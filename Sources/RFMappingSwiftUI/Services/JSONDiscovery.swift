@@ -1,0 +1,102 @@
+import Foundation
+
+enum JSONDiscovery {
+    static let defaultJSONDirectory = "data"
+    static let defaultJSONName = "unitsSpikeCounts_260701_1.json"
+
+    static func candidateRoots() -> [URL] {
+        var roots: [URL] = []
+        let fileManager = FileManager.default
+
+        roots.append(URL(fileURLWithPath: fileManager.currentDirectoryPath))
+
+        let bundleParent = Bundle.main.bundleURL
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        roots.append(bundleParent)
+
+        if let home = fileManager.homeDirectoryForCurrentUser as URL? {
+            roots.append(home.appendingPathComponent("Developer/rfmapping", isDirectory: true))
+        }
+
+        var seen: Set<String> = []
+        return roots.filter { url in
+            let key = url.standardizedFileURL.path
+            guard !seen.contains(key) else { return false }
+            seen.insert(key)
+            return true
+        }
+    }
+
+    static func discoverJSONFiles(root: URL? = nil, currentURL: URL? = nil) -> [URL] {
+        let roots = root.map { [$0] } ?? candidateRoots()
+        var candidates: [URL] = []
+        let fileManager = FileManager.default
+
+        for root in roots {
+            let dataDir = root.appendingPathComponent(defaultJSONDirectory, isDirectory: true)
+            for folder in [dataDir, root] {
+                guard let contents = try? fileManager.contentsOfDirectory(
+                    at: folder,
+                    includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey],
+                    options: [.skipsHiddenFiles]
+                ) else { continue }
+                candidates.append(contentsOf: contents.filter { $0.pathExtension.lowercased() == "json" })
+            }
+        }
+
+        if let currentURL {
+            candidates.append(currentURL)
+        }
+
+        var unique: [String: URL] = [:]
+        for candidate in candidates where isRegularFile(candidate) {
+            unique[candidate.standardizedFileURL.path] = candidate.standardizedFileURL
+        }
+
+        return unique.values.sorted { lhs, rhs in
+            let leftDate = modificationDate(lhs)
+            let rightDate = modificationDate(rhs)
+            if leftDate == rightDate {
+                return lhs.lastPathComponent < rhs.lastPathComponent
+            }
+            return leftDate > rightDate
+        }
+    }
+
+    static func latestJSONURL() -> URL? {
+        if let latest = discoverJSONFiles().first {
+            return latest
+        }
+        for root in candidateRoots() {
+            let fallback = root
+                .appendingPathComponent(defaultJSONDirectory, isDirectory: true)
+                .appendingPathComponent(defaultJSONName)
+            if isRegularFile(fallback) {
+                return fallback
+            }
+        }
+        return nil
+    }
+
+    static func shortLabel(for url: URL, relativeTo roots: [URL] = candidateRoots()) -> String {
+        let path = url.standardizedFileURL.path
+        for root in roots {
+            let rootPath = root.standardizedFileURL.path
+            if path.hasPrefix(rootPath + "/") {
+                return String(path.dropFirst(rootPath.count + 1))
+            }
+        }
+        return url.lastPathComponent
+    }
+
+    static func modificationDate(_ url: URL) -> Date {
+        let values = try? url.resourceValues(forKeys: [.contentModificationDateKey])
+        return values?.contentModificationDate ?? .distantPast
+    }
+
+    private static func isRegularFile(_ url: URL) -> Bool {
+        let values = try? url.resourceValues(forKeys: [.isRegularFileKey])
+        return values?.isRegularFile == true
+    }
+}
