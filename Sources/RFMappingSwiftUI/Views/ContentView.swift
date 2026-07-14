@@ -3,6 +3,7 @@ import UniformTypeIdentifiers
 
 struct ContentView: View {
     @Bindable var store: RFMappingStore
+    let openJSONInNewWindow: (URL) -> Void
 
     var body: some View {
         HStack(spacing: 0) {
@@ -13,16 +14,16 @@ struct ContentView: View {
         }
         .fileImporter(
             isPresented: $store.isImporting,
-            allowedContentTypes: [.json],
-            allowsMultipleSelection: false
+            allowedContentTypes: [.json, .data],
+            allowsMultipleSelection: true
         ) { result in
             switch result {
             case .success(let urls):
-                if let url = urls.first {
-                    store.loadJSON(url)
-                }
+                urls.forEach(openJSONInNewWindow)
             case .failure(let error):
-                store.errorMessage = error.localizedDescription
+                if (error as? CocoaError)?.code != .userCancelled {
+                    store.errorMessage = error.localizedDescription
+                }
             }
         }
         .fileExporter(
@@ -42,34 +43,85 @@ struct ContentView: View {
                 set: { if !$0 { store.errorMessage = nil } }
             )
         ) {
-            Button("OK") {
-                store.errorMessage = nil
-            }
+            Button("OK") { store.errorMessage = nil }
         } message: {
             Text(store.errorMessage ?? "")
         }
+        .onChange(of: hoverContext) { _, _ in
+            store.clearHover()
+        }
+        .onChange(of: store.isImporting) { _, isImporting in
+            if isImporting, !store.hasData {
+                WindowRouter.shared.pauseColdInitialWindowFallback()
+            } else if !isImporting, !store.hasData {
+                DispatchQueue.main.async {
+                    WindowRouter.shared.resumeColdInitialWindowFallback()
+                }
+            }
+        }
+    }
+
+    private var hoverContext: HoverContext {
+        HoverContext(
+            dataPath: store.data?.url.path,
+            unitIndex: store.unitIndex,
+            valueMode: store.valueMode,
+            rangeStartMS: store.rangeStartMS,
+            rangeEndMS: store.rangeEndMS,
+            flipY: store.flipY,
+            palette: store.palette,
+            polarRadiusMode: store.polarRadiusMode,
+            responseFloor: store.responseFloor,
+            xBins: store.xBins,
+            yBins: store.yBins,
+            timeResolutionMS: store.timeResolutionMS,
+            smoothRadius: store.smoothRadius,
+            selectedTab: store.selectedTab
+        )
     }
 
     @ViewBuilder
     private var mainContent: some View {
-        if store.hasData {
+        if store.isAwaitingStartupDocument {
+            ProgressView("Opening RF mapping data…")
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if store.hasData {
             VStack(spacing: 0) {
                 HeaderView(store: store)
+                Divider()
+                PlotControlBar(store: store)
                 Divider()
                 PlotTabsView(store: store)
             }
         } else {
-            VStack(spacing: 16) {
-                Text("RF Mapping Viewer")
-                    .font(.title2.weight(.semibold))
-                Button("Open JSON") {
-                    store.isImporting = true
-                }
-                .keyboardShortcut("o", modifiers: [.command])
+            ContentUnavailableView {
+                Label("RF Mapping Viewer", systemImage: "waveform.path.ecg.rectangle")
+            } description: {
+                Text("Open a unitsSpikeCounts JSON file to begin.")
+            } actions: {
+                Button("Open JSON") { store.isImporting = true }
+                    .keyboardShortcut("o", modifiers: [.command])
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
+}
+
+private struct HoverContext: Hashable {
+    let dataPath: String?
+    let unitIndex: Int
+    let valueMode: ResponseValueMode
+    let rangeStartMS: Double
+    let rangeEndMS: Double
+    let flipY: Bool
+    let palette: RFPalette
+    let polarRadiusMode: PolarRadiusMode
+    let responseFloor: Double
+    let xBins: Int
+    let yBins: Int
+    let timeResolutionMS: Double
+    let smoothRadius: Int
+    let selectedTab: PlotTab
 }
 
 private struct HeaderView: View {
@@ -86,7 +138,102 @@ private struct HeaderView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 16)
-        .padding(.vertical, 12)
+        .padding(.vertical, 10)
+    }
+}
+
+private struct PlotControlBar: View {
+    @Bindable var store: RFMappingStore
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 12) {
+                LabeledContent("Value") {
+                    Picker("Value", selection: Binding(
+                        get: { store.valueMode },
+                        set: store.setValueMode
+                    )) {
+                        ForEach(ResponseValueMode.allCases) { mode in
+                            Text(mode.rawValue)
+                                .tag(mode)
+                                .disabled(mode.requiresPresentationCounts && !store.supportsNormalizedValues)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(width: 190)
+                }
+
+                Divider().frame(height: 24)
+
+                compactTimeControl(
+                    title: "Time resolution",
+                    normalizedValue: Binding(
+                        get: { store.timeResolutionMS },
+                        set: { store.timeResolutionMS = $0; store.timelineRangeAnchor = nil; store.normalizeControls() }
+                    ),
+                    range: store.baseBinMS()...store.totalTimeMS(),
+                    step: store.baseBinMS()
+                )
+                Spacer(minLength: 0)
+            }
+
+            HStack(spacing: 8) {
+                Text("RF time range")
+                    .foregroundStyle(.secondary)
+                compactTimeControl(
+                    title: "Start",
+                    normalizedValue: Binding(
+                        get: { store.rangeStartMS },
+                        set: { store.rangeStartMS = $0; store.timelineRangeAnchor = nil; store.normalizeControls() }
+                    ),
+                    range: store.timeAxisStartMS()...store.timeAxisEndMS(),
+                    step: store.baseBinMS(),
+                    showTitle: false
+                )
+                Text("to").foregroundStyle(.secondary)
+                compactTimeControl(
+                    title: "End",
+                    normalizedValue: Binding(
+                        get: { store.rangeEndMS },
+                        set: { store.rangeEndMS = $0; store.timelineRangeAnchor = nil; store.normalizeControls() }
+                    ),
+                    range: store.timeAxisStartMS()...store.timeAxisEndMS(),
+                    step: store.baseBinMS(),
+                    showTitle: false
+                )
+
+                Button("Full range") { store.clearTimelineSelection() }
+                    .disabled(!store.hasTimeSelection)
+                    .help("Show the complete RF time range (Esc)")
+
+                Spacer(minLength: 0)
+            }
+        }
+        .controlSize(.small)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(.bar)
+    }
+
+    private func compactTimeControl(
+        title: String,
+        normalizedValue: Binding<Double>,
+        range: ClosedRange<Double>,
+        step: Double,
+        showTitle: Bool = true
+    ) -> some View {
+        HStack(spacing: 4) {
+            if showTitle {
+                Text(title).foregroundStyle(.secondary)
+            }
+            TextField(title, value: normalizedValue, format: .number.precision(.fractionLength(0...3)))
+                .multilineTextAlignment(.trailing)
+                .frame(width: 58)
+                .onSubmit { store.timelineRangeAnchor = nil; store.normalizeControls() }
+            Text("ms").foregroundStyle(.secondary)
+            Stepper(title, value: normalizedValue, in: range, step: step)
+                .labelsHidden()
+        }
     }
 }
 

@@ -6,9 +6,14 @@ struct StackView: View {
 
     var body: some View {
         GeometryReader { proxy in
-            Canvas { context, size in
-                var context = context
-                drawStack(context: &context, size: size, store: store)
+            ScrollView(.vertical) {
+                Canvas { context, size in
+                    var context = context
+                    drawStack(context: &context, size: size, store: store)
+                }
+                .frame(width: proxy.size.width, height: max(proxy.size.height, 680))
+                .accessibilityLabel("Combined RF plots")
+                .accessibilityHint("RF, delay, polar, and RGB plots in a vertically scrollable stack")
             }
         }
         .background(Color(nsColor: .textBackgroundColor))
@@ -31,7 +36,7 @@ private func drawStack(context: inout GraphicsContext, size: CGSize, store: RFMa
     drawStackHeatmap(
         context: &context,
         title: "RF - \(store.currentMatrixLabel())",
-        matrix: optionalMatrix(store.currentMatrix()),
+        matrix: store.currentMatrix(),
         x: x,
         y: sectionTop,
         width: width,
@@ -57,7 +62,7 @@ private func drawStack(context: inout GraphicsContext, size: CGSize, store: RFMa
     drawStackPolar(
         context: &context,
         title: "Polar RF",
-        matrix: optionalMatrix(store.currentMatrix()),
+        matrix: store.currentMatrix(),
         x: x,
         y: sectionTop + 2 * (sectionHeight + sectionGap),
         width: width,

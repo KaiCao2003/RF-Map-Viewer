@@ -7,7 +7,7 @@ struct PolarMapView: View {
     var body: some View {
         GeometryReader { proxy in
             let size = proxy.size
-            let plot = makeHeatmapPlot(store: store, matrix: optionalMatrix(store.currentMatrix()))
+            let plot = makeHeatmapPlot(store: store, matrix: store.currentMatrix())
             let layout = makePolarLayout(size: size, store: store, plot: plot)
 
             ZStack(alignment: .topLeading) {
@@ -35,6 +35,15 @@ struct PolarMapView: View {
                 if let cell = store.hoverCell, let location = store.hoverLocation {
                     PlotTooltip(text: store.tooltipText(cell), location: location, canvasSize: size)
                 }
+            }
+            .accessibilityRepresentation {
+                SpatialPlotAccessibilityRepresentation(
+                    store: store,
+                    title: "Polar RF map",
+                    matrix: plot.matrix,
+                    xGroups: plot.xGroups,
+                    yGroups: plot.yGroups
+                )
             }
         }
         .background(Color(nsColor: .textBackgroundColor))
@@ -124,7 +133,7 @@ private func drawPolar(context: inout GraphicsContext, store: RFMappingStore, pl
         anchor: .center
     )
     context.draw(
-        Text("RF values share the 2D map color scale").font(.system(size: 11)).foregroundStyle(.secondary),
+        Text("RF values: \(store.valueMode.rawValue)").font(.system(size: 11)).foregroundStyle(.secondary),
         at: CGPoint(x: layout.center.x, y: layout.center.y + outer + 22),
         anchor: .center
     )
@@ -136,7 +145,7 @@ private func drawPolar(context: inout GraphicsContext, store: RFMappingStore, pl
         low: plot.low,
         high: plot.high,
         palette: store.palette,
-        suffix: ""
+        suffix: store.valueMode.suffix
     )
 }
 

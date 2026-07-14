@@ -40,6 +40,29 @@ struct RGBMapView: View {
                     PlotTooltip(text: store.tooltipText(cell), location: location, canvasSize: size)
                 }
             }
+            .accessibilityRepresentation {
+                SpatialPlotAccessibilityRepresentation(
+                    store: store,
+                    title: "RGB composite; red response, green delay, blue entropy",
+                    matrix: rgb.total,
+                    xGroups: rgb.reference.xGroups,
+                    yGroups: rgb.reference.yGroups,
+                    valueDescription: { displayY, displayX, value in
+                        let delay = rgb.delay.indices.contains(displayY)
+                            && rgb.delay[displayY].indices.contains(displayX)
+                            ? rgb.delay[displayY][displayX]
+                            : nil
+                        let entropy = rgb.entropy.indices.contains(displayY)
+                            && rgb.entropy[displayY].indices.contains(displayX)
+                            ? rgb.entropy[displayY][displayX]
+                            : nil
+                        let delayText = delay.map { String(format: "%.1f milliseconds", $0) } ?? "none"
+                        let entropyText = entropy.map { String(format: "%.3f", $0) } ?? "none"
+                        return "response \(store.valueMode.format(value)) \(store.valueMode.unit), "
+                            + "delay \(delayText), entropy \(entropyText)"
+                    }
+                )
+            }
         }
         .background(Color(nsColor: .textBackgroundColor))
     }
@@ -61,15 +84,23 @@ func makeRGBPlot(store: RFMappingStore) -> RGBPlot {
         return RGBPlot(total: [], delay: [], entropy: [], reference: empty, maxTotal: 1, minDelay: 0, delaySpan: 1)
     }
     let metrics = data.metrics(for: store.unitIndex)
-    let totalPrepared = store.preparePlotMatrix(optionalMatrix(metrics.total))
+    let fullWindowResponse = (try? data.responseMatrix(
+        unitIndex: store.unitIndex,
+        start: 0,
+        end: data.nBins - 1,
+        valueMode: store.valueMode
+    )) ?? []
+    let totalPrepared = store.preparePlotMatrix(fullWindowResponse)
     let delayPrepared = store.preparePlotMatrix(store.delayMatrixForTimeGroups(floor: 0.0))
     let entropyPrepared = store.preparePlotMatrix(optionalMatrix(metrics.entropy))
+    let responseRange = finiteMinMax(totalPrepared.0)
+    let maxResponse = max(responseRange.1, 1.0)
     let reference = HeatmapPlot(
         matrix: totalPrepared.0,
         xGroups: totalPrepared.1,
         yGroups: totalPrepared.2,
         low: 0,
-        high: max(metrics.maxTotal, 1.0)
+        high: maxResponse
     )
     let range = store.timeAxisRangeMS()
     return RGBPlot(
@@ -77,7 +108,7 @@ func makeRGBPlot(store: RFMappingStore) -> RGBPlot {
         delay: delayPrepared.0,
         entropy: entropyPrepared.0,
         reference: reference,
-        maxTotal: max(metrics.maxTotal, 1.0),
+        maxTotal: maxResponse,
         minDelay: range.0,
         delaySpan: max(range.1 - range.0, 1.0)
     )
@@ -87,7 +118,7 @@ private func drawRGB(context: inout GraphicsContext, store: RFMappingStore, rgb:
     drawTitle(
         context: &context,
         title: "RGB composite",
-        subtitle: "R total response; G delay; B temporal entropy"
+        subtitle: "R \(store.valueMode.rawValue); G count-peak delay; B count entropy"
     )
 
     for displayY in rgb.total.indices {
@@ -120,9 +151,9 @@ private func drawRGB(context: inout GraphicsContext, store: RFMappingStore, rgb:
 
     let legendX = min(layout.x0 + layout.gridWidth + 34, 10_000)
     let items: [(String, Color)] = [
-        ("R total", .red),
+        ("R \(store.valueMode.unit)", .red),
         ("G delay", .green),
-        ("B entropy", .blue)
+        ("B count entropy", .blue)
     ]
     for (index, item) in items.enumerated() {
         let y = layout.y0 + CGFloat(index * 26)

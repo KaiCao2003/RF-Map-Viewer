@@ -11,6 +11,11 @@ let package = Package(
         .executable(name: "RFMappingSwiftUI", targets: ["RFMappingSwiftUI"])
     ],
     targets: [
-        .executableTarget(name: "RFMappingSwiftUI")
+        .executableTarget(name: "RFMappingSwiftUI"),
+        .testTarget(
+            name: "RFMappingSwiftUITests",
+            dependencies: ["RFMappingSwiftUI"],
+            path: "tests/RFMappingSwiftUITests"
+        )
     ]
 )
