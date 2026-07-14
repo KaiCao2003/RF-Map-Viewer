@@ -2,52 +2,35 @@
 set -euo pipefail
 
 MODE="${1:-run}"
-APP_NAME="RFMappingSwiftUI"
-BUNDLE_ID="com.rfmapping.RFMappingSwiftUI"
-MIN_SYSTEM_VERSION="14.0"
+APP_NAME="RF Mapping Viewer"
+EXECUTABLE_NAME="RFMappingSwiftUI"
+BUNDLE_ID="org.local.rfmapping.viewer"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST_DIR="$ROOT_DIR/dist"
 APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
-APP_CONTENTS="$APP_BUNDLE/Contents"
-APP_MACOS="$APP_CONTENTS/MacOS"
-APP_BINARY="$APP_MACOS/$APP_NAME"
-INFO_PLIST="$APP_CONTENTS/Info.plist"
+APP_BINARY="$APP_BUNDLE/Contents/MacOS/$EXECUTABLE_NAME"
+BUILD_SCRIPT="$ROOT_DIR/script/build_macos_app.sh"
 
-cd "$ROOT_DIR"
-pkill -x "$APP_NAME" >/dev/null 2>&1 || true
+case "$MODE" in
+  run|--bundle|bundle|--debug|debug|--logs|logs|--telemetry|telemetry|--verify|verify)
+    ;;
+  *)
+    echo "usage: $0 [run|--bundle|--debug|--logs|--telemetry|--verify]" >&2
+    exit 2
+    ;;
+esac
 
-swift build
-BUILD_BINARY="$(swift build --show-bin-path)/$APP_NAME"
+case "$MODE" in
+  run|--debug|debug|--logs|logs|--telemetry|telemetry|--verify|verify)
+    pkill -x "$EXECUTABLE_NAME" >/dev/null 2>&1 || true
+    ;;
+esac
 
-rm -rf "$APP_BUNDLE"
-mkdir -p "$APP_MACOS"
-cp "$BUILD_BINARY" "$APP_BINARY"
-chmod +x "$APP_BINARY"
-
-cat >"$INFO_PLIST" <<PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>CFBundleExecutable</key>
-  <string>$APP_NAME</string>
-  <key>CFBundleIdentifier</key>
-  <string>$BUNDLE_ID</string>
-  <key>CFBundleName</key>
-  <string>$APP_NAME</string>
-  <key>CFBundlePackageType</key>
-  <string>APPL</string>
-  <key>LSMinimumSystemVersion</key>
-  <string>$MIN_SYSTEM_VERSION</string>
-  <key>NSPrincipalClass</key>
-  <string>NSApplication</string>
-</dict>
-</plist>
-PLIST
+"$BUILD_SCRIPT"
 
 open_app() {
-  /usr/bin/open -n "$APP_BUNDLE"
+  /usr/bin/open "$APP_BUNDLE"
 }
 
 case "$MODE" in
@@ -55,14 +38,13 @@ case "$MODE" in
     open_app
     ;;
   --bundle|bundle)
-    echo "$APP_BUNDLE"
     ;;
   --debug|debug)
     lldb -- "$APP_BINARY"
     ;;
   --logs|logs)
     open_app
-    /usr/bin/log stream --info --style compact --predicate "process == \"$APP_NAME\""
+    /usr/bin/log stream --info --style compact --predicate "process == \"$EXECUTABLE_NAME\""
     ;;
   --telemetry|telemetry)
     open_app
@@ -71,10 +53,6 @@ case "$MODE" in
   --verify|verify)
     open_app
     sleep 1
-    pgrep -x "$APP_NAME" >/dev/null
-    ;;
-  *)
-    echo "usage: $0 [run|--bundle|--debug|--logs|--telemetry|--verify]" >&2
-    exit 2
+    pgrep -x "$EXECUTABLE_NAME" >/dev/null
     ;;
 esac

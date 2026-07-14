@@ -7,16 +7,14 @@ enum JSONDiscovery {
     static func candidateRoots() -> [URL] {
         var roots: [URL] = []
         let fileManager = FileManager.default
+        let isPackagedApplication = Bundle.main.bundleURL.pathExtension.lowercased() == "app"
 
-        roots.append(URL(fileURLWithPath: fileManager.currentDirectoryPath))
-
-        let bundleParent = Bundle.main.bundleURL
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-        roots.append(bundleParent)
-
-        if let home = fileManager.homeDirectoryForCurrentUser as URL? {
-            roots.append(home.appendingPathComponent("Developer/rfmapping", isDirectory: true))
+        if let resourceURL = Bundle.main.resourceURL {
+            roots.append(resourceURL)
+        }
+        if !isPackagedApplication {
+            roots.append(URL(fileURLWithPath: fileManager.currentDirectoryPath))
+            roots.append(fileManager.homeDirectoryForCurrentUser.appendingPathComponent("Developer/rfmapping", isDirectory: true))
         }
 
         var seen: Set<String> = []
@@ -88,6 +86,14 @@ enum JSONDiscovery {
             }
         }
         return url.lastPathComponent
+    }
+
+    static func choiceLabel(for url: URL) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd HH:mm"
+        let date = modificationDate(url)
+        let stamp = date == .distantPast ? "" : "  \(formatter.string(from: date))"
+        return "\(shortLabel(for: url))\(stamp)"
     }
 
     static func modificationDate(_ url: URL) -> Date {

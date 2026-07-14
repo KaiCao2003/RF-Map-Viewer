@@ -796,7 +796,8 @@ def get_neuro_summary(base_dir: str | Path, kilosort_dir: str | Path, probe_name
     return result
 
 
-def gen_adc_spike_time(session_info: dict, probe: str, base_dir: str, num_of_rec: int) -> tuple[bool, str | Path]:
+def gen_adc_spike_time(session_info: dict, probe: str, base_dir: str, num_of_rec: int, *, kilosort_path: str | Path | None = None,
+                       save_file_name: str | None = None, is_convert_to_zero: bool = True) -> tuple[bool, str | Path]:
     probe = probe.upper()
 
     base_data_dir = session_info['base_path']
@@ -806,21 +807,28 @@ def gen_adc_spike_time(session_info: dict, probe: str, base_dir: str, num_of_rec
     path_between = f'/{record_nodes}/{experiment_id}/'
 
     continuous_folder = base_data_dir + path_between + recording_name + '/continuous/'
-    kilosort_dir = f"{base_dir}/kilosort/Probe{probe}/kilosort_{num_of_rec}"
+    kilosort_dir = f"{base_dir}/kilosort/Probe{probe}/kilosort_{num_of_rec}" if kilosort_path is None else kilosort_path
 
     print("Loading probe npy data...")
     probe_name: str = session_info[f'continuous_probe_{probe}_folder']
     probe_continuous_timestamp_file = f'{continuous_folder}/{probe_name}/timestamps.npy'
-    probe_continuous_timestamp_data = np.load(probe_continuous_timestamp_file, mmap_mode='r')
-    probe_continuous_timestamp_data = probe_continuous_timestamp_data - probe_continuous_timestamp_data[0]
+    probe_continuous_timestamp_data_raw = np.load(probe_continuous_timestamp_file, mmap_mode='r')
+    if is_convert_to_zero:
+        probe_continuous_timestamp_data = probe_continuous_timestamp_data_raw - probe_continuous_timestamp_data_raw[0]
+    else:
+        probe_continuous_timestamp_data = probe_continuous_timestamp_data_raw
+        print(11111111)
+
     print(f"Probe{probe} continuous shape: {probe_continuous_timestamp_data.shape}")
     probe_duration = probe_continuous_timestamp_data[-1]
     print(f"Probe{probe} duration: {probe_duration} ")
 
     spike_times = np.load(f"{kilosort_dir}/spike_times.npy")
     spike_time_adc = probe_continuous_timestamp_data[spike_times]
+    print(spike_time_adc[:10])
+    save_file_name = "adc_spike_time" if save_file_name is None else save_file_name
 
-    file_path = Path(base_dir) / "data" / f"probe{probe}" / "adc_spike_time.npy"
+    file_path = Path(base_dir) / "data" / f"probe{probe}" / f"{save_file_name}.npy"
     file_path.parent.mkdir(parents=True, exist_ok=True)
     np.save(file_path, spike_time_adc)
     return True, file_path

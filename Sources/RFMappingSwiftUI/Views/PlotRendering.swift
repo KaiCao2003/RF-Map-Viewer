@@ -175,6 +175,16 @@ func drawAxes(context: inout GraphicsContext, store: RFMappingStore, layout: Hea
         )
     }
 
+    context.drawLayer { layer in
+        layer.translateBy(x: layout.x0 - 58, y: layout.y0 + layout.gridHeight / 2)
+        layer.rotate(by: .degrees(-90))
+        layer.draw(
+            Text("yIdx / y").font(.system(size: 10)).foregroundStyle(.secondary),
+            at: .zero,
+            anchor: .center
+        )
+    }
+
     context.draw(
         Text("x position").font(.system(size: 11)).foregroundStyle(.secondary),
         at: CGPoint(x: layout.x0 + layout.gridWidth / 2.0, y: layout.y0 + layout.gridHeight + 44),
@@ -230,6 +240,14 @@ struct PlotTooltip: View {
     let text: String
     let location: CGPoint
     let canvasSize: CGSize
+    let visibleRect: CGRect?
+
+    init(text: String, location: CGPoint, canvasSize: CGSize, visibleRect: CGRect? = nil) {
+        self.text = text
+        self.location = location
+        self.canvasSize = canvasSize
+        self.visibleRect = visibleRect
+    }
 
     var body: some View {
         Text(text)
@@ -245,16 +263,17 @@ struct PlotTooltip: View {
     private var position: CGPoint {
         let width: CGFloat = 210
         let height: CGFloat = 92
+        let bounds = visibleRect ?? CGRect(origin: .zero, size: canvasSize)
         var x = location.x + width / 2.0 + 16
         var y = location.y + height / 2.0 + 16
-        if x + width / 2.0 > canvasSize.width - 8 {
+        if x + width / 2.0 > bounds.maxX - 8 {
             x = location.x - width / 2.0 - 16
         }
-        if y + height / 2.0 > canvasSize.height - 8 {
+        if y + height / 2.0 > bounds.maxY - 8 {
             y = location.y - height / 2.0 - 16
         }
-        x = max(width / 2.0 + 8, min(canvasSize.width - width / 2.0 - 8, x))
-        y = max(height / 2.0 + 8, min(canvasSize.height - height / 2.0 - 8, y))
+        x = max(bounds.minX + width / 2.0 + 8, min(bounds.maxX - width / 2.0 - 8, x))
+        y = max(bounds.minY + height / 2.0 + 8, min(bounds.maxY - height / 2.0 - 8, y))
         return CGPoint(x: x, y: y)
     }
 }

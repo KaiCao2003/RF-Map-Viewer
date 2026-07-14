@@ -29,6 +29,29 @@ func optionalMatrix(_ matrix: [[Double]]) -> OptionalMatrix {
     matrix.map { row in row.map { Optional($0) } }
 }
 
+/// CPython 3.12+ uses compensated summation for homogeneous floating-point
+/// inputs. RF Mapping's required Python 3.14 runtime therefore produces more
+/// accurate results than a naïve Swift `reduce(0, +)` for mixed magnitudes.
+func compensatedSum<S: Sequence>(_ values: S) -> Double where S.Element == Double {
+    var high = 0.0
+    var low = 0.0
+    for value in values {
+        let next = high + value
+        if !next.isFinite {
+            high = next
+            low = 0.0
+            continue
+        }
+        if abs(high) >= abs(value) {
+            low += (high - next) + value
+        } else {
+            low += (value - next) + high
+        }
+        high = next
+    }
+    return high + low
+}
+
 func axisGroupsForTarget(sourceCount: Int, targetCount: Int) -> [AxisGroup] {
     let target = max(1, min(sourceCount, targetCount))
     return (0..<target).map { groupIndex in
@@ -54,7 +77,7 @@ func reduceMatrixXY(
                 }
             }
             guard !values.isEmpty else { return nil }
-            return values.reduce(0.0, +) / Double(values.count)
+            return compensatedSum(values) / Double(values.count)
         }
     }
 }

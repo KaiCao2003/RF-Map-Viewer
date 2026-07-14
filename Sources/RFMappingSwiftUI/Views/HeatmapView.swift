@@ -33,7 +33,7 @@ struct HeatmapView: View {
                         title: title,
                         subtitle: subtitle,
                         palette: kind == .delay ? nil : store.palette,
-                        valueSuffix: kind == .delay ? " ms" : ""
+                        valueSuffix: kind == .delay ? " ms" : store.valueMode.suffix
                     )
                 }
                 PointerCaptureView(
@@ -57,6 +57,21 @@ struct HeatmapView: View {
                     PlotTooltip(text: store.tooltipText(cell), location: location, canvasSize: size)
                 }
             }
+            .accessibilityRepresentation {
+                SpatialPlotAccessibilityRepresentation(
+                    store: store,
+                    title: title,
+                    matrix: plot.matrix,
+                    xGroups: plot.xGroups,
+                    yGroups: plot.yGroups,
+                    valueDescription: { _, _, value in
+                        if kind == .delay {
+                            return value.map { String(format: "%.1f milliseconds", $0) } ?? "no delay"
+                        }
+                        return "\(store.valueMode.format(value)) \(store.valueMode.unit)"
+                    }
+                )
+            }
         }
         .background(Color(nsColor: .textBackgroundColor))
     }
@@ -64,7 +79,7 @@ struct HeatmapView: View {
     private var sourceMatrix: OptionalMatrix {
         switch kind {
         case .rf:
-            return optionalMatrix(store.currentMatrix())
+            return store.currentMatrix()
         case .delay:
             return store.delayMatrixForTimeGroups(floor: store.responseFloor)
         }

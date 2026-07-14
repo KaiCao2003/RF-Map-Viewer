@@ -1,5 +1,11 @@
 import Foundation
 
+private enum PresentationCountsPayload {
+    case matrix([[Double]])
+    case vector([Double])
+    case scalar(Double)
+}
+
 private struct RFMappingPayload: Decodable {
     let unitsSpikeCounts: [[[[Double]]]]
     let unitsSpikeCountsSize: [Int]
@@ -7,6 +13,41 @@ private struct RFMappingPayload: Decodable {
     let xPositions: [Double]
     let yPositions: [Double]
     let timeBinEdges: [Double]
+    let stimulusPresentationCounts: PresentationCountsPayload?
+
+    private enum CodingKeys: String, CodingKey {
+        case unitsSpikeCounts
+        case unitsSpikeCountsSize
+        case unitPool
+        case xPositions
+        case yPositions
+        case timeBinEdges
+        case stimulusPresentationCounts
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        unitsSpikeCounts = try container.decode([[[[Double]]]].self, forKey: .unitsSpikeCounts)
+        unitsSpikeCountsSize = try container.decode([Int].self, forKey: .unitsSpikeCountsSize)
+        unitPool = try container.decode([Int].self, forKey: .unitPool)
+        xPositions = try container.decode([Double].self, forKey: .xPositions)
+        yPositions = try container.decode([Double].self, forKey: .yPositions)
+        timeBinEdges = try container.decode([Double].self, forKey: .timeBinEdges)
+
+        if !container.contains(.stimulusPresentationCounts) {
+            stimulusPresentationCounts = nil
+        } else if try container.decodeNil(forKey: .stimulusPresentationCounts) {
+            stimulusPresentationCounts = nil
+        } else if let matrix = try? container.decode([[Double]].self, forKey: .stimulusPresentationCounts) {
+            stimulusPresentationCounts = .matrix(matrix)
+        } else if let vector = try? container.decode([Double].self, forKey: .stimulusPresentationCounts) {
+            stimulusPresentationCounts = .vector(vector)
+        } else if let scalar = try? container.decode(Double.self, forKey: .stimulusPresentationCounts) {
+            stimulusPresentationCounts = .scalar(scalar)
+        } else {
+            throw RFMappingError.invalidData("stimulusPresentationCounts must be a y-by-x numeric array.")
+        }
+    }
 }
 
 final class RFMappingData {
@@ -21,35 +62,59 @@ final class RFMappingData {
     let xPositions: [Double]
     let yPositions: [Double]
     let timeBinEdges: [Double]
+    let presentationCounts: [[Double]]?
 
     private var metricsCache: [Int: UnitMetrics] = [:]
 
-    init(url: URL) throws {
-        self.url = url
-        let data = try Data(contentsOf: url)
-        let payload = try JSONDecoder().decode(RFMappingPayload.self, from: data)
+    convenience init(url: URL) throws {
+        try self.init(data: Data(contentsOf: url), url: url)
+    }
+
+    init(data jsonData: Data, url: URL) throws {
+        self.url = url.standardizedFileURL
+        let payload: RFMappingPayload
+        do {
+            payload = try JSONDecoder().decode(RFMappingPayload.self, from: jsonData)
+        } catch let error as RFMappingError {
+            throw error
+        } catch {
+            throw RFMappingError.invalidData("Could not decode RF mapping JSON: \(error.localizedDescription)")
+        }
 
         guard payload.unitsSpikeCountsSize.count == 4 else {
             throw RFMappingError.invalidData("unitsSpikeCountsSize must contain 4 values.")
         }
 
-        counts = payload.unitsSpikeCounts
         size = (
-            Int(payload.unitsSpikeCountsSize[0]),
-            Int(payload.unitsSpikeCountsSize[1]),
-            Int(payload.unitsSpikeCountsSize[2]),
-            Int(payload.unitsSpikeCountsSize[3])
+            payload.unitsSpikeCountsSize[0],
+            payload.unitsSpikeCountsSize[1],
+            payload.unitsSpikeCountsSize[2],
+            payload.unitsSpikeCountsSize[3]
         )
         nUnits = size.0
         nY = size.1
         nX = size.2
         nBins = size.3
+        counts = payload.unitsSpikeCounts
         unitPool = payload.unitPool
         xPositions = payload.xPositions
         yPositions = payload.yPositions
         timeBinEdges = payload.timeBinEdges
+        presentationCounts = try Self.normalizePresentationCounts(
+            payload.stimulusPresentationCounts,
+            nY: nY,
+            nX: nX
+        )
 
         try validate()
+    }
+
+    var hasPresentationCounts: Bool {
+        presentationCounts != nil
+    }
+
+    func supports(_ valueMode: ResponseValueMode) -> Bool {
+        !valueMode.requiresPresentationCounts || presentationCounts != nil
     }
 
     func displayYIndices(flipY: Bool) -> [Int] {
@@ -60,12 +125,6 @@ final class RFMappingData {
         unitPool[unitIndex]
     }
 
-    func binLabel(_ binIndex: Int) -> String {
-        let start = timeBinEdges[binIndex] * 1000.0
-        let end = timeBinEdges[binIndex + 1] * 1000.0
-        return "\(binIndex): \(formatMS(start))-\(formatMS(end)) ms"
-    }
-
     func binCenterMS(_ binIndex: Int) -> Double {
         (timeBinEdges[binIndex] + timeBinEdges[binIndex + 1]) * 500.0
     }
@@ -73,7 +132,7 @@ final class RFMappingData {
     func inferTotalDeg() -> Double {
         guard nX > 1 else { return 360.0 }
         let diffs = (0..<(nX - 1)).map { xPositions[$0 + 1] - xPositions[$0] }
-        let step = diffs.reduce(0.0, +) / Double(diffs.count)
+        let step = compensatedSum(diffs) / Double(diffs.count)
         if diffs.allSatisfy({ abs($0 - step) < 1e-6 }) && abs(step) > 1e-9 {
             return abs(step) * Double(nX)
         }
@@ -109,20 +168,23 @@ final class RFMappingData {
 
             for xIndex in 0..<nX {
                 let hist = unit[yIndex][xIndex]
-                let cellTotal = hist.reduce(0.0, +)
+                let cellTotal = compensatedSum(hist)
                 let cellPeak = hist.max() ?? 0.0
                 let bestBin: Int?
                 let delay: Double?
                 let cellEntropy: Double
 
                 if cellTotal > 0 {
-                    let localBest = hist.indices.max { hist[$0] < hist[$1] } ?? 0
-                    bestBin = localBest
-                    delay = binCenterMS(localBest)
+                    var earliestBest = 0
+                    for index in 1..<hist.count where hist[index] > hist[earliestBest] {
+                        earliestBest = index
+                    }
+                    bestBin = earliestBest
+                    delay = binCenterMS(earliestBest)
                     var entropyValue = 0.0
                     for count in hist where count > 0 {
-                        let p = count / cellTotal
-                        entropyValue -= p * log(p)
+                        let probability = count / cellTotal
+                        entropyValue -= probability * log(probability)
                     }
                     cellEntropy = nBins > 1 ? entropyValue / log(Double(nBins)) : 0.0
                 } else {
@@ -135,7 +197,6 @@ final class RFMappingData {
                     binTotals[binIndex] += count
                     maxBinCount = max(maxBinCount, count)
                 }
-
                 if cellTotal > maxTotal {
                     maxTotal = cellTotal
                     bestY = yIndex
@@ -176,51 +237,140 @@ final class RFMappingData {
         return metrics
     }
 
-    func aggregateMatrix(
-        unitIndex: Int,
-        mode: RFMode,
-        binIndex: Int,
-        rangeStart: Int,
-        rangeEnd: Int
-    ) -> [[Double]] {
-        let metrics = metrics(for: unitIndex)
-        switch mode {
-        case .total:
-            return metrics.total
-        case .peak:
-            return metrics.peak
-        case .bin:
-            return (0..<nY).map { yIndex in
-                (0..<nX).map { xIndex in
-                    counts[unitIndex][yIndex][xIndex][binIndex]
-                }
-            }
-        case .rangeSum:
-            let start = max(0, min(rangeStart, rangeEnd))
-            let end = min(nBins - 1, max(rangeStart, rangeEnd))
-            return (0..<nY).map { yIndex in
-                (0..<nX).map { xIndex in
-                    counts[unitIndex][yIndex][xIndex][start...end].reduce(0.0, +)
-                }
+    func timeSpanSeconds(start: Int, end: Int) -> Double {
+        let low = max(0, min(nBins - 1, min(start, end)))
+        let high = max(0, min(nBins - 1, max(start, end)))
+        return timeBinEdges[high + 1] - timeBinEdges[low]
+    }
+
+    func countMatrix(unitIndex: Int, start: Int, end: Int) -> [[Double]] {
+        let low = max(0, min(nBins - 1, min(start, end)))
+        let high = max(0, min(nBins - 1, max(start, end)))
+        let unit = counts[unitIndex]
+        return (0..<nY).map { yIndex in
+            (0..<nX).map { xIndex in
+                compensatedSum(unit[yIndex][xIndex][low...high])
             }
         }
     }
 
+    func responseValue(
+        unitIndex: Int,
+        yIndex: Int,
+        xIndex: Int,
+        start: Int,
+        end: Int,
+        valueMode: ResponseValueMode
+    ) throws -> Double? {
+        let low = max(0, min(nBins - 1, min(start, end)))
+        let high = max(0, min(nBins - 1, max(start, end)))
+        let count = compensatedSum(counts[unitIndex][yIndex][xIndex][low...high])
+        if valueMode == .spikeCount {
+            return count
+        }
+        guard let presentationCounts else {
+            throw RFMappingError.presentationCountsRequired(valueMode)
+        }
+        let presentations = presentationCounts[yIndex][xIndex]
+        guard presentations > 0 else { return nil }
+        switch valueMode {
+        case .spikeCount:
+            return count
+        case .spikesPerPresentation:
+            return count / presentations
+        case .meanFiringRate:
+            return count / (presentations * timeSpanSeconds(start: low, end: high))
+        }
+    }
+
+    func responseMatrix(
+        unitIndex: Int,
+        start: Int,
+        end: Int,
+        valueMode: ResponseValueMode
+    ) throws -> OptionalMatrix {
+        let low = max(0, min(nBins - 1, min(start, end)))
+        let high = max(0, min(nBins - 1, max(start, end)))
+        let matrix = countMatrix(unitIndex: unitIndex, start: low, end: high)
+        if valueMode == .spikeCount {
+            return optionalMatrix(matrix)
+        }
+        guard let presentationCounts else {
+            throw RFMappingError.presentationCountsRequired(valueMode)
+        }
+        let duration = timeSpanSeconds(start: low, end: high)
+        return (0..<nY).map { yIndex in
+            (0..<nX).map { xIndex -> Double? in
+                let presentations = presentationCounts[yIndex][xIndex]
+                guard presentations > 0 else { return nil }
+                let divisor = presentations * (valueMode == .meanFiringRate ? duration : 1.0)
+                return matrix[yIndex][xIndex] / divisor
+            }
+        }
+    }
+
+    private static func normalizePresentationCounts(
+        _ payload: PresentationCountsPayload?,
+        nY: Int,
+        nX: Int
+    ) throws -> [[Double]]? {
+        guard let payload else { return nil }
+        switch payload {
+        case .matrix(let matrix):
+            return matrix
+        case .vector(let vector):
+            if nY == 1, vector.count == nX {
+                return [vector]
+            }
+            if nX == 1, vector.count == nY {
+                return vector.map { [$0] }
+            }
+            throw RFMappingError.invalidData("stimulusPresentationCounts singleton dimensions do not match the y-by-x shape.")
+        case .scalar(let value):
+            guard nY == 1, nX == 1 else {
+                throw RFMappingError.invalidData("A scalar stimulusPresentationCounts value is valid only for a 1-by-1 map.")
+            }
+            return [[value]]
+        }
+    }
+
     private func validate() throws {
+        guard [nUnits, nY, nX, nBins].allSatisfy({ $0 > 0 }) else {
+            throw RFMappingError.invalidData("unitsSpikeCountsSize values must all be positive.")
+        }
         guard counts.count == nUnits else {
             throw RFMappingError.invalidData("unitsSpikeCounts first dimension does not match unitsSpikeCountsSize.")
         }
         guard unitPool.count == nUnits else {
             throw RFMappingError.invalidData("unitPool length does not match unit count.")
         }
-        guard xPositions.count == nX else {
-            throw RFMappingError.invalidData("xPositions length does not match x dimension.")
+        guard xPositions.count == nX, xPositions.allSatisfy(\.isFinite) else {
+            throw RFMappingError.invalidData("xPositions must match the x dimension and contain finite values.")
         }
-        guard yPositions.count == nY else {
-            throw RFMappingError.invalidData("yPositions length does not match y dimension.")
+        guard yPositions.count == nY, yPositions.allSatisfy(\.isFinite) else {
+            throw RFMappingError.invalidData("yPositions must match the y dimension and contain finite values.")
         }
-        guard timeBinEdges.count == nBins + 1 else {
-            throw RFMappingError.invalidData("timeBinEdges must contain nBins + 1 edges.")
+        guard timeBinEdges.count == nBins + 1, timeBinEdges.allSatisfy(\.isFinite) else {
+            throw RFMappingError.invalidData("timeBinEdges must contain nBins + 1 finite edges.")
+        }
+        guard zip(timeBinEdges, timeBinEdges.dropFirst()).allSatisfy({ pair in pair.0 < pair.1 }) else {
+            throw RFMappingError.invalidData("timeBinEdges must be strictly increasing.")
+        }
+
+        if let presentationCounts {
+            guard presentationCounts.count == nY else {
+                throw RFMappingError.invalidData("stimulusPresentationCounts y dimension does not match unitsSpikeCountsSize.")
+            }
+            for (yIndex, row) in presentationCounts.enumerated() {
+                guard row.count == nX else {
+                    throw RFMappingError.invalidData("stimulusPresentationCounts row \(yIndex) x dimension does not match unitsSpikeCountsSize.")
+                }
+                for (xIndex, value) in row.enumerated() {
+                    guard value.isFinite, value >= 0, abs(value - value.rounded()) <= 1e-9 else {
+                        throw RFMappingError.invalidData("stimulusPresentationCounts values must be finite, non-negative integers (y \(yIndex), x \(xIndex)).")
+                    }
+                }
+            }
         }
 
         for unitIndex in 0..<nUnits {
@@ -232,8 +382,25 @@ final class RFMappingData {
                     throw RFMappingError.invalidData("Unit \(unitIndex), y \(yIndex) has wrong x dimension.")
                 }
                 for xIndex in 0..<nX {
-                    guard counts[unitIndex][yIndex][xIndex].count == nBins else {
+                    let hist = counts[unitIndex][yIndex][xIndex]
+                    guard hist.count == nBins else {
                         throw RFMappingError.invalidData("Unit \(unitIndex), y \(yIndex), x \(xIndex) has wrong bin dimension.")
+                    }
+                    guard hist.allSatisfy({ $0.isFinite && $0 >= 0 }) else {
+                        throw RFMappingError.invalidData("Unit \(unitIndex), y \(yIndex), x \(xIndex) counts must be finite and non-negative.")
+                    }
+                }
+            }
+        }
+
+        if let presentationCounts {
+            for yIndex in 0..<nY {
+                for xIndex in 0..<nX where presentationCounts[yIndex][xIndex] == 0 {
+                    let hasCounts = (0..<nUnits).contains { unitIndex in
+                        counts[unitIndex][yIndex][xIndex].contains { $0 != 0 }
+                    }
+                    if hasCounts {
+                        throw RFMappingError.invalidData("stimulusPresentationCounts is zero where spike counts are nonzero (y \(yIndex), x \(xIndex)).")
                     }
                 }
             }
@@ -243,11 +410,14 @@ final class RFMappingData {
 
 enum RFMappingError: LocalizedError {
     case invalidData(String)
+    case presentationCountsRequired(ResponseValueMode)
 
     var errorDescription: String? {
         switch self {
         case .invalidData(let message):
             message
+        case .presentationCountsRequired(let mode):
+            "\(mode.rawValue) requires stimulusPresentationCounts metadata. Regenerate this legacy JSON with presentation-count metadata."
         }
     }
 }
