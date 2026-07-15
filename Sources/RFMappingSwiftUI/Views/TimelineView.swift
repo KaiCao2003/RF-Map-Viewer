@@ -11,62 +11,14 @@ struct TimelineView: View {
 
             ScrollView(.vertical) {
                 ZStack(alignment: .topLeading) {
-                    Canvas { context, size in
-                        var context = context
-                        drawTimeline(context: &context, size: size, store: store, layout: layout)
-                    }
-                    PointerCaptureView(
-                        onMove: { point in
-                            if let hit = timelineHit(at: point, layout: layout) {
-                                switch hit {
-                                case .cell(let bin, let cell):
-                                    store.setHover(
-                                        cell,
-                                        location: point,
-                                        extra: "timeline bin \(store.timeGroupLabel(bin))",
-                                        displayBin: bin
-                                    )
-                                case .bin(let bin):
-                                    store.setTimelineBinHover(bin)
-                                }
-                            } else {
-                                store.clearHover()
-                            }
-                        },
-                        onClick: { point, modifiers in
-                            guard let hit = timelineHit(at: point, layout: layout) else { return }
-                            let extending = modifiers.contains(.shift)
-                                || modifiers.contains(.control)
-                                || modifiers.contains(.option)
-                                || modifiers.contains(.command)
-                            switch hit {
-                            case .cell(let bin, let cell):
-                                store.selectCell(cell)
-                                store.selectTimelineBin(bin, extending: extending)
-                            case .bin(let bin):
-                                store.selectTimelineBin(bin, extending: extending)
-                            }
-                        },
-                        onLeave: {
-                            store.clearHover()
-                        }
+                    TimelineBaseLayer(layout: layout)
+                        .equatable()
+                    TimelineSelectionLayer(layout: layout)
+                    TimelineInteractionLayer(
+                        store: store,
+                        layout: layout,
+                        outerSize: outerSize
                     )
-                    if let cell = store.hoverCell, let location = store.hoverLocation {
-                        PlotTooltip(
-                            text: store.tooltipText(cell, displayBin: store.hoverDisplayBin),
-                            location: location,
-                            canvasSize: CGSize(width: outerSize.width, height: layout.contentHeight),
-                            visibleRect: CGRect(
-                                x: 0,
-                                y: CGFloat(store.timelineScrollFraction)
-                                    * max(0, layout.contentHeight - outerSize.height),
-                                width: outerSize.width,
-                                height: outerSize.height
-                            )
-                        )
-                    }
-                    TimelineScrollOffsetTracker(fraction: $store.timelineScrollFraction)
-                        .frame(width: 1, height: 1)
                 }
                 .frame(width: outerSize.width, height: layout.contentHeight)
                 .accessibilityRepresentation {
@@ -92,8 +44,28 @@ struct TimelineMiniLayout {
     let gridHeight: CGFloat
     let xGroups: [AxisGroup]
     let yGroups: [AxisGroup]
+    let spatialFormat: SpatialPlotFormat
+    let totalDegrees: Double
+    let polarRingRows: [Int]
+
+    var polarLayout: PolarLayout? {
+        guard spatialFormat == .polar, !xGroups.isEmpty, !yGroups.isEmpty else { return nil }
+        let radiusUnits = CGFloat(innerBlankRows + yGroups.count + polarPadRows)
+        let scale = min(gridWidth, gridHeight) / max(2.0, 2.0 * radiusUnits)
+        return PolarLayout(
+            center: CGPoint(x: x0 + gridWidth / 2.0, y: y0 + gridHeight / 2.0),
+            scale: scale,
+            totalDegrees: totalDegrees,
+            xGroups: xGroups,
+            yGroups: yGroups,
+            ringRows: polarRingRows
+        )
+    }
 
     func cellRef(at point: CGPoint) -> CellRef? {
+        if let polarLayout {
+            return polarCell(at: point, layout: polarLayout)?.cell
+        }
         guard x0 <= point.x, point.x < x0 + gridWidth,
               y0 <= point.y, point.y < y0 + gridHeight else {
             return nil
@@ -128,6 +100,173 @@ struct TimelineLayout {
     let cellHigh: Double
     let labelGap: CGFloat
     let labelHeight: CGFloat
+    let miniColumns: Int
+    let miniRowStep: CGFloat
+    fileprivate let renderState: TimelineRenderState
+    fileprivate let renderKey: TimelineBaseRenderKey
+}
+
+private struct TimelineRenderState {
+    let valueMode: ResponseValueMode
+    let palette: RFPalette
+    let spatialFormat: SpatialPlotFormat
+    let selectedBoundsStartMS: Double
+    let selectedBoundsEndMS: Double
+    let axisStartMS: Double
+    let axisEndMS: Double
+    let baseBinMS: Double
+    let timeResolutionMS: Double
+    let hasTimeSelection: Bool
+    let selectedDisplayRange: AxisGroup?
+    let timeGroupLabels: [String]
+    let timeGroupEndBoundsMS: [Double]
+}
+
+/// A compact provenance key for everything rasterized by the heavy timeline
+/// layer. Hover position, hover cell, and scroll offset are intentionally not
+/// inputs: those are rendered by lightweight layers above it.
+private struct TimelineBaseRenderKey: Equatable {
+    let dataID: ObjectIdentifier?
+    let unitIndex: Int
+    let valueMode: ResponseValueMode
+    let timeGroupSize: Int
+    let timeResolutionMS: Double
+    let xBins: Int
+    let yBins: Int
+    let flipY: Bool
+    let smoothRadius: Int
+    let palette: RFPalette
+    let spatialFormat: SpatialPlotFormat
+    let polarRadiusMode: PolarRadiusMode
+    let width: CGFloat
+    let height: CGFloat
+    let contentHeight: CGFloat
+}
+
+private struct TimelineBaseLayer: View, Equatable {
+    let layout: TimelineLayout
+
+    nonisolated static func == (lhs: TimelineBaseLayer, rhs: TimelineBaseLayer) -> Bool {
+        MainActor.assumeIsolated {
+            lhs.layout.renderKey == rhs.layout.renderKey
+        }
+    }
+
+    var body: some View {
+        Canvas(rendersAsynchronously: true) { context, size in
+            var context = context
+            drawTimelineBase(context: &context, size: size, layout: layout)
+        }
+    }
+}
+
+private struct TimelineSelectionLayer: View {
+    let layout: TimelineLayout
+
+    var body: some View {
+        Canvas { context, size in
+            var context = context
+            drawTimelineSelection(context: &context, size: size, layout: layout)
+        }
+        .allowsHitTesting(false)
+    }
+}
+
+private struct TimelineHoverLayer: View {
+    let layout: TimelineLayout
+    let displayBin: Int
+    let cell: CellRef
+
+    var body: some View {
+        Canvas { context, _ in
+            var context = context
+            drawTimelineHover(
+                context: &context,
+                layout: layout,
+                displayBin: displayBin,
+                cell: cell
+            )
+        }
+    }
+}
+
+/// Owns the transient observable state so hover movement and scroll-offset
+/// tracking do not invalidate `TimelineView` and rebuild its immutable layout.
+private struct TimelineInteractionLayer: View {
+    @Bindable var store: RFMappingStore
+    let layout: TimelineLayout
+    let outerSize: CGSize
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            if let hoverCell = store.hoverCell,
+               let hoverDisplayBin = store.hoverDisplayBin {
+                TimelineHoverLayer(
+                    layout: layout,
+                    displayBin: hoverDisplayBin,
+                    cell: hoverCell
+                )
+                .allowsHitTesting(false)
+            }
+            PointerCaptureView(
+                onMove: { point in
+                    if let hit = timelineHit(at: point, layout: layout) {
+                        switch hit {
+                        case .cell(let bin, let cell):
+                            store.setHover(
+                                cell,
+                                location: point,
+                                extra: "timeline bin \(store.timeGroupLabel(bin))",
+                                displayBin: bin
+                            )
+                        case .bin(let bin):
+                            store.setTimelineBinHover(bin)
+                        }
+                    } else {
+                        store.clearHover()
+                    }
+                },
+                onClick: { point, modifiers in
+                    guard let hit = timelineHit(at: point, layout: layout) else { return }
+                    let extending = modifiers.contains(.shift)
+                        || modifiers.contains(.control)
+                        || modifiers.contains(.option)
+                        || modifiers.contains(.command)
+                    switch hit {
+                    case .cell(let bin, let cell):
+                        store.selectCell(cell)
+                        store.selectTimelineBin(bin, extending: extending)
+                    case .bin(let bin):
+                        store.selectTimelineBin(bin, extending: extending)
+                    }
+                },
+                onLeave: {
+                    store.clearHover()
+                }
+            )
+            if let cell = store.hoverCell, let location = store.hoverLocation {
+                PlotTooltip(
+                    text: store.tooltipText(cell, displayBin: store.hoverDisplayBin),
+                    location: location,
+                    canvasSize: CGSize(width: outerSize.width, height: layout.contentHeight),
+                    visibleRect: CGRect(
+                        x: 0,
+                        y: CGFloat(store.timelineScrollFraction)
+                            * max(0, layout.contentHeight - outerSize.height),
+                        width: outerSize.width,
+                        height: outerSize.height
+                    )
+                )
+            }
+            TimelineScrollOffsetTracker(fraction: $store.timelineScrollFraction)
+                .frame(width: 1, height: 1)
+        }
+        .frame(
+            width: outerSize.width,
+            height: layout.contentHeight,
+            alignment: .topLeading
+        )
+    }
 }
 
 private func makeTimelineLayout(store: RFMappingStore, width: CGFloat, height: CGFloat) -> TimelineLayout {
@@ -150,6 +289,12 @@ private func makeTimelineLayout(store: RFMappingStore, width: CGFloat, height: C
     let xGroups = store.xGroups()
     let yGroups = store.displayYGroups()
     let miniMatrices = snapshot.matrices
+    let selectedBounds = store.selectedTimeBoundsMS()
+    let axisRange = store.timeAxisRangeMS()
+    let hasTimeSelection = store.hasTimeSelection
+    let selectedDisplayRange = hasTimeSelection ? store.displayRangeIndices() : nil
+    let timeGroupLabels = visibleBins.map(store.timeGroupLabel)
+    let timeGroupEndBoundsMS = visibleBins.map { store.timeGroupBoundsMS($0).1 }
 
     let chartRect = CGRect(x: 64, y: 78, width: max(320, width - 140), height: 62)
     let miniTop = chartRect.maxY + 54
@@ -158,8 +303,13 @@ private func makeTimelineLayout(store: RFMappingStore, width: CGFloat, height: C
         height: height,
         visibleCount: visibleBins.count,
         xCount: xGroups.count,
-        yCount: yGroups.count
+        yCount: yGroups.count,
+        spatialFormat: store.spatialPlotFormat
     )
+    let totalDegrees = store.data?.inferTotalDeg() ?? 360.0
+    let polarRingRows = store.polarRadiusMode == .matlabRowOneInner
+        ? Array(yGroups.indices).sorted { yGroups[$0].start < yGroups[$1].start }
+        : Array(yGroups.indices.reversed())
     var miniLayouts: [TimelineMiniLayout] = []
     for (visibleIndex, bin) in visibleBins.enumerated() {
         let row = visibleIndex / miniSpec.cols
@@ -176,7 +326,10 @@ private func makeTimelineLayout(store: RFMappingStore, width: CGFloat, height: C
                 gridWidth: miniSpec.gridWidth,
                 gridHeight: miniSpec.gridHeight,
                 xGroups: xGroups,
-                yGroups: yGroups
+                yGroups: yGroups,
+                spatialFormat: store.spatialPlotFormat,
+                totalDegrees: totalDegrees,
+                polarRingRows: polarRingRows
             )
         )
     }
@@ -191,6 +344,38 @@ private func makeTimelineLayout(store: RFMappingStore, width: CGFloat, height: C
             + miniSpec.labelHeight
             + 12
     )
+    let renderState = TimelineRenderState(
+        valueMode: store.valueMode,
+        palette: store.palette,
+        spatialFormat: store.spatialPlotFormat,
+        selectedBoundsStartMS: selectedBounds.0,
+        selectedBoundsEndMS: selectedBounds.1,
+        axisStartMS: axisRange.0,
+        axisEndMS: axisRange.1,
+        baseBinMS: store.baseBinMS(),
+        timeResolutionMS: store.timeResolutionMS,
+        hasTimeSelection: hasTimeSelection,
+        selectedDisplayRange: selectedDisplayRange,
+        timeGroupLabels: timeGroupLabels,
+        timeGroupEndBoundsMS: timeGroupEndBoundsMS
+    )
+    let renderKey = TimelineBaseRenderKey(
+        dataID: store.data.map(ObjectIdentifier.init),
+        unitIndex: store.unitIndex,
+        valueMode: store.valueMode,
+        timeGroupSize: store.timeGroupSize(),
+        timeResolutionMS: store.timeResolutionMS,
+        xBins: store.xBins,
+        yBins: store.yBins,
+        flipY: store.flipY,
+        smoothRadius: store.smoothRadius,
+        palette: store.palette,
+        spatialFormat: store.spatialPlotFormat,
+        polarRadiusMode: store.polarRadiusMode,
+        width: width,
+        height: height,
+        contentHeight: contentHeight
+    )
     return TimelineLayout(
         chartRect: chartRect,
         displayBins: displayBins,
@@ -204,7 +389,11 @@ private func makeTimelineLayout(store: RFMappingStore, width: CGFloat, height: C
         selectedValues: selectedValues,
         cellHigh: snapshot.sharedHigh,
         labelGap: miniSpec.labelGap,
-        labelHeight: miniSpec.labelHeight
+        labelHeight: miniSpec.labelHeight,
+        miniColumns: miniSpec.cols,
+        miniRowStep: miniSpec.rowStep,
+        renderState: renderState,
+        renderKey: renderKey
     )
 }
 
@@ -226,7 +415,8 @@ private func timelineMiniSpec(
     height: CGFloat,
     visibleCount: Int,
     xCount: Int,
-    yCount: Int
+    yCount: Int,
+    spatialFormat: SpatialPlotFormat
 ) -> TimelineMiniSpec {
     let count = max(1, visibleCount)
     let xCount = max(1, xCount)
@@ -242,13 +432,25 @@ private func timelineMiniSpec(
     let densityScale = min(1.0, max(0.35, sqrt(50.0 / Double(count))))
     let targetGridHeight = max(18.0, baseGridHeight * CGFloat(densityScale))
     let targetCell = targetGridHeight / CGFloat(yCount)
-    let targetGridWidth = targetCell * CGFloat(xCount)
+    let targetGridWidth = spatialFormat == .polar
+        ? targetGridHeight
+        : targetCell * CGFloat(xCount)
     let maxColumns = max(1, Int((availableWidth + gapX) / max(1.0, targetGridWidth + gapX)))
     let cols = min(count, maxColumns)
     let slotWidth = max(1.0, (availableWidth - CGFloat(cols - 1) * gapX) / CGFloat(cols))
-    let cell = max(2.0, min(targetCell, slotWidth / CGFloat(xCount)))
-    let gridWidth = cell * CGFloat(xCount)
-    let gridHeight = cell * CGFloat(yCount)
+    let cell: CGFloat
+    let gridWidth: CGFloat
+    let gridHeight: CGFloat
+    if spatialFormat == .polar {
+        let diameter = max(18.0, min(targetGridHeight, slotWidth))
+        cell = diameter / CGFloat(max(xCount, yCount))
+        gridWidth = diameter
+        gridHeight = diameter
+    } else {
+        cell = max(2.0, min(targetCell, slotWidth / CGFloat(xCount)))
+        gridWidth = cell * CGFloat(xCount)
+        gridHeight = cell * CGFloat(yCount)
+    }
     return TimelineMiniSpec(
         left: left,
         cols: cols,
@@ -263,34 +465,41 @@ private func timelineMiniSpec(
     )
 }
 
-private func drawTimeline(
+private func drawTimelineBase(
     context: inout GraphicsContext,
     size: CGSize,
-    store: RFMappingStore,
     layout: TimelineLayout
 ) {
-    let selectedBounds = store.selectedTimeBoundsMS()
-    let negativeWarning = store.timeAxisStartMS() < 0
+    drawTimelineMiniMapCells(context: &context, layout: layout)
+}
+
+private func drawTimelineSelection(
+    context: inout GraphicsContext,
+    size: CGSize,
+    layout: TimelineLayout
+) {
+    let renderState = layout.renderState
+    let negativeWarning = renderState.axisStartMS < 0
         ? " Negative bins may include previous-stimulus responses."
         : ""
     drawTitle(
         context: &context,
         title: "Timeline and \(layout.displayBins) bin maps",
-        subtitle: "RF time range \(formatMS(selectedBounds.0)) to \(formatMS(selectedBounds.1)) ms; time res \(formatMS(store.timeResolutionMS)) ms; \(store.valueMode.rawValue).\(negativeWarning)"
+        subtitle: "Full time axis; Timeline highlight \(formatMS(renderState.selectedBoundsStartMS)) to \(formatMS(renderState.selectedBoundsEndMS)) ms; time res \(formatMS(renderState.timeResolutionMS)) ms; \(renderState.spatialFormat.rawValue) maps.\(negativeWarning)"
     )
 
-    drawTimelineChart(context: &context, store: store, layout: layout)
-    drawTimelineMiniMaps(context: &context, store: store, layout: layout)
+    drawTimelineChart(context: &context, layout: layout)
+    drawTimelineMiniMapFrames(context: &context, layout: layout)
 }
 
 private func drawTimelineChart(
     context: inout GraphicsContext,
-    store: RFMappingStore,
     layout: TimelineLayout
 ) {
+    let renderState = layout.renderState
     let rect = layout.chartRect
-    let axisRange = store.timeAxisRangeMS()
-    let axisSpan = max(axisRange.1 - axisRange.0, store.baseBinMS())
+    let axisRange = (renderState.axisStartMS, renderState.axisEndMS)
+    let axisSpan = max(axisRange.1 - axisRange.0, renderState.baseBinMS)
 
     if axisRange.0 < 0 {
         let negativeEnd = min(0.0, axisRange.1)
@@ -317,7 +526,7 @@ private func drawTimelineChart(
         )
     }
 
-    drawTimelineLegend(context: &context, store: store, layout: layout)
+    drawTimelineLegend(context: &context, layout: layout)
     drawTimelinePath(
         context: &context,
         values: layout.timeTotals,
@@ -340,7 +549,7 @@ private func drawTimelineChart(
             context: &context,
             x: rect.minX - 20,
             rect: rect,
-            highLabel: store.valueMode.format(layout.selectedMax),
+            highLabel: renderState.valueMode.format(layout.selectedMax),
             color: .red,
             leading: true
         )
@@ -349,15 +558,16 @@ private func drawTimelineChart(
         context: &context,
         x: rect.maxX + 20,
         rect: rect,
-        highLabel: store.valueMode.format(layout.maxTotal),
+        highLabel: renderState.valueMode.format(layout.maxTotal),
         color: .blue,
         leading: false
     )
 
-    if store.hasTimeSelection {
-        let bounds = store.selectedTimeBoundsMS()
-        let startX = rect.minX + rect.width * CGFloat((bounds.0 - axisRange.0) / axisSpan)
-        let endX = rect.minX + rect.width * CGFloat((bounds.1 - axisRange.0) / axisSpan)
+    if renderState.hasTimeSelection {
+        let startX = rect.minX
+            + rect.width * CGFloat((renderState.selectedBoundsStartMS - axisRange.0) / axisSpan)
+        let endX = rect.minX
+            + rect.width * CGFloat((renderState.selectedBoundsEndMS - axisRange.0) / axisSpan)
         let rangeRect = CGRect(
             x: min(startX, endX),
             y: rect.minY,
@@ -375,7 +585,9 @@ private func drawTimelineChart(
     }
     for boundary in boundaries {
         let x = rect.minX + rect.width * CGFloat(boundary) / CGFloat(layout.displayBins)
-        let timeMS = boundary == 0 ? axisRange.0 : store.timeGroupBoundsMS(boundary - 1).1
+        let timeMS = boundary == 0
+            ? axisRange.0
+            : renderState.timeGroupEndBoundsMS[min(boundary - 1, renderState.timeGroupEndBoundsMS.count - 1)]
         var tick = Path()
         tick.move(to: CGPoint(x: x, y: rect.maxY))
         tick.addLine(to: CGPoint(x: x, y: rect.maxY + 4))
@@ -396,7 +608,6 @@ private func drawTimelineChart(
 
 private func drawTimelineLegend(
     context: inout GraphicsContext,
-    store: RFMappingStore,
     layout: TimelineLayout
 ) {
     let y = layout.chartRect.minY - 11
@@ -404,7 +615,9 @@ private func drawTimelineLegend(
     blueLine.move(to: CGPoint(x: layout.chartRect.minX, y: y))
     blueLine.addLine(to: CGPoint(x: layout.chartRect.minX + 16, y: y))
     context.stroke(blueLine, with: .color(.blue), lineWidth: 2)
-    let totalLabel = store.valueMode == .spikeCount ? "All positions (sum)" : "All positions (weighted mean)"
+    let totalLabel = layout.renderState.valueMode == .spikeCount
+        ? "All positions (sum)"
+        : "All positions (weighted mean)"
     context.draw(
         Text(totalLabel).font(.system(size: 8)).foregroundStyle(.blue),
         at: CGPoint(x: layout.chartRect.minX + 21, y: y),
@@ -491,65 +704,135 @@ private func drawAxisScale(
     )
 }
 
-private func drawTimelineMiniMaps(
+private func drawTimelineMiniMapCells(
     context: inout GraphicsContext,
-    store: RFMappingStore,
     layout: TimelineLayout
 ) {
+    let renderState = layout.renderState
     for mini in layout.miniLayouts {
         guard layout.miniMatrices.indices.contains(mini.bin) else { continue }
         let matrix = layout.miniMatrices[mini.bin]
-        for displayY in matrix.indices {
-            for groupIndex in matrix[displayY].indices {
-                let rect = CGRect(
-                    x: mini.x0 + CGFloat(groupIndex) * mini.cell,
-                    y: mini.y0 + CGFloat(displayY) * mini.cell,
-                    width: mini.cell,
-                    height: mini.cell
-                )
-                context.fill(
-                    Path(rect),
-                    with: .color(
-                        paletteColor(
-                            matrix[displayY][groupIndex],
-                            low: 0,
-                            high: layout.cellHigh,
-                            palette: store.palette
+        if let polar = mini.polarLayout {
+            let thetaEdges = (0...polar.xGroups.count).map {
+                Double.pi / 180.0
+                    * (90.0 + polar.totalDegrees / 2.0
+                        - polar.totalDegrees * Double($0) / Double(polar.xGroups.count))
+            }
+            for (ringIndex, displayY) in polar.ringRows.enumerated() {
+                for groupIndex in polar.xGroups.indices {
+                    let path = polarCellPath(
+                        center: polar.center,
+                        scale: polar.scale,
+                        rInner: Double(innerBlankRows + ringIndex),
+                        rOuter: Double(innerBlankRows + ringIndex + 1),
+                        thetaStart: thetaEdges[groupIndex],
+                        thetaEnd: thetaEdges[groupIndex + 1],
+                        arcSegments: polarArcSampleCount(
+                            thetaStart: thetaEdges[groupIndex],
+                            thetaEnd: thetaEdges[groupIndex + 1]
                         )
                     )
-                )
+                    context.fill(
+                        path,
+                        with: .color(
+                            paletteColor(
+                                matrix[displayY][groupIndex],
+                                low: 0,
+                                high: layout.cellHigh,
+                                palette: renderState.palette
+                            )
+                        )
+                    )
+                }
+            }
+        } else {
+            for displayY in matrix.indices {
+                for groupIndex in matrix[displayY].indices {
+                    let rect = CGRect(
+                        x: mini.x0 + CGFloat(groupIndex) * mini.cell,
+                        y: mini.y0 + CGFloat(displayY) * mini.cell,
+                        width: mini.cell,
+                        height: mini.cell
+                    )
+                    context.fill(
+                        Path(rect),
+                        with: .color(
+                            paletteColor(
+                                matrix[displayY][groupIndex],
+                                low: 0,
+                                high: layout.cellHigh,
+                                palette: renderState.palette
+                            )
+                        )
+                    )
+                }
             }
         }
+    }
+}
 
-        let group = layout.timeGroups[mini.bin]
-        let inSelectedRange = store.hasTimeSelection && store.selectedRangeOverlaps(group)
+private func drawTimelineMiniMapFrames(
+    context: inout GraphicsContext,
+    layout: TimelineLayout
+) {
+    let renderState = layout.renderState
+    for mini in layout.miniLayouts {
+        let inSelectedRange = renderState.selectedDisplayRange.map {
+            $0.start <= mini.bin && mini.bin <= $0.end
+        } ?? false
         let outline = inSelectedRange ? Color.green : Color.secondary.opacity(0.45)
         let lineWidth: CGFloat = inSelectedRange ? 2 : 1
-        context.stroke(
-            Path(CGRect(x: mini.x0, y: mini.y0, width: mini.gridWidth, height: mini.gridHeight)),
-            with: .color(outline),
-            lineWidth: lineWidth
-        )
-        if store.hoverDisplayBin == mini.bin,
-           let hover = store.hoverCell,
-           let xIndex = mini.xGroups.firstIndex(where: { $0.start == hover.xStart && $0.end == hover.xEnd }),
-           let yIndex = mini.yGroups.firstIndex(where: { $0.start == hover.yStart && $0.end == hover.yEnd }) {
-            let hoverRect = CGRect(
-                x: mini.x0 + CGFloat(xIndex) * mini.cell,
-                y: mini.y0 + CGFloat(yIndex) * mini.cell,
-                width: mini.cell,
-                height: mini.cell
-            ).insetBy(dx: 1, dy: 1)
-            context.stroke(Path(hoverRect), with: .color(.orange), lineWidth: 3)
+        let framePath: Path
+        if let polar = mini.polarLayout {
+            let outer = CGFloat(innerBlankRows + polar.yGroups.count) * polar.scale
+            framePath = Path(ellipseIn: CGRect(
+                x: polar.center.x - outer,
+                y: polar.center.y - outer,
+                width: outer * 2,
+                height: outer * 2
+            ))
+        } else {
+            framePath = Path(CGRect(x: mini.x0, y: mini.y0, width: mini.gridWidth, height: mini.gridHeight))
         }
+        context.stroke(framePath, with: .color(outline), lineWidth: lineWidth)
         context.draw(
-            Text(store.timeGroupLabel(mini.bin))
+            Text(renderState.timeGroupLabels[mini.bin])
                 .font(.system(size: 8, weight: inSelectedRange ? .semibold : .regular))
                 .foregroundStyle(inSelectedRange ? Color.green : Color.secondary),
             at: CGPoint(x: mini.x0, y: mini.y0 + mini.gridHeight + layout.labelGap),
             anchor: .topLeading
         )
     }
+}
+
+private func drawTimelineHover(
+    context: inout GraphicsContext,
+    layout: TimelineLayout,
+    displayBin: Int,
+    cell: CellRef
+) {
+    guard layout.miniLayouts.indices.contains(displayBin) else { return }
+    let mini = layout.miniLayouts[displayBin]
+    guard mini.bin == displayBin else { return }
+    if let polar = mini.polarLayout, let path = polarPath(for: cell, layout: polar) {
+        context.stroke(path, with: .color(.orange), lineWidth: 3)
+        return
+    }
+    guard let xIndex = mini.xGroups.firstIndex(where: {
+              $0.start == cell.xStart && $0.end == cell.xEnd
+          }),
+          let yIndex = mini.yGroups.firstIndex(where: {
+              $0.start == cell.yStart && $0.end == cell.yEnd
+          }) else {
+        return
+    }
+    let hoverRect = CGRect(
+        x: mini.x0 + CGFloat(xIndex) * mini.cell,
+        y: mini.y0 + CGFloat(yIndex) * mini.cell,
+        width: mini.cell,
+        height: mini.cell
+    ).insetBy(dx: 1, dy: 1)
+    context.stroke(Path(hoverRect), with: .color(.orange), lineWidth: 3)
 }
 
 /// Bridges the enclosing NSScrollView's content offset into the per-window
@@ -648,7 +931,9 @@ private struct TimelineScrollOffsetTracker: NSViewRepresentable {
         }
 
         deinit {
-            if let observer { NotificationCenter.default.removeObserver(observer) }
+            MainActor.assumeIsolated {
+                if let observer { NotificationCenter.default.removeObserver(observer) }
+            }
         }
     }
 }
@@ -661,7 +946,17 @@ private func timelineHit(at point: CGPoint, layout: TimelineLayout) -> TimelineH
         return .bin(bin)
     }
 
-    for mini in layout.miniLayouts {
+    guard let firstMini = layout.miniLayouts.first,
+          point.y >= firstMini.y0,
+          layout.miniColumns > 0,
+          layout.miniRowStep > 0 else {
+        return nil
+    }
+    let row = Int((point.y - firstMini.y0) / layout.miniRowStep)
+    let rowStart = row * layout.miniColumns
+    guard row >= 0, rowStart < layout.miniLayouts.count else { return nil }
+    let rowEnd = min(rowStart + layout.miniColumns, layout.miniLayouts.count)
+    for mini in layout.miniLayouts[rowStart..<rowEnd] {
         if let cell = mini.cellRef(at: point) {
             return .cell(mini.bin, cell)
         }

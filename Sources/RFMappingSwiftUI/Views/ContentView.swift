@@ -12,6 +12,17 @@ struct ContentView: View {
             Divider()
             mainContent
         }
+        .overlay {
+            if store.isLoadingData {
+                ZStack {
+                    Rectangle()
+                        .fill(.ultraThinMaterial)
+                    ProgressView("Opening RF mapping data…")
+                        .padding(18)
+                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+                }
+            }
+        }
         .fileImporter(
             isPresented: $store.isImporting,
             allowedContentTypes: [.json, .data],
@@ -68,9 +79,13 @@ struct ContentView: View {
             valueMode: store.valueMode,
             rangeStartMS: store.rangeStartMS,
             rangeEndMS: store.rangeEndMS,
+            plotRangeStartMS: store.plotRangeStartMS,
+            plotRangeEndMS: store.plotRangeEndMS,
             flipY: store.flipY,
             palette: store.palette,
             polarRadiusMode: store.polarRadiusMode,
+            spatialPlotFormat: store.spatialPlotFormat,
+            delayRGBMode: store.delayRGBMode,
             responseFloor: store.responseFloor,
             xBins: store.xBins,
             yBins: store.yBins,
@@ -113,9 +128,13 @@ private struct HoverContext: Hashable {
     let valueMode: ResponseValueMode
     let rangeStartMS: Double
     let rangeEndMS: Double
+    let plotRangeStartMS: Double
+    let plotRangeEndMS: Double
     let flipY: Bool
     let palette: RFPalette
     let polarRadiusMode: PolarRadiusMode
+    let spatialPlotFormat: SpatialPlotFormat
+    let delayRGBMode: DelayRGBMode
     let responseFloor: Double
     let xBins: Int
     let yBins: Int
@@ -151,7 +170,7 @@ private struct PlotControlBar: View {
                 LabeledContent("Value") {
                     Picker("Value", selection: Binding(
                         get: { store.valueMode },
-                        set: store.setValueMode
+                        set: { store.setValueMode($0) }
                     )) {
                         ForEach(ResponseValueMode.allCases) { mode in
                             Text(mode.rawValue)
@@ -174,39 +193,75 @@ private struct PlotControlBar: View {
                     range: store.baseBinMS()...store.totalTimeMS(),
                     step: store.baseBinMS()
                 )
+
+                Divider().frame(height: 24)
+
+                Toggle("Polar layout", isOn: Binding(
+                    get: { store.spatialPlotFormat == .polar },
+                    set: { store.spatialPlotFormat = $0 ? .polar : .rectangular }
+                ))
+                .toggleStyle(.switch)
+                .help("Off: rectangular spatial maps. On: polar spatial maps.")
+
                 Spacer(minLength: 0)
             }
 
-            HStack(spacing: 8) {
-                Text("RF time range")
-                    .foregroundStyle(.secondary)
-                compactTimeControl(
-                    title: "Start",
-                    normalizedValue: Binding(
-                        get: { store.rangeStartMS },
-                        set: { store.rangeStartMS = $0; store.timelineRangeAnchor = nil; store.normalizeControls() }
-                    ),
-                    range: store.timeAxisStartMS()...store.timeAxisEndMS(),
-                    step: store.baseBinMS(),
-                    showTitle: false
-                )
-                Text("to").foregroundStyle(.secondary)
-                compactTimeControl(
-                    title: "End",
-                    normalizedValue: Binding(
-                        get: { store.rangeEndMS },
-                        set: { store.rangeEndMS = $0; store.timelineRangeAnchor = nil; store.normalizeControls() }
-                    ),
-                    range: store.timeAxisStartMS()...store.timeAxisEndMS(),
-                    step: store.baseBinMS(),
-                    showTitle: false
-                )
-
-                Button("Full range") { store.clearTimelineSelection() }
-                    .disabled(!store.hasTimeSelection)
-                    .help("Show the complete RF time range (Esc)")
-
-                Spacer(minLength: 0)
+            switch store.selectedTab {
+            case .rf:
+                HStack(spacing: 8) {
+                    Text("RF sum range (ms)")
+                        .foregroundStyle(.secondary)
+                    compactTimeControl(
+                        title: "Start",
+                        normalizedValue: Binding(
+                            get: { store.plotRangeStartMS },
+                            set: { store.plotRangeStartMS = $0; store.normalizePlotTimeRange() }
+                        ),
+                        range: store.timeAxisStartMS()...store.timeAxisEndMS(),
+                        step: store.baseBinMS(),
+                        showTitle: false,
+                        showUnit: false
+                    )
+                    Text("to").foregroundStyle(.secondary)
+                    compactTimeControl(
+                        title: "End",
+                        normalizedValue: Binding(
+                            get: { store.plotRangeEndMS },
+                            set: { store.plotRangeEndMS = $0; store.normalizePlotTimeRange() }
+                        ),
+                        range: store.timeAxisStartMS()...store.timeAxisEndMS(),
+                        step: store.baseBinMS(),
+                        showTitle: false,
+                        showUnit: false
+                    )
+                    Button("Reset 0–20") { store.resetPlotRangeToDefault() }
+                        .help("Use 0–20 ms, clamped and snapped to the available source bins")
+                    Text("Timeline remains full and independent")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                    Spacer(minLength: 0)
+                }
+            case .delayRGB:
+                HStack(spacing: 8) {
+                    Toggle("RGB composite", isOn: Binding(
+                        get: { store.delayRGBMode == .rgb },
+                        set: { store.delayRGBMode = $0 ? .rgb : .delay }
+                    ))
+                    .toggleStyle(.switch)
+                    .help("Off: delay only. On: RGB response/delay/entropy composite.")
+                    Text("Off: Delay   On: RGB")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                    Spacer(minLength: 0)
+                }
+            case .timeline:
+                HStack(spacing: 8) {
+                    Text("Timeline always shows the full time axis")
+                        .foregroundStyle(.secondary)
+                    Button("Clear selection") { store.clearTimelineSelection() }
+                        .disabled(!store.hasTimeSelection)
+                    Spacer(minLength: 0)
+                }
             }
         }
         .controlSize(.small)
@@ -220,7 +275,8 @@ private struct PlotControlBar: View {
         normalizedValue: Binding<Double>,
         range: ClosedRange<Double>,
         step: Double,
-        showTitle: Bool = true
+        showTitle: Bool = true,
+        showUnit: Bool = true
     ) -> some View {
         HStack(spacing: 4) {
             if showTitle {
@@ -229,8 +285,17 @@ private struct PlotControlBar: View {
             TextField(title, value: normalizedValue, format: .number.precision(.fractionLength(0...3)))
                 .multilineTextAlignment(.trailing)
                 .frame(width: 58)
-                .onSubmit { store.timelineRangeAnchor = nil; store.normalizeControls() }
-            Text("ms").foregroundStyle(.secondary)
+                .onSubmit {
+                    if title == "Start" || title == "End" {
+                        store.normalizePlotTimeRange()
+                    } else {
+                        store.timelineRangeAnchor = nil
+                        store.normalizeControls()
+                    }
+                }
+            if showUnit {
+                Text("ms").foregroundStyle(.secondary)
+            }
             Stepper(title, value: normalizedValue, in: range, step: step)
                 .labelsHidden()
         }
@@ -255,17 +320,21 @@ private struct PlotTabsView: View {
             Group {
                 switch store.selectedTab {
                 case .rf:
-                    HeatmapView(store: store, kind: .rf)
-                case .delay:
-                    HeatmapView(store: store, kind: .delay)
-                case .polar:
-                    PolarMapView(store: store)
+                    if store.spatialPlotFormat == .polar {
+                        PolarMapView(store: store, kind: .rf)
+                    } else {
+                        HeatmapView(store: store, kind: .rf)
+                    }
+                case .delayRGB:
+                    if store.delayRGBMode == .rgb {
+                        RGBMapView(store: store)
+                    } else if store.spatialPlotFormat == .polar {
+                        PolarMapView(store: store, kind: .delay)
+                    } else {
+                        HeatmapView(store: store, kind: .delay)
+                    }
                 case .timeline:
                     TimelineView(store: store)
-                case .rgb:
-                    RGBMapView(store: store)
-                case .stack:
-                    StackView(store: store)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)

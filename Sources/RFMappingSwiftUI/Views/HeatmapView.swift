@@ -13,13 +13,7 @@ struct HeatmapView: View {
     var body: some View {
         GeometryReader { proxy in
             let size = proxy.size
-            let matrix = sourceMatrix
-            let plot = makeHeatmapPlot(
-                store: store,
-                matrix: matrix,
-                fixedRange: fixedRange,
-                smooth: true
-            )
+            let plot = cachedPlot
             let layout = makeHeatmapLayout(size: size, plot: plot)
 
             ZStack(alignment: .topLeading) {
@@ -33,29 +27,11 @@ struct HeatmapView: View {
                         title: title,
                         subtitle: subtitle,
                         palette: kind == .delay ? nil : store.palette,
-                        valueSuffix: kind == .delay ? " ms" : store.valueMode.suffix
+                        valueSuffix: kind == .delay ? " ms" : store.valueMode.suffix,
+                        drawInteraction: false
                     )
                 }
-                PointerCaptureView(
-                    onMove: { point in
-                        if let cell = layout.cellRef(at: point) {
-                            store.setHover(cell, location: point)
-                        } else {
-                            store.clearHover()
-                        }
-                    },
-                    onClick: { point, _ in
-                        if let cell = layout.cellRef(at: point) {
-                            store.selectCell(cell)
-                        }
-                    },
-                    onLeave: {
-                        store.clearHover()
-                    }
-                )
-                if let cell = store.hoverCell, let location = store.hoverLocation {
-                    PlotTooltip(text: store.tooltipText(cell), location: location, canvasSize: size)
-                }
+                RectangularPlotInteractionLayer(store: store, layout: layout, size: size)
             }
             .accessibilityRepresentation {
                 SpatialPlotAccessibilityRepresentation(
@@ -76,21 +52,12 @@ struct HeatmapView: View {
         .background(Color(nsColor: .textBackgroundColor))
     }
 
-    private var sourceMatrix: OptionalMatrix {
+    private var cachedPlot: HeatmapPlot {
         switch kind {
         case .rf:
-            return store.currentMatrix()
+            return store.currentHeatmapPlot()
         case .delay:
-            return store.delayMatrixForTimeGroups(floor: store.responseFloor)
-        }
-    }
-
-    private var fixedRange: (Double, Double)? {
-        switch kind {
-        case .rf:
-            return nil
-        case .delay:
-            return store.timeAxisRangeMS()
+            return store.delayHeatmapPlot(floor: store.responseFloor)
         }
     }
 

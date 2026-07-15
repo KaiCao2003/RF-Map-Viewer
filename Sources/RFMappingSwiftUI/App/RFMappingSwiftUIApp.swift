@@ -15,10 +15,15 @@ struct DocumentWindowRequest: Codable, Hashable {
 final class WindowRouter {
     static let shared = WindowRouter()
 
+    private struct PendingExternalOpen {
+        let urls: [URL]
+        let completion: (Bool) -> Void
+    }
+
     private var opener: ((DocumentWindowRequest) -> Void)?
     private var pending: [DocumentWindowRequest] = []
-    private var pendingExternalURLs: [URL] = []
-    private var coldLaunchReplacement: ((URL) -> Bool)?
+    private var pendingExternalOpens: [PendingExternalOpen] = []
+    private var coldLaunchReplacement: ((URL) async -> Bool)?
     private var coldLaunchFallback: (() -> Void)?
     private var coldLaunchExpiration: Task<Void, Never>?
     private var didOfferColdLaunchReplacement = false
@@ -26,7 +31,7 @@ final class WindowRouter {
 
     func install(
         _ action: OpenWindowAction,
-        coldLaunchReplacement replacement: ((URL) -> Bool)? = nil,
+        coldLaunchReplacement replacement: ((URL) async -> Bool)? = nil,
         coldLaunchFallback fallback: (() -> Void)? = nil
     ) {
         opener = { request in action(value: request) }
@@ -42,20 +47,29 @@ final class WindowRouter {
         pending.removeAll()
         queued.forEach { opener?($0) }
 
-        if !pendingExternalURLs.isEmpty {
-            let externalURLs = pendingExternalURLs
-            pendingExternalURLs.removeAll()
-            openExternal(externalURLs)
+        if !pendingExternalOpens.isEmpty {
+            let externalOpens = pendingExternalOpens
+            pendingExternalOpens.removeAll()
+            for externalOpen in externalOpens {
+                openExternal(externalOpen.urls, completion: externalOpen.completion)
+            }
         }
     }
 
-    func open(_ url: URL) throws {
+    @discardableResult
+    func openAsync(_ url: URL) async -> Bool {
         let request = DocumentWindowRequest(url: url)
-        preparedDocuments[request.id] = try loadDocument(url)
-        if let opener {
-            opener(request)
-        } else {
-            pending.append(request)
+        do {
+            preparedDocuments[request.id] = try await loadDocumentAsync(url)
+            if let opener {
+                opener(request)
+            } else {
+                pending.append(request)
+            }
+            return true
+        } catch {
+            showOpenError(error, url: url)
+            return false
         }
     }
 
@@ -65,11 +79,13 @@ final class WindowRouter {
 
     func claimColdInitialWindow(for url: URL) -> Bool {
         guard let replacement = coldLaunchReplacement else { return false }
-        _ = replacement(url)
         coldLaunchReplacement = nil
         coldLaunchFallback = nil
         coldLaunchExpiration?.cancel()
         coldLaunchExpiration = nil
+        Task { @MainActor in
+            _ = await replacement(url)
+        }
         return true
     }
 
@@ -87,31 +103,38 @@ final class WindowRouter {
     /// Finder/Launch Services should populate the otherwise-empty initial
     /// WindowGroup window during a cold launch. Later document opens always
     /// create independent windows, matching the Python viewer.
-    @discardableResult
-    func openExternal(_ urls: [URL]) -> Bool {
-        guard !urls.isEmpty else { return true }
+    func openExternal(_ urls: [URL], completion: @escaping (Bool) -> Void) {
+        guard !urls.isEmpty else {
+            completion(true)
+            return
+        }
         guard opener != nil else {
-            pendingExternalURLs.append(contentsOf: urls)
-            return true
+            pendingExternalOpens.append(PendingExternalOpen(urls: urls, completion: completion))
+            return
         }
 
+        Task { @MainActor [weak self] in
+            guard let self else {
+                completion(false)
+                return
+            }
+            completion(await processExternal(urls))
+        }
+    }
+
+    private func processExternal(_ urls: [URL]) async -> Bool {
         var allSucceeded = true
         var remaining = urls[...]
         if let replacement = coldLaunchReplacement, let first = remaining.first {
-            allSucceeded = replacement(first) && allSucceeded
-            remaining = remaining.dropFirst()
             coldLaunchReplacement = nil
             coldLaunchFallback = nil
             coldLaunchExpiration?.cancel()
             coldLaunchExpiration = nil
+            allSucceeded = await replacement(first) && allSucceeded
+            remaining = remaining.dropFirst()
         }
         for url in remaining {
-            do {
-                try open(url)
-            } catch {
-                allSucceeded = false
-                showOpenError(error, url: url)
-            }
+            allSucceeded = await openAsync(url) && allSucceeded
         }
         return allSucceeded
     }
@@ -125,18 +148,18 @@ final class WindowRouter {
         alert.runModal()
     }
 
-    private func loadDocument(_ url: URL) throws -> RFMappingData {
+    private func loadDocumentAsync(_ url: URL) async throws -> RFMappingData {
         let accessing = url.startAccessingSecurityScopedResource()
         defer {
             if accessing { url.stopAccessingSecurityScopedResource() }
         }
-        return try RFMappingData(url: url)
+        return try await RFMappingData.decodeOffMain(url: url)
     }
 
     private func scheduleColdLaunchFallback() {
         coldLaunchExpiration?.cancel()
         coldLaunchExpiration = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .milliseconds(350))
+            try? await Task.sleep(for: .milliseconds(150))
             guard !Task.isCancelled, let self, self.coldLaunchReplacement != nil else { return }
             let fallback = self.coldLaunchFallback
             self.coldLaunchReplacement = nil
@@ -194,16 +217,17 @@ private struct RFMappingWindow: View {
     @Environment(\.dismiss) private var dismiss
     @State private var store: RFMappingStore
     private let isInitialWindow: Bool
+    private let initialURL: URL?
 
     init(request: DocumentWindowRequest?) {
         let url = request.map { URL(fileURLWithPath: $0.path) }
         let prepared = request.flatMap { WindowRouter.shared.takePreparedDocument(for: $0.id) }
         _store = State(initialValue: RFMappingStore(
-            initialURL: prepared == nil ? url : nil,
             initialData: prepared,
-            loadDefault: request != nil
+            loadDefault: false
         ))
         isInitialWindow = request == nil
+        initialURL = prepared == nil ? url : nil
     }
 
     var body: some View {
@@ -214,10 +238,8 @@ private struct RFMappingWindow: View {
                    WindowRouter.shared.claimColdInitialWindow(for: url) {
                     return
                 }
-                do {
-                    try WindowRouter.shared.open(url)
-                } catch {
-                    store.errorMessage = error.localizedDescription
+                Task { @MainActor in
+                    _ = await WindowRouter.shared.openAsync(url)
                 }
             }
         )
@@ -229,7 +251,7 @@ private struct RFMappingWindow: View {
             WindowRouter.shared.install(
                 openWindow,
                 coldLaunchReplacement: isInitialWindow ? { url in
-                    guard store.loadJSON(url) else {
+                    guard await store.loadJSONAsync(url) else {
                         let error = RFMappingError.invalidData(store.errorMessage ?? "Unknown document error")
                         WindowRouter.shared.showOpenError(error, url: url)
                         store.errorMessage = nil
@@ -238,8 +260,15 @@ private struct RFMappingWindow: View {
                     }
                     return true
                 } : nil,
-                coldLaunchFallback: isInitialWindow ? store.loadLatestJSON : nil
+                coldLaunchFallback: isInitialWindow ? {
+                    Task { @MainActor in
+                        await store.loadLatestJSONAsync()
+                    }
+                } : nil
             )
+            if let initialURL, !store.hasData {
+                _ = await store.loadJSONAsync(initialURL)
+            }
         }
     }
 
@@ -315,8 +344,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func application(_ sender: NSApplication, openFiles filenames: [String]) {
-        let succeeded = WindowRouter.shared.openExternal(filenames.map { URL(fileURLWithPath: $0) })
-        sender.reply(toOpenOrPrint: succeeded ? .success : .failure)
+        WindowRouter.shared.openExternal(filenames.map { URL(fileURLWithPath: $0) }) { succeeded in
+            sender.reply(toOpenOrPrint: succeeded ? .success : .failure)
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -417,7 +447,7 @@ private struct WindowShortcutMonitor: NSViewRepresentable {
                 case "f": actions.toggleFlipY(); return true
                 case "p": actions.cyclePalette(); return true
                 case "?": showKeyboardShortcuts(); return true
-                case "1", "2", "3", "4", "5", "6":
+                case "1", "2", "3":
                     actions.selectTab(Int(character!)! - 1)
                     return true
                 default: return false
@@ -433,7 +463,9 @@ private struct WindowShortcutMonitor: NSViewRepresentable {
         }
 
         deinit {
-            if let monitor { NSEvent.removeMonitor(monitor) }
+            MainActor.assumeIsolated {
+                if let monitor { NSEvent.removeMonitor(monitor) }
+            }
         }
     }
 }
@@ -446,7 +478,7 @@ private func showKeyboardShortcuts() {
     ← / →   Previous / next unit
     ↑ / ↓   Previous / next timeline bin
     Shift+, / Shift+.   Time resolution −/+ 1 ms
-    1–6   Switch plot tab
+    1–3   Switch plot tab
     F   Invert Y
     P   Cycle palette
     Esc   Show full time range

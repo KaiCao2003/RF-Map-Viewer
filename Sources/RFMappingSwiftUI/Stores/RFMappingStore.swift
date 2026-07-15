@@ -4,6 +4,102 @@ import Observation
 
 @Observable
 final class RFMappingStore {
+    private enum SpatialPlotKind: Int, Equatable {
+        case current
+        case delay
+    }
+
+    private struct RawMatrixCacheKey: Equatable {
+        let dataID: ObjectIdentifier
+        let unitIndex: Int
+        let valueMode: ResponseValueMode
+        let sourceStart: Int
+        let sourceEnd: Int
+    }
+
+    private struct DelayCacheKey: Equatable {
+        let dataID: ObjectIdentifier
+        let unitIndex: Int
+        let timeGroupSize: Int
+        let floor: Double
+    }
+
+    private struct SpatialPlotCacheKey: Equatable {
+        let kind: SpatialPlotKind
+        let dataID: ObjectIdentifier
+        let unitIndex: Int
+        let valueMode: ResponseValueMode
+        let sourceStart: Int
+        let sourceEnd: Int
+        let timeGroupSize: Int
+        let floor: Double
+        let xBins: Int
+        let yBins: Int
+        let flipY: Bool
+        let smoothRadius: Int
+    }
+
+    private struct RGBPlotCacheKey: Equatable {
+        let dataID: ObjectIdentifier
+        let unitIndex: Int
+        let valueMode: ResponseValueMode
+        let timeGroupSize: Int
+        let xBins: Int
+        let yBins: Int
+        let flipY: Bool
+        let smoothRadius: Int
+    }
+
+    private struct TimeAxisMetadata {
+        let dataID: ObjectIdentifier
+        let edgesMS: [Double]
+        let startMS: Double
+        let endMS: Double
+        let totalMS: Double
+        let baseBinMS: Double
+    }
+
+    private struct TimeGroupingCache {
+        let dataID: ObjectIdentifier
+        let groupSize: Int
+        let groups: [AxisGroup]
+        let bounds: [(Double, Double)]
+        let labels: [String]
+        let intervalLabels: [String]
+        let centers: [Double]
+    }
+
+    private struct SelectedSourceRangeCacheKey: Equatable {
+        let dataID: ObjectIdentifier
+        let startMS: Double
+        let endMS: Double
+    }
+
+    private struct GroupResponseCacheKey: Equatable {
+        let dataID: ObjectIdentifier
+        let unitIndex: Int
+        let valueMode: ResponseValueMode
+        let timeGroupSize: Int
+        let cell: CellRef
+    }
+
+    private struct CellAnalysisCacheKey: Equatable {
+        let responseKey: GroupResponseCacheKey
+        let selectedStart: Int
+        let selectedEnd: Int
+    }
+
+    private struct CellAnalysis {
+        let displayValues: [Double?]
+        let countHist: [Double]
+        let selectedValue: Double?
+        let totalValue: Double?
+        let peakBin: Int?
+        let peakValue: Double?
+        let delayMS: Double?
+        let entropy: Double
+    }
+
     private struct TimelineCacheKey: Equatable {
         let dataID: ObjectIdentifier
         let unitIndex: Int
@@ -15,7 +111,19 @@ final class RFMappingStore {
         let smoothRadius: Int
     }
 
-    @ObservationIgnored private var timelineCache: (key: TimelineCacheKey, value: TimelineMatrixSnapshot)?
+    @ObservationIgnored private var timelineCaches: [(key: TimelineCacheKey, value: TimelineMatrixSnapshot)] = []
+    @ObservationIgnored private var currentMatrixCache: (key: RawMatrixCacheKey, value: OptionalMatrix)?
+    @ObservationIgnored private var delayMatrixCache: (key: DelayCacheKey, value: OptionalMatrix)?
+    @ObservationIgnored private var spatialPlotCaches: [(key: SpatialPlotCacheKey, value: HeatmapPlot)] = []
+    @ObservationIgnored private var rgbPlotCache: (key: RGBPlotCacheKey, value: RGBPlot)?
+    @ObservationIgnored private var timeAxisMetadataCache: TimeAxisMetadata?
+    @ObservationIgnored private var timeGroupingCache: TimeGroupingCache?
+    @ObservationIgnored private var selectedSourceRangeCache: (key: SelectedSourceRangeCacheKey, value: AxisGroup)?
+    @ObservationIgnored private var plotSourceRangeCache: (key: SelectedSourceRangeCacheKey, value: AxisGroup)?
+    @ObservationIgnored private var groupResponseCaches: [(key: GroupResponseCacheKey, value: [Double?])] = []
+    @ObservationIgnored private var cellAnalysisCaches: [(key: CellAnalysisCacheKey, value: CellAnalysis)] = []
+    @ObservationIgnored private var loadRequestID: UUID?
+    @ObservationIgnored private var activeDecodeTask: Task<RFMappingData, Error>?
 
     var data: RFMappingData?
     var availableJSONURLs: [URL] = []
@@ -26,9 +134,13 @@ final class RFMappingStore {
     var binIndex = 0
     var rangeStartMS = 0.0
     var rangeEndMS = 1.0
+    var plotRangeStartMS = 0.0
+    var plotRangeEndMS = 20.0
     var flipY = false
     var palette: RFPalette = .gray
     var polarRadiusMode: PolarRadiusMode = .displayBottomInner
+    var spatialPlotFormat: SpatialPlotFormat = .rectangular
+    var delayRGBMode: DelayRGBMode = .delay
     var responseFloor = 0.0
     var xBins = 1
     var yBins = 1
@@ -46,6 +158,7 @@ final class RFMappingStore {
 
     var isImporting = false
     var isExporting = false
+    var isLoadingData = false
     var isAwaitingStartupDocument = false
     var exportDocument: CSVMatrixDocument?
     var exportFilename = "rf_matrix.csv"
@@ -53,7 +166,7 @@ final class RFMappingStore {
 
     init(initialURL: URL? = nil, initialData: RFMappingData? = nil, loadDefault: Bool = true) {
         isAwaitingStartupDocument = initialURL == nil && initialData == nil && !loadDefault
-        rescanJSONFiles()
+        refreshJSONChoices()
         if let initialData {
             adopt(initialData)
         } else if let url = initialURL {
@@ -67,6 +180,17 @@ final class RFMappingStore {
         if let url = JSONDiscovery.latestJSONURL() {
             loadJSON(url)
         } else {
+            isAwaitingStartupDocument = false
+            errorMessage = "No RF mapping JSON files found. Use Open JSON to choose one."
+        }
+    }
+
+    @MainActor
+    func loadLatestJSONAsync() async {
+        if let url = JSONDiscovery.latestJSONURL() {
+            _ = await loadJSONAsync(url)
+        } else {
+            isLoadingData = false
             isAwaitingStartupDocument = false
             errorMessage = "No RF mapping JSON files found. Use Open JSON to choose one."
         }
@@ -128,7 +252,7 @@ final class RFMappingStore {
         return range.start != 0 || range.end != data.nBins - 1
     }
 
-    func rescanJSONFiles() {
+    private func refreshJSONChoices() {
         availableJSONURLs = JSONDiscovery.discoverJSONFiles(currentURL: data?.url)
         if let data {
             selectedJSONPath = data.url.standardizedFileURL.path
@@ -143,8 +267,62 @@ final class RFMappingStore {
         return loadJSON(URL(fileURLWithPath: path))
     }
 
+    @MainActor
+    @discardableResult
+    func loadJSONAsync(path: String) async -> Bool {
+        guard !path.isEmpty else { return false }
+        return await loadJSONAsync(URL(fileURLWithPath: path))
+    }
+
+    @MainActor
+    @discardableResult
+    func loadJSONAsync(_ url: URL) async -> Bool {
+        let requestID = UUID()
+        loadRequestID = requestID
+        isLoadingData = true
+        if data == nil { isAwaitingStartupDocument = true }
+
+        activeDecodeTask?.cancel()
+        let accessing = url.startAccessingSecurityScopedResource()
+        let decodeTask = RFMappingData.makeDecodeTask(url: url)
+        activeDecodeTask = decodeTask
+        defer {
+            if accessing { url.stopAccessingSecurityScopedResource() }
+            if loadRequestID == requestID {
+                loadRequestID = nil
+                activeDecodeTask = nil
+                isLoadingData = false
+                if data == nil { isAwaitingStartupDocument = false }
+            }
+        }
+
+        do {
+            let loaded = try await withTaskCancellationHandler {
+                try await decodeTask.value
+            } onCancel: {
+                decodeTask.cancel()
+            }
+            guard loadRequestID == requestID else { return false }
+            adopt(loaded)
+            return true
+        } catch is CancellationError {
+            guard loadRequestID == requestID else { return false }
+            isAwaitingStartupDocument = false
+            return false
+        } catch {
+            guard loadRequestID == requestID else { return false }
+            isAwaitingStartupDocument = false
+            errorMessage = error.localizedDescription
+            return false
+        }
+    }
+
     @discardableResult
     func loadJSON(_ url: URL) -> Bool {
+        activeDecodeTask?.cancel()
+        activeDecodeTask = nil
+        loadRequestID = nil
+        isLoadingData = false
         let accessing = url.startAccessingSecurityScopedResource()
         defer {
             if accessing { url.stopAccessingSecurityScopedResource() }
@@ -164,6 +342,7 @@ final class RFMappingStore {
     private func adopt(_ loaded: RFMappingData) {
         isAwaitingStartupDocument = false
         errorMessage = nil
+        clearDerivedCaches()
         data = loaded
         selectedJSONPath = loaded.url.path
         unitIndex = 0
@@ -178,9 +357,24 @@ final class RFMappingStore {
         clearHover()
         timelineRangeAnchor = nil
         timelineScrollFraction = 0
+        resetPlotRangeToDefault()
         normalizeControls()
         ensureSelectedCell()
-        rescanJSONFiles()
+        refreshJSONChoices()
+    }
+
+    private func clearDerivedCaches() {
+        timelineCaches.removeAll(keepingCapacity: true)
+        currentMatrixCache = nil
+        delayMatrixCache = nil
+        spatialPlotCaches.removeAll(keepingCapacity: true)
+        rgbPlotCache = nil
+        timeAxisMetadataCache = nil
+        timeGroupingCache = nil
+        selectedSourceRangeCache = nil
+        plotSourceRangeCache = nil
+        groupResponseCaches.removeAll(keepingCapacity: true)
+        cellAnalysisCaches.removeAll(keepingCapacity: true)
     }
 
     func setValueMode(_ mode: ResponseValueMode) {
@@ -243,6 +437,7 @@ final class RFMappingStore {
             timelineRangeAnchor = max(0, min(maximum, anchor))
         }
         normalizeSelectedTimeRange()
+        normalizePlotTimeRange()
     }
 
     func normalizeSelectedTimeRange() {
@@ -250,6 +445,22 @@ final class RFMappingStore {
         let source = sourceBinsForSelectedRange()
         rangeStartMS = data.timeBinEdges[source.start] * 1000.0
         rangeEndMS = data.timeBinEdges[source.end + 1] * 1000.0
+    }
+
+    func normalizePlotTimeRange() {
+        guard let data else { return }
+        let source = sourceBinsForPlotRange()
+        plotRangeStartMS = data.timeBinEdges[source.start] * 1000.0
+        plotRangeEndMS = data.timeBinEdges[source.end + 1] * 1000.0
+    }
+
+    func resetPlotRangeToDefault() {
+        guard data != nil else { return }
+        let axisStart = timeAxisStartMS()
+        let axisEnd = timeAxisEndMS()
+        plotRangeStartMS = max(axisStart, min(axisEnd, 0.0))
+        plotRangeEndMS = max(axisStart, min(axisEnd, 20.0))
+        normalizePlotTimeRange()
     }
 
     func ensureSelectedCell() {
@@ -321,31 +532,24 @@ final class RFMappingStore {
     }
 
     func baseBinMS() -> Double {
-        guard let data, data.timeBinEdges.count >= 2 else { return 1.0 }
-        let positive = zip(data.timeBinEdges, data.timeBinEdges.dropFirst())
-            .map { pair in (pair.1 - pair.0) * 1000.0 }
-            .filter { $0 > 1e-9 }
-        return positive.min() ?? 1.0
+        timeAxisMetadata().baseBinMS
     }
 
     func timeAxisStartMS() -> Double {
-        data?.timeBinEdges.first.map { $0 * 1000.0 } ?? 0.0
+        timeAxisMetadata().startMS
     }
 
     func timeAxisEndMS() -> Double {
-        guard let data else { return baseBinMS() }
-        return data.timeBinEdges.last.map { $0 * 1000.0 } ?? baseBinMS() * Double(data.nBins)
+        timeAxisMetadata().endMS
     }
 
     func timeAxisRangeMS() -> (Double, Double) {
-        let start = timeAxisStartMS()
-        let end = timeAxisEndMS()
-        return end <= start ? (start, start + baseBinMS()) : (start, end)
+        let metadata = timeAxisMetadata()
+        return (metadata.startMS, metadata.endMS)
     }
 
     func totalTimeMS() -> Double {
-        let range = timeAxisRangeMS()
-        return max(range.1 - range.0, baseBinMS())
+        timeAxisMetadata().totalMS
     }
 
     func timeGroupSize() -> Int {
@@ -356,59 +560,194 @@ final class RFMappingStore {
     }
 
     func timeGroups() -> [AxisGroup] {
-        guard let data else { return [AxisGroup(start: 0, end: 0)] }
-        let size = timeGroupSize()
-        return stride(from: 0, to: data.nBins, by: size).map {
-            AxisGroup(start: $0, end: min($0 + size - 1, data.nBins - 1))
-        }
+        timeGrouping().groups
     }
 
     func timeGroupCount() -> Int { max(1, timeGroups().count) }
 
     func timeGroupBoundsMS(_ displayBin: Int) -> (Double, Double) {
-        guard let data else { return (0.0, baseBinMS()) }
-        let groups = timeGroups()
-        let index = max(0, min(groups.count - 1, displayBin))
-        let group = groups[index]
-        return (data.timeBinEdges[group.start] * 1000.0, data.timeBinEdges[group.end + 1] * 1000.0)
+        let grouping = timeGrouping()
+        let index = max(0, min(grouping.bounds.count - 1, displayBin))
+        return grouping.bounds[index]
     }
 
     func timeGroupLabel(_ displayBin: Int) -> String {
-        "\(formatMS(timeGroupBoundsMS(displayBin).0)) ms"
+        let grouping = timeGrouping()
+        let index = max(0, min(grouping.labels.count - 1, displayBin))
+        return grouping.labels[index]
     }
 
     func timeGroupIntervalLabel(_ displayBin: Int) -> String {
-        let bounds = timeGroupBoundsMS(displayBin)
-        return "\(formatMS(bounds.0))–\(formatMS(bounds.1)) ms"
+        let grouping = timeGrouping()
+        let index = max(0, min(grouping.intervalLabels.count - 1, displayBin))
+        return grouping.intervalLabels[index]
     }
 
     func timeGroupCenterMS(_ displayBin: Int) -> Double {
-        let bounds = timeGroupBoundsMS(displayBin)
-        return (bounds.0 + bounds.1) / 2.0
+        let grouping = timeGrouping()
+        let index = max(0, min(grouping.centers.count - 1, displayBin))
+        return grouping.centers[index]
     }
 
     func sourceBinsForDisplayBin(_ displayBin: Int) -> AxisGroup {
-        let groups = timeGroups()
+        let groups = timeGrouping().groups
         return groups[max(0, min(groups.count - 1, displayBin))]
     }
 
     func sourceBinsForSelectedRange() -> AxisGroup {
         guard let data else { return AxisGroup(start: 0, end: 0) }
-        let edgesMS = data.timeBinEdges.map { $0 * 1000.0 }
-        let axisStart = edgesMS[0]
-        let axisEnd = edgesMS[data.nBins]
-        var requestedStart = max(axisStart, min(axisEnd, rangeStartMS))
-        var requestedEnd = max(axisStart, min(axisEnd, rangeEndMS))
+        let key = SelectedSourceRangeCacheKey(
+            dataID: ObjectIdentifier(data),
+            startMS: rangeStartMS,
+            endMS: rangeEndMS
+        )
+        if let selectedSourceRangeCache, selectedSourceRangeCache.key == key {
+            return selectedSourceRangeCache.value
+        }
+        let result = sourceBins(startMS: rangeStartMS, endMS: rangeEndMS, data: data)
+        selectedSourceRangeCache = (key, result)
+        return result
+    }
+
+    func sourceBinsForPlotRange() -> AxisGroup {
+        guard let data else { return AxisGroup(start: 0, end: 0) }
+        let key = SelectedSourceRangeCacheKey(
+            dataID: ObjectIdentifier(data),
+            startMS: plotRangeStartMS,
+            endMS: plotRangeEndMS
+        )
+        if let plotSourceRangeCache, plotSourceRangeCache.key == key {
+            return plotSourceRangeCache.value
+        }
+        let result = sourceBins(startMS: plotRangeStartMS, endMS: plotRangeEndMS, data: data)
+        plotSourceRangeCache = (key, result)
+        return result
+    }
+
+    private func sourceBins(
+        startMS: Double,
+        endMS: Double,
+        data: RFMappingData
+    ) -> AxisGroup {
+        let metadata = timeAxisMetadata()
+        let edgesMS = metadata.edgesMS
+        let axisStart = metadata.startMS
+        let axisEnd = metadata.endMS
+        var requestedStart = max(axisStart, min(axisEnd, startMS))
+        var requestedEnd = max(axisStart, min(axisEnd, endMS))
         if requestedStart > requestedEnd { swap(&requestedStart, &requestedEnd) }
 
-        let startEdge = (0..<data.nBins).min { lhs, rhs in
-            abs(edgesMS[lhs] - requestedStart) < abs(edgesMS[rhs] - requestedStart)
-        } ?? 0
-        var endEdge = (1...data.nBins).min { lhs, rhs in
-            abs(edgesMS[lhs] - requestedEnd) < abs(edgesMS[rhs] - requestedEnd)
-        } ?? data.nBins
+        let startEdge = nearestEdgeIndex(
+            edgesMS,
+            target: requestedStart,
+            lowerBound: 0,
+            upperBound: data.nBins - 1
+        )
+        var endEdge = nearestEdgeIndex(
+            edgesMS,
+            target: requestedEnd,
+            lowerBound: 1,
+            upperBound: data.nBins
+        )
         if endEdge <= startEdge { endEdge = min(data.nBins, startEdge + 1) }
         return AxisGroup(start: startEdge, end: endEdge - 1)
+    }
+
+    private func timeAxisMetadata() -> TimeAxisMetadata {
+        guard let data else {
+            return TimeAxisMetadata(
+                dataID: ObjectIdentifier(self),
+                edgesMS: [0, 1],
+                startMS: 0,
+                endMS: 1,
+                totalMS: 1,
+                baseBinMS: 1
+            )
+        }
+        let dataID = ObjectIdentifier(data)
+        if let timeAxisMetadataCache, timeAxisMetadataCache.dataID == dataID {
+            return timeAxisMetadataCache
+        }
+        let edgesMS = data.timeBinEdges.map { $0 * 1000.0 }
+        var base = Double.infinity
+        for index in 0..<data.nBins {
+            let width = edgesMS[index + 1] - edgesMS[index]
+            if width > 1e-9 { base = min(base, width) }
+        }
+        if !base.isFinite { base = 1 }
+        let start = edgesMS.first ?? 0
+        let rawEnd = edgesMS.last ?? (start + base)
+        let end = rawEnd > start ? rawEnd : start + base
+        let metadata = TimeAxisMetadata(
+            dataID: dataID,
+            edgesMS: edgesMS,
+            startMS: start,
+            endMS: end,
+            totalMS: max(end - start, base),
+            baseBinMS: base
+        )
+        timeAxisMetadataCache = metadata
+        return metadata
+    }
+
+    private func timeGrouping() -> TimeGroupingCache {
+        guard let data else {
+            return TimeGroupingCache(
+                dataID: ObjectIdentifier(self),
+                groupSize: 1,
+                groups: [AxisGroup(start: 0, end: 0)],
+                bounds: [(0, 1)],
+                labels: ["0 ms"],
+                intervalLabels: ["0–1 ms"],
+                centers: [0.5]
+            )
+        }
+        let dataID = ObjectIdentifier(data)
+        let size = timeGroupSize()
+        if let timeGroupingCache,
+           timeGroupingCache.dataID == dataID,
+           timeGroupingCache.groupSize == size {
+            return timeGroupingCache
+        }
+        let metadata = timeAxisMetadata()
+        let groups = stride(from: 0, to: data.nBins, by: size).map {
+            AxisGroup(start: $0, end: min($0 + size - 1, data.nBins - 1))
+        }
+        let bounds = groups.map {
+            (metadata.edgesMS[$0.start], metadata.edgesMS[$0.end + 1])
+        }
+        let grouping = TimeGroupingCache(
+            dataID: dataID,
+            groupSize: size,
+            groups: groups,
+            bounds: bounds,
+            labels: bounds.map { "\(formatMS($0.0)) ms" },
+            intervalLabels: bounds.map { "\(formatMS($0.0))–\(formatMS($0.1)) ms" },
+            centers: bounds.map { ($0.0 + $0.1) / 2 }
+        )
+        timeGroupingCache = grouping
+        return grouping
+    }
+
+    private func nearestEdgeIndex(
+        _ edges: [Double],
+        target: Double,
+        lowerBound: Int,
+        upperBound: Int
+    ) -> Int {
+        var low = lowerBound
+        var high = upperBound
+        while low < high {
+            let middle = (low + high) / 2
+            if edges[middle] < target {
+                low = middle + 1
+            } else {
+                high = middle
+            }
+        }
+        if low <= lowerBound { return lowerBound }
+        let previous = low - 1
+        return abs(edges[previous] - target) <= abs(edges[low] - target) ? previous : low
     }
 
     func displayRangeIndices() -> AxisGroup {
@@ -425,6 +764,20 @@ final class RFMappingStore {
         return (data.timeBinEdges[source.start] * 1000.0, data.timeBinEdges[source.end + 1] * 1000.0)
     }
 
+    func plotTimeBoundsMS() -> (Double, Double) {
+        guard let data else { return (0.0, 1.0) }
+        let source = sourceBinsForPlotRange()
+        return (data.timeBinEdges[source.start] * 1000.0, data.timeBinEdges[source.end + 1] * 1000.0)
+    }
+
+    func plotDisplayRangeIndices() -> AxisGroup {
+        let groups = timeGroups()
+        let source = sourceBinsForPlotRange()
+        let start = groups.firstIndex { $0.start <= source.start && source.start <= $0.end } ?? 0
+        let end = groups.firstIndex { $0.start <= source.end && source.end <= $0.end } ?? max(0, groups.count - 1)
+        return AxisGroup(start: min(start, end), end: max(start, end))
+    }
+
     func selectedRangeOverlaps(_ group: AxisGroup) -> Bool {
         let selected = sourceBinsForSelectedRange()
         return group.start <= selected.end && group.end >= selected.start
@@ -432,31 +785,201 @@ final class RFMappingStore {
 
     func currentMatrix() -> OptionalMatrix {
         guard let data else { return [] }
-        let range = sourceBinsForSelectedRange()
-        return (try? data.responseMatrix(
+        let range = sourceBinsForPlotRange()
+        let key = RawMatrixCacheKey(
+            dataID: ObjectIdentifier(data),
+            unitIndex: unitIndex,
+            valueMode: valueMode,
+            sourceStart: range.start,
+            sourceEnd: range.end
+        )
+        if let currentMatrixCache, currentMatrixCache.key == key {
+            return currentMatrixCache.value
+        }
+        let matrix = (try? data.responseMatrix(
             unitIndex: unitIndex,
             start: range.start,
             end: range.end,
             valueMode: valueMode
         )) ?? []
+        currentMatrixCache = (key, matrix)
+        return matrix
     }
 
     func delayMatrixForTimeGroups(floor: Double = 0.0) -> OptionalMatrix {
         guard let data else { return [] }
-        let unit = data.counts[unitIndex]
+        let safeFloor = max(0.0, floor)
+        let key = DelayCacheKey(
+            dataID: ObjectIdentifier(data),
+            unitIndex: unitIndex,
+            timeGroupSize: timeGroupSize(),
+            floor: safeFloor
+        )
+        if let delayMatrixCache, delayMatrixCache.key == key {
+            return delayMatrixCache.value
+        }
         let metrics = data.metrics(for: unitIndex)
-        let groups = timeGroups()
-        return (0..<data.nY).map { yIndex in
+        let grouping = timeGrouping()
+        let matrix: OptionalMatrix = (0..<data.nY).map { yIndex in
             (0..<data.nX).map { xIndex -> Double? in
-                guard metrics.total[yIndex][xIndex] > floor else { return nil }
-                let hist = unit[yIndex][xIndex]
-                let grouped = groups.map { compensatedSum(hist[$0.start...$0.end]) }
-                guard let maximum = grouped.max(), maximum > 0 else { return nil }
-                var peak = 0
-                for index in 1..<grouped.count where grouped[index] > grouped[peak] { peak = index }
-                return timeGroupCenterMS(peak)
+                guard metrics.total[yIndex][xIndex] > safeFloor else { return nil }
+                var peakIndex = 0
+                var peakCount = 0.0
+                for (index, group) in grouping.groups.enumerated() {
+                    let count = data.rangeCount(
+                        unitIndex: unitIndex,
+                        yIndex: yIndex,
+                        xIndex: xIndex,
+                        start: group.start,
+                        end: group.end
+                    )
+                    if count > peakCount {
+                        peakIndex = index
+                        peakCount = count
+                    }
+                }
+                return peakCount > 0 ? grouping.centers[peakIndex] : nil
             }
         }
+        delayMatrixCache = (key, matrix)
+        return matrix
+    }
+
+    func currentHeatmapPlot() -> HeatmapPlot {
+        guard let data else { return emptyHeatmapPlot() }
+        let range = sourceBinsForPlotRange()
+        let key = SpatialPlotCacheKey(
+            kind: .current,
+            dataID: ObjectIdentifier(data),
+            unitIndex: unitIndex,
+            valueMode: valueMode,
+            sourceStart: range.start,
+            sourceEnd: range.end,
+            timeGroupSize: 0,
+            floor: 0,
+            xBins: xBins,
+            yBins: yBins,
+            flipY: flipY,
+            smoothRadius: smoothRadius
+        )
+        if let cached = spatialPlot(for: key) { return cached }
+        let prepared = preparePlotMatrix(currentMatrix(), smooth: true)
+        let valueRange = finiteMinMax(prepared.0)
+        let plot = HeatmapPlot(
+            matrix: prepared.0,
+            xGroups: prepared.1,
+            yGroups: prepared.2,
+            low: valueRange.0,
+            high: valueRange.1
+        )
+        cacheSpatialPlot(plot, for: key)
+        return plot
+    }
+
+    func delayHeatmapPlot(floor: Double) -> HeatmapPlot {
+        guard let data else { return emptyHeatmapPlot() }
+        let safeFloor = max(0.0, floor)
+        let key = SpatialPlotCacheKey(
+            kind: .delay,
+            dataID: ObjectIdentifier(data),
+            unitIndex: unitIndex,
+            valueMode: .spikeCount,
+            sourceStart: 0,
+            sourceEnd: data.nBins - 1,
+            timeGroupSize: timeGroupSize(),
+            floor: safeFloor,
+            xBins: xBins,
+            yBins: yBins,
+            flipY: flipY,
+            smoothRadius: smoothRadius
+        )
+        if let cached = spatialPlot(for: key) { return cached }
+        let prepared = preparePlotMatrix(delayMatrixForTimeGroups(floor: safeFloor), smooth: true)
+        let range = timeAxisRangeMS()
+        let plot = HeatmapPlot(
+            matrix: prepared.0,
+            xGroups: prepared.1,
+            yGroups: prepared.2,
+            low: range.0,
+            high: range.1
+        )
+        cacheSpatialPlot(plot, for: key)
+        return plot
+    }
+
+    func cachedRGBPlot() -> RGBPlot {
+        guard let data else {
+            let empty = emptyHeatmapPlot()
+            return RGBPlot(
+                total: [],
+                delay: [],
+                entropy: [],
+                reference: empty,
+                maxTotal: 1,
+                minDelay: 0,
+                delaySpan: 1
+            )
+        }
+        let key = RGBPlotCacheKey(
+            dataID: ObjectIdentifier(data),
+            unitIndex: unitIndex,
+            valueMode: valueMode,
+            timeGroupSize: timeGroupSize(),
+            xBins: xBins,
+            yBins: yBins,
+            flipY: flipY,
+            smoothRadius: smoothRadius
+        )
+        if let rgbPlotCache, rgbPlotCache.key == key {
+            return rgbPlotCache.value
+        }
+
+        let fullWindowResponse = (try? data.responseMatrix(
+            unitIndex: unitIndex,
+            start: 0,
+            end: data.nBins - 1,
+            valueMode: valueMode
+        )) ?? []
+        let totalPrepared = preparePlotMatrix(fullWindowResponse)
+        let delayPrepared = preparePlotMatrix(delayMatrixForTimeGroups(floor: 0.0))
+        let entropyPrepared = preparePlotMatrix(optionalMatrix(data.metrics(for: unitIndex).entropy))
+        let responseRange = finiteMinMax(totalPrepared.0)
+        let maxResponse = max(responseRange.1, 1.0)
+        let reference = HeatmapPlot(
+            matrix: totalPrepared.0,
+            xGroups: totalPrepared.1,
+            yGroups: totalPrepared.2,
+            low: 0,
+            high: maxResponse
+        )
+        let timeRange = timeAxisRangeMS()
+        let plot = RGBPlot(
+            total: totalPrepared.0,
+            delay: delayPrepared.0,
+            entropy: entropyPrepared.0,
+            reference: reference,
+            maxTotal: maxResponse,
+            minDelay: timeRange.0,
+            delaySpan: max(timeRange.1 - timeRange.0, 1.0)
+        )
+        rgbPlotCache = (key, plot)
+        return plot
+    }
+
+    private func emptyHeatmapPlot() -> HeatmapPlot {
+        HeatmapPlot(matrix: [], xGroups: [], yGroups: [], low: 0, high: 1)
+    }
+
+    private func spatialPlot(for key: SpatialPlotCacheKey) -> HeatmapPlot? {
+        guard let index = spatialPlotCaches.firstIndex(where: { $0.key == key }) else { return nil }
+        let cached = spatialPlotCaches.remove(at: index)
+        spatialPlotCaches.insert(cached, at: 0)
+        return cached.value
+    }
+
+    private func cacheSpatialPlot(_ plot: HeatmapPlot, for key: SpatialPlotCacheKey) {
+        spatialPlotCaches.insert((key, plot), at: 0)
+        if spatialPlotCaches.count > 6 { spatialPlotCaches.removeLast() }
     }
 
     func timelineMatrix(for displayBin: Int) -> OptionalMatrix {
@@ -489,35 +1012,51 @@ final class RFMappingStore {
             flipY: flipY,
             smoothRadius: smoothRadius
         )
-        if let timelineCache, timelineCache.key == key {
-            return timelineCache.value
+        if let index = timelineCaches.firstIndex(where: { $0.key == key }) {
+            let cached = timelineCaches.remove(at: index)
+            timelineCaches.insert(cached, at: 0)
+            return cached.value
         }
 
-        let groups = timeGroups()
-        let matrices = groups.indices.map { displayBin in
-            preparePlotMatrix(timelineMatrix(for: displayBin), smooth: true).0
-        }
-        let sharedHigh = matrices
-            .flatMap { $0 }
-            .flatMap { $0 }
-            .compactMap { value -> Double? in
-                guard let value, value.isFinite else { return nil }
-                return value
+        let groups = timeGrouping().groups
+        let xGroups = xGroups()
+        let yGroups = displayYGroups()
+        var matrices: [OptionalMatrix] = []
+        matrices.reserveCapacity(groups.count)
+        var sharedHigh = 0.0
+        for group in groups {
+            let raw = (try? data.responseMatrix(
+                unitIndex: unitIndex,
+                start: group.start,
+                end: group.end,
+                valueMode: valueMode
+            )) ?? []
+            var prepared = reduceMatrixXY(raw, yGroups: yGroups, xGroups: xGroups)
+            prepared = smoothMatrix(prepared, radius: smoothRadius)
+            for row in prepared {
+                for value in row {
+                    if let value, value.isFinite { sharedHigh = max(sharedHigh, value) }
+                }
             }
-            .max() ?? 0.0
+            matrices.append(prepared)
+        }
         let snapshot = TimelineMatrixSnapshot(
             timeGroups: groups,
             matrices: matrices,
-            totals: allPositionsTimelineValues(),
+            totals: allPositionsTimelineValues(groups: groups),
             sharedHigh: max(sharedHigh, 1.0)
         )
-        timelineCache = (key, snapshot)
+        timelineCaches.insert((key, snapshot), at: 0)
+        if timelineCaches.count > 3 { timelineCaches.removeLast() }
         return snapshot
     }
 
     func allPositionsTimelineValues() -> [Double] {
+        allPositionsTimelineValues(groups: timeGrouping().groups)
+    }
+
+    private func allPositionsTimelineValues(groups: [AxisGroup]) -> [Double] {
         guard let data else { return [] }
-        let groups = timeGroups()
         if valueMode == .spikeCount {
             let totals = data.metrics(for: unitIndex).binTotals
             return groups.map { compensatedSum(totals[$0.start...$0.end]) }
@@ -525,15 +1064,25 @@ final class RFMappingStore {
         guard let presentations = data.presentationCounts else {
             return Array(repeating: 0.0, count: groups.count)
         }
-        let presentationTotal = compensatedSum(presentations.flatMap { $0 }.filter { $0 > 0 })
+        var presentationValues: [Double] = []
+        presentationValues.reserveCapacity(data.nY * data.nX)
+        for row in presentations {
+            for value in row where value > 0 { presentationValues.append(value) }
+        }
+        let presentationTotal = compensatedSum(presentationValues)
         guard presentationTotal > 0 else { return Array(repeating: 0.0, count: groups.count) }
-        let unit = data.counts[unitIndex]
         return groups.map { group in
             var cellCounts: [Double] = []
             cellCounts.reserveCapacity(data.nY * data.nX)
             for yIndex in 0..<data.nY {
                 for xIndex in 0..<data.nX {
-                    cellCounts.append(compensatedSum(unit[yIndex][xIndex][group.start...group.end]))
+                    cellCounts.append(data.rangeCount(
+                        unitIndex: unitIndex,
+                        yIndex: yIndex,
+                        xIndex: xIndex,
+                        start: group.start,
+                        end: group.end
+                    ))
                 }
             }
             let count = compensatedSum(cellCounts)
@@ -615,7 +1164,25 @@ final class RFMappingStore {
     }
 
     func groupResponseValues(_ cell: CellRef) -> [Double?] {
-        timeGroups().map { groupResponseValue(cell, sourceStart: $0.start, sourceEnd: $0.end) }
+        guard let data else { return [] }
+        let key = GroupResponseCacheKey(
+            dataID: ObjectIdentifier(data),
+            unitIndex: unitIndex,
+            valueMode: valueMode,
+            timeGroupSize: timeGroupSize(),
+            cell: cell
+        )
+        if let index = groupResponseCaches.firstIndex(where: { $0.key == key }) {
+            let cached = groupResponseCaches.remove(at: index)
+            groupResponseCaches.insert(cached, at: 0)
+            return cached.value
+        }
+        let values = timeGrouping().groups.map {
+            groupResponseValue(cell, sourceStart: $0.start, sourceEnd: $0.end)
+        }
+        groupResponseCaches.insert((key, values), at: 0)
+        if groupResponseCaches.count > 12 { groupResponseCaches.removeLast() }
+        return values
     }
 
     func yGroupText(_ yStart: Int, _ yEnd: Int) -> String {
@@ -631,19 +1198,110 @@ final class RFMappingStore {
     }
 
     func currentMatrixLabel() -> String {
-        let bounds = selectedTimeBoundsMS()
+        let bounds = plotTimeBoundsMS()
         return "\(valueMode.rawValue): \(formatMS(bounds.0)) to \(formatMS(bounds.1)) ms"
     }
 
     func cellMetricsText(_ cell: CellRef, displayBin: Int? = nil) -> String {
         guard let data else { return "" }
-        let countHist = timeGroupedHist(groupHist(cell))
-        let displayValues = groupResponseValues(cell)
+        let analysis = cellAnalysis(for: cell)
+        let displayValues = analysis.displayValues
         guard !displayValues.isEmpty else { return "" }
         let bin = max(0, min(displayValues.count - 1, displayBin ?? binIndex))
-        let selected = sourceBinsForSelectedRange()
-        let rangeValue = groupResponseValue(cell, sourceStart: selected.start, sourceEnd: selected.end)
-        let totalValue = groupResponseValue(cell, sourceStart: 0, sourceEnd: data.nBins - 1)
+
+        let grouped = cell.yStart != cell.yEnd || cell.xStart != cell.xEnd
+        let groupNote = grouped ? "avg over source pixels\n" : ""
+        let peakText = analysis.peakBin.map { "\($0 + 1) (\(timeGroupLabel($0)))" } ?? "n/a"
+        let delayText = analysis.delayMS.map { String(format: "%.1f ms", $0) } ?? "n/a"
+        let plotBounds = plotTimeBoundsMS()
+        return """
+        cluster \(data.clusterID(for: unitIndex))
+        \(yGroupText(cell.yStart, cell.yEnd)), \(xGroupText(cell.xStart, cell.xEnd))
+        \(groupNote)bin \(valueMode.format(displayValues[bin])) \(valueMode.unit) (\(timeGroupLabel(bin)))
+        RF sum range \(formatMS(plotBounds.0))–\(formatMS(plotBounds.1)) ms: \(valueMode.format(analysis.selectedValue)) \(valueMode.unit)
+        full window \(valueMode.format(analysis.totalValue)) \(valueMode.unit)
+        peak \(valueMode.format(analysis.peakValue)) \(valueMode.unit)
+        peak bin \(peakText)
+        delay \(delayText), count entropy \(String(format: "%.3f", analysis.entropy))
+        """
+    }
+
+    func tooltipText(_ cell: CellRef, displayBin: Int? = nil) -> String {
+        guard data != nil else { return "" }
+        let analysis = cellAnalysis(for: cell)
+        let values = analysis.displayValues
+        guard !values.isEmpty else { return "" }
+        let bin = max(0, min(values.count - 1, displayBin ?? binIndex))
+        let plotBounds = plotTimeBoundsMS()
+        return [
+            yGroupText(cell.yStart, cell.yEnd),
+            xGroupText(cell.xStart, cell.xEnd),
+            "bin \(bin + 1): \(valueMode.format(values[bin])) \(valueMode.unit)",
+            "RF sum range \(formatMS(plotBounds.0))–\(formatMS(plotBounds.1)) ms: \(valueMode.format(analysis.selectedValue)) \(valueMode.unit)",
+            "full window: \(valueMode.format(analysis.totalValue)) \(valueMode.unit)",
+            analysis.delayMS.map { String(format: "delay %.1f ms", $0) } ?? "delay n/a"
+        ].joined(separator: "\n")
+    }
+
+    private func cellAnalysis(for cell: CellRef) -> CellAnalysis {
+        guard let data else {
+            return CellAnalysis(
+                displayValues: [],
+                countHist: [],
+                selectedValue: nil,
+                totalValue: nil,
+                peakBin: nil,
+                peakValue: nil,
+                delayMS: nil,
+                entropy: 0
+            )
+        }
+        let selected = sourceBinsForPlotRange()
+        let responseKey = GroupResponseCacheKey(
+            dataID: ObjectIdentifier(data),
+            unitIndex: unitIndex,
+            valueMode: valueMode,
+            timeGroupSize: timeGroupSize(),
+            cell: cell
+        )
+        let key = CellAnalysisCacheKey(
+            responseKey: responseKey,
+            selectedStart: selected.start,
+            selectedEnd: selected.end
+        )
+        if let index = cellAnalysisCaches.firstIndex(where: { $0.key == key }) {
+            let cached = cellAnalysisCaches.remove(at: index)
+            cellAnalysisCaches.insert(cached, at: 0)
+            return cached.value
+        }
+
+        let displayValues = groupResponseValues(cell)
+        let groups = timeGrouping().groups
+        let pixelCount = Double(max(1, (cell.yEnd - cell.yStart + 1) * (cell.xEnd - cell.xStart + 1)))
+        let countHist: [Double]
+        if valueMode == .spikeCount {
+            countHist = displayValues.map { $0 ?? 0.0 }
+        } else {
+            var values: [Double] = []
+            values.reserveCapacity(groups.count)
+            for group in groups {
+                var counts: [Double] = []
+                counts.reserveCapacity(Int(pixelCount))
+                for yIndex in cell.yStart...cell.yEnd {
+                    for xIndex in cell.xStart...cell.xEnd {
+                        counts.append(data.rangeCount(
+                            unitIndex: unitIndex,
+                            yIndex: yIndex,
+                            xIndex: xIndex,
+                            start: group.start,
+                            end: group.end
+                        ))
+                    }
+                }
+                values.append(compensatedSum(counts) / pixelCount)
+            }
+            countHist = values
+        }
 
         var peakBin: Int?
         var peakValue: Double?
@@ -654,8 +1312,10 @@ final class RFMappingStore {
                 peakValue = value
             }
         }
-        if (peakValue ?? 0) <= 0 { peakBin = nil; peakValue = nil }
-        let delay = peakBin.map(timeGroupCenterMS)
+        if (peakValue ?? 0) <= 0 {
+            peakBin = nil
+            peakValue = nil
+        }
 
         let countTotal = compensatedSum(countHist)
         var entropy = 0.0
@@ -667,40 +1327,27 @@ final class RFMappingStore {
             if countHist.count > 1 { entropy /= log(Double(countHist.count)) }
         }
 
-        let grouped = cell.yStart != cell.yEnd || cell.xStart != cell.xEnd
-        let groupNote = grouped ? "avg over source pixels\n" : ""
-        let peakText = peakBin.map { "\($0 + 1) (\(timeGroupLabel($0)))" } ?? "n/a"
-        let delayText = delay.map { String(format: "%.1f ms", $0) } ?? "n/a"
-        return """
-        cluster \(data.clusterID(for: unitIndex))
-        \(yGroupText(cell.yStart, cell.yEnd)), \(xGroupText(cell.xStart, cell.xEnd))
-        \(groupNote)bin \(valueMode.format(displayValues[bin])) \(valueMode.unit) (\(timeGroupLabel(bin)))
-        selected range \(valueMode.format(rangeValue)) \(valueMode.unit)
-        full window \(valueMode.format(totalValue)) \(valueMode.unit)
-        peak \(valueMode.format(peakValue)) \(valueMode.unit)
-        peak bin \(peakText)
-        delay \(delayText), count entropy \(String(format: "%.3f", entropy))
-        """
-    }
-
-    func tooltipText(_ cell: CellRef, displayBin: Int? = nil) -> String {
-        guard let data else { return "" }
-        let values = groupResponseValues(cell)
-        guard !values.isEmpty else { return "" }
-        let bin = max(0, min(values.count - 1, displayBin ?? binIndex))
-        var peakIndex: Int?
-        var peakValue = 0.0
-        for (index, value) in values.enumerated() {
-            if let value, value > peakValue { peakValue = value; peakIndex = index }
-        }
-        let total = groupResponseValue(cell, sourceStart: 0, sourceEnd: data.nBins - 1)
-        return [
-            yGroupText(cell.yStart, cell.yEnd),
-            xGroupText(cell.xStart, cell.xEnd),
-            "bin \(bin + 1): \(valueMode.format(values[bin])) \(valueMode.unit)",
-            "full window: \(valueMode.format(total)) \(valueMode.unit)",
-            peakIndex.map { String(format: "delay %.1f ms", timeGroupCenterMS($0)) } ?? "delay n/a"
-        ].joined(separator: "\n")
+        let analysis = CellAnalysis(
+            displayValues: displayValues,
+            countHist: countHist,
+            selectedValue: groupResponseValue(
+                cell,
+                sourceStart: selected.start,
+                sourceEnd: selected.end
+            ),
+            totalValue: groupResponseValue(
+                cell,
+                sourceStart: 0,
+                sourceEnd: data.nBins - 1
+            ),
+            peakBin: peakBin,
+            peakValue: peakValue,
+            delayMS: peakBin.map { timeGrouping().centers[$0] },
+            entropy: entropy
+        )
+        cellAnalysisCaches.insert((key, analysis), at: 0)
+        if cellAnalysisCaches.count > 12 { cellAnalysisCaches.removeLast() }
+        return analysis
     }
 
     func prepareExport() {
@@ -712,12 +1359,12 @@ final class RFMappingStore {
 
     func exportCSV() -> String {
         guard let data else { return "" }
-        let prepared = preparePlotMatrix(currentMatrix(), smooth: true)
-        let matrix = prepared.0
-        let xGroups = prepared.1
-        let yGroups = prepared.2
-        let displayRange = displayRangeIndices()
-        let timeBounds = selectedTimeBoundsMS()
+        let plot = currentHeatmapPlot()
+        let matrix = plot.matrix
+        let xGroups = plot.xGroups
+        let yGroups = plot.yGroups
+        let displayRange = plotDisplayRangeIndices()
+        let timeBounds = plotTimeBoundsMS()
         let header = [
             "unit_index", "cluster_id", "y_index_0based", "y_index_matlab", "y_position",
             "x_index_0based", "x_index_matlab", "x_position", "value", "value_mode",

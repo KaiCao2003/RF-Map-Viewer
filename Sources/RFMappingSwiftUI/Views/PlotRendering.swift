@@ -78,7 +78,8 @@ func drawHeatmap(
     subtitle: String,
     palette: RFPalette?,
     valueSuffix: String = "",
-    drawLegend: Bool = true
+    drawLegend: Bool = true,
+    drawInteraction: Bool = true
 ) {
     drawTitle(context: &context, title: title, subtitle: subtitle)
 
@@ -97,7 +98,9 @@ func drawHeatmap(
         }
     }
 
-    drawSelectionAndHover(context: &context, store: store, layout: layout)
+    if drawInteraction {
+        drawSelectionAndHover(context: &context, store: store, layout: layout)
+    }
     drawAxes(context: &context, store: store, layout: layout)
     if drawLegend {
         drawColorbar(
@@ -110,6 +113,42 @@ func drawHeatmap(
             palette: palette,
             suffix: valueSuffix
         )
+    }
+}
+
+struct RectangularPlotInteractionLayer: View {
+    @Bindable var store: RFMappingStore
+    let layout: HeatmapLayout
+    let size: CGSize
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            Canvas { context, _ in
+                var context = context
+                drawSelectionAndHover(context: &context, store: store, layout: layout)
+            }
+            .allowsHitTesting(false)
+
+            PointerCaptureView(
+                onMove: { point in
+                    if let cell = layout.cellRef(at: point) {
+                        store.setHover(cell, location: point)
+                    } else {
+                        store.clearHover()
+                    }
+                },
+                onClick: { point, _ in
+                    if let cell = layout.cellRef(at: point) {
+                        store.selectCell(cell)
+                    }
+                },
+                onLeave: store.clearHover
+            )
+
+            if let cell = store.hoverCell, let location = store.hoverLocation {
+                PlotTooltip(text: store.tooltipText(cell), location: location, canvasSize: size)
+            }
+        }
     }
 }
 
@@ -262,7 +301,8 @@ struct PlotTooltip: View {
 
     private var position: CGPoint {
         let width: CGFloat = 210
-        let height: CGFloat = 92
+        let lineCount = max(1, text.split(separator: "\n", omittingEmptySubsequences: false).count)
+        let height = max(92, CGFloat(lineCount) * 14 + 16)
         let bounds = visibleRect ?? CGRect(origin: .zero, size: canvasSize)
         var x = location.x + width / 2.0 + 16
         var y = location.y + height / 2.0 + 16
