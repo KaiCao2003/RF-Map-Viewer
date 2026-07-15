@@ -41,18 +41,20 @@ struct SidebarView: View {
             Text("Current JSON").font(.headline)
             Picker("JSON", selection: Binding(
                 get: { store.selectedJSONPath },
-                set: { store.loadJSON(path: $0) }
+                set: { path in
+                    Task { @MainActor in
+                        _ = await store.loadJSONAsync(path: path)
+                    }
+                }
             )) {
                 ForEach(store.availableJSONURLs, id: \.path) { url in
                     Text(JSONDiscovery.choiceLabel(for: url)).tag(url.path)
                 }
             }
             .labelsHidden()
-            .disabled(store.isAwaitingStartupDocument)
-            HStack {
-                Button("Open…") { store.isImporting = true }
-                Button("Scan") { store.rescanJSONFiles() }
-            }
+            .disabled(store.isAwaitingStartupDocument || store.isLoadingData)
+            Button("Open…") { store.isImporting = true }
+                .disabled(store.isLoadingData)
         }
     }
 
@@ -129,9 +131,11 @@ struct SidebarView: View {
                 }
             }
 
-            Picker("Polar radius", selection: $store.polarRadiusMode) {
-                ForEach(PolarRadiusMode.allCases) { mode in
-                    Text(mode.rawValue).tag(mode)
+            if store.spatialPlotFormat == .polar {
+                Picker("Polar radius", selection: $store.polarRadiusMode) {
+                    ForEach(PolarRadiusMode.allCases) { mode in
+                        Text(mode.rawValue).tag(mode)
+                    }
                 }
             }
 
@@ -188,7 +192,7 @@ struct SidebarView: View {
     }
 
     private var shortcutHint: some View {
-        Text("←/→ unit   ↑/↓ timeline\n⇧,/⇧. time resolution   1–6 views")
+        Text("←/→ unit   ↑/↓ timeline\n⇧,/⇧. time resolution   1–3 views")
             .font(.caption)
             .foregroundStyle(.tertiary)
     }

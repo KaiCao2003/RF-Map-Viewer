@@ -3,6 +3,11 @@ import Foundation
 enum JSONDiscovery {
     static let defaultJSONDirectory = "data"
     static let defaultJSONName = "unitsSpikeCounts_260701_1.json"
+    private static let choiceDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd HH:mm"
+        return formatter
+    }()
 
     static func candidateRoots() -> [URL] {
         var roots: [URL] = []
@@ -52,14 +57,15 @@ enum JSONDiscovery {
             unique[candidate.standardizedFileURL.path] = candidate.standardizedFileURL
         }
 
-        return unique.values.sorted { lhs, rhs in
-            let leftDate = modificationDate(lhs)
-            let rightDate = modificationDate(rhs)
-            if leftDate == rightDate {
-                return lhs.lastPathComponent < rhs.lastPathComponent
+        return unique.values
+            .map { (url: $0, date: modificationDate($0)) }
+            .sorted { lhs, rhs in
+                if lhs.date == rhs.date {
+                    return lhs.url.lastPathComponent < rhs.url.lastPathComponent
+                }
+                return lhs.date > rhs.date
             }
-            return leftDate > rightDate
-        }
+            .map(\.url)
     }
 
     static func latestJSONURL() -> URL? {
@@ -89,10 +95,8 @@ enum JSONDiscovery {
     }
 
     static func choiceLabel(for url: URL) -> String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd HH:mm"
         let date = modificationDate(url)
-        let stamp = date == .distantPast ? "" : "  \(formatter.string(from: date))"
+        let stamp = date == .distantPast ? "" : "  \(choiceDateFormatter.string(from: date))"
         return "\(shortLabel(for: url))\(stamp)"
     }
 

@@ -513,6 +513,16 @@ def axis_groups_for_target(source_count: int, target_count: int) -> list[AxisGro
     return groups
 
 
+def display_group_index_for_source_bin(groups: list[AxisGroup], source_bin: int) -> int:
+    """Return the display group containing a source bin, clamped at the ends."""
+    if not groups:
+        return 0
+    for index, (start, end) in enumerate(groups):
+        if start <= source_bin <= end:
+            return index
+    return 0 if source_bin < groups[0][0] else len(groups) - 1
+
+
 def x_groups_for_count(n_x: int, group_size: int) -> list[AxisGroup]:
     group_size = max(1, min(n_x, int(group_size)))
     return [(start, min(start + group_size - 1, n_x - 1)) for start in range(0, n_x, group_size)]
@@ -847,6 +857,93 @@ def matrix_atlas_ppm_data(
     return f"P6\n{width} {height}\n255\n".encode("ascii") + bytes(pixels)
 
 
+def polar_matrix_atlas_ppm_data(
+    tiles: list[
+        tuple[
+            list[list[float | None]],
+            float,
+            float,
+            float,
+            float,
+            list[int],
+        ]
+    ],
+    width: int,
+    height: int,
+    color_for_value: Callable[[float | None], str],
+) -> bytes:
+    """Rasterize polar matrices into one white PPM atlas.
+
+    Keeping the timeline previews in a single image avoids creating thousands
+    of individual Tk canvas polygons when the source contains many time bins.
+    """
+    width = max(1, int(width))
+    height = max(1, int(height))
+    pixels = bytearray(b"\xff" * (width * height * 3))
+
+    for matrix, origin_x, origin_y, scale, total_deg, ring_rows in tiles:
+        rows = len(matrix)
+        cols = len(matrix[0]) if rows else 0
+        if rows == 0 or cols == 0:
+            continue
+        if any(len(row) != cols for row in matrix):
+            raise ValueError("Cannot rasterize a ragged polar matrix")
+        if len(ring_rows) != rows:
+            raise ValueError("Polar ring order must match matrix rows")
+
+        rgb_by_cell: list[list[bytes]] = []
+        for row in matrix:
+            rgb_row: list[bytes] = []
+            for value in row:
+                raw = color_for_value(value).lstrip("#")
+                if len(raw) != 6:
+                    raise ValueError(f"Expected #RRGGBB color, got {raw!r}")
+                rgb_row.append(bytes(int(raw[index : index + 2], 16) for index in (0, 2, 4)))
+            rgb_by_cell.append(rgb_row)
+
+        scale = max(float(scale), 1e-9)
+        radius_units = INNER_BLANK_ROWS + rows
+        diameter = 2.0 * radius_units * scale
+        cx = origin_x + diameter / 2.0
+        cy = origin_y + diameter / 2.0
+        x_start = max(0, int(math.floor(origin_x)))
+        x_end = min(width, int(math.ceil(origin_x + diameter)))
+        y_start = max(0, int(math.floor(origin_y)))
+        y_end = min(height, int(math.ceil(origin_y + diameter)))
+        column_span = total_deg / cols
+        theta_start = 90.0 + total_deg / 2.0
+        theta_end = 90.0 - total_deg / 2.0
+
+        for pixel_y in range(y_start, y_end):
+            dy = (cy - (pixel_y + 0.5)) / scale
+            for pixel_x in range(x_start, x_end):
+                dx = ((pixel_x + 0.5) - cx) / scale
+                radius = math.hypot(dx, dy)
+                if not (INNER_BLANK_ROWS <= radius < radius_units):
+                    continue
+                ring_idx = int(radius - INNER_BLANK_ROWS)
+                if not (0 <= ring_idx < len(ring_rows)):
+                    continue
+
+                theta_deg = math.degrees(math.atan2(dy, dx))
+                if total_deg >= 359.999:
+                    relative = (theta_start - theta_deg) % 360.0
+                else:
+                    while theta_deg > theta_start:
+                        theta_deg -= 360.0
+                    while theta_deg < theta_end:
+                        theta_deg += 360.0
+                    if not (theta_end <= theta_deg <= theta_start):
+                        continue
+                    relative = theta_start - theta_deg
+                column = max(0, min(cols - 1, int(relative / column_span)))
+                rgb = rgb_by_cell[ring_rows[ring_idx]][column]
+                offset = (pixel_y * width + pixel_x) * 3
+                pixels[offset : offset + 3] = rgb
+
+    return f"P6\n{width} {height}\n255\n".encode("ascii") + bytes(pixels)
+
+
 class RFMViewer(tk.Toplevel):
     def __init__(
         self,
@@ -896,14 +993,19 @@ class RFMViewer(tk.Toplevel):
         self.bin_var = tk.IntVar(value=0)
         self.range_start_var = tk.IntVar(value=0)
         self.range_end_var = tk.IntVar(value=data.n_bins - 1)
-        self.range_start_ms_var = tk.StringVar(value=format_ms(data.time_bin_edges[0] * 1000.0))
-        self.range_end_ms_var = tk.StringVar(value=format_ms(data.time_bin_edges[-1] * 1000.0))
+        plot_start_ms, plot_end_ms = self._default_plot_time_bounds_ms()
+        self.range_start_ms_var = tk.StringVar(value=format_ms(plot_start_ms))
+        self.range_end_ms_var = tk.StringVar(value=format_ms(plot_end_ms))
         self.flip_y_var = tk.BooleanVar(value=False)
         self.palette_var = tk.StringVar(value="Gray")
         self.polar_radius_var = tk.StringVar(value=POLAR_RADIUS_MODES[1])
+        self.polar_layout_var = tk.BooleanVar(value=False)
+        self.rgb_mode_var = tk.BooleanVar(value=False)
         self.x_bins_var = tk.IntVar(value=data.n_x)
         self.y_bins_var = tk.IntVar(value=data.n_y)
         self.time_res_ms_var = tk.StringVar(value=format_ms(self._base_bin_ms()))
+        self._last_time_group_count = data.n_bins
+        self._last_time_groups = [(index, index) for index in range(data.n_bins)]
         self.smooth_radius_var = tk.IntVar(value=0)
         self.selected_cell: CellRef | None = None
         self.hover_cell: CellRef | None = None
@@ -911,6 +1013,7 @@ class RFMViewer(tk.Toplevel):
         self._json_choice_to_path: dict[str, Path] = {}
         self._canvas_layouts: dict[str, dict[str, object]] = {}
         self._timeline_cells: list[dict[str, object]] = []
+        self._timeline_cells_by_bin: dict[int, dict[str, object]] = {}
         self._timeline_preview_cache_key: tuple[object, ...] | None = None
         self._timeline_preview_images: dict[int, object] = {}
         self._timeline_preview_high = 1.0
@@ -1026,11 +1129,15 @@ class RFMViewer(tk.Toplevel):
         navigate_menu.add_command(label="Decrease Time Resolution 1 ms", accelerator="⇧,", command=lambda: self._step_time_resolution(-1.0))
         navigate_menu.add_command(label="Increase Time Resolution 1 ms", accelerator="⇧.", command=lambda: self._step_time_resolution(1.0))
         navigate_menu.add_separator()
-        navigate_menu.add_command(label="Show Full Time Range", accelerator="Esc", command=self._clear_timeline_selection)
+        navigate_menu.add_command(
+            label="Show Full Timeline Range",
+            accelerator="Esc",
+            command=self._clear_timeline_selection,
+        )
         menu.add_cascade(label="Navigate", menu=navigate_menu)
 
         view_menu = tk.Menu(menu, tearoff=False)
-        for tab_index, title in enumerate(("2D RF", "Delay", "Polar", "Timeline", "RGB")):
+        for tab_index, title in enumerate(("RF", "Delay / RGB", "Timeline")):
             view_menu.add_command(
                 label=title,
                 accelerator=str(tab_index + 1),
@@ -1083,7 +1190,6 @@ class RFMViewer(tk.Toplevel):
         self.json_combo = ttk.Combobox(json_row, state="readonly", width=23)
         self.json_combo.grid(row=0, column=0, sticky="ew")
         ttk.Button(json_row, text="Open…", width=6, command=self._open_json).grid(row=0, column=1, padx=(5, 0))
-        ttk.Button(json_row, text="Scan", width=5, command=self._sync_json_combo).grid(row=0, column=2, padx=(5, 0))
         row += 1
 
         ttk.Separator(parent).grid(row=row, column=0, sticky="ew", pady=(0, 12))
@@ -1196,11 +1302,9 @@ class RFMViewer(tk.Toplevel):
         self.canvases: dict[str, tk.Canvas] = {}
         self._tab_keys = {}
         for key, title in (
-            ("rf", "2D RF"),
-            ("delay", "Delay"),
-            ("polar", "Polar"),
+            ("rf", "RF"),
+            ("delay", "Delay / RGB"),
             ("timeline", "Timeline"),
-            ("rgb", "RGB"),
         ):
             frame = ttk.Frame(self.notebook)
             frame.columnconfigure(0, weight=1)
@@ -1243,7 +1347,9 @@ class RFMViewer(tk.Toplevel):
         )
         self.time_res_spin.grid(row=0, column=3, sticky="w", padx=(0, 18))
 
-        ttk.Label(controls, text="RF time range (ms)", style="Panel.TLabel").grid(row=0, column=4, sticky="e", padx=(0, 6))
+        ttk.Label(controls, text="RF sum range (ms)", style="Panel.TLabel").grid(
+            row=1, column=0, columnspan=2, sticky="w", pady=(8, 0), padx=(0, 6)
+        )
         self.range_start_spin = ttk.Spinbox(
             controls,
             from_=self._time_axis_start_ms(),
@@ -1253,8 +1359,8 @@ class RFMViewer(tk.Toplevel):
             textvariable=self.range_start_ms_var,
             command=self._on_range_changed,
         )
-        self.range_start_spin.grid(row=0, column=5, sticky="ew")
-        ttk.Label(controls, text="to", style="Panel.TLabel").grid(row=0, column=6, padx=6)
+        self.range_start_spin.grid(row=1, column=2, sticky="w", pady=(8, 0))
+        ttk.Label(controls, text="to", style="Panel.TLabel").grid(row=1, column=3, padx=6, pady=(8, 0))
         self.range_end_spin = ttk.Spinbox(
             controls,
             from_=self._time_axis_start_ms(),
@@ -1264,7 +1370,27 @@ class RFMViewer(tk.Toplevel):
             textvariable=self.range_end_ms_var,
             command=self._on_range_changed,
         )
-        self.range_end_spin.grid(row=0, column=7, sticky="ew")
+        self.range_end_spin.grid(row=1, column=4, sticky="w", pady=(8, 0), padx=(0, 18))
+
+        self.polar_layout_toggle = ttk.Checkbutton(
+            controls,
+            text="Polar layout",
+            variable=self.polar_layout_var,
+            command=self._on_spatial_format_changed,
+        )
+        self.polar_layout_toggle.grid(row=1, column=5, sticky="w", pady=(8, 0), padx=(0, 18))
+        self.rgb_mode_toggle = ttk.Checkbutton(
+            controls,
+            text="RGB composite",
+            variable=self.rgb_mode_var,
+            command=self._on_control_changed,
+        )
+        self.rgb_mode_toggle.grid(row=1, column=6, columnspan=2, sticky="w", pady=(8, 0))
+        ttk.Button(
+            controls,
+            text="Reset 0–20",
+            command=self._reset_plot_range,
+        ).grid(row=1, column=8, sticky="e", pady=(8, 0), padx=(18, 0))
 
     def _wire_events(self) -> None:
         self.json_combo.bind("<<ComboboxSelected>>", self._on_json_selected)
@@ -1281,7 +1407,7 @@ class RFMViewer(tk.Toplevel):
         self.smooth_spin.bind("<Return>", self._on_control_changed)
         self.palette_var.trace_add("write", lambda *_: self._on_control_changed())
         self.polar_radius_var.trace_add("write", lambda *_: self._on_control_changed())
-        self.notebook.bind("<<NotebookTabChanged>>", self._on_control_changed)
+        self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
         self.bind("<FocusIn>", self._on_window_focus, add="+")
         self.bind("<Left>", lambda event: self._run_navigation_shortcut(event, self._step_unit, -1))
         self.bind("<Right>", lambda event: self._run_navigation_shortcut(event, self._step_unit, 1))
@@ -1295,7 +1421,7 @@ class RFMViewer(tk.Toplevel):
         self.bind("<KeyPress-f>", lambda event: self._run_navigation_shortcut(event, self._toggle_flip_y))
         self.bind("<KeyPress-p>", lambda event: self._run_navigation_shortcut(event, self._cycle_palette))
         self.bind("<question>", lambda event: self._run_navigation_shortcut(event, self._show_shortcuts))
-        for tab_index in range(5):
+        for tab_index in range(3):
             self.bind(
                 f"<KeyPress-{tab_index + 1}>",
                 lambda event, index=tab_index: self._run_navigation_shortcut(event, self._select_tab, index),
@@ -1356,10 +1482,10 @@ class RFMViewer(tk.Toplevel):
             "← / →   Previous / next unit\n"
             "↑ / ↓   Previous / next timeline bin\n"
             "Shift+, / Shift+.   Time resolution −/+ 1 ms\n"
-            "1–5   Switch plot tab\n"
+            "1–3   Switch plot tab\n"
             "F   Invert Y\n"
             "P   Cycle palette\n"
-            "Esc   Show full time range\n"
+            "Esc   Show Full Timeline Range\n"
             "[ / ]   Previous / next unit (legacy)\n"
             "Command-O   Open JSON in a new window\n"
             "Command-E   Export displayed matrix\n"
@@ -1552,18 +1678,75 @@ class RFMViewer(tk.Toplevel):
         self._update_all()
 
     def _on_range_changed(self, _event: object | None = None) -> None:
-        self._timeline_range_anchor = None
         self._normalize_control_values()
         self._update_all()
 
+    def _reset_plot_range(self) -> None:
+        start_ms, end_ms = self._default_plot_time_bounds_ms()
+        self.range_start_ms_var.set(format_ms(start_ms))
+        self.range_end_ms_var.set(format_ms(end_ms))
+        self._on_range_changed()
+
     def _on_time_resolution_changed(self, _event: object | None = None) -> None:
+        previous_groups = list(getattr(self, "_last_time_groups", ()))
+        if not previous_groups:
+            previous_groups = [(index, index) for index in range(self.data.n_bins)]
+        previous_count = len(previous_groups)
+        previous_start = max(
+            0,
+            min(
+                previous_count - 1,
+                min(self.range_start_var.get(), self.range_end_var.get()),
+            ),
+        )
+        previous_end = max(
+            0,
+            min(
+                previous_count - 1,
+                max(self.range_start_var.get(), self.range_end_var.get()),
+            ),
+        )
+        source_start = previous_groups[previous_start][0]
+        source_end = previous_groups[previous_end][1]
+        previous_bin = max(0, min(previous_count - 1, self.bin_var.get()))
+        active_source_group = previous_groups[previous_bin]
+        active_source_bin = (active_source_group[0] + active_source_group[1]) // 2
+        was_full_timeline = (
+            previous_start == 0
+            and previous_end == previous_count - 1
+        )
         self._timeline_range_anchor = None
         self._normalize_control_values()
+        new_groups = list(self._last_time_groups)
+        if was_full_timeline:
+            self.range_start_var.set(0)
+            self.range_end_var.set(len(new_groups) - 1)
+        else:
+            self.range_start_var.set(display_group_index_for_source_bin(new_groups, source_start))
+            self.range_end_var.set(display_group_index_for_source_bin(new_groups, source_end))
+        self.bin_var.set(display_group_index_for_source_bin(new_groups, active_source_bin))
         self._update_all()
 
     def _on_control_changed(self, _event: object | None = None) -> None:
         self._normalize_control_values()
         self._update_all()
+
+    def _on_spatial_format_changed(self) -> None:
+        self._timeline_preview_cache_key = None
+        self._timeline_preview_images = {}
+        self._on_control_changed()
+
+    def _on_tab_changed(self, _event: object | None = None) -> None:
+        self._sync_context_controls()
+        self._on_control_changed()
+
+    def _sync_context_controls(self) -> None:
+        if not hasattr(self, "rgb_mode_toggle"):
+            return
+        if self._active_tab_key() == "delay":
+            self.rgb_mode_toggle.state(["!disabled"])
+        else:
+            self.rgb_mode_toggle.state(["disabled"])
 
     def _schedule_redraw(self, _event: object | None = None) -> None:
         if self._redraw_after is not None:
@@ -1635,21 +1818,24 @@ class RFMViewer(tk.Toplevel):
         return "break"
 
     def _normalize_control_values(self) -> None:
-        time_count = self._time_group_count()
+        time_groups = self._time_groups()
+        time_count = max(1, len(time_groups))
         max_bin = max(0, time_count - 1)
-        for var in (self.bin_var,):
+        for var in (self.bin_var, self.range_start_var, self.range_end_var):
             try:
                 value = int(var.get())
             except (tk.TclError, ValueError):
                 value = 0
             var.set(max(0, min(max_bin, value)))
-        self._align_range_indices_from_time_controls()
+        self._source_bins_for_time_controls()
         if self._timeline_range_anchor is not None:
             self._timeline_range_anchor = max(0, min(max_bin, self._timeline_range_anchor))
         self._x_target_bins()
         self._y_target_bins()
         self._smooth_radius()
         self._sync_time_control_ranges()
+        self._last_time_group_count = time_count
+        self._last_time_groups = list(time_groups)
 
     def _parse_time_control(self, variable: tk.StringVar, fallback: float) -> float:
         try:
@@ -1657,46 +1843,56 @@ class RFMViewer(tk.Toplevel):
         except (tk.TclError, TypeError, ValueError):
             return fallback
 
-    def _align_range_indices_from_time_controls(self) -> None:
-        groups = self._time_groups()
-        if not groups:
-            return
-        source_start, source_end = self._source_bins_for_time_controls()
-        start_index = next(
-            (index for index, (start, end) in enumerate(groups) if start <= source_start <= end),
-            0,
+    def _default_plot_time_bounds_ms(self) -> tuple[float, float]:
+        start, end = self._snap_time_range_to_bins(0.0, 20.0)
+        return (
+            self.data.time_bin_edges[start] * 1000.0,
+            self.data.time_bin_edges[end + 1] * 1000.0,
         )
-        end_index = next(
-            (index for index, (start, end) in enumerate(groups) if start <= source_end <= end),
-            len(groups) - 1,
+
+    def _snap_time_range_to_bins(self, requested_start: float, requested_end: float) -> AxisGroup:
+        edges_ms = [edge * 1000.0 for edge in self.data.time_bin_edges]
+        axis_start, axis_end = edges_ms[0], edges_ms[-1]
+        requested_start = max(axis_start, min(axis_end, requested_start))
+        requested_end = max(axis_start, min(axis_end, requested_end))
+        if requested_start > requested_end:
+            requested_start, requested_end = requested_end, requested_start
+
+        start_edge = min(
+            range(self.data.n_bins),
+            key=lambda index: abs(edges_ms[index] - requested_start),
         )
-        self.range_start_var.set(start_index)
-        self.range_end_var.set(end_index)
+        end_edge = min(
+            range(1, self.data.n_bins + 1),
+            key=lambda index: abs(edges_ms[index] - requested_end),
+        )
+        if end_edge <= start_edge:
+            if requested_start >= axis_end:
+                start_edge, end_edge = self.data.n_bins - 1, self.data.n_bins
+            elif requested_end <= axis_start:
+                start_edge, end_edge = 0, 1
+            else:
+                end_edge = min(self.data.n_bins, start_edge + 1)
+        return start_edge, end_edge - 1
 
     def _source_bins_for_time_controls(self) -> AxisGroup:
         edges_ms = [edge * 1000.0 for edge in self.data.time_bin_edges]
         axis_start, axis_end = edges_ms[0], edges_ms[-1]
         requested_start = self._parse_time_control(self.range_start_ms_var, axis_start)
         requested_end = self._parse_time_control(self.range_end_ms_var, axis_end)
-        requested_start = max(axis_start, min(axis_end, requested_start))
-        requested_end = max(axis_start, min(axis_end, requested_end))
-        if requested_start > requested_end:
-            requested_start, requested_end = requested_end, requested_start
-
-        start_edge = min(range(self.data.n_bins), key=lambda index: abs(edges_ms[index] - requested_start))
-        end_edge = min(range(1, self.data.n_bins + 1), key=lambda index: abs(edges_ms[index] - requested_end))
-        if end_edge <= start_edge:
-            end_edge = min(self.data.n_bins, start_edge + 1)
+        start, end = self._snap_time_range_to_bins(requested_start, requested_end)
+        start_edge, end_edge = start, end + 1
         self.range_start_ms_var.set(format_ms(edges_ms[start_edge]))
         self.range_end_ms_var.set(format_ms(edges_ms[end_edge]))
-        return start_edge, end_edge - 1
+        return start, end
 
     def _sync_time_range_controls(self) -> None:
-        start, end = self._display_range_indices()
-        start_ms = self._time_group_bounds_ms(start)[0]
-        end_ms = self._time_group_bounds_ms(end)[1]
-        self.range_start_ms_var.set(format_ms(start_ms))
-        self.range_end_ms_var.set(format_ms(end_ms))
+        # Timeline selection is intentionally independent of the RF sum range
+        # shown in the top bar.
+        count = self._time_group_count()
+        max_bin = max(0, count - 1)
+        self.range_start_var.set(max(0, min(max_bin, self.range_start_var.get())))
+        self.range_end_var.set(max(0, min(max_bin, self.range_end_var.get())))
 
     def _active_tab_key(self) -> str:
         if not hasattr(self, "notebook"):
@@ -1709,13 +1905,9 @@ class RFMViewer(tk.Toplevel):
         if key == "rf":
             self._draw_rf()
         elif key == "delay":
-            self._draw_delay()
-        elif key == "polar":
-            self._draw_polar()
+            self._draw_rgb() if self.rgb_mode_var.get() else self._draw_delay()
         elif key == "timeline":
             self._draw_timeline()
-        elif key == "rgb":
-            self._draw_rgb()
 
     def _update_all(self) -> None:
         if self._redraw_after is not None:
@@ -1757,6 +1949,7 @@ class RFMViewer(tk.Toplevel):
             )
         )
         self._update_cell_label()
+        self._sync_context_controls()
         self._draw_active_tab()
 
     def _current_matrix(self) -> list[list[float | None]]:
@@ -1849,15 +2042,28 @@ class RFMViewer(tk.Toplevel):
         return start, end
 
     def _is_full_display_range(self) -> bool:
-        start, end = self._source_bins_for_time_controls()
-        return start == 0 and end == self.data.n_bins - 1
+        start, end = self._display_range_indices()
+        return start == 0 and end == self._time_group_count() - 1
 
     def _display_range_label(self) -> str:
-        start_ms, end_ms = self._selected_time_bounds_ms()
+        start_ms, end_ms = self._timeline_selected_time_bounds_ms()
         return f"{format_ms(start_ms)} to {format_ms(end_ms)} ms"
 
     def _selected_time_bounds_ms(self) -> tuple[float, float]:
+        """Return the independent spatial RF summation window."""
         start, end = self._source_bins_for_time_controls()
+        return (
+            self.data.time_bin_edges[start] * 1000.0,
+            self.data.time_bin_edges[end + 1] * 1000.0,
+        )
+
+    def _timeline_selected_source_bins(self) -> AxisGroup:
+        groups = self._time_groups()
+        start, end = self._display_range_indices()
+        return groups[start][0], groups[end][1]
+
+    def _timeline_selected_time_bounds_ms(self) -> tuple[float, float]:
+        start, end = self._timeline_selected_source_bins()
         return (
             self.data.time_bin_edges[start] * 1000.0,
             self.data.time_bin_edges[end + 1] * 1000.0,
@@ -1889,6 +2095,19 @@ class RFMViewer(tk.Toplevel):
     def _source_bins_for_display_range(self) -> AxisGroup:
         return self._source_bins_for_time_controls()
 
+    def _plot_range_group_indices(self) -> AxisGroup:
+        source_start, source_end = self._source_bins_for_time_controls()
+        groups = self._time_groups()
+        start_group = next(
+            (index for index, (start, end) in enumerate(groups) if start <= source_start <= end),
+            0,
+        )
+        end_group = next(
+            (index for index, (start, end) in enumerate(groups) if start <= source_end <= end),
+            len(groups) - 1,
+        )
+        return start_group, end_group
+
     def _time_grouped_hist(self, hist: list[float]) -> list[float]:
         return [float(sum(hist[start : end + 1])) for start, end in self._time_groups()]
 
@@ -1896,9 +2115,9 @@ class RFMViewer(tk.Toplevel):
         return not self._is_full_display_range()
 
     def _visible_timeline_bins(self, display_bins: int) -> list[int]:
-        # Timeline is an overview: the RF selection highlights bins but never
+        # Timeline is an overview: its own selection highlights bins but never
         # removes temporal context. A dedicated timeline filter can be added
-        # later if filtering is needed independently of the 2D RF controls.
+        # later if filtering is needed independently of the RF sum controls.
         return list(range(display_bins))
 
     def _sync_time_control_ranges(self) -> None:
@@ -2029,6 +2248,14 @@ class RFMViewer(tk.Toplevel):
         start_ms, end_ms = self._selected_time_bounds_ms()
         return f"{self.value_mode_var.get()}: {format_ms(start_ms)} to {format_ms(end_ms)} ms"
 
+    def _rf_sum_range_value_text(self, value: float | None) -> str:
+        value_mode = self.value_mode_var.get()
+        start_ms, end_ms = self._selected_time_bounds_ms()
+        return (
+            f"RF sum range {format_ms(start_ms)}–{format_ms(end_ms)} ms: "
+            f"{format_response_value(value, value_mode)} {value_mode_unit(value_mode)}"
+        )
+
     def _cell_metrics_text(
         self,
         y_start: int,
@@ -2084,7 +2311,7 @@ class RFMViewer(tk.Toplevel):
             f"{group_note}"
             f"bin {format_response_value(display_values[bin_idx], value_mode)} {unit} "
             f"({self._time_group_label(bin_idx)})\n"
-            f"selected range {format_response_value(range_value, value_mode)} {unit}\n"
+            f"{self._rf_sum_range_value_text(range_value)}\n"
             f"full window {format_response_value(total_value, value_mode)} {unit}\n"
             f"peak {format_response_value(peak_value, value_mode)} {unit}\n"
             f"peak bin {peak_text}\n"
@@ -2137,11 +2364,21 @@ class RFMViewer(tk.Toplevel):
             0,
             self.data.n_bins - 1,
         )
+        plot_start, plot_end = self._source_bins_for_time_controls()
+        plot_value = self._group_response_value(
+            y_start,
+            y_end,
+            x_start,
+            x_end,
+            plot_start,
+            plot_end,
+        )
         return "\n".join(
             [
                 self._y_group_text(y_start, y_end),
                 self._x_group_text(x_start, x_end),
                 f"bin {bin_idx + 1}: {format_response_value(display_values[bin_idx], value_mode)} {unit}",
+                self._rf_sum_range_value_text(plot_value),
                 f"full window: {format_response_value(total, value_mode)} {unit}",
                 f"delay {delay:.1f} ms" if delay is not None else "delay n/a",
             ]
@@ -2149,26 +2386,46 @@ class RFMViewer(tk.Toplevel):
 
     def _draw_rf(self) -> None:
         matrix = self._current_matrix()
-        title = f"2D RF map - {self._current_matrix_label()}"
-        self._draw_heatmap(
-            "rf",
-            matrix,
-            title,
-            self.palette_var.get(),
-            value_suffix=value_mode_suffix(self.value_mode_var.get()),
-            fixed_range=None,
-        )
+        title = f"RF map - {self._current_matrix_label()}"
+        if self.polar_layout_var.get():
+            self._draw_polar_matrix(
+                "rf",
+                matrix,
+                title,
+                self.palette_var.get(),
+                value_suffix=value_mode_suffix(self.value_mode_var.get()),
+                fixed_range=None,
+            )
+        else:
+            self._draw_heatmap(
+                "rf",
+                matrix,
+                title,
+                self.palette_var.get(),
+                value_suffix=value_mode_suffix(self.value_mode_var.get()),
+                fixed_range=None,
+            )
 
     def _draw_delay(self) -> None:
         delay_matrix = self._delay_matrix_for_time_groups(0.0)
-        self._draw_heatmap(
-            "delay",
-            delay_matrix,
-            "Delay map - peak displayed bin center",
-            "Delay",
-            value_suffix=" ms",
-            fixed_range=self._time_axis_range_ms(),
-        )
+        if self.polar_layout_var.get():
+            self._draw_polar_matrix(
+                "delay",
+                delay_matrix,
+                "Delay map - peak displayed bin center",
+                "Delay",
+                value_suffix=" ms",
+                fixed_range=self._time_axis_range_ms(),
+            )
+        else:
+            self._draw_heatmap(
+                "delay",
+                delay_matrix,
+                "Delay map - peak displayed bin center",
+                "Delay",
+                value_suffix=" ms",
+                fixed_range=self._time_axis_range_ms(),
+            )
 
     def _draw_heatmap(
         self,
@@ -2215,6 +2472,7 @@ class RFMViewer(tk.Toplevel):
         self._draw_axes(canvas, x0, y0, cell, grid_w, grid_h, x_groups, y_groups)
         self._draw_colorbar(canvas, x0 + grid_w + 36, y0, min(220, grid_h), low, high, palette, value_suffix)
         self._canvas_layouts[key] = {
+            "geometry": "rectangle",
             "x0": x0,
             "y0": y0,
             "cell": cell,
@@ -2297,13 +2555,20 @@ class RFMViewer(tk.Toplevel):
         canvas.create_rectangle(x + 1, y + 1, x + cell - 1, y + cell - 1, outline="#111827", width=2)
         canvas.create_rectangle(x + 3, y + 3, x + cell - 3, y + cell - 3, outline="#ffffff", width=1)
 
-    def _draw_polar(self) -> None:
-        canvas = self.canvases["polar"]
+    def _draw_polar_matrix(
+        self,
+        key: str,
+        matrix: list[list[float | None]],
+        title: str,
+        palette: str,
+        value_suffix: str,
+        fixed_range: tuple[float, float] | None,
+    ) -> None:
+        canvas = self.canvases[key]
         canvas.delete("all")
         w, h = max(canvas.winfo_width(), 200), max(canvas.winfo_height(), 160)
-        matrix = self._current_matrix()
         disp, x_groups, y_groups = self._prepare_plot_matrix(matrix)
-        low, high = finite_min_max(disp)
+        low, high = fixed_range if fixed_range is not None else finite_min_max(disp)
         total_deg = self.data.infer_total_deg()
         n_rows = len(y_groups)
         radius_units = INNER_BLANK_ROWS + n_rows + POLAR_PAD_ROWS
@@ -2312,8 +2577,14 @@ class RFMViewer(tk.Toplevel):
         cx = w / 2
         cy = h / 2 + 22
 
-        canvas.create_text(20, 22, anchor="w", text=f"Polar RF map - {self._current_matrix_label()}", font=("TkDefaultFont", 15, "bold"), fill="#111827")
-        canvas.create_text(20, 44, anchor="w", text=f"total_deg inferred: {total_deg:.0f}; radius: {self.polar_radius_var.get()}", fill="#667085")
+        canvas.create_text(20, 22, anchor="w", text=title, font=("TkDefaultFont", 15, "bold"), fill="#111827")
+        canvas.create_text(
+            20,
+            44,
+            anchor="w",
+            text=f"Polar layout; total angle {total_deg:.0f}°; radius: {self.polar_radius_var.get()}",
+            fill="#667085",
+        )
         canvas.create_oval(
             cx - INNER_BLANK_ROWS * scale,
             cy - INNER_BLANK_ROWS * scale,
@@ -2337,9 +2608,20 @@ class RFMViewer(tk.Toplevel):
             r_outer = INNER_BLANK_ROWS + ring_idx + 1
             for col in range(len(x_groups)):
                 value = disp[display_row][col]
-                fill = palette_color(value, low, high, self.palette_var.get())
+                fill = delay_color(value, low, high) if palette == "Delay" else palette_color(value, low, high, palette)
                 points = self._polar_cell_points(cx, cy, scale, r_inner, r_outer, theta_edges[col], theta_edges[col + 1])
                 canvas.create_polygon(points, fill=fill, outline="")
+
+        self._draw_polar_selection_outline(
+            canvas,
+            cx,
+            cy,
+            scale,
+            theta_edges,
+            x_groups,
+            y_groups,
+            ring_rows,
+        )
 
         outer_r = (INNER_BLANK_ROWS + n_rows) * scale
         canvas.create_oval(cx - outer_r, cy - outer_r, cx + outer_r, cy + outer_r, outline="#475467")
@@ -2347,7 +2629,7 @@ class RFMViewer(tk.Toplevel):
         canvas.create_text(
             cx,
             cy + outer_r + 22,
-            text=f"RF values: {self.value_mode_var.get()}",
+            text=f"Values: {self.value_mode_var.get() if palette != 'Delay' else 'delay (ms)'}",
             fill="#475467",
         )
         self._draw_colorbar(
@@ -2357,10 +2639,11 @@ class RFMViewer(tk.Toplevel):
             min(220, 2 * outer_r),
             low,
             high,
-            self.palette_var.get(),
-            value_mode_suffix(self.value_mode_var.get()),
+            palette,
+            value_suffix,
         )
-        self._canvas_layouts["polar"] = {
+        self._canvas_layouts[key] = {
+            "geometry": "polar",
             "cx": cx,
             "cy": cy,
             "scale": scale,
@@ -2369,6 +2652,43 @@ class RFMViewer(tk.Toplevel):
             "y_groups": y_groups,
             "ring_rows": ring_rows,
         }
+
+    def _draw_polar_selection_outline(
+        self,
+        canvas: tk.Canvas,
+        cx: float,
+        cy: float,
+        scale: float,
+        theta_edges: list[float],
+        x_groups: list[AxisGroup],
+        y_groups: list[AxisGroup],
+        ring_rows: list[int],
+    ) -> None:
+        if self.selected_cell is None:
+            return
+        y_start, _y_end, x_start, _x_end = self.selected_cell
+        display_row = next(
+            (index for index, (start, end) in enumerate(y_groups) if start <= y_start <= end),
+            None,
+        )
+        column = next(
+            (index for index, (start, end) in enumerate(x_groups) if start <= x_start <= end),
+            None,
+        )
+        if display_row is None or column is None or display_row not in ring_rows:
+            return
+        ring_idx = ring_rows.index(display_row)
+        points = self._polar_cell_points(
+            cx,
+            cy,
+            scale,
+            INNER_BLANK_ROWS + ring_idx,
+            INNER_BLANK_ROWS + ring_idx + 1,
+            theta_edges[column],
+            theta_edges[column + 1],
+        )
+        canvas.create_polygon(points, fill="", outline="#ffffff", width=4)
+        canvas.create_polygon(points, fill="", outline="#111827", width=2)
 
     def _polar_cell_points(
         self,
@@ -2395,7 +2715,7 @@ class RFMViewer(tk.Toplevel):
 
     def _draw_rgb(self) -> None:
         metrics = self.data.metrics(self.unit_idx.get())
-        canvas = self.canvases["rgb"]
+        canvas = self.canvases["delay"]
         canvas.delete("all")
         w, h = max(canvas.winfo_width(), 200), max(canvas.winfo_height(), 160)
         margin_l, margin_r, margin_t, margin_b = 78, 188, 56, 68
@@ -2420,6 +2740,19 @@ class RFMViewer(tk.Toplevel):
         max_total = max(response_high, 1.0)
         min_delay, max_delay = self._time_axis_range_ms()
         delay_span = max(max_delay - min_delay, 1.0)
+
+        if self.polar_layout_var.get():
+            self._draw_rgb_polar(
+                total_disp,
+                delay_disp,
+                entropy_disp,
+                x_groups,
+                y_groups,
+                max_total,
+                min_delay,
+                delay_span,
+            )
+            return
 
         canvas.create_text(20, 22, anchor="w", text="RGB composite", font=("TkDefaultFont", 15, "bold"), fill="#111827")
         canvas.create_text(
@@ -2460,7 +2793,8 @@ class RFMViewer(tk.Toplevel):
             y = legend_y + i * 26
             canvas.create_rectangle(legend_x, y, legend_x + 16, y + 16, fill=color, outline="")
             canvas.create_text(legend_x + 24, y + 8, anchor="w", text=label, fill="#475467")
-        self._canvas_layouts["rgb"] = {
+        self._canvas_layouts["delay"] = {
+            "geometry": "rectangle",
             "x0": x0,
             "y0": y0,
             "cell": cell,
@@ -2468,6 +2802,114 @@ class RFMViewer(tk.Toplevel):
             "grid_h": grid_h,
             "x_groups": x_groups,
             "y_groups": y_groups,
+        }
+
+    def _draw_rgb_polar(
+        self,
+        total_disp: list[list[float | None]],
+        delay_disp: list[list[float | None]],
+        entropy_disp: list[list[float | None]],
+        x_groups: list[AxisGroup],
+        y_groups: list[AxisGroup],
+        max_total: float,
+        min_delay: float,
+        delay_span: float,
+    ) -> None:
+        canvas = self.canvases["delay"]
+        canvas.delete("all")
+        w, h = max(canvas.winfo_width(), 200), max(canvas.winfo_height(), 160)
+        total_deg = self.data.infer_total_deg()
+        n_rows = len(y_groups)
+        radius_units = INNER_BLANK_ROWS + n_rows + POLAR_PAD_ROWS
+        scale = max(4.0, min((w - 220) / (2 * radius_units), (h - 130) / (2 * radius_units)))
+        cx = w / 2
+        cy = h / 2 + 22
+        canvas.create_text(20, 22, anchor="w", text="RGB composite", font=("TkDefaultFont", 15, "bold"), fill="#111827")
+        canvas.create_text(
+            20,
+            44,
+            anchor="w",
+            text=(
+                f"Polar layout; R {self.value_mode_var.get()}; G delay; "
+                "B temporal entropy"
+            ),
+            fill="#667085",
+        )
+        canvas.create_oval(
+            cx - INNER_BLANK_ROWS * scale,
+            cy - INNER_BLANK_ROWS * scale,
+            cx + INNER_BLANK_ROWS * scale,
+            cy + INNER_BLANK_ROWS * scale,
+            fill="#f8fafc",
+            outline="#e5e7eb",
+        )
+        theta_edges = [
+            math.radians(90.0 + total_deg / 2.0 - total_deg * index / len(x_groups))
+            for index in range(len(x_groups) + 1)
+        ]
+        if self.polar_radius_var.get() == POLAR_RADIUS_MODES[0]:
+            ring_rows = sorted(range(n_rows), key=lambda index: y_groups[index][0])
+        else:
+            ring_rows = list(range(n_rows - 1, -1, -1))
+
+        for ring_idx, display_row in enumerate(ring_rows):
+            for column in range(len(x_groups)):
+                total_value = total_disp[display_row][column] or 0.0
+                delay = delay_disp[display_row][column]
+                if total_value <= 0:
+                    fill = "#edf0f3"
+                else:
+                    fill = hex_color(
+                        (
+                            int(round(clamp(total_value / max_total) * 255)),
+                            int(round((0.0 if delay is None else clamp((delay - min_delay) / delay_span)) * 255)),
+                            int(round(clamp(entropy_disp[display_row][column] or 0.0) * 255)),
+                        )
+                    )
+                points = self._polar_cell_points(
+                    cx,
+                    cy,
+                    scale,
+                    INNER_BLANK_ROWS + ring_idx,
+                    INNER_BLANK_ROWS + ring_idx + 1,
+                    theta_edges[column],
+                    theta_edges[column + 1],
+                )
+                canvas.create_polygon(points, fill=fill, outline="")
+
+        self._draw_polar_selection_outline(
+            canvas,
+            cx,
+            cy,
+            scale,
+            theta_edges,
+            x_groups,
+            y_groups,
+            ring_rows,
+        )
+        outer_r = (INNER_BLANK_ROWS + n_rows) * scale
+        canvas.create_oval(cx - outer_r, cy - outer_r, cx + outer_r, cy + outer_r, outline="#475467")
+        legend_x = min(cx + outer_r + 26, w - 154)
+        legend_y = max(64.0, cy - 40.0)
+        for index, (label, color) in enumerate(
+            (
+                (f"R {value_mode_unit(self.value_mode_var.get())}", "#dc2626"),
+                ("G delay", "#16a34a"),
+                ("B entropy", "#2563eb"),
+            )
+        ):
+            y = legend_y + index * 26
+            canvas.create_rectangle(legend_x, y, legend_x + 16, y + 16, fill=color, outline="")
+            canvas.create_text(legend_x + 24, y + 8, anchor="w", text=label, fill="#475467")
+        self._canvas_layouts["delay"] = {
+            "geometry": "polar",
+            "cx": cx,
+            "cy": cy,
+            "scale": scale,
+            "total_deg": total_deg,
+            "x_groups": x_groups,
+            "y_groups": y_groups,
+            "ring_rows": ring_rows,
         }
 
     def _all_positions_timeline_values(
@@ -2526,6 +2968,8 @@ class RFMViewer(tk.Toplevel):
             tuple(y_groups),
             smooth_radius,
             self.palette_var.get(),
+            self.polar_layout_var.get(),
+            self.polar_radius_var.get(),
             round(cell_size, 6),
             tuple((bin_idx, *tile_positions[bin_idx]) for bin_idx in visible_bins),
             atlas_width,
@@ -2562,16 +3006,40 @@ class RFMViewer(tk.Toplevel):
 
         high = max(high, 1.0)
         palette = self.palette_var.get()
-        tiles = [
-            (prepared_by_bin[bin_idx], *tile_positions[bin_idx], cell_size)
-            for bin_idx in visible_bins
-        ]
-        ppm = matrix_atlas_ppm_data(
-            tiles,
-            atlas_width,
-            atlas_height,
-            lambda value, high=high, palette=palette: palette_color(value, 0.0, high, palette),
-        )
+        color_for_value = lambda value, high=high, palette=palette: palette_color(value, 0.0, high, palette)
+        if self.polar_layout_var.get():
+            total_deg = self.data.infer_total_deg()
+            if self.polar_radius_var.get() == POLAR_RADIUS_MODES[0]:
+                ring_rows = sorted(range(len(y_groups)), key=lambda index: y_groups[index][0])
+            else:
+                ring_rows = list(range(len(y_groups) - 1, -1, -1))
+            polar_tiles = [
+                (
+                    prepared_by_bin[bin_idx],
+                    *tile_positions[bin_idx],
+                    cell_size,
+                    total_deg,
+                    ring_rows,
+                )
+                for bin_idx in visible_bins
+            ]
+            ppm = polar_matrix_atlas_ppm_data(
+                polar_tiles,
+                atlas_width,
+                atlas_height,
+                color_for_value,
+            )
+        else:
+            tiles = [
+                (prepared_by_bin[bin_idx], *tile_positions[bin_idx], cell_size)
+                for bin_idx in visible_bins
+            ]
+            ppm = matrix_atlas_ppm_data(
+                tiles,
+                atlas_width,
+                atlas_height,
+                color_for_value,
+            )
         atlas = tk.PhotoImage(master=canvas, data=ppm, format="PPM")
 
         self._timeline_preview_cache_key = cache_key
@@ -2663,7 +3131,7 @@ class RFMViewer(tk.Toplevel):
             44,
             anchor="w",
             text=(
-                f"RF time range {self._display_range_label()}; "
+                f"Timeline selection {self._display_range_label()}; "
                 f"time res {format_ms(self._time_group_size() * self._base_bin_ms())} ms; "
                 f"{self.value_mode_var.get()}."
                 f"{timing_warning}"
@@ -2752,7 +3220,7 @@ class RFMViewer(tk.Toplevel):
         )
         canvas.create_text(blue_axis_x + 7, chart_y + chart_h, anchor="w", text="0", fill="#2563eb", font=axis_font)
         if self._has_time_selection():
-            selected_start_ms, selected_end_ms = self._selected_time_bounds_ms()
+            selected_start_ms, selected_end_ms = self._timeline_selected_time_bounds_ms()
             time_span_ms = max(axis_end_ms - axis_start_ms, self._base_bin_ms())
             range_x0 = chart_x + chart_w * (selected_start_ms - axis_start_ms) / time_span_ms
             range_x1 = chart_x + chart_w * (selected_end_ms - axis_start_ms) / time_span_ms
@@ -2788,7 +3256,22 @@ class RFMViewer(tk.Toplevel):
         preview_x_groups = self._x_groups()
         preview_y_groups = self._display_y_groups()
         smooth_radius = self._smooth_radius()
-        mini_layout = self._timeline_mini_layout(canvas, w, h, mini_top, len(visible_bins), len(preview_x_groups), len(preview_y_groups))
+        if self.polar_layout_var.get():
+            polar_diameter_units = 2 * (INNER_BLANK_ROWS + len(preview_y_groups))
+            layout_x_count = polar_diameter_units
+            layout_y_count = polar_diameter_units
+        else:
+            layout_x_count = len(preview_x_groups)
+            layout_y_count = len(preview_y_groups)
+        mini_layout = self._timeline_mini_layout(
+            canvas,
+            w,
+            h,
+            mini_top,
+            len(visible_bins),
+            layout_x_count,
+            layout_y_count,
+        )
         cols = int(mini_layout["cols"])
         rows = int(mini_layout["rows"])
         gap_x = float(mini_layout["gap_x"])
@@ -2854,8 +3337,9 @@ class RFMViewer(tk.Toplevel):
             "visible_bins": visible_bins,
         }
         self._timeline_cells = []
-        selected_start, selected_end = self._source_bins_for_time_controls()
-        has_time_selection = not (selected_start == 0 and selected_end == self.data.n_bins - 1)
+        self._timeline_cells_by_bin = {}
+        selected_start, selected_end = self._timeline_selected_source_bins()
+        has_time_selection = self._has_time_selection()
 
         for visible_idx, bin_idx in enumerate(visible_bins):
             source_start, source_end = time_groups[bin_idx]
@@ -2867,22 +3351,40 @@ class RFMViewer(tk.Toplevel):
             cell = preview_cell
             grid_w = preview_grid_w
             grid_h = preview_grid_h
-            self._timeline_cells.append(
-                {
-                    "bin_idx": bin_idx,
-                    "source_start": source_start,
-                    "source_end": source_end,
-                    "x0": x0,
-                    "y0": y0,
-                    "cell": cell,
-                    "grid_w": grid_w,
-                    "grid_h": grid_h,
-                    "label_gap": label_gap,
-                    "label_height": label_height,
-                    "x_groups": preview_x_groups,
-                    "y_groups": preview_y_groups,
-                }
-            )
+            timeline_layout: dict[str, object] = {
+                "geometry": "polar" if self.polar_layout_var.get() else "rectangle",
+                "bin_idx": bin_idx,
+                "source_start": source_start,
+                "source_end": source_end,
+                "x0": x0,
+                "y0": y0,
+                "cell": cell,
+                "grid_w": grid_w,
+                "grid_h": grid_h,
+                "label_gap": label_gap,
+                "label_height": label_height,
+                "x_groups": preview_x_groups,
+                "y_groups": preview_y_groups,
+            }
+            self._timeline_cells.append(timeline_layout)
+            self._timeline_cells_by_bin[bin_idx] = timeline_layout
+            if self.polar_layout_var.get():
+                timeline_layout.update(
+                    {
+                        "cx": x0 + grid_w / 2.0,
+                        "cy": y0 + grid_h / 2.0,
+                        "scale": cell,
+                        "total_deg": self.data.infer_total_deg(),
+                        "ring_rows": (
+                            sorted(
+                                range(len(preview_y_groups)),
+                                key=lambda index: preview_y_groups[index][0],
+                            )
+                            if self.polar_radius_var.get() == POLAR_RADIUS_MODES[0]
+                            else list(range(len(preview_y_groups) - 1, -1, -1))
+                        ),
+                    }
+                )
             in_selected_range = source_start <= selected_end and source_end >= selected_start
             if has_time_selection and in_selected_range:
                 outline = "#16a34a"
@@ -2890,7 +3392,10 @@ class RFMViewer(tk.Toplevel):
             else:
                 outline = "#cbd5e1"
                 width_line = 1
-            canvas.create_rectangle(x0, y0, x0 + grid_w, y0 + grid_h, outline=outline, width=width_line)
+            if self.polar_layout_var.get():
+                canvas.create_oval(x0, y0, x0 + grid_w, y0 + grid_h, outline=outline, width=width_line)
+            else:
+                canvas.create_rectangle(x0, y0, x0 + grid_w, y0 + grid_h, outline=outline, width=width_line)
             label_color = "#15803d" if has_time_selection and in_selected_range else "#475467"
             label_font = ("TkDefaultFont", 8, "bold") if has_time_selection and in_selected_range else ("TkDefaultFont", 8)
             canvas.create_text(
@@ -2935,6 +3440,49 @@ class RFMViewer(tk.Toplevel):
         x_start, x_end = x_groups[group_idx]
         return y_start, y_end, x_start, x_end
 
+    def _timeline_layout_at_point(
+        self,
+        event_x: float,
+        event_y: float,
+        *,
+        include_label: bool,
+    ) -> dict[str, object] | None:
+        """Find the one timeline mini-map candidate at a canvas coordinate."""
+        timeline_layout = self._canvas_layouts.get("timeline")
+        if not timeline_layout or not self._timeline_cells:
+            return None
+        mini_left = float(timeline_layout["mini_left"])
+        mini_top = float(timeline_layout["mini_top"])
+        slot_w = float(timeline_layout["mini_w"])
+        gap_x = float(timeline_layout["gap_x"])
+        row_step = float(timeline_layout["row_step"])
+        cols = max(1, int(timeline_layout["cols"]))
+        relative_x = event_x - mini_left
+        relative_y = event_y - mini_top
+        slot_stride = slot_w + gap_x
+        if relative_x < 0.0 or relative_y < 0.0 or slot_stride <= 0.0 or row_step <= 0.0:
+            return None
+        column = int(relative_x // slot_stride)
+        row = int(relative_y // row_step)
+        if not (0 <= column < cols and row >= 0):
+            return None
+        candidate_index = row * cols + column
+        if not (0 <= candidate_index < len(self._timeline_cells)):
+            return None
+        candidate = self._timeline_cells[candidate_index]
+        x0 = float(candidate["x0"])
+        y0 = float(candidate["y0"])
+        grid_w = float(candidate["grid_w"])
+        grid_h = float(candidate["grid_h"])
+        if include_label:
+            bottom = y0 + grid_h + float(candidate.get("label_gap", 4.0)) + float(
+                candidate.get("label_height", 12.0)
+            )
+            inside = x0 <= event_x <= x0 + grid_w and y0 <= event_y <= bottom
+        else:
+            inside = x0 <= event_x < x0 + grid_w and y0 <= event_y < y0 + grid_h
+        return candidate if inside else None
+
     def _timeline_bin_at(self, event: tk.Event) -> int | None:
         layout = self._canvas_layouts.get("timeline")
         if not layout:
@@ -2957,43 +3505,48 @@ class RFMViewer(tk.Toplevel):
             display_bins = int(layout.get("display_bins", self._time_group_count()))
             bin_idx = int((event_x - float(chart_x)) / (float(chart_w) / display_bins))
             return max(0, min(display_bins - 1, bin_idx))
-        for cell_layout in self._timeline_cells:
-            x0 = float(cell_layout["x0"])
-            y0 = float(cell_layout["y0"])
-            grid_w = float(cell_layout["grid_w"])
-            grid_h = float(cell_layout["grid_h"])
-            label_gap = float(cell_layout.get("label_gap", 4.0))
-            label_height = float(cell_layout.get("label_height", 12.0))
-            if x0 <= event_x <= x0 + grid_w and y0 <= event_y <= y0 + grid_h + label_gap + label_height:
-                return int(cell_layout["bin_idx"])
-        return None
+        cell_layout = self._timeline_layout_at_point(event_x, event_y, include_label=True)
+        return int(cell_layout["bin_idx"]) if cell_layout is not None else None
 
     def _timeline_cell_at(self, event: tk.Event) -> tuple[int, CellRef] | None:
         canvas = self.canvases["timeline"]
         event_x = canvas.canvasx(event.x)
         event_y = canvas.canvasy(event.y)
-        for layout in self._timeline_cells:
-            x0 = float(layout["x0"])
-            y0 = float(layout["y0"])
-            cell = float(layout["cell"])
-            grid_w = float(layout["grid_w"])
-            grid_h = float(layout["grid_h"])
-            if not (x0 <= event_x < x0 + grid_w and y0 <= event_y < y0 + grid_h):
-                continue
-            group_idx = int((event_x - x0) // cell)
-            display_y = int((event_y - y0) // cell)
-            x_groups = layout.get("x_groups") or self._x_groups()
-            y_groups = layout.get("y_groups") or self._display_y_groups()
-            if 0 <= group_idx < len(x_groups) and 0 <= display_y < len(y_groups):
-                y_start, y_end = y_groups[display_y]
-                x_start, x_end = x_groups[group_idx]
-                return int(layout["bin_idx"]), (y_start, y_end, x_start, x_end)
+        layout = self._timeline_layout_at_point(event_x, event_y, include_label=False)
+        if layout is None:
+            return None
+        if layout.get("geometry") == "polar":
+            polar_cell = self._polar_cell_from_layout(layout, event_x, event_y)
+            if polar_cell is None:
+                return None
+            _ring_idx, cell_ref = polar_cell
+            return int(layout["bin_idx"]), cell_ref
+        x0 = float(layout["x0"])
+        y0 = float(layout["y0"])
+        cell = float(layout["cell"])
+        group_idx = int((event_x - x0) // cell)
+        display_y = int((event_y - y0) // cell)
+        x_groups = layout.get("x_groups") or self._x_groups()
+        y_groups = layout.get("y_groups") or self._display_y_groups()
+        if 0 <= group_idx < len(x_groups) and 0 <= display_y < len(y_groups):
+            y_start, y_end = y_groups[display_y]
+            x_start, x_end = x_groups[group_idx]
+            return int(layout["bin_idx"]), (y_start, y_end, x_start, x_end)
         return None
 
-    def _polar_cell_at(self, event: tk.Event) -> tuple[int, CellRef] | None:
-        layout = self._canvas_layouts.get("polar")
+    def _polar_cell_at(self, key: str, event: tk.Event) -> tuple[int, CellRef] | None:
+        layout = self._canvas_layouts.get(key)
         if not layout:
             return None
+        canvas = self.canvases[key]
+        return self._polar_cell_from_layout(layout, canvas.canvasx(event.x), canvas.canvasy(event.y))
+
+    def _polar_cell_from_layout(
+        self,
+        layout: dict[str, object],
+        event_x: float,
+        event_y: float,
+    ) -> tuple[int, CellRef] | None:
         cx = layout["cx"]
         cy = layout["cy"]
         scale = layout["scale"]
@@ -3003,8 +3556,8 @@ class RFMViewer(tk.Toplevel):
         ring_rows = layout.get("ring_rows")
         if not isinstance(ring_rows, list):
             ring_rows = list(range(len(y_groups) - 1, -1, -1))
-        dx = (event.x - cx) / scale
-        dy = (cy - event.y) / scale
+        dx = (event_x - cx) / scale
+        dy = (cy - event_y) / scale
         radius = math.hypot(dx, dy)
         if not (INNER_BLANK_ROWS <= radius < INNER_BLANK_ROWS + len(y_groups)):
             return None
@@ -3032,19 +3585,20 @@ class RFMViewer(tk.Toplevel):
         return ring_idx, (y_start, y_end, x_start, x_end)
 
     def _on_canvas_motion(self, key: str, event: tk.Event) -> None:
-        if key in {"rf", "delay", "rgb"}:
-            cell = self._canvas_to_cell(key, event)
-            if cell is not None:
-                self._set_hover_cell(key, cell, event)
+        if key in {"rf", "delay"}:
+            if self._canvas_layouts.get(key, {}).get("geometry") == "polar":
+                polar_cell = self._polar_cell_at(key, event)
+                if polar_cell is not None:
+                    ring_idx, cell = polar_cell
+                    self._set_hover_cell(key, cell, event, extra=f"polar ring {ring_idx + 1}")
+                else:
+                    self._clear_canvas_hover(key)
             else:
-                self._clear_canvas_hover(key)
-        elif key == "polar":
-            polar_cell = self._polar_cell_at(event)
-            if polar_cell is not None:
-                ring_idx, cell = polar_cell
-                self._set_hover_cell(key, cell, event, extra=f"polar ring {ring_idx + 1}")
-            else:
-                self._clear_canvas_hover(key)
+                cell = self._canvas_to_cell(key, event)
+                if cell is not None:
+                    self._set_hover_cell(key, cell, event)
+                else:
+                    self._clear_canvas_hover(key)
         elif key == "timeline":
             cell = self._timeline_cell_at(event)
             if cell is not None:
@@ -3064,15 +3618,13 @@ class RFMViewer(tk.Toplevel):
 
     def _on_canvas_click(self, key: str, event: tk.Event) -> None:
         self.canvases[key].focus_set()
-        if key in {"rf", "delay", "rgb"}:
-            cell = self._canvas_to_cell(key, event)
+        if key in {"rf", "delay"}:
+            if self._canvas_layouts.get(key, {}).get("geometry") == "polar":
+                polar_cell = self._polar_cell_at(key, event)
+                cell = polar_cell[1] if polar_cell is not None else None
+            else:
+                cell = self._canvas_to_cell(key, event)
             if cell is not None:
-                self.selected_cell = cell
-                self._update_all()
-        elif key == "polar":
-            polar_cell = self._polar_cell_at(event)
-            if polar_cell is not None:
-                _ring_idx, cell = polar_cell
                 self.selected_cell = cell
                 self._update_all()
         elif key == "timeline":
@@ -3199,7 +3751,7 @@ class RFMViewer(tk.Toplevel):
             for x, y in polygon:
                 coords.extend((x, y))
             canvas.create_polygon(*coords, fill="", outline="#f97316", width=3, tags="hover")
-        elif key in {"rf", "delay", "rgb"}:
+        elif key in {"rf", "delay"} and self._canvas_layouts.get(key, {}).get("geometry") != "polar":
             layout = self._canvas_layouts.get(key)
             if layout:
                 y_groups = layout.get("y_groups") or self._display_y_groups()
@@ -3213,9 +3765,9 @@ class RFMViewer(tk.Toplevel):
                     x = x0 + group_idx * cell_size
                     y = y0 + display_y * cell_size
                     canvas.create_rectangle(x + 1, y + 1, x + cell_size - 1, y + cell_size - 1, outline="#f97316", width=3, tags="hover")
-        elif key == "polar":
-            polar = self._polar_cell_at(event)
-            layout = self._canvas_layouts.get("polar")
+        elif key in {"rf", "delay"}:
+            polar = self._polar_cell_at(key, event)
+            layout = self._canvas_layouts.get(key)
             if polar is not None and layout:
                 ring_idx, polar_cell = polar
                 _y_start, _y_end, x_start, _x_end = polar_cell
@@ -3240,9 +3792,8 @@ class RFMViewer(tk.Toplevel):
             if display_bin is not None:
                 bin_idx = int(display_bin)
                 y_start_t, _y_end_t, x_idx_t, _x_end_t = cell
-                for layout in self._timeline_cells:
-                    if int(layout["bin_idx"]) != bin_idx:
-                        continue
+                layout = self._timeline_cells_by_bin.get(bin_idx)
+                if layout is not None:
                     y_groups = layout.get("y_groups") or self._display_y_groups()
                     display_y = next((idx for idx, (start, end) in enumerate(y_groups) if start <= y_start_t <= end), 0)
                     x_groups = layout.get("x_groups") or self._x_groups()
@@ -3250,10 +3801,61 @@ class RFMViewer(tk.Toplevel):
                     x0 = float(layout["x0"])
                     y0 = float(layout["y0"])
                     cell_size = float(layout["cell"])
-                    x = x0 + group_idx * cell_size
-                    y = y0 + display_y * cell_size
-                    canvas.create_rectangle(x, y, x + cell_size, y + cell_size, outline="#f97316", width=2, tags="hover")
-                    break
+                    if layout.get("geometry") == "polar":
+                        polar = self._polar_cell_from_layout(
+                            layout,
+                            canvas.canvasx(event.x),
+                            canvas.canvasy(event.y),
+                        )
+                        if polar is None:
+                            self._draw_canvas_tooltip(canvas, event, tooltip_text)
+                            return
+                        ring_idx, polar_cell = polar
+                        _polar_y_start, _polar_y_end, polar_x_start, _polar_x_end = polar_cell
+                        x_groups = layout.get("x_groups") or self._x_groups()
+                        column = next(
+                            (
+                                index
+                                for index, (start, end) in enumerate(x_groups)
+                                if start <= polar_x_start <= end
+                            ),
+                            0,
+                        )
+                        total_deg = float(layout["total_deg"])
+                        theta_edges = [
+                            math.radians(
+                                90.0 + total_deg / 2.0 - total_deg * index / len(x_groups)
+                            )
+                            for index in range(len(x_groups) + 1)
+                        ]
+                        points = self._polar_cell_points(
+                            float(layout["cx"]),
+                            float(layout["cy"]),
+                            float(layout["scale"]),
+                            INNER_BLANK_ROWS + ring_idx,
+                            INNER_BLANK_ROWS + ring_idx + 1,
+                            theta_edges[column],
+                            theta_edges[column + 1],
+                        )
+                        canvas.create_polygon(
+                            points,
+                            fill="",
+                            outline="#f97316",
+                            width=2,
+                            tags="hover",
+                        )
+                    else:
+                        x = x0 + group_idx * cell_size
+                        y = y0 + display_y * cell_size
+                        canvas.create_rectangle(
+                            x,
+                            y,
+                            x + cell_size,
+                            y + cell_size,
+                            outline="#f97316",
+                            width=2,
+                            tags="hover",
+                        )
         self._draw_canvas_tooltip(canvas, event, tooltip_text)
 
     def _draw_canvas_tooltip(
@@ -3298,9 +3900,12 @@ class RFMViewer(tk.Toplevel):
         self.bin_var.set(0)
         self.range_start_var.set(0)
         self.time_res_ms_var.set(format_ms(self._base_bin_ms()))
+        self._last_time_group_count = self.data.n_bins
+        self._last_time_groups = [(index, index) for index in range(self.data.n_bins)]
         self.range_end_var.set(self._time_group_count() - 1)
-        self.range_start_ms_var.set(format_ms(self._time_axis_start_ms()))
-        self.range_end_ms_var.set(format_ms(self._time_axis_end_ms()))
+        plot_start_ms, plot_end_ms = self._default_plot_time_bounds_ms()
+        self.range_start_ms_var.set(format_ms(plot_start_ms))
+        self.range_end_ms_var.set(format_ms(plot_end_ms))
         if not self.data.supports_value_mode(self.value_mode_var.get()):
             self.value_mode_var.set(VALUE_MODE_COUNT)
         self.selected_cell = None
@@ -3310,6 +3915,8 @@ class RFMViewer(tk.Toplevel):
         self._timeline_preview_cache_key = None
         self._timeline_preview_images = {}
         self._timeline_preview_high = 1.0
+        self._timeline_cells = []
+        self._timeline_cells_by_bin = {}
         self._timeline_range_anchor = None
         self._timeline_scroll_fraction = 0.0
         self._sync_time_control_ranges()
@@ -3327,7 +3934,7 @@ class RFMViewer(tk.Toplevel):
         matrix, x_groups, y_groups = self._prepare_plot_matrix(raw_matrix, smooth=True)
         export_space = "displayed"
 
-        range_start, range_end = self._display_range_indices()
+        range_start, range_end = self._plot_range_group_indices()
         range_start_ms, range_end_ms = self._selected_time_bounds_ms()
         value_mode = self.value_mode_var.get()
         path = filedialog.asksaveasfilename(

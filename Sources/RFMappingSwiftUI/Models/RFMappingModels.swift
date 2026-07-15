@@ -81,13 +81,24 @@ enum PolarRadiusMode: String, CaseIterable, Identifiable, Hashable, Sendable {
     var id: String { rawValue }
 }
 
-enum PlotTab: String, CaseIterable, Identifiable, Hashable, Sendable {
-    case rf = "2D RF"
-    case delay = "Delay"
+enum SpatialPlotFormat: String, CaseIterable, Identifiable, Hashable, Sendable {
+    case rectangular = "Rectangle"
     case polar = "Polar"
-    case timeline = "Timeline"
+
+    var id: String { rawValue }
+}
+
+enum DelayRGBMode: String, CaseIterable, Identifiable, Hashable, Sendable {
+    case delay = "Delay"
     case rgb = "RGB"
-    case stack = "Stack"
+
+    var id: String { rawValue }
+}
+
+enum PlotTab: String, CaseIterable, Identifiable, Hashable, Sendable {
+    case rf = "RF Map"
+    case delayRGB = "Delay / RGB"
+    case timeline = "Timeline"
 
     var id: String { rawValue }
 }

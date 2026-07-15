@@ -50,7 +50,23 @@ private struct RFMappingPayload: Decodable {
     }
 }
 
-final class RFMappingData {
+/// Instances are constructed completely on one worker and then transferred to
+/// the main actor. Mutable derived caches remain main-actor confined by the
+/// store; no instance is read concurrently while decoding.
+final class RFMappingData: @unchecked Sendable {
+    /// Prefix subtraction is lossless only while non-negative integer counts
+    /// stay within Double's exact-integer range. Other cells retain the
+    /// original compensated slice summation path.
+    private struct ExactPrefixValues {
+        let values: ContiguousArray<Double>
+        let safeCells: ContiguousArray<Bool>
+    }
+
+    private struct UnitPrefixCache {
+        let unitIndex: Int
+        let values: ExactPrefixValues
+    }
+
     let url: URL
     let counts: [[[[Double]]]]
     let size: (Int, Int, Int, Int)
@@ -65,9 +81,32 @@ final class RFMappingData {
     let presentationCounts: [[Double]]?
 
     private var metricsCache: [Int: UnitMetrics] = [:]
+    private var prefixCaches: [UnitPrefixCache] = []
 
     convenience init(url: URL) throws {
-        try self.init(data: Data(contentsOf: url), url: url)
+        try self.init(data: Data(contentsOf: url, options: .mappedIfSafe), url: url)
+    }
+
+    static func makeDecodeTask(url: URL) -> Task<RFMappingData, Error> {
+        Task.detached(priority: .userInitiated) {
+            try Task.checkCancellation()
+            let decoded = try RFMappingData(url: url)
+            try Task.checkCancellation()
+            _ = decoded.metrics(for: 0)
+            try Task.checkCancellation()
+            _ = decoded.prefixValues(for: 0)
+            try Task.checkCancellation()
+            return decoded
+        }
+    }
+
+    static func decodeOffMain(url: URL) async throws -> RFMappingData {
+        let task = makeDecodeTask(url: url)
+        return try await withTaskCancellationHandler {
+            try await task.value
+        } onCancel: {
+            task.cancel()
+        }
     }
 
     init(data jsonData: Data, url: URL) throws {
@@ -80,6 +119,7 @@ final class RFMappingData {
         } catch {
             throw RFMappingError.invalidData("Could not decode RF mapping JSON: \(error.localizedDescription)")
         }
+        try Task.checkCancellation()
 
         guard payload.unitsSpikeCountsSize.count == 4 else {
             throw RFMappingError.invalidData("unitsSpikeCountsSize must contain 4 values.")
@@ -246,12 +286,42 @@ final class RFMappingData {
     func countMatrix(unitIndex: Int, start: Int, end: Int) -> [[Double]] {
         let low = max(0, min(nBins - 1, min(start, end)))
         let high = max(0, min(nBins - 1, max(start, end)))
+        let prefix = prefixValues(for: unitIndex)
+        let stride = nBins + 1
         let unit = counts[unitIndex]
         return (0..<nY).map { yIndex in
             (0..<nX).map { xIndex in
-                compensatedSum(unit[yIndex][xIndex][low...high])
+                let base = (yIndex * nX + xIndex) * stride
+                return prefixRangeCount(
+                    prefix,
+                    base: base,
+                    low: low,
+                    high: high,
+                    hist: unit[yIndex][xIndex]
+                )
             }
         }
+    }
+
+    func rangeCount(
+        unitIndex: Int,
+        yIndex: Int,
+        xIndex: Int,
+        start: Int,
+        end: Int
+    ) -> Double {
+        let low = max(0, min(nBins - 1, min(start, end)))
+        let high = max(0, min(nBins - 1, max(start, end)))
+        let prefix = prefixValues(for: unitIndex)
+        let stride = nBins + 1
+        let base = (yIndex * nX + xIndex) * stride
+        return prefixRangeCount(
+            prefix,
+            base: base,
+            low: low,
+            high: high,
+            hist: counts[unitIndex][yIndex][xIndex]
+        )
     }
 
     func responseValue(
@@ -264,7 +334,13 @@ final class RFMappingData {
     ) throws -> Double? {
         let low = max(0, min(nBins - 1, min(start, end)))
         let high = max(0, min(nBins - 1, max(start, end)))
-        let count = compensatedSum(counts[unitIndex][yIndex][xIndex][low...high])
+        let count = rangeCount(
+            unitIndex: unitIndex,
+            yIndex: yIndex,
+            xIndex: xIndex,
+            start: low,
+            end: high
+        )
         if valueMode == .spikeCount {
             return count
         }
@@ -291,22 +367,91 @@ final class RFMappingData {
     ) throws -> OptionalMatrix {
         let low = max(0, min(nBins - 1, min(start, end)))
         let high = max(0, min(nBins - 1, max(start, end)))
-        let matrix = countMatrix(unitIndex: unitIndex, start: low, end: high)
-        if valueMode == .spikeCount {
-            return optionalMatrix(matrix)
-        }
-        guard let presentationCounts else {
+        if valueMode != .spikeCount, presentationCounts == nil {
             throw RFMappingError.presentationCountsRequired(valueMode)
         }
         let duration = timeSpanSeconds(start: low, end: high)
+        let prefix = prefixValues(for: unitIndex)
+        let stride = nBins + 1
+        let unit = counts[unitIndex]
         return (0..<nY).map { yIndex in
             (0..<nX).map { xIndex -> Double? in
+                let base = (yIndex * nX + xIndex) * stride
+                let count = prefixRangeCount(
+                    prefix,
+                    base: base,
+                    low: low,
+                    high: high,
+                    hist: unit[yIndex][xIndex]
+                )
+                if valueMode == .spikeCount { return count }
+                guard let presentationCounts else { return nil }
                 let presentations = presentationCounts[yIndex][xIndex]
                 guard presentations > 0 else { return nil }
                 let divisor = presentations * (valueMode == .meanFiringRate ? duration : 1.0)
-                return matrix[yIndex][xIndex] / divisor
+                return count / divisor
             }
         }
+    }
+
+    private func prefixRangeCount(
+        _ prefix: ExactPrefixValues,
+        base: Int,
+        low: Int,
+        high: Int,
+        hist: [Double]
+    ) -> Double {
+        let stride = nBins + 1
+        let cellIndex = base / stride
+        guard prefix.safeCells[cellIndex] else {
+            return compensatedSum(hist[low...high])
+        }
+        let start = base + low
+        let end = base + high + 1
+        return prefix.values[end] - prefix.values[start]
+    }
+
+    private func prefixValues(for unitIndex: Int) -> ExactPrefixValues {
+        if let cached = prefixCaches.first, cached.unitIndex == unitIndex {
+            return cached.values
+        }
+        if let index = prefixCaches.firstIndex(where: { $0.unitIndex == unitIndex }) {
+            let cached = prefixCaches.remove(at: index)
+            prefixCaches.insert(cached, at: 0)
+            return cached.values
+        }
+
+        let stride = nBins + 1
+        let valueCount = nY * nX * stride
+        let maximumExactInteger = 9_007_199_254_740_992.0
+        var prefixValues = ContiguousArray(repeating: 0.0, count: valueCount)
+        var safeCells = ContiguousArray(repeating: true, count: nY * nX)
+        let unit = counts[unitIndex]
+        for yIndex in 0..<nY {
+            for xIndex in 0..<nX {
+                let base = (yIndex * nX + xIndex) * stride
+                let cellIndex = yIndex * nX + xIndex
+                var running = 0.0
+                var isExactIntegerPrefix = true
+                for bin in 0..<nBins {
+                    let value = unit[yIndex][xIndex][bin]
+                    if isExactIntegerPrefix,
+                       value == value.rounded(),
+                       value <= maximumExactInteger - running {
+                        running += value
+                        prefixValues[base + bin + 1] = running
+                    } else {
+                        isExactIntegerPrefix = false
+                    }
+                }
+                safeCells[cellIndex] = isExactIntegerPrefix
+            }
+        }
+
+        let prefix = ExactPrefixValues(values: prefixValues, safeCells: safeCells)
+        prefixCaches.insert(UnitPrefixCache(unitIndex: unitIndex, values: prefix), at: 0)
+        if prefixCaches.count > 2 { prefixCaches.removeLast() }
+        return prefix
     }
 
     private static func normalizePresentationCounts(
@@ -374,6 +519,7 @@ final class RFMappingData {
         }
 
         for unitIndex in 0..<nUnits {
+            try Task.checkCancellation()
             guard counts[unitIndex].count == nY else {
                 throw RFMappingError.invalidData("Unit \(unitIndex) has wrong y dimension.")
             }

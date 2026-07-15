@@ -3,54 +3,62 @@ import SwiftUI
 
 struct PolarMapView: View {
     @Bindable var store: RFMappingStore
+    let kind: HeatmapKind
 
     var body: some View {
         GeometryReader { proxy in
             let size = proxy.size
-            let plot = makeHeatmapPlot(store: store, matrix: store.currentMatrix())
+            let plot = cachedPlot
             let layout = makePolarLayout(size: size, store: store, plot: plot)
 
             ZStack(alignment: .topLeading) {
                 Canvas { context, _ in
                     var context = context
-                    drawPolar(context: &context, store: store, plot: plot, layout: layout)
+                    drawPolar(
+                        context: &context,
+                        store: store,
+                        plot: plot,
+                        layout: layout,
+                        kind: kind,
+                        drawInteraction: false
+                    )
                 }
-                PointerCaptureView(
-                    onMove: { point in
-                        if let hit = polarCell(at: point, layout: layout) {
-                            store.setHover(hit.cell, location: point, extra: "polar ring \(hit.ring + 1)")
-                        } else {
-                            store.clearHover()
-                        }
-                    },
-                    onClick: { point, _ in
-                        if let hit = polarCell(at: point, layout: layout) {
-                            store.selectCell(hit.cell)
-                        }
-                    },
-                    onLeave: {
-                        store.clearHover()
-                    }
-                )
-                if let cell = store.hoverCell, let location = store.hoverLocation {
-                    PlotTooltip(text: store.tooltipText(cell), location: location, canvasSize: size)
-                }
+                PolarInteractionLayer(store: store, layout: layout, size: size)
             }
             .accessibilityRepresentation {
                 SpatialPlotAccessibilityRepresentation(
                     store: store,
-                    title: "Polar RF map",
+                    title: accessibilityTitle,
                     matrix: plot.matrix,
                     xGroups: plot.xGroups,
-                    yGroups: plot.yGroups
+                    yGroups: plot.yGroups,
+                    valueDescription: { _, _, value in
+                        if kind == .delay {
+                            return value.map { String(format: "%.1f milliseconds", $0) } ?? "no delay"
+                        }
+                        return "\(store.valueMode.format(value)) \(store.valueMode.unit)"
+                    }
                 )
             }
         }
         .background(Color(nsColor: .textBackgroundColor))
     }
+
+    private var cachedPlot: HeatmapPlot {
+        switch kind {
+        case .rf:
+            store.currentHeatmapPlot()
+        case .delay:
+            store.delayHeatmapPlot(floor: store.responseFloor)
+        }
+    }
+
+    private var accessibilityTitle: String {
+        kind == .delay ? "Polar delay map" : "Polar RF map"
+    }
 }
 
-private struct PolarLayout {
+struct PolarLayout {
     let center: CGPoint
     let scale: CGFloat
     let totalDegrees: Double
@@ -59,7 +67,49 @@ private struct PolarLayout {
     let ringRows: [Int]
 }
 
-private func makePolarLayout(size: CGSize, store: RFMappingStore, plot: HeatmapPlot) -> PolarLayout {
+struct PolarInteractionLayer: View {
+    @Bindable var store: RFMappingStore
+    let layout: PolarLayout
+    let size: CGSize
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            Canvas { context, _ in
+                if let selected = store.selectedCell,
+                   let selectedPath = polarPath(for: selected, layout: layout) {
+                    context.stroke(selectedPath, with: .color(.primary), lineWidth: 2)
+                }
+                if let hover = store.hoverCell,
+                   let hoverPath = polarPath(for: hover, layout: layout) {
+                    context.stroke(hoverPath, with: .color(.orange), lineWidth: 3)
+                }
+            }
+            .allowsHitTesting(false)
+
+            PointerCaptureView(
+                onMove: { point in
+                    if let hit = polarCell(at: point, layout: layout) {
+                        store.setHover(hit.cell, location: point, extra: "polar ring \(hit.ring + 1)")
+                    } else {
+                        store.clearHover()
+                    }
+                },
+                onClick: { point, _ in
+                    if let hit = polarCell(at: point, layout: layout) {
+                        store.selectCell(hit.cell)
+                    }
+                },
+                onLeave: store.clearHover
+            )
+
+            if let cell = store.hoverCell, let location = store.hoverLocation {
+                PlotTooltip(text: store.tooltipText(cell), location: location, canvasSize: size)
+            }
+        }
+    }
+}
+
+func makePolarLayout(size: CGSize, store: RFMappingStore, plot: HeatmapPlot) -> PolarLayout {
     let totalDegrees = store.data?.inferTotalDeg() ?? 360.0
     let rowCount = max(1, plot.yGroups.count)
     let radiusUnits = Double(innerBlankRows + rowCount + polarPadRows)
@@ -74,10 +124,20 @@ private func makePolarLayout(size: CGSize, store: RFMappingStore, plot: HeatmapP
     return PolarLayout(center: center, scale: scale, totalDegrees: totalDegrees, xGroups: plot.xGroups, yGroups: plot.yGroups, ringRows: ringRows)
 }
 
-private func drawPolar(context: inout GraphicsContext, store: RFMappingStore, plot: HeatmapPlot, layout: PolarLayout) {
+private func drawPolar(
+    context: inout GraphicsContext,
+    store: RFMappingStore,
+    plot: HeatmapPlot,
+    layout: PolarLayout,
+    kind: HeatmapKind,
+    drawInteraction: Bool = true
+) {
+    let isDelay = kind == .delay
     drawTitle(
         context: &context,
-        title: "Polar RF map - \(store.currentMatrixLabel())",
+        title: isDelay
+            ? "Polar delay map - peak displayed bin center"
+            : "Polar RF map - \(store.currentMatrixLabel())",
         subtitle: "total_deg inferred: \(String(format: "%.0f", layout.totalDegrees)); radius: \(store.polarRadiusMode.rawValue)"
     )
 
@@ -101,7 +161,9 @@ private func drawPolar(context: inout GraphicsContext, store: RFMappingStore, pl
         let rOuter = Double(innerBlankRows + ringIndex + 1)
         for col in layout.xGroups.indices {
             let value = plot.matrix[displayRow][col]
-            let fill = paletteColor(value, low: plot.low, high: plot.high, palette: store.palette)
+            let fill = isDelay
+                ? delayColor(value, low: plot.low, high: plot.high)
+                : paletteColor(value, low: plot.low, high: plot.high, palette: store.palette)
             let path = polarCellPath(
                 center: layout.center,
                 scale: layout.scale,
@@ -114,11 +176,13 @@ private func drawPolar(context: inout GraphicsContext, store: RFMappingStore, pl
         }
     }
 
-    if let selected = store.selectedCell, let selectedPath = polarPath(for: selected, layout: layout) {
-        context.stroke(selectedPath, with: .color(.primary), lineWidth: 2)
-    }
-    if let hover = store.hoverCell, let hoverPath = polarPath(for: hover, layout: layout) {
-        context.stroke(hoverPath, with: .color(.orange), lineWidth: 3)
+    if drawInteraction {
+        if let selected = store.selectedCell, let selectedPath = polarPath(for: selected, layout: layout) {
+            context.stroke(selectedPath, with: .color(.primary), lineWidth: 2)
+        }
+        if let hover = store.hoverCell, let hoverPath = polarPath(for: hover, layout: layout) {
+            context.stroke(hoverPath, with: .color(.orange), lineWidth: 3)
+        }
     }
 
     let outer = CGFloat(innerBlankRows + layout.yGroups.count) * layout.scale
@@ -133,7 +197,9 @@ private func drawPolar(context: inout GraphicsContext, store: RFMappingStore, pl
         anchor: .center
     )
     context.draw(
-        Text("RF values: \(store.valueMode.rawValue)").font(.system(size: 11)).foregroundStyle(.secondary),
+        Text(isDelay ? "Delay: peak time" : "RF values: \(store.valueMode.rawValue)")
+            .font(.system(size: 11))
+            .foregroundStyle(.secondary),
         at: CGPoint(x: layout.center.x, y: layout.center.y + outer + 22),
         anchor: .center
     )
@@ -144,13 +210,21 @@ private func drawPolar(context: inout GraphicsContext, store: RFMappingStore, pl
         height: min(220, outer * 2),
         low: plot.low,
         high: plot.high,
-        palette: store.palette,
-        suffix: store.valueMode.suffix
+        palette: isDelay ? nil : store.palette,
+        suffix: isDelay ? " ms" : store.valueMode.suffix
     )
 }
 
-func polarCellPath(center: CGPoint, scale: CGFloat, rInner: Double, rOuter: Double, thetaStart: Double, thetaEnd: Double) -> Path {
-    let nArc = 16
+func polarCellPath(
+    center: CGPoint,
+    scale: CGFloat,
+    rInner: Double,
+    rOuter: Double,
+    thetaStart: Double,
+    thetaEnd: Double,
+    arcSegments: Int = 16
+) -> Path {
+    let nArc = max(2, arcSegments)
     var points: [CGPoint] = []
     for index in 0..<nArc {
         let t = thetaStart + (thetaEnd - thetaStart) * Double(index) / Double(nArc - 1)
@@ -170,7 +244,17 @@ func polarCellPath(center: CGPoint, scale: CGFloat, rInner: Double, rOuter: Doub
     return path
 }
 
-private func polarPath(for cell: CellRef, layout: PolarLayout) -> Path? {
+/// Keeps broad polar sectors visibly curved without paying the full sampling
+/// cost for every narrow sector. In particular, a single 360-degree sector
+/// needs more than three samples because its first and last points coincide.
+func polarArcSampleCount(thetaStart: Double, thetaEnd: Double) -> Int {
+    guard thetaStart.isFinite, thetaEnd.isFinite else { return 16 }
+    let maximumStep = Double.pi / 8.0
+    let cappedSpan = min(abs(thetaEnd - thetaStart), 4.0 * Double.pi)
+    return max(3, min(33, Int(ceil(cappedSpan / maximumStep)) + 1))
+}
+
+func polarPath(for cell: CellRef, layout: PolarLayout) -> Path? {
     guard let displayRow = layout.yGroups.firstIndex(where: { $0.start <= cell.yStart && cell.yStart <= $0.end }),
           let ringIndex = layout.ringRows.firstIndex(of: displayRow),
           let col = layout.xGroups.firstIndex(where: { $0.start <= cell.xStart && cell.xStart <= $0.end }) else {
@@ -188,7 +272,7 @@ private func polarPath(for cell: CellRef, layout: PolarLayout) -> Path? {
     )
 }
 
-private func polarCell(at point: CGPoint, layout: PolarLayout) -> (ring: Int, cell: CellRef)? {
+func polarCell(at point: CGPoint, layout: PolarLayout) -> (ring: Int, cell: CellRef)? {
     let dx = Double((point.x - layout.center.x) / layout.scale)
     let dy = Double((layout.center.y - point.y) / layout.scale)
     let radius = hypot(dx, dy)

@@ -4,7 +4,7 @@ set -euo pipefail
 MODE="${1:-run}"
 APP_NAME="RF Mapping Viewer"
 EXECUTABLE_NAME="RFMappingSwiftUI"
-BUNDLE_ID="org.local.rfmapping.viewer"
+BUNDLE_ID="org.local.rfmapping.viewer.swift"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST_DIR="$ROOT_DIR/dist"
