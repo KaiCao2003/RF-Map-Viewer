@@ -1,0 +1,32 @@
+# macOS and editor metadata
+.DS_Store
+._*
+.idea/
+.vscode/
+*.swp
+
+# Swift Package Manager and Xcode
+.build/
+.swiftpm/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+.venv/
+venv/
+
+# Packaging output
+build/
+dist/
+*.spec
+packaging/windows/Output/
+*.app/
+*.dmg
+*.exe
+*.msi
+*.zip
