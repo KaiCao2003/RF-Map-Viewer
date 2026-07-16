@@ -1,0 +1,175 @@
+name: Build distributions
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  validate-python:
+    name: Validate Python model
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+      - name: Run model tests
+        run: python -m unittest discover -s tests -p "test_rfmapping_gui.py"
+      - name: Validate synthetic demo
+        run: python rfmapping_gui.py --self-test data/demo_rf_map.json
+
+  build-swift-macos:
+    name: Build Swift macOS arm64
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v6
+      - name: Test Swift package
+        run: swift test
+      - name: Build arm64 application
+        run: script/build_macos_app.sh
+      - name: Inspect application architecture
+        run: |
+          test "$(lipo -archs 'dist/RF Map Viewer.app/Contents/MacOS/RFMappingSwiftUI')" = "arm64"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' 'dist/RF Map Viewer.app/Contents/Info.plist')" = "15.0"
+      - uses: actions/upload-artifact@v5
+        with:
+          name: swift-macos-arm64
+          path: dist/RF_Map_Viewer-macos-arm64.zip
+          if-no-files-found: error
+          compression-level: 0
+
+  build-python-macos:
+    name: Build Python macOS universal2
+    runs-on: macos-15-intel
+    env:
+      PYTHON_PACKAGE_URL: https://www.python.org/ftp/python/3.14.6/python-3.14.6-macos11.pkg
+      PYTHON_PACKAGE_SHA256: d3c9fff52214847e4fab03e9eaf53dd2a8e51e3534aa0b61f201b749f86bef28
+      RF_MAPPING_PYTHON_BIN: /Library/Frameworks/Python.framework/Versions/3.14/bin/python3
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install universal2 Python 3.14
+        run: |
+          curl --fail --location --retry 3 "$PYTHON_PACKAGE_URL" --output "$RUNNER_TEMP/python.pkg"
+          actual="$(shasum -a 256 "$RUNNER_TEMP/python.pkg" | awk '{print $1}')"
+          test "$actual" = "$PYTHON_PACKAGE_SHA256"
+          sudo installer -pkg "$RUNNER_TEMP/python.pkg" -target /
+          "$RF_MAPPING_PYTHON_BIN" -c 'import platform, tkinter; print(platform.platform(), tkinter.TkVersion)'
+      - name: Run Python model tests
+        run: |
+          "$RF_MAPPING_PYTHON_BIN" -m unittest discover -s tests -p "test_rfmapping_gui.py"
+      - name: Build universal2 application
+        run: script/build_python_macos_app.sh
+      - name: Inspect archive
+        run: |
+          unzip -tq dist/python/RF_Map_Viewer-python-macos-universal2.zip
+          if unzip -Z1 dist/python/RF_Map_Viewer-python-macos-universal2.zip | grep -Eq '(^|/)__MACOSX/|(^|/)\._'; then
+            echo "Archive contains AppleDouble metadata" >&2
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v5
+        with:
+          name: python-macos-universal2
+          path: dist/python/RF_Map_Viewer-python-macos-universal2.zip
+          if-no-files-found: error
+          compression-level: 0
+
+  build-python-windows:
+    name: Build Python Windows x64
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+          architecture: x64
+      - name: Run Python model tests
+        run: python -m unittest discover -s tests -p "test_rfmapping_gui.py"
+      - name: Install packaging tools
+        shell: pwsh
+        run: |
+          python -m pip install --disable-pip-version-check pyinstaller==6.21.0 pillow
+          choco install innosetup --yes --no-progress
+      - name: Build and stage portable application
+        shell: pwsh
+        run: |
+          $distRoot = Join-Path $env:RUNNER_TEMP "rf-map-viewer-dist"
+          $workRoot = Join-Path $env:RUNNER_TEMP "rf-map-viewer-work"
+          $specRoot = Join-Path $env:RUNNER_TEMP "rf-map-viewer-spec"
+          python -m PyInstaller `
+            --noconfirm `
+            --clean `
+            --windowed `
+            --onedir `
+            --noupx `
+            --name "RF Map Viewer" `
+            --icon "assets\rf-mapping-viewer-icon-1024.png" `
+            --distpath $distRoot `
+            --workpath $workRoot `
+            --specpath $specRoot `
+            "rfmapping_gui.py"
+
+          $stage = Join-Path $PWD "dist\windows\RF Map Viewer"
+          New-Item -ItemType Directory -Force "$stage\App", "$stage\Resources\data" | Out-Null
+          Copy-Item "$distRoot\RF Map Viewer\*" "$stage\App" -Recurse -Force
+          Copy-Item "data\*" "$stage\Resources\data" -Recurse -Force
+
+          & "$stage\App\RF Map Viewer.exe" --self-test "$stage\Resources\data\demo_rf_map.json"
+          if ($LASTEXITCODE -ne 0) { throw "Portable executable self-test failed with exit code $LASTEXITCODE" }
+
+          Compress-Archive `
+            -Path "$stage\*" `
+            -DestinationPath "dist\windows\RF_Map_Viewer-python-windows-x64-portable.zip" `
+            -CompressionLevel Optimal
+      - name: Build and test installer
+        shell: pwsh
+        run: |
+          $stage = Join-Path $PWD "dist\windows\RF Map Viewer"
+          $iscc = Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { throw "Inno Setup compiler not found: $iscc" }
+          & $iscc "/DSourceRoot=$stage" "packaging\windows\RFMapViewer.iss"
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE" }
+
+          $setup = Join-Path $PWD "dist\windows\RF_Map_Viewer-python-windows-x64-setup.exe"
+          $installed = Join-Path $env:RUNNER_TEMP "rf-map-viewer-installed"
+          & $setup /VERYSILENT /SUPPRESSMSGBOXES /NORESTART "/DIR=$installed"
+          if ($LASTEXITCODE -ne 0) { throw "Installer smoke test failed with exit code $LASTEXITCODE" }
+          & "$installed\App\RF Map Viewer.exe" --self-test "$installed\Resources\data\demo_rf_map.json"
+          if ($LASTEXITCODE -ne 0) { throw "Installed executable self-test failed with exit code $LASTEXITCODE" }
+      - uses: actions/upload-artifact@v5
+        with:
+          name: python-windows-x64
+          path: |
+            dist/windows/RF_Map_Viewer-python-windows-x64-portable.zip
+            dist/windows/RF_Map_Viewer-python-windows-x64-setup.exe
+          if-no-files-found: error
+          compression-level: 0
+
+  publish-release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs:
+      - validate-python
+      - build-swift-macos
+      - build-python-macos
+      - build-python-windows
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v6
+        with:
+          path: release-assets
+          merge-multiple: true
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes --title "RF Map Viewer $GITHUB_REF_NAME"
+          fi
+          gh release upload "$GITHUB_REF_NAME" release-assets/* --repo "$GITHUB_REPOSITORY" --clobber
