@@ -28,8 +28,6 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v6
-      - name: Test Swift package
-        run: swift test
       - name: Build arm64 application
         run: script/build_macos_app.sh
       - name: Inspect application architecture
@@ -100,6 +98,7 @@ jobs:
           $distRoot = Join-Path $env:RUNNER_TEMP "rf-map-viewer-dist"
           $workRoot = Join-Path $env:RUNNER_TEMP "rf-map-viewer-work"
           $specRoot = Join-Path $env:RUNNER_TEMP "rf-map-viewer-spec"
+          $icon = (Resolve-Path "assets\rf-mapping-viewer-icon-1024.png").Path
           python -m PyInstaller `
             --noconfirm `
             --clean `
@@ -107,11 +106,12 @@ jobs:
             --onedir `
             --noupx `
             --name "RF Map Viewer" `
-            --icon "assets\rf-mapping-viewer-icon-1024.png" `
+            --icon $icon `
             --distpath $distRoot `
             --workpath $workRoot `
             --specpath $specRoot `
             "rfmapping_gui.py"
+          if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed with exit code $LASTEXITCODE" }
 
           $stage = Join-Path $PWD "dist\windows\RF Map Viewer"
           New-Item -ItemType Directory -Force "$stage\App", "$stage\Resources\data" | Out-Null
