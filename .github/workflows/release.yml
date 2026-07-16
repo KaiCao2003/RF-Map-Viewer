@@ -25,16 +25,20 @@ jobs:
 
   build-swift-macos:
     name: Build Swift macOS arm64
-    runs-on: macos-15
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v6
+      - name: Show Swift toolchain
+        run: |
+          xcodebuild -version
+          swift --version
       - name: Build arm64 application
         run: script/build_macos_app.sh
       - name: Inspect application architecture
         run: |
           test "$(lipo -archs 'dist/RF Map Viewer.app/Contents/MacOS/RFMappingSwiftUI')" = "arm64"
           test "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' 'dist/RF Map Viewer.app/Contents/Info.plist')" = "15.0"
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v6
         with:
           name: swift-macos-arm64
           path: dist/RF_Map_Viewer-macos-arm64.zip
@@ -69,7 +73,7 @@ jobs:
             echo "Archive contains AppleDouble metadata" >&2
             exit 1
           fi
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v6
         with:
           name: python-macos-universal2
           path: dist/python/RF_Map_Viewer-python-macos-universal2.zip
@@ -136,11 +140,21 @@ jobs:
 
           $setup = Join-Path $PWD "dist\windows\RF_Map_Viewer-python-windows-x64-setup.exe"
           $installed = Join-Path $env:RUNNER_TEMP "rf-map-viewer-installed"
-          & $setup /VERYSILENT /SUPPRESSMSGBOXES /NORESTART "/DIR=$installed"
-          if ($LASTEXITCODE -ne 0) { throw "Installer smoke test failed with exit code $LASTEXITCODE" }
-          & "$installed\App\RF Map Viewer.exe" --self-test "$installed\Resources\data\demo_rf_map.json"
+          $installer = Start-Process `
+            -FilePath $setup `
+            -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/DIR=$installed") `
+            -Wait `
+            -PassThru
+          if ($installer.ExitCode -ne 0) { throw "Installer smoke test failed with exit code $($installer.ExitCode)" }
+
+          $installedExecutable = "$installed\App\RF Map Viewer.exe"
+          if (-not (Test-Path $installedExecutable)) {
+            Get-ChildItem $installed -Recurse -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName
+            throw "Installer completed but executable is missing: $installedExecutable"
+          }
+          & $installedExecutable --self-test "$installed\Resources\data\demo_rf_map.json"
           if ($LASTEXITCODE -ne 0) { throw "Installed executable self-test failed with exit code $LASTEXITCODE" }
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v6
         with:
           name: python-windows-x64
           path: |
