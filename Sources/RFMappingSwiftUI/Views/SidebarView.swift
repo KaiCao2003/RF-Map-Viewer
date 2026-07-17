@@ -2,6 +2,8 @@ import SwiftUI
 
 struct SidebarView: View {
     @Bindable var store: RFMappingStore
+    @Bindable var pairingCoordinator: WindowPairingCoordinator
+    let pairingWindowID: UUID
 
     var body: some View {
         ScrollView {
@@ -9,6 +11,8 @@ struct SidebarView: View {
                 titleSection
                 Divider()
                 jsonSection
+                Divider()
+                pairingSection
                 Divider()
                 unitSection
                 Divider()
@@ -24,9 +28,37 @@ struct SidebarView: View {
         .background(.bar)
     }
 
+    private var pairingSection: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text("Window pairing").font(.headline)
+            Toggle("Sync viewer windows", isOn: Binding(
+                get: { pairingCoordinator.isPairingEnabled },
+                set: { pairingCoordinator.setPairingEnabled($0, sourceID: pairingWindowID) }
+            ))
+            .disabled(!pairingCoordinator.isPairingEnabled && !pairingCoordinator.eligibility.canEnable)
+            .help("Pair loaded windows whose ordered unit lists match exactly")
+
+            Text(pairingCoordinator.statusText())
+                .font(.caption)
+                .foregroundStyle(pairingStatusColor)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var pairingStatusColor: Color {
+        switch pairingCoordinator.eligibility {
+        case .matching:
+            pairingCoordinator.isPairingEnabled ? .green : .secondary
+        case .noSecondWindow:
+            .secondary
+        case .mismatch:
+            .orange
+        }
+    }
+
     private var titleSection: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Label("RF Mapping Viewer", systemImage: "waveform.path.ecg.rectangle")
+            Label("RF Map Viewer", systemImage: "waveform.path.ecg.rectangle")
                 .font(.system(size: 17, weight: .semibold))
             Text(store.dataSummary)
                 .font(.callout)

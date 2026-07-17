@@ -882,6 +882,7 @@ private struct TimelineScrollOffsetTracker: NSViewRepresentable {
         private weak var clipView: NSClipView?
         private weak var scrollView: NSScrollView?
         private var observer: NSObjectProtocol?
+        private var isRestoring = false
 
         init(fraction: Binding<Double>) {
             self.fraction = fraction
@@ -902,7 +903,8 @@ private struct TimelineScrollOffsetTracker: NSViewRepresentable {
             ) { [weak self] _ in
                 MainActor.assumeIsolated {
                     guard let self, let clipView = self.clipView,
-                          let documentView = self.scrollView?.documentView else { return }
+                          let documentView = self.scrollView?.documentView,
+                          !self.isRestoring else { return }
                     let maximum = max(0, documentView.bounds.height - clipView.bounds.height)
                     if maximum > 0 {
                         self.fraction.wrappedValue = max(
@@ -919,8 +921,12 @@ private struct TimelineScrollOffsetTracker: NSViewRepresentable {
             let maximum = max(0, documentView.bounds.height - clipView.bounds.height)
             let requested = maximum * CGFloat(max(0, min(1, fraction.wrappedValue)))
             guard abs(clipView.bounds.origin.y - requested) > 0.5 else { return }
+            isRestoring = true
             clipView.scroll(to: CGPoint(x: clipView.bounds.origin.x, y: requested))
             scrollView.reflectScrolledClipView(clipView)
+            DispatchQueue.main.async { [weak self] in
+                self?.isRestoring = false
+            }
         }
 
         func detach() {
@@ -928,6 +934,7 @@ private struct TimelineScrollOffsetTracker: NSViewRepresentable {
             observer = nil
             clipView = nil
             scrollView = nil
+            isRestoring = false
         }
 
         deinit {

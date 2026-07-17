@@ -124,6 +124,7 @@ final class RFMappingStore {
     @ObservationIgnored private var cellAnalysisCaches: [(key: CellAnalysisCacheKey, value: CellAnalysis)] = []
     @ObservationIgnored private var loadRequestID: UUID?
     @ObservationIgnored private var activeDecodeTask: Task<RFMappingData, Error>?
+    @ObservationIgnored var pairingDataDidChange: (() -> Void)?
 
     var data: RFMappingData?
     var availableJSONURLs: [URL] = []
@@ -198,6 +199,32 @@ final class RFMappingStore {
 
     var hasData: Bool { data != nil }
 
+    var viewerSyncState: ViewerSyncState {
+        ViewerSyncState(
+            unitIndex: unitIndex,
+            valueMode: valueMode,
+            activeTimeMS: timeGroupCenterMS(binIndex),
+            rangeStartMS: rangeStartMS,
+            rangeEndMS: rangeEndMS,
+            plotRangeStartMS: plotRangeStartMS,
+            plotRangeEndMS: plotRangeEndMS,
+            timeResolutionMS: timeResolutionMS,
+            xBins: xBins,
+            yBins: yBins,
+            smoothRadius: smoothRadius,
+            flipY: flipY,
+            palette: palette,
+            polarRadiusMode: polarRadiusMode,
+            spatialPlotFormat: spatialPlotFormat,
+            delayRGBMode: delayRGBMode,
+            responseFloor: responseFloor,
+            selectedTab: selectedTab,
+            selectedCell: selectedCell,
+            timelineRangeAnchorMS: timelineRangeAnchor.map(timeGroupCenterMS),
+            timelineScrollFraction: timelineScrollFraction
+        )
+    }
+
     var dataSummary: String {
         guard let data else { return "No JSON loaded" }
         return """
@@ -208,12 +235,12 @@ final class RFMappingStore {
     }
 
     var headerTitle: String {
-        guard let data else { return "RF Mapping Viewer" }
+        guard let data else { return "RF Map Viewer" }
         return "Unit \(String(format: "%03d", unitIndex)) / cluster \(data.clusterID(for: unitIndex))"
     }
 
     var windowTitle: String {
-        data.map { "\($0.url.lastPathComponent) — RF Mapping Viewer" } ?? "RF Mapping Viewer"
+        data.map { "\($0.url.lastPathComponent) — RF Map Viewer" } ?? "RF Map Viewer"
     }
 
     var statusText: String {
@@ -361,6 +388,91 @@ final class RFMappingStore {
         normalizeControls()
         ensureSelectedCell()
         refreshJSONChoices()
+        pairingDataDidChange?()
+    }
+
+    /// Applies paired-window state in one normalization pass. A target may use
+    /// a different time axis or spatial grid even though its ordered unit list
+    /// matches, so every index, range, and dimension is snapped locally.
+    func applyViewerSyncState(
+        _ state: ViewerSyncState,
+        fields: ViewerSyncFields = .all
+    ) {
+        guard let data else { return }
+        let state = viewerSyncState.merging(state, fields: fields)
+
+        unitIndex = state.unitIndex
+        valueMode = data.supports(state.valueMode) ? state.valueMode : .spikeCount
+        timeResolutionMS = finiteOr(state.timeResolutionMS, fallback: baseBinMS())
+        xBins = state.xBins
+        yBins = state.yBins
+        smoothRadius = state.smoothRadius
+        flipY = state.flipY
+        palette = state.palette
+        polarRadiusMode = state.polarRadiusMode
+        spatialPlotFormat = state.spatialPlotFormat
+        delayRGBMode = state.delayRGBMode
+        responseFloor = max(0, finiteOr(state.responseFloor, fallback: 0))
+        selectedTab = state.selectedTab
+
+        rangeStartMS = finiteOr(state.rangeStartMS, fallback: timeAxisStartMS())
+        rangeEndMS = finiteOr(state.rangeEndMS, fallback: timeAxisEndMS())
+        plotRangeStartMS = finiteOr(state.plotRangeStartMS, fallback: timeAxisStartMS())
+        plotRangeEndMS = finiteOr(state.plotRangeEndMS, fallback: timeAxisEndMS())
+        binIndex = 0
+        timelineRangeAnchor = nil
+
+        normalizeControls()
+        binIndex = nearestTimeGroupIndex(to: state.activeTimeMS)
+        timelineRangeAnchor = state.timelineRangeAnchorMS.map(nearestTimeGroupIndex)
+        selectedCell = state.selectedCell.map(normalizedCell)
+        timelineScrollFraction = max(
+            0,
+            min(1, finiteOr(state.timelineScrollFraction, fallback: 0))
+        )
+    }
+
+    func applyTimelineScrollFraction(_ fraction: Double) {
+        timelineScrollFraction = max(0, min(1, finiteOr(fraction, fallback: 0)))
+    }
+
+    private func normalizedCell(_ cell: CellRef) -> CellRef {
+        guard let data else { return cell }
+        let rawXMidpoint = cell.xStart + (cell.xEnd - cell.xStart) / 2
+        let rawYMidpoint = cell.yStart + (cell.yEnd - cell.yStart) / 2
+        let xMidpoint = max(0, min(data.nX - 1, rawXMidpoint))
+        let yMidpoint = max(0, min(data.nY - 1, rawYMidpoint))
+        let xGroup = xGroups().first {
+            $0.start <= xMidpoint && xMidpoint <= $0.end
+        } ?? xGroups().first ?? AxisGroup(start: 0, end: 0)
+        let yGroup = displayYGroups().first {
+            $0.start <= yMidpoint && yMidpoint <= $0.end
+        } ?? displayYGroups().first ?? AxisGroup(start: 0, end: 0)
+        return CellRef(
+            yStart: yGroup.start,
+            yEnd: yGroup.end,
+            xStart: xGroup.start,
+            xEnd: xGroup.end
+        )
+    }
+
+    private func nearestTimeGroupIndex(to requestedTimeMS: Double) -> Int {
+        let time = finiteOr(requestedTimeMS, fallback: timeAxisStartMS())
+        let count = timeGroupCount()
+        for index in 0..<count {
+            let bounds = timeGroupBoundsMS(index)
+            let isLast = index == count - 1
+            if bounds.0 <= time && (time < bounds.1 || (isLast && time <= bounds.1)) {
+                return index
+            }
+        }
+        return (0..<count).min {
+            abs(timeGroupCenterMS($0) - time) < abs(timeGroupCenterMS($1) - time)
+        } ?? 0
+    }
+
+    private func finiteOr(_ value: Double, fallback: Double) -> Double {
+        value.isFinite ? value : fallback
     }
 
     private func clearDerivedCaches() {
@@ -438,6 +550,9 @@ final class RFMappingStore {
         }
         normalizeSelectedTimeRange()
         normalizePlotTimeRange()
+        if let selectedCell {
+            self.selectedCell = normalizedCell(selectedCell)
+        }
     }
 
     func normalizeSelectedTimeRange() {
@@ -466,7 +581,12 @@ final class RFMappingStore {
     func ensureSelectedCell() {
         guard selectedCell == nil, let data else { return }
         let metrics = data.metrics(for: unitIndex)
-        selectedCell = CellRef(yStart: metrics.bestY, yEnd: metrics.bestY, xStart: metrics.bestX, xEnd: metrics.bestX)
+        selectedCell = normalizedCell(CellRef(
+            yStart: metrics.bestY,
+            yEnd: metrics.bestY,
+            xStart: metrics.bestX,
+            xEnd: metrics.bestX
+        ))
     }
 
     func setHover(_ cell: CellRef, location: CGPoint, extra: String = "", displayBin: Int? = nil) {

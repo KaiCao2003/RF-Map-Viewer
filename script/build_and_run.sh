@@ -2,7 +2,7 @@
 set -euo pipefail
 
 MODE="${1:-run}"
-APP_NAME="RF Mapping Viewer"
+APP_NAME="RF Map Viewer"
 EXECUTABLE_NAME="RFMappingSwiftUI"
 BUNDLE_ID="org.local.rfmapping.viewer.swift"
 
