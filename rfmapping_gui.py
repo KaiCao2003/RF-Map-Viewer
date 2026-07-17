@@ -38,6 +38,8 @@ DEFAULT_JSON = DEFAULT_JSON_DIR / "unitsSpikeCounts_260701_1.json"
 INNER_BLANK_ROWS = 4
 POLAR_PAD_ROWS = 1
 STARTUP_EVENT_WAIT_MS = 350
+DEFAULT_RF_SUM_START_MS = 0.0
+DEFAULT_RF_SUM_END_MS = 200.0
 VALUE_MODE_COUNT = "Spike count"
 VALUE_MODE_PER_PRESENTATION = "Spikes / presentation"
 VALUE_MODE_RATE = "Mean firing rate (Hz)"
@@ -175,13 +177,15 @@ class UnitMetrics:
 class ViewerSyncState:
     """Persistent viewer controls shared by paired windows.
 
-    Time selections are stored in physical milliseconds so compatible unit
-    lists can still be paired when their files use different time axes or
-    display-group resolutions.  A selected spatial cell is represented by its
-    source-index midpoint for the same reason.
+    The selected unit is stored by cluster ID rather than by its per-file
+    array index so windows with different unit lists can still be paired.
+    Time selections are stored in physical milliseconds so files with
+    different time axes or display-group resolutions remain synchronized. A
+    selected spatial cell is represented by its source-index midpoint for the
+    same reason.
     """
 
-    unit_index: int
+    unit_id: int
     value_mode: str
     timeline_bin_center_ms: float
     timeline_selection_start_ms: float
@@ -205,7 +209,7 @@ class ViewerSyncState:
 
     def changed_fields(self, baseline: ViewerSyncState) -> frozenset[str]:
         fields: set[str] = set()
-        if self.unit_index != baseline.unit_index:
+        if self.unit_id != baseline.unit_id:
             fields.add("unit")
         if self.value_mode != baseline.value_mode:
             fields.add("value_mode")
@@ -255,7 +259,7 @@ class ViewerSyncState:
     ) -> ViewerSyncState:
         updates: dict[str, object] = {}
         if "unit" in fields:
-            updates["unit_index"] = incoming.unit_index
+            updates["unit_id"] = incoming.unit_id
         if "value_mode" in fields:
             updates["value_mode"] = incoming.value_mode
         if "active_time" in fields:
@@ -1177,6 +1181,8 @@ class RFMViewer(tk.Toplevel):
         self.minsize(1120, 720)
 
         self.unit_idx = tk.IntVar(value=0)
+        self._selected_unit_id = data.unit_pool[0]
+        self._last_supported_unit_id = data.unit_pool[0]
         self.value_mode_var = tk.StringVar(value=VALUE_MODE_COUNT)
         self.bin_var = tk.IntVar(value=0)
         self.range_start_var = tk.IntVar(value=0)
@@ -1604,7 +1610,7 @@ class RFMViewer(tk.Toplevel):
         self.rgb_mode_toggle.grid(row=1, column=6, columnspan=2, sticky="w", pady=(8, 0))
         ttk.Button(
             controls,
-            text="Reset 0–20",
+            text="Reset 0–200",
             command=self._reset_plot_range,
         ).grid(row=1, column=8, sticky="e", pady=(8, 0), padx=(18, 0))
 
@@ -1741,26 +1747,120 @@ class RFMViewer(tk.Toplevel):
             if getattr(window, "_viewer_ready", False) and hasattr(window, "data")
         ]
 
+    def _pairing_unit_ids(
+        self,
+        ready: list[RFMViewer] | None = None,
+    ) -> list[int]:
+        viewers = self._ready_pairing_viewers() if ready is None else ready
+        return sorted(
+            {
+                int(unit_id)
+                for window in viewers
+                for unit_id in window.data.unit_pool
+            }
+        )
+
+    @staticmethod
+    def _unit_lists_match(ready: list[RFMViewer]) -> bool:
+        if len(ready) < 2:
+            return True
+        first_units = tuple(int(unit_id) for unit_id in ready[0].data.unit_pool)
+        return all(
+            tuple(int(unit_id) for unit_id in window.data.unit_pool) == first_units
+            for window in ready[1:]
+        )
+
+    @staticmethod
+    def _next_union_unit_id(unit_ids: list[int], requested: int) -> int:
+        if not unit_ids:
+            raise ValueError("Cannot select a unit from an empty unit union")
+        requested = int(requested)
+        if requested in unit_ids:
+            return requested
+        return next((unit_id for unit_id in unit_ids if unit_id > requested), unit_ids[0])
+
+    def _local_unit_index(self, unit_id: int) -> int | None:
+        try:
+            return self.data.unit_pool.index(int(unit_id))
+        except ValueError:
+            return None
+
+    def _selected_unit_id_value(self) -> int:
+        selected = self.__dict__.get("_selected_unit_id")
+        if selected is not None:
+            return int(selected)
+        local_index = int(self.unit_idx.get())
+        if 0 <= local_index < self.data.n_units:
+            return int(self.data.cluster_id(local_index))
+        return int(self.data.unit_pool[0])
+
+    def _selected_local_unit_index(self) -> int | None:
+        unit_id = self._selected_unit_id_value()
+        local_index = self._local_unit_index(unit_id)
+        if local_index is None:
+            return None
+        if int(self.unit_idx.get()) != local_index:
+            self.unit_idx.set(local_index)
+        return local_index
+
+    def _set_selected_unit_id(self, unit_id: int) -> None:
+        unit_id = int(unit_id)
+        self._selected_unit_id = unit_id
+        local_index = self._local_unit_index(unit_id)
+        if local_index is None:
+            self.unit_idx.set(-1)
+        else:
+            self.unit_idx.set(local_index)
+            self._last_supported_unit_id = unit_id
+        if hasattr(self, "unit_combo"):
+            self._sync_unit_combo()
+
+    def _restore_local_unit_selection(self) -> None:
+        local_units = [int(unit_id) for unit_id in self.data.unit_pool]
+        if not local_units:
+            return
+        selected = self._selected_unit_id_value()
+        if selected in local_units:
+            target = selected
+        else:
+            last_supported = self.__dict__.get("_last_supported_unit_id")
+            target = int(last_supported) if last_supported in local_units else local_units[0]
+        changed = target != selected or self._selected_local_unit_index() is None
+        self._set_selected_unit_id(target)
+        if changed and self.__dict__.get("_viewer_ready", False):
+            self.selected_cell = None
+            self._update_all()
+
+    def _unit_navigation_ids(self) -> list[int]:
+        if getattr(self._app_root, "_rfm_pairing_enabled", False):
+            ready, eligible = self._pairing_eligibility()
+            if eligible:
+                return self._pairing_unit_ids(ready)
+        return [int(unit_id) for unit_id in self.data.unit_pool]
+
     def _pairing_eligibility(self) -> tuple[list[RFMViewer], bool]:
         ready = self._ready_pairing_viewers()
-        if len(ready) < 2:
-            return ready, False
-        first_units = tuple(ready[0].data.unit_pool)
-        return ready, all(tuple(window.data.unit_pool) == first_units for window in ready[1:])
+        return ready, len(ready) >= 2
 
     def _refresh_pairing_controls(self) -> None:
         ready, eligible = self._pairing_eligibility()
         active = bool(getattr(self._app_root, "_rfm_pairing_enabled", False) and eligible)
+        matching_units = self._unit_lists_match(ready)
         if len(ready) < 2:
             status = "Open another loaded viewer window to enable sync."
-        elif not eligible:
-            status = "Sync unavailable: loaded windows have different ordered unit lists."
+        elif not matching_units:
+            prefix = f"{len(ready)} windows paired. " if active else f"{len(ready)} windows ready. "
+            status = (
+                prefix
+                + "Unit lists differ; these files may be from different sessions. "
+                "Missing units display N/A."
+            )
         elif active:
             status = (
                 f"{len(ready)} windows paired. Changes in any paired window sync to the others."
             )
         else:
-            status = f"{len(ready)} loaded windows have matching ordered unit lists."
+            status = f"{len(ready)} loaded windows have matching unit lists."
 
         windows = getattr(self._app_root, "_rfm_viewer_windows", [])
         for window in windows:
@@ -1774,6 +1874,8 @@ class RFMViewer(tk.Toplevel):
                     )
                 if hasattr(window, "pair_status_label"):
                     window.pair_status_label.configure(text=status)
+                if getattr(window, "_viewer_ready", False) and hasattr(window, "_sync_unit_combo"):
+                    window._sync_unit_combo()
             except tk.TclError:
                 continue
 
@@ -1783,6 +1885,8 @@ class RFMViewer(tk.Toplevel):
         self._app_root._rfm_pairing_broadcasting = False
         for window in self._ready_pairing_viewers():
             window._pair_last_local_state = None
+            if hasattr(window, "_restore_local_unit_selection"):
+                window._restore_local_unit_selection()
         self._refresh_pairing_controls()
 
     def _pair_ready_viewer_set_changed(
@@ -1804,10 +1908,24 @@ class RFMViewer(tk.Toplevel):
             state = source._capture_pairing_state()
             source._pair_last_local_state = state
             self._app_root._rfm_pairing_state = state
-        if adopt_viewer is not None and adopt_viewer in ready:
+        unit_ids = self._pairing_unit_ids(ready)
+        normalized_unit_id = self._next_union_unit_id(unit_ids, state.unit_id)
+        unit_changed = normalized_unit_id != state.unit_id
+        if unit_changed:
+            state = replace(state, unit_id=normalized_unit_id)
+            self._app_root._rfm_pairing_state = state
+
+        recipients = ready if unit_changed else (
+            [adopt_viewer] if adopt_viewer is not None and adopt_viewer in ready else []
+        )
+        if recipients:
             self._app_root._rfm_pairing_broadcasting = True
             try:
-                adopt_viewer._apply_pairing_state(state)
+                for window in recipients:
+                    if unit_changed and window is not adopt_viewer:
+                        window._apply_pairing_state(state, frozenset({"unit"}))
+                    else:
+                        window._apply_pairing_state(state)
             finally:
                 self._app_root._rfm_pairing_broadcasting = False
         self._refresh_pairing_controls()
@@ -1866,7 +1984,7 @@ class RFMViewer(tk.Toplevel):
             selected_tab = "rf"
 
         return ViewerSyncState(
-            unit_index=max(0, min(self.data.n_units - 1, int(self.unit_idx.get()))),
+            unit_id=self._selected_unit_id_value(),
             value_mode=value_mode,
             timeline_bin_center_ms=self._time_group_center_ms(current_bin),
             timeline_selection_start_ms=timeline_start_ms,
@@ -1991,10 +2109,7 @@ class RFMViewer(tk.Toplevel):
                     (float(x_start) + float(x_end)) / 2.0,
                 )
             if "unit" in fields:
-                unit_index = max(0, min(self.data.n_units - 1, int(state.unit_index)))
-                self.unit_idx.set(unit_index)
-                if hasattr(self, "unit_combo"):
-                    self.unit_combo.current(unit_index)
+                self._set_selected_unit_id(state.unit_id)
             if "value_mode" in fields:
                 value_mode = state.value_mode
                 if (
@@ -2272,25 +2387,45 @@ class RFMViewer(tk.Toplevel):
         self._load_json_path(path)
 
     def _sync_unit_combo(self) -> None:
-        values = [
-            f"{idx:03d}  cluster {cluster_id}"
-            for idx, cluster_id in enumerate(self.data.unit_pool)
-        ]
+        unit_ids = self._unit_navigation_ids()
+        self._unit_combo_unit_ids = unit_ids
+        values: list[str] = []
+        for unit_id in unit_ids:
+            local_index = self._local_unit_index(unit_id)
+            if local_index is None:
+                values.append(f"N/A  cluster {unit_id} — not in this session")
+            else:
+                values.append(f"{local_index:03d}  cluster {unit_id}")
         self.unit_combo.configure(values=values)
-        self.unit_combo.current(self.unit_idx.get())
+        selected_unit_id = self._selected_unit_id_value()
+        try:
+            selected_index = unit_ids.index(selected_unit_id)
+        except ValueError:
+            self.unit_combo.set("")
+        else:
+            self.unit_combo.current(selected_index)
 
     def _on_unit_selected(self, _event: object | None = None) -> None:
-        idx = self.unit_combo.current()
-        if idx >= 0:
-            self.unit_idx.set(idx)
+        combo_index = self.unit_combo.current()
+        unit_ids = self.__dict__.get("_unit_combo_unit_ids", [])
+        if 0 <= combo_index < len(unit_ids):
+            self._set_selected_unit_id(unit_ids[combo_index])
             self.selected_cell = None
             self._update_all()
             self._publish_pairing_state_if_changed()
 
     def _step_unit(self, delta: int) -> None:
-        idx = (self.unit_idx.get() + delta) % self.data.n_units
-        self.unit_idx.set(idx)
-        self.unit_combo.current(idx)
+        unit_ids = self._unit_navigation_ids()
+        if not unit_ids:
+            return
+        selected_unit_id = self._selected_unit_id_value()
+        try:
+            current_index = unit_ids.index(selected_unit_id)
+        except ValueError:
+            selected_unit_id = self._next_union_unit_id(unit_ids, selected_unit_id)
+            current_index = unit_ids.index(selected_unit_id)
+        target_unit_id = unit_ids[(current_index + int(delta)) % len(unit_ids)]
+        self._set_selected_unit_id(target_unit_id)
         self.selected_cell = None
         self._update_all()
         self._publish_pairing_state_if_changed()
@@ -2527,7 +2662,10 @@ class RFMViewer(tk.Toplevel):
             return fallback
 
     def _default_plot_time_bounds_ms(self) -> tuple[float, float]:
-        start, end = self._snap_time_range_to_bins(0.0, 20.0)
+        start, end = self._snap_time_range_to_bins(
+            DEFAULT_RF_SUM_START_MS,
+            DEFAULT_RF_SUM_END_MS,
+        )
         return (
             self.data.time_bin_edges[start] * 1000.0,
             self.data.time_bin_edges[end + 1] * 1000.0,
@@ -2585,12 +2723,43 @@ class RFMViewer(tk.Toplevel):
 
     def _draw_active_tab(self) -> None:
         key = self._active_tab_key()
+        if self._selected_local_unit_index() is None:
+            self._draw_unavailable_unit(key)
+            return
         if key == "rf":
             self._draw_rf()
         elif key == "delay":
             self._draw_rgb() if self.rgb_mode_var.get() else self._draw_delay()
         elif key == "timeline":
             self._draw_timeline()
+
+    def _draw_unavailable_unit(self, key: str) -> None:
+        canvas = self.canvases[key]
+        canvas.delete("all")
+        self._canvas_layouts.pop(key, None)
+        if key == "timeline":
+            self._timeline_cells = []
+            self._timeline_cells_by_bin = {}
+            self._timeline_preview_cache_key = None
+            self._timeline_preview_images = {}
+        width = max(canvas.winfo_width(), 300)
+        height = max(canvas.winfo_height(), 220)
+        canvas.configure(scrollregion=(0, 0, width, height))
+        unit_id = self._selected_unit_id_value()
+        canvas.create_text(
+            width / 2,
+            height / 2 - 14,
+            text="N/A",
+            fill="#667085",
+            font=("TkDefaultFont", 28, "bold"),
+        )
+        canvas.create_text(
+            width / 2,
+            height / 2 + 26,
+            text=f"Cluster {unit_id} is not available in this session.",
+            fill="#667085",
+            font=("TkDefaultFont", 12),
+        )
 
     def _update_all(self) -> None:
         if self._redraw_after is not None:
@@ -2600,9 +2769,6 @@ class RFMViewer(tk.Toplevel):
         self.hover_cell = None
         self._hover_signature = None
         self._hover_tooltip_text = ""
-        unit_idx = self.unit_idx.get()
-        cluster_id = self.data.cluster_id(unit_idx)
-        metrics = self.data.metrics(unit_idx)
         self.data_label.configure(
             text=(
                 f"{self.data.path}\n"
@@ -2611,6 +2777,26 @@ class RFMViewer(tk.Toplevel):
                 f"Firing-rate metadata: {'yes' if self.data.presentation_counts is not None else 'no'}"
             )
         )
+        unit_idx = self._selected_local_unit_index()
+        cluster_id = self._selected_unit_id_value()
+        if unit_idx is None:
+            self.selected_cell = None
+            self.header_label.configure(text=f"Unit N/A / cluster {cluster_id}")
+            self.status_label.configure(
+                text=(
+                    f"N/A: cluster {cluster_id} is not available in this session. "
+                    "Use ←/→ to continue through the paired unit list."
+                )
+            )
+            self.unit_stats_label.configure(
+                text="N/A\nThis unit is available only in another paired window."
+            )
+            self.cell_label.configure(text="N/A for this session")
+            self._sync_context_controls()
+            self._draw_active_tab()
+            return
+
+        metrics = self.data.metrics(unit_idx)
         self.header_label.configure(text=f"Unit {unit_idx:03d} / cluster {cluster_id}")
         self.status_label.configure(
             text=(
@@ -2636,17 +2822,23 @@ class RFMViewer(tk.Toplevel):
         self._draw_active_tab()
 
     def _current_matrix(self) -> list[list[float | None]]:
+        unit_idx = self._selected_local_unit_index()
+        if unit_idx is None:
+            return [[None for _x in range(self.data.n_x)] for _y in range(self.data.n_y)]
         start, end = self._source_bins_for_display_range()
         return self.data.response_matrix(
-            self.unit_idx.get(),
+            unit_idx,
             start,
             end,
             self.value_mode_var.get(),
         )
 
     def _delay_matrix_for_time_groups(self, floor: float = 0.0) -> list[list[float | None]]:
-        unit = self.data.counts[self.unit_idx.get()]
-        metrics = self.data.metrics(self.unit_idx.get())
+        unit_idx = self._selected_local_unit_index()
+        if unit_idx is None:
+            return [[None for _x in range(self.data.n_x)] for _y in range(self.data.n_y)]
+        unit = self.data.counts[unit_idx]
+        metrics = self.data.metrics(unit_idx)
         groups = self._time_groups()
         delay_matrix: list[list[float | None]] = []
         for y_idx in range(self.data.n_y):
@@ -2865,8 +3057,11 @@ class RFMViewer(tk.Toplevel):
 
     def _group_hist(self, y_start: int, y_end: int, x_start: int, x_end: int) -> list[float]:
         hist = [0.0 for _ in range(self.data.n_bins)]
+        unit_idx = self._selected_local_unit_index()
+        if unit_idx is None:
+            return hist
         n = max(1, (y_end - y_start + 1) * (x_end - x_start + 1))
-        unit = self.data.counts[self.unit_idx.get()]
+        unit = self.data.counts[unit_idx]
         for y_idx in range(y_start, y_end + 1):
             for x_idx in range(x_start, x_end + 1):
                 for bin_idx, value in enumerate(unit[y_idx][x_idx]):
@@ -2882,7 +3077,9 @@ class RFMViewer(tk.Toplevel):
         source_start: int,
         source_end: int,
     ) -> float | None:
-        unit_idx = self.unit_idx.get()
+        unit_idx = self._selected_local_unit_index()
+        if unit_idx is None:
+            return None
         value_mode = self.value_mode_var.get()
         values = [
             self.data.response_value(
@@ -3007,6 +3204,9 @@ class RFMViewer(tk.Toplevel):
         prefix: str = "",
         display_bin: int | None = None,
     ) -> None:
+        if self._selected_local_unit_index() is None:
+            self.cell_label.configure(text="N/A for this session")
+            return
         if cell is None and self.hover_cell is not None:
             cell = self.hover_cell
             prefix = "Hover\n"
@@ -4268,6 +4468,8 @@ class RFMViewer(tk.Toplevel):
         return ring_idx, (y_start, y_end, x_start, x_end)
 
     def _on_canvas_motion(self, key: str, event: tk.Event) -> None:
+        if self._selected_local_unit_index() is None:
+            return
         if key in {"rf", "delay"}:
             if self._canvas_layouts.get(key, {}).get("geometry") == "polar":
                 polar_cell = self._polar_cell_at(key, event)
@@ -4301,6 +4503,8 @@ class RFMViewer(tk.Toplevel):
 
     def _on_canvas_click(self, key: str, event: tk.Event) -> None:
         self.canvases[key].focus_set()
+        if self._selected_local_unit_index() is None:
+            return
         if key in {"rf", "delay"}:
             if self._canvas_layouts.get(key, {}).get("geometry") == "polar":
                 polar_cell = self._polar_cell_at(key, event)
@@ -4354,8 +4558,16 @@ class RFMViewer(tk.Toplevel):
         self.hover_cell = None
         self._hover_signature = None
         self._hover_tooltip_text = ""
-        if had_hover:
+        if had_hover and self._selected_local_unit_index() is not None:
             self._update_cell_label(cell=self.selected_cell)
+        if self._selected_local_unit_index() is None:
+            self.status_label.configure(
+                text=(
+                    f"N/A: cluster {self._selected_unit_id_value()} is not available in this "
+                    "session. Use ←/→ to continue through the paired unit list."
+                )
+            )
+            return
         self.status_label.configure(
             text=(
                 f"x: {format_pos(self.data.x_positions[0])}..{format_pos(self.data.x_positions[-1])}  "
@@ -4417,7 +4629,8 @@ class RFMViewer(tk.Toplevel):
         self.hover_cell = None
         self._hover_signature = None
         self._hover_tooltip_text = ""
-        self._update_cell_label(cell=self.selected_cell)
+        if self._selected_local_unit_index() is not None:
+            self._update_cell_label(cell=self.selected_cell)
 
     def _draw_hover_overlay(
         self,
@@ -4582,6 +4795,8 @@ class RFMViewer(tk.Toplevel):
             return
         self.title(f"{self.data.path.name} — RF Map Viewer")
         self.unit_idx.set(0)
+        self._selected_unit_id = self.data.unit_pool[0]
+        self._last_supported_unit_id = self.data.unit_pool[0]
         self.bin_var.set(0)
         self.range_start_var.set(0)
         self.time_res_ms_var.set(format_ms(self._base_bin_ms()))
@@ -4617,6 +4832,13 @@ class RFMViewer(tk.Toplevel):
         self._pair_ready_viewer_set_changed(adopt_viewer=self)
 
     def _export_current_matrix(self) -> None:
+        if self._selected_local_unit_index() is None:
+            messagebox.showinfo(
+                "Unit unavailable",
+                f"Cluster {self._selected_unit_id_value()} is not available in this session.",
+                parent=self,
+            )
+            return
         raw_matrix = self._current_matrix()
         matrix, x_groups, y_groups = self._prepare_plot_matrix(raw_matrix, smooth=True)
         export_space = "displayed"
