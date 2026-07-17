@@ -5,6 +5,11 @@ data stored as JSON. It provides rectangular and polar RF maps, delay and RGB
 views, time-bin timelines, response normalization, interactive selection, and
 synchronized multi-window viewing.
 
+Paired windows navigate the sorted union of their unit IDs. If a selected unit
+is absent from one file, that window displays **N/A** while the other controls
+remain synchronized; the pairing panel warns that differing unit lists may
+represent different sessions.
+
 The repository contains two implementations of the same viewer:
 
 - A native Swift/SwiftUI application for Apple silicon Macs running macOS 15
@@ -18,7 +23,6 @@ Choose an artifact from the latest GitHub Release:
 
 | Platform | Release asset | Notes |
 | --- | --- | --- |
-| macOS 15+, Apple silicon | `RF_Map_Viewer-macos-arm64.zip` | Native Swift/SwiftUI application |
 | macOS, Intel or Apple silicon | `RF_Map_Viewer-python-macos-universal2.zip` | Python/Tk universal2 application |
 | Windows 64-bit | `RF_Map_Viewer-python-windows-x64-portable.zip` | Portable build; extract before running |
 | Windows 64-bit | `RF_Map_Viewer-python-windows-x64-setup.exe` | Windows installer |
@@ -105,6 +109,7 @@ python -m unittest discover -s tests -p 'test_rfmapping_gui_tk.py'
 ## Automated releases
 
 The workflow in [`.github/workflows/release.yml`](.github/workflows/release.yml)
-builds platform-specific artifacts on their corresponding operating systems.
-Release archives and installers belong on the GitHub Release, not in the source
-tree.
+builds the Python/Tk releases for universal2 macOS and 64-bit Windows on their
+corresponding operating systems. A manual workflow run also validates the
+native Swift application. Release archives and installers belong on the GitHub
+Release, not in the source tree.
