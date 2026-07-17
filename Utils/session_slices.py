@@ -191,4 +191,22 @@ def check_session_slices(database_path: str | Path) -> SessionSliceStore:
     return session_slice_store
 
 
+def interp_missing_trials(start, end, num_insert, target: list | np.ndarray) -> np.ndarray:
+    target = np.array(target)
+
+    a = target[start]  # 47724427
+    b = target[end]  # 47788633
+
+    normal_dt = np.median(np.diff(target))
+    n_interval = round((b - a) / normal_dt)
+    n_insert = n_interval - 1
+
+    inserted_t = np.linspace(a, b, n_insert + 2)[1:-1]
+
+    result = np.insert(target, (start + 1), inserted_t)
+
+    result = np.delete(result, (start + num_insert))
+
+    return result
+
 __all__ = ["SessionSliceStore", "SliceBounds", "check_session_slices"]

@@ -1,5 +1,29 @@
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
+
 import numpy as np
+from numpy.typing import NDArray
+
+
+type FloatArray = NDArray[np.floating[Any]]
+type IntArray = NDArray[np.integer[Any]]
+
+
+@dataclass(frozen=True)
+class TemplatePtpSummary:
+    ptp_by_channel: FloatArray
+    best_channel_indices: IntArray
+    max_ptp_by_unit: FloatArray
+
+
+def compute_template_ptp_summary(template_array: FloatArray) -> TemplatePtpSummary:
+    ptp_by_channel: FloatArray = np.ptp(template_array, axis=1)
+    return TemplatePtpSummary(
+        ptp_by_channel=ptp_by_channel,
+        best_channel_indices=np.argmax(ptp_by_channel, axis=1),
+        max_ptp_by_unit=np.max(ptp_by_channel, axis=1),
+    )
 
 
 def validate_data(
