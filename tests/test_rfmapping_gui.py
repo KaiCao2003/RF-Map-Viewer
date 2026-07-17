@@ -203,15 +203,15 @@ class RFPlotRangeTests(unittest.TestCase):
         )
         return viewer
 
-    def test_default_rf_range_is_zero_to_twenty_ms(self) -> None:
-        viewer = self.viewer_with_edges([-100, 0, 10, 20, 30])
-        self.assertEqual(gui.RFMViewer._default_plot_time_bounds_ms(viewer), (0.0, 20.0))
+    def test_default_rf_range_is_zero_to_two_hundred_ms(self) -> None:
+        viewer = self.viewer_with_edges([-100, 0, 50, 100, 150, 200, 250])
+        self.assertEqual(gui.RFMViewer._default_plot_time_bounds_ms(viewer), (0.0, 200.0))
 
-    def test_default_rf_range_clamps_to_one_available_bin(self) -> None:
+    def test_default_rf_range_clamps_to_available_axis(self) -> None:
         all_negative = self.viewer_with_edges([-100, -50, -20])
         all_positive = self.viewer_with_edges([50, 60, 100])
         self.assertEqual(gui.RFMViewer._default_plot_time_bounds_ms(all_negative), (-50.0, -20.0))
-        self.assertEqual(gui.RFMViewer._default_plot_time_bounds_ms(all_positive), (50.0, 60.0))
+        self.assertEqual(gui.RFMViewer._default_plot_time_bounds_ms(all_positive), (50.0, 100.0))
 
     def test_reversed_and_out_of_axis_range_is_clamped_and_ordered(self) -> None:
         viewer = self.viewer_with_edges([-100, 0, 10, 20, 30])
@@ -257,6 +257,7 @@ class RFPlotRangeTests(unittest.TestCase):
         viewer._source_bins_for_display_range = lambda: gui.RFMViewer._source_bins_for_time_controls(
             viewer
         )
+        viewer._selected_local_unit_index = lambda: 0
 
         before = gui.RFMViewer._current_matrix(viewer)
         viewer.range_start_var.set(3)
@@ -451,7 +452,7 @@ class WindowPairingTests(unittest.TestCase):
     @staticmethod
     def state(**overrides) -> gui.ViewerSyncState:
         values = {
-            "unit_index": 1,
+            "unit_id": 20,
             "value_mode": gui.VALUE_MODE_COUNT,
             "timeline_bin_center_ms": 50.0,
             "timeline_selection_start_ms": 20.0,
@@ -476,7 +477,7 @@ class WindowPairingTests(unittest.TestCase):
         values.update(overrides)
         return gui.ViewerSyncState(**values)
 
-    def test_pairing_status_uses_only_ready_ordered_unit_lists(self) -> None:
+    def test_pairing_status_warns_but_allows_different_unit_lists(self) -> None:
         first = self.window([10, 20])
         loading = self.window([10, 20], ready=False)
         root = SimpleNamespace(
@@ -486,6 +487,7 @@ class WindowPairingTests(unittest.TestCase):
         first._app_root = root
         loading._app_root = root
         self.bind(first, "_ready_pairing_viewers", "_pairing_eligibility")
+        first._unit_lists_match = gui.RFMViewer._unit_lists_match
 
         gui.RFMViewer._refresh_pairing_controls(first)
         self.assertEqual(
@@ -500,10 +502,16 @@ class WindowPairingTests(unittest.TestCase):
         gui.RFMViewer._refresh_pairing_controls(first)
         self.assertEqual(
             first.pair_status_label.text,
-            "2 loaded windows have matching ordered unit lists.",
+            "2 loaded windows have matching unit lists.",
         )
         self.assertEqual(second.pair_windows_toggle.states[-1], ["!disabled"])
 
+        second.data.unit_pool = [20, 10]
+        gui.RFMViewer._refresh_pairing_controls(first)
+        self.assertIn("Unit lists differ", first.pair_status_label.text)
+        self.assertEqual(first.pair_windows_toggle.states[-1], ["!disabled"])
+
+        second.data.unit_pool = [10, 20]
         root._rfm_pairing_enabled = True
         gui.RFMViewer._refresh_pairing_controls(first)
         self.assertEqual(
@@ -511,13 +519,177 @@ class WindowPairingTests(unittest.TestCase):
             "2 windows paired. Changes in any paired window sync to the others.",
         )
 
-        second.data.unit_pool = [20, 10]
+        second.data.unit_pool = [20, 30]
         gui.RFMViewer._refresh_pairing_controls(first)
         self.assertEqual(
             first.pair_status_label.text,
-            "Sync unavailable: loaded windows have different ordered unit lists.",
+            "2 windows paired. Unit lists differ; these files may be from different "
+            "sessions. Missing units display N/A.",
         )
-        self.assertEqual(first.pair_windows_toggle.states[-1], ["disabled"])
+        self.assertEqual(first.pair_windows_toggle.states[-1], ["!disabled"])
+
+    def test_paired_navigation_uses_sorted_union_and_marks_missing_unit(self) -> None:
+        main = self.window([1, 3, 5, 7])
+        sync_one = self.window([1, 3, 5, 6, 7])
+        sync_two = self.window([2, 3, 5, 7])
+        root = SimpleNamespace(
+            _rfm_viewer_windows=[main, sync_one, sync_two],
+            _rfm_pairing_enabled=True,
+        )
+        for window in root._rfm_viewer_windows:
+            window._app_root = root
+
+        main.data.n_units = len(main.data.unit_pool)
+        main.unit_idx = self.FakeVar(0)
+        main._selected_unit_id = 1
+        main._last_supported_unit_id = 1
+        main.selected_cell = None
+        main._update_all = mock.Mock()
+        main._publish_pairing_state_if_changed = mock.Mock()
+        self.bind(
+            main,
+            "_ready_pairing_viewers",
+            "_pairing_eligibility",
+            "_pairing_unit_ids",
+            "_unit_navigation_ids",
+            "_local_unit_index",
+            "_selected_unit_id_value",
+            "_set_selected_unit_id",
+        )
+
+        self.assertEqual(main._pairing_unit_ids(), [1, 2, 3, 5, 6, 7])
+        gui.RFMViewer._step_unit(main, 1)
+        self.assertEqual(main._selected_unit_id, 2)
+        self.assertEqual(main.unit_idx.get(), -1)
+        gui.RFMViewer._step_unit(main, 1)
+        self.assertEqual(main._selected_unit_id, 3)
+        self.assertEqual(main.unit_idx.get(), 1)
+
+    def test_pairing_state_maps_unit_id_instead_of_local_index(self) -> None:
+        incoming = self.state(unit_id=20)
+        viewer = SimpleNamespace(
+            _viewer_ready=True,
+            _pair_apply_in_progress=False,
+            data=SimpleNamespace(unit_pool=[30, 20], n_units=2),
+            unit_idx=self.FakeVar(0),
+            _selected_unit_id=30,
+            _last_supported_unit_id=30,
+            _normalize_control_values=mock.Mock(),
+            _timeline_preview_cache_key="cached",
+            _timeline_preview_images={1: object()},
+            _update_all=mock.Mock(),
+            _capture_pairing_state=mock.Mock(return_value=incoming),
+            _pair_last_local_state=None,
+        )
+        self.bind(
+            viewer,
+            "_local_unit_index",
+            "_selected_unit_id_value",
+            "_set_selected_unit_id",
+        )
+
+        gui.RFMViewer._apply_pairing_state(viewer, incoming, frozenset({"unit"}))
+        self.assertEqual(viewer._selected_unit_id, 20)
+        self.assertEqual(viewer.unit_idx.get(), 1)
+
+        missing = replace(incoming, unit_id=99)
+        viewer._capture_pairing_state.return_value = missing
+        gui.RFMViewer._apply_pairing_state(viewer, missing, frozenset({"unit"}))
+        self.assertEqual(viewer._selected_unit_id, 99)
+        self.assertEqual(viewer.unit_idx.get(), -1)
+
+    def test_removed_only_selected_unit_advances_to_next_union_id(self) -> None:
+        canonical = self.state(unit_id=2)
+        first = self.window([1, 3])
+        removed = self.window([2, 3])
+        third = self.window([3, 5])
+        root = SimpleNamespace(
+            _rfm_viewer_windows=[first, removed, third],
+            _rfm_pairing_enabled=True,
+            _rfm_pairing_state=canonical,
+            _rfm_pairing_broadcasting=False,
+        )
+        for window in root._rfm_viewer_windows:
+            window._app_root = root
+            window._apply_pairing_state = mock.Mock()
+        first._refresh_pairing_controls = mock.Mock()
+        self.bind(
+            first,
+            "_ready_pairing_viewers",
+            "_pairing_eligibility",
+            "_pairing_unit_ids",
+            "_disable_window_pairing",
+        )
+        first._next_union_unit_id = gui.RFMViewer._next_union_unit_id
+
+        root._rfm_viewer_windows.remove(removed)
+        gui.RFMViewer._pair_ready_viewer_set_changed(first)
+
+        self.assertEqual(root._rfm_pairing_state.unit_id, 3)
+        first._apply_pairing_state.assert_called_once_with(
+            root._rfm_pairing_state,
+            frozenset({"unit"}),
+        )
+        third._apply_pairing_state.assert_called_once_with(
+            root._rfm_pairing_state,
+            frozenset({"unit"}),
+        )
+
+    def test_reloaded_adopted_window_receives_full_state_when_unit_is_normalized(self) -> None:
+        canonical = self.state(unit_id=2, palette="Inferno", rf_end_ms=200.0)
+        first = self.window([1, 3])
+        reloaded = self.window([3, 5])
+        root = SimpleNamespace(
+            _rfm_viewer_windows=[first, reloaded],
+            _rfm_pairing_enabled=True,
+            _rfm_pairing_state=canonical,
+            _rfm_pairing_broadcasting=False,
+        )
+        for window in root._rfm_viewer_windows:
+            window._app_root = root
+            window._apply_pairing_state = mock.Mock()
+        first._refresh_pairing_controls = mock.Mock()
+        self.bind(
+            first,
+            "_ready_pairing_viewers",
+            "_pairing_eligibility",
+            "_pairing_unit_ids",
+            "_disable_window_pairing",
+        )
+        first._next_union_unit_id = gui.RFMViewer._next_union_unit_id
+
+        gui.RFMViewer._pair_ready_viewer_set_changed(first, adopt_viewer=reloaded)
+
+        normalized = root._rfm_pairing_state
+        self.assertEqual(normalized.unit_id, 3)
+        self.assertEqual(normalized.palette, "Inferno")
+        self.assertEqual(normalized.rf_end_ms, 200.0)
+        first._apply_pairing_state.assert_called_once_with(
+            normalized,
+            frozenset({"unit"}),
+        )
+        reloaded._apply_pairing_state.assert_called_once_with(normalized)
+
+    def test_leaving_pairing_restores_last_supported_local_unit(self) -> None:
+        viewer = SimpleNamespace(
+            _viewer_ready=False,
+            data=SimpleNamespace(unit_pool=[1, 3], n_units=2),
+            unit_idx=self.FakeVar(-1),
+            _selected_unit_id=2,
+            _last_supported_unit_id=1,
+        )
+        self.bind(
+            viewer,
+            "_local_unit_index",
+            "_selected_unit_id_value",
+            "_selected_local_unit_index",
+            "_set_selected_unit_id",
+        )
+
+        gui.RFMViewer._restore_local_unit_selection(viewer)
+
+        self.assertEqual(viewer._selected_unit_id, 1)
+        self.assertEqual(viewer.unit_idx.get(), 0)
 
     def test_enabling_uses_toggling_window_as_initial_source(self) -> None:
         state = self.state()
@@ -544,7 +716,7 @@ class WindowPairingTests(unittest.TestCase):
         target._apply_pairing_state.assert_called_once_with(state)
         self.assertFalse(root._rfm_pairing_broadcasting)
 
-    def test_new_compatible_window_adopts_canonical_and_mismatch_disables(self) -> None:
+    def test_new_window_adopts_canonical_even_when_unit_is_missing(self) -> None:
         canonical = self.state()
         first = self.window([10, 20])
         newcomer = self.window([10, 20])
@@ -561,17 +733,21 @@ class WindowPairingTests(unittest.TestCase):
             first,
             "_ready_pairing_viewers",
             "_pairing_eligibility",
+            "_pairing_unit_ids",
             "_disable_window_pairing",
         )
+        first._next_union_unit_id = gui.RFMViewer._next_union_unit_id
 
         gui.RFMViewer._pair_ready_viewer_set_changed(first, adopt_viewer=newcomer)
         newcomer._apply_pairing_state.assert_called_once_with(canonical)
         self.assertTrue(root._rfm_pairing_enabled)
 
+        newcomer._apply_pairing_state.reset_mock()
         newcomer.data.unit_pool = [10, 99]
         gui.RFMViewer._pair_ready_viewer_set_changed(first, adopt_viewer=newcomer)
-        self.assertFalse(root._rfm_pairing_enabled)
-        self.assertIsNone(root._rfm_pairing_state)
+        newcomer._apply_pairing_state.assert_called_once_with(canonical)
+        self.assertTrue(root._rfm_pairing_enabled)
+        self.assertEqual(root._rfm_pairing_state, canonical)
 
     def test_pairing_survives_three_to_two_closure_but_not_two_to_one(self) -> None:
         canonical = self.state()
@@ -588,8 +764,10 @@ class WindowPairingTests(unittest.TestCase):
             first,
             "_ready_pairing_viewers",
             "_pairing_eligibility",
+            "_pairing_unit_ids",
             "_disable_window_pairing",
         )
+        first._next_union_unit_id = gui.RFMViewer._next_union_unit_id
 
         root._rfm_viewer_windows.remove(third)
         gui.RFMViewer._pair_ready_viewer_set_changed(first)
