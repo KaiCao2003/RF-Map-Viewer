@@ -201,7 +201,7 @@ struct RFMappingSwiftUIApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     var body: some Scene {
-        WindowGroup("RF Mapping Viewer", for: DocumentWindowRequest.self) { request in
+        WindowGroup("RF Map Viewer", for: DocumentWindowRequest.self) { request in
             RFMappingWindow(request: request.wrappedValue)
         }
         .defaultSize(width: 1440, height: 900)
@@ -216,6 +216,8 @@ private struct RFMappingWindow: View {
     @Environment(\.openWindow) private var openWindow
     @Environment(\.dismiss) private var dismiss
     @State private var store: RFMappingStore
+    @State private var pairingCoordinator: WindowPairingCoordinator
+    @State private var pairingWindowID: UUID
     private let isInitialWindow: Bool
     private let initialURL: URL?
 
@@ -226,6 +228,8 @@ private struct RFMappingWindow: View {
             initialData: prepared,
             loadDefault: false
         ))
+        _pairingCoordinator = State(initialValue: WindowPairingCoordinator.shared)
+        _pairingWindowID = State(initialValue: UUID())
         isInitialWindow = request == nil
         initialURL = prepared == nil ? url : nil
     }
@@ -233,6 +237,8 @@ private struct RFMappingWindow: View {
     var body: some View {
         ContentView(
             store: store,
+            pairingCoordinator: pairingCoordinator,
+            pairingWindowID: pairingWindowID,
             openJSONInNewWindow: { url in
                 if isInitialWindow, !store.hasData,
                    WindowRouter.shared.claimColdInitialWindow(for: url) {
@@ -247,6 +253,18 @@ private struct RFMappingWindow: View {
         .navigationTitle(store.windowTitle)
         .focusedSceneValue(\.rfMappingCommands, commandActions)
         .background(WindowShortcutMonitor(actions: commandActions))
+        .background(WindowCloseObserver {
+            pairingCoordinator.unregister(id: pairingWindowID)
+        })
+        .onAppear {
+            pairingCoordinator.register(store, id: pairingWindowID)
+        }
+        .onDisappear {
+            pairingCoordinator.unregister(id: pairingWindowID)
+        }
+        .onChange(of: store.viewerSyncState) { _, state in
+            pairingCoordinator.synchronizedStateDidChange(state, from: pairingWindowID)
+        }
         .task {
             WindowRouter.shared.install(
                 openWindow,
@@ -287,6 +305,80 @@ private struct RFMappingWindow: View {
             toggleFlipY: { store.flipY.toggle() },
             cyclePalette: store.cyclePalette
         )
+    }
+}
+
+/// Uses the actual NSWindow close notification as the authoritative lifecycle
+/// signal. `onDisappear` remains as an idempotent fallback for scene teardown.
+private struct WindowCloseObserver: NSViewRepresentable {
+    let onClose: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onClose: onClose)
+    }
+
+    func makeNSView(context: Context) -> ObserverView {
+        let view = ObserverView()
+        view.coordinator = context.coordinator
+        return view
+    }
+
+    func updateNSView(_ nsView: ObserverView, context: Context) {
+        context.coordinator.onClose = onClose
+        context.coordinator.attach(to: nsView.window)
+    }
+
+    static func dismantleNSView(_ nsView: ObserverView, coordinator: Coordinator) {
+        coordinator.detach()
+    }
+
+    final class ObserverView: NSView {
+        weak var coordinator: Coordinator?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            coordinator?.attach(to: window)
+        }
+
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    }
+
+    @MainActor
+    final class Coordinator {
+        var onClose: () -> Void
+        private weak var window: NSWindow?
+        private var observer: NSObjectProtocol?
+
+        init(onClose: @escaping () -> Void) {
+            self.onClose = onClose
+        }
+
+        func attach(to window: NSWindow?) {
+            guard let window, self.window !== window else { return }
+            detach()
+            self.window = window
+            observer = NotificationCenter.default.addObserver(
+                forName: NSWindow.willCloseNotification,
+                object: window,
+                queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.onClose()
+                }
+            }
+        }
+
+        func detach() {
+            if let observer { NotificationCenter.default.removeObserver(observer) }
+            observer = nil
+            window = nil
+        }
+
+        deinit {
+            MainActor.assumeIsolated {
+                if let observer { NotificationCenter.default.removeObserver(observer) }
+            }
+        }
     }
 }
 
@@ -332,7 +424,7 @@ private struct RFMappingCommands: Commands {
         }
 
         CommandGroup(after: .help) {
-            Button("RF Mapping Keyboard Shortcuts (?)") { showKeyboardShortcuts() }
+            Button("RF Map Viewer Keyboard Shortcuts (?)") { showKeyboardShortcuts() }
         }
     }
 }
@@ -473,7 +565,7 @@ private struct WindowShortcutMonitor: NSViewRepresentable {
 @MainActor
 private func showKeyboardShortcuts() {
     let alert = NSAlert()
-    alert.messageText = "RF Mapping Keyboard Shortcuts"
+    alert.messageText = "RF Map Viewer Keyboard Shortcuts"
     alert.informativeText = """
     ← / →   Previous / next unit
     ↑ / ↓   Previous / next timeline bin

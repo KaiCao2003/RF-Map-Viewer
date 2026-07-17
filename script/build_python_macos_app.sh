@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP_NAME="RF Mapping Viewer"
+APP_NAME="RF Map Viewer"
 BUNDLE_ID="org.local.rfmapping.viewer"
 APP_VERSION="1.4.0"
 APP_BUILD="10400"
@@ -15,7 +15,7 @@ DIST_DIR="$ROOT_DIR/dist/python"
 APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
 APP_BINARY="$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 APP_RESOURCES="$APP_BUNDLE/Contents/Resources"
-ARCHIVE_PATH="$DIST_DIR/RF_Mapping_Viewer-python-macos-universal2.zip"
+ARCHIVE_PATH="$DIST_DIR/RF_Map_Viewer-python-macos-universal2.zip"
 INFO_PLIST="$APP_BUNDLE/Contents/Info.plist"
 DATA_SOURCE="$ROOT_DIR/data"
 ICON_MASTER="${RF_MAPPING_ICON_SOURCE:-$ROOT_DIR/assets/rf-mapping-viewer-icon-1024.png}"

@@ -12,7 +12,7 @@ import csv
 import json
 import math
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
 
@@ -46,6 +46,61 @@ PALETTES = ("Gray", "Viridis", "Inferno")
 POLAR_RADIUS_MODES = ("MATLAB row 1 inner", "Display bottom inner")
 AxisGroup = tuple[int, int]
 CellRef = tuple[int, int, int, int]
+PAIR_SYNC_ALL_FIELDS = frozenset(
+    {
+        "unit",
+        "value_mode",
+        "active_time",
+        "timeline_selection",
+        "rf_range",
+        "time_resolution",
+        "x_bins",
+        "y_bins",
+        "smoothing",
+        "flip_y",
+        "palette",
+        "polar_radius",
+        "spatial_format",
+        "delay_rgb",
+        "selected_cell",
+        "timeline_scroll",
+        "selected_tab",
+    }
+)
+
+
+def timeline_scroll_progress(first: float, last: float) -> float | None:
+    """Convert a Tk canvas yview into viewport-independent scroll progress.
+
+    Tk reports fractions of the full scroll region.  The first fraction at the
+    bottom therefore depends on how much of that region the current viewport
+    can show.  Pairing stores progress through the *scrollable travel* instead.
+    ``None`` means the canvas is currently not scrollable, so callers should
+    preserve the last meaningful progress for a later draw.
+    """
+
+    first = float(first)
+    last = float(last)
+    visible_span = max(0.0, min(1.0, last - first))
+    max_first = max(0.0, 1.0 - visible_span)
+    if max_first <= 1e-9:
+        return None
+    progress = max(0.0, min(1.0, first / max_first))
+    if progress <= 1e-9:
+        return 0.0
+    if progress >= 1.0 - 1e-9:
+        return 1.0
+    return progress
+
+
+def timeline_scroll_offset(progress: float, first: float, last: float) -> float | None:
+    """Map normalized scroll progress to a target canvas yview offset."""
+
+    visible_span = max(0.0, min(1.0, float(last) - float(first)))
+    max_first = max(0.0, 1.0 - visible_span)
+    if max_first <= 1e-9:
+        return None
+    return max(0.0, min(1.0, float(progress))) * max_first
 
 
 def safe_mtime(path: Path) -> float:
@@ -114,6 +169,133 @@ class UnitMetrics:
     total_spikes: float
     best_y: int
     best_x: int
+
+
+@dataclass(frozen=True)
+class ViewerSyncState:
+    """Persistent viewer controls shared by paired windows.
+
+    Time selections are stored in physical milliseconds so compatible unit
+    lists can still be paired when their files use different time axes or
+    display-group resolutions.  A selected spatial cell is represented by its
+    source-index midpoint for the same reason.
+    """
+
+    unit_index: int
+    value_mode: str
+    timeline_bin_center_ms: float
+    timeline_selection_start_ms: float
+    timeline_selection_end_ms: float
+    timeline_anchor_center_ms: float | None
+    rf_start_ms: float
+    rf_end_ms: float
+    time_resolution_ms: float
+    x_bins: int
+    y_bins: int
+    smooth_radius: int
+    flip_y: bool
+    palette: str
+    polar_radius: str
+    polar_layout: bool
+    rgb_mode: bool
+    selected_cell_y_midpoint: float | None
+    selected_cell_x_midpoint: float | None
+    timeline_scroll_fraction: float
+    selected_tab: str
+
+    def changed_fields(self, baseline: ViewerSyncState) -> frozenset[str]:
+        fields: set[str] = set()
+        if self.unit_index != baseline.unit_index:
+            fields.add("unit")
+        if self.value_mode != baseline.value_mode:
+            fields.add("value_mode")
+        if self.timeline_bin_center_ms != baseline.timeline_bin_center_ms:
+            fields.add("active_time")
+        if (
+            self.timeline_selection_start_ms != baseline.timeline_selection_start_ms
+            or self.timeline_selection_end_ms != baseline.timeline_selection_end_ms
+            or self.timeline_anchor_center_ms != baseline.timeline_anchor_center_ms
+        ):
+            fields.add("timeline_selection")
+        if self.rf_start_ms != baseline.rf_start_ms or self.rf_end_ms != baseline.rf_end_ms:
+            fields.add("rf_range")
+        if self.time_resolution_ms != baseline.time_resolution_ms:
+            fields.add("time_resolution")
+        if self.x_bins != baseline.x_bins:
+            fields.add("x_bins")
+        if self.y_bins != baseline.y_bins:
+            fields.add("y_bins")
+        if self.smooth_radius != baseline.smooth_radius:
+            fields.add("smoothing")
+        if self.flip_y != baseline.flip_y:
+            fields.add("flip_y")
+        if self.palette != baseline.palette:
+            fields.add("palette")
+        if self.polar_radius != baseline.polar_radius:
+            fields.add("polar_radius")
+        if self.polar_layout != baseline.polar_layout:
+            fields.add("spatial_format")
+        if self.rgb_mode != baseline.rgb_mode:
+            fields.add("delay_rgb")
+        if (
+            self.selected_cell_y_midpoint != baseline.selected_cell_y_midpoint
+            or self.selected_cell_x_midpoint != baseline.selected_cell_x_midpoint
+        ):
+            fields.add("selected_cell")
+        if abs(self.timeline_scroll_fraction - baseline.timeline_scroll_fraction) > 1e-6:
+            fields.add("timeline_scroll")
+        if self.selected_tab != baseline.selected_tab:
+            fields.add("selected_tab")
+        return frozenset(fields)
+
+    def merging(
+        self,
+        incoming: ViewerSyncState,
+        fields: frozenset[str],
+    ) -> ViewerSyncState:
+        updates: dict[str, object] = {}
+        if "unit" in fields:
+            updates["unit_index"] = incoming.unit_index
+        if "value_mode" in fields:
+            updates["value_mode"] = incoming.value_mode
+        if "active_time" in fields:
+            updates["timeline_bin_center_ms"] = incoming.timeline_bin_center_ms
+        if "timeline_selection" in fields:
+            updates.update(
+                timeline_selection_start_ms=incoming.timeline_selection_start_ms,
+                timeline_selection_end_ms=incoming.timeline_selection_end_ms,
+                timeline_anchor_center_ms=incoming.timeline_anchor_center_ms,
+            )
+        if "rf_range" in fields:
+            updates.update(rf_start_ms=incoming.rf_start_ms, rf_end_ms=incoming.rf_end_ms)
+        if "time_resolution" in fields:
+            updates["time_resolution_ms"] = incoming.time_resolution_ms
+        if "x_bins" in fields:
+            updates["x_bins"] = incoming.x_bins
+        if "y_bins" in fields:
+            updates["y_bins"] = incoming.y_bins
+        if "smoothing" in fields:
+            updates["smooth_radius"] = incoming.smooth_radius
+        if "flip_y" in fields:
+            updates["flip_y"] = incoming.flip_y
+        if "palette" in fields:
+            updates["palette"] = incoming.palette
+        if "polar_radius" in fields:
+            updates["polar_radius"] = incoming.polar_radius
+        if "spatial_format" in fields:
+            updates["polar_layout"] = incoming.polar_layout
+        if "delay_rgb" in fields:
+            updates["rgb_mode"] = incoming.rgb_mode
+        if "selected_cell" in fields:
+            updates.update(
+                selected_cell_y_midpoint=incoming.selected_cell_y_midpoint,
+                selected_cell_x_midpoint=incoming.selected_cell_x_midpoint,
+            )
+        if "timeline_scroll" in fields:
+            updates["timeline_scroll_fraction"] = incoming.timeline_scroll_fraction
+        if "selected_tab" in fields:
+            updates["selected_tab"] = incoming.selected_tab
+        return replace(self, **updates)
 
 
 class RFMappingData:
@@ -965,11 +1147,17 @@ class RFMViewer(tk.Toplevel):
             windows = []
             self._app_root._rfm_viewer_windows = windows
         windows.append(self)
+        if not hasattr(self._app_root, "_rfm_pairing_enabled"):
+            self._app_root._rfm_pairing_enabled = False
+            self._app_root._rfm_pairing_state = None
+            self._app_root._rfm_pairing_broadcasting = False
         self._quitting = False
         self._viewer_ready = False
+        self._pair_apply_in_progress = False
+        self._pair_last_local_state: ViewerSyncState | None = None
         self._startup_after: str | None = None
         self._redraw_after: str | None = None
-        self.title("RF Mapping Viewer")
+        self.title("RF Map Viewer")
         self.withdraw()
         self._install_application_handlers()
 
@@ -984,7 +1172,7 @@ class RFMViewer(tk.Toplevel):
 
     def _initialize_viewer(self, data: RFMappingData) -> None:
         self.data = data
-        self.title(f"{data.path.name} — RF Mapping Viewer")
+        self.title(f"{data.path.name} — RF Map Viewer")
         self.geometry("1440x900")
         self.minsize(1120, 720)
 
@@ -1001,6 +1189,9 @@ class RFMViewer(tk.Toplevel):
         self.polar_radius_var = tk.StringVar(value=POLAR_RADIUS_MODES[1])
         self.polar_layout_var = tk.BooleanVar(value=False)
         self.rgb_mode_var = tk.BooleanVar(value=False)
+        self.pair_windows_var = tk.BooleanVar(
+            value=bool(getattr(self._app_root, "_rfm_pairing_enabled", False))
+        )
         self.x_bins_var = tk.IntVar(value=data.n_x)
         self.y_bins_var = tk.IntVar(value=data.n_y)
         self.time_res_ms_var = tk.StringVar(value=format_ms(self._base_bin_ms()))
@@ -1032,6 +1223,7 @@ class RFMViewer(tk.Toplevel):
         self._sync_unit_combo()
         self._update_all()
         self._viewer_ready = True
+        self._pair_ready_viewer_set_changed(adopt_viewer=self)
         self.deiconify()
         self.lift()
         self.after_idle(lambda: self.canvases["rf"].focus_set())
@@ -1068,6 +1260,8 @@ class RFMViewer(tk.Toplevel):
         windows = getattr(self._app_root, "_rfm_viewer_windows", [])
         if self in windows:
             windows.remove(self)
+        if not getattr(self._app_root, "_rfm_quitting", False):
+            self._pair_ready_viewer_set_changed()
         try:
             super().destroy()
         except tk.TclError:
@@ -1173,7 +1367,7 @@ class RFMViewer(tk.Toplevel):
 
     def _build_sidebar(self, parent: ttk.Frame) -> None:
         row = 0
-        ttk.Label(parent, text="RF Mapping Viewer", style="Title.TLabel").grid(row=row, column=0, sticky="w")
+        ttk.Label(parent, text="RF Map Viewer", style="Title.TLabel").grid(row=row, column=0, sticky="w")
         row += 1
         self.data_label = ttk.Label(parent, text="", style="Muted.TLabel", wraplength=260, justify="left")
         self.data_label.grid(row=row, column=0, sticky="ew", pady=(6, 14))
@@ -1190,6 +1384,28 @@ class RFMViewer(tk.Toplevel):
         self.json_combo = ttk.Combobox(json_row, state="readonly", width=23)
         self.json_combo.grid(row=0, column=0, sticky="ew")
         ttk.Button(json_row, text="Open…", width=6, command=self._open_json).grid(row=0, column=1, padx=(5, 0))
+        row += 1
+
+        ttk.Label(parent, text="Window pairing", style="Panel.TLabel").grid(
+            row=row, column=0, sticky="w", pady=(2, 0)
+        )
+        row += 1
+        self.pair_windows_toggle = ttk.Checkbutton(
+            parent,
+            text="Sync viewer windows",
+            variable=self.pair_windows_var,
+            command=self._on_pair_windows_toggled,
+        )
+        self.pair_windows_toggle.grid(row=row, column=0, sticky="w", pady=(5, 0))
+        row += 1
+        self.pair_status_label = ttk.Label(
+            parent,
+            text="Open another loaded viewer window to enable sync.",
+            style="Muted.TLabel",
+            wraplength=260,
+            justify="left",
+        )
+        self.pair_status_label.grid(row=row, column=0, sticky="ew", pady=(4, 10))
         row += 1
 
         ttk.Separator(parent).grid(row=row, column=0, sticky="ew", pady=(0, 12))
@@ -1405,6 +1621,9 @@ class RFMViewer(tk.Toplevel):
         self.x_bins_spin.bind("<Return>", self._on_control_changed)
         self.y_bins_spin.bind("<Return>", self._on_control_changed)
         self.smooth_spin.bind("<Return>", self._on_control_changed)
+        self.x_bins_spin.bind("<FocusOut>", self._on_control_changed)
+        self.y_bins_spin.bind("<FocusOut>", self._on_control_changed)
+        self.smooth_spin.bind("<FocusOut>", self._on_control_changed)
         self.palette_var.trace_add("write", lambda *_: self._on_control_changed())
         self.polar_radius_var.trace_add("write", lambda *_: self._on_control_changed())
         self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
@@ -1513,6 +1732,443 @@ class RFMViewer(tk.Toplevel):
         active = getattr(self._app_root, "_rfm_active_viewer", None)
         windows = getattr(self._app_root, "_rfm_viewer_windows", [])
         return active if active in windows else (windows[-1] if windows else self)
+
+    def _ready_pairing_viewers(self) -> list[RFMViewer]:
+        windows = getattr(self._app_root, "_rfm_viewer_windows", [])
+        return [
+            window
+            for window in windows
+            if getattr(window, "_viewer_ready", False) and hasattr(window, "data")
+        ]
+
+    def _pairing_eligibility(self) -> tuple[list[RFMViewer], bool]:
+        ready = self._ready_pairing_viewers()
+        if len(ready) < 2:
+            return ready, False
+        first_units = tuple(ready[0].data.unit_pool)
+        return ready, all(tuple(window.data.unit_pool) == first_units for window in ready[1:])
+
+    def _refresh_pairing_controls(self) -> None:
+        ready, eligible = self._pairing_eligibility()
+        active = bool(getattr(self._app_root, "_rfm_pairing_enabled", False) and eligible)
+        if len(ready) < 2:
+            status = "Open another loaded viewer window to enable sync."
+        elif not eligible:
+            status = "Sync unavailable: loaded windows have different ordered unit lists."
+        elif active:
+            status = (
+                f"{len(ready)} windows paired. Changes in any paired window sync to the others."
+            )
+        else:
+            status = f"{len(ready)} loaded windows have matching ordered unit lists."
+
+        windows = getattr(self._app_root, "_rfm_viewer_windows", [])
+        for window in windows:
+            if not hasattr(window, "pair_windows_var"):
+                continue
+            try:
+                window.pair_windows_var.set(active)
+                if hasattr(window, "pair_windows_toggle"):
+                    window.pair_windows_toggle.state(
+                        ["!disabled"] if eligible else ["disabled"]
+                    )
+                if hasattr(window, "pair_status_label"):
+                    window.pair_status_label.configure(text=status)
+            except tk.TclError:
+                continue
+
+    def _disable_window_pairing(self) -> None:
+        self._app_root._rfm_pairing_enabled = False
+        self._app_root._rfm_pairing_state = None
+        self._app_root._rfm_pairing_broadcasting = False
+        for window in self._ready_pairing_viewers():
+            window._pair_last_local_state = None
+        self._refresh_pairing_controls()
+
+    def _pair_ready_viewer_set_changed(
+        self,
+        *,
+        adopt_viewer: RFMViewer | None = None,
+    ) -> None:
+        ready, eligible = self._pairing_eligibility()
+        if not getattr(self._app_root, "_rfm_pairing_enabled", False):
+            self._refresh_pairing_controls()
+            return
+        if not eligible:
+            self._disable_window_pairing()
+            return
+
+        state = getattr(self._app_root, "_rfm_pairing_state", None)
+        if state is None:
+            source = ready[0]
+            state = source._capture_pairing_state()
+            source._pair_last_local_state = state
+            self._app_root._rfm_pairing_state = state
+        if adopt_viewer is not None and adopt_viewer in ready:
+            self._app_root._rfm_pairing_broadcasting = True
+            try:
+                adopt_viewer._apply_pairing_state(state)
+            finally:
+                self._app_root._rfm_pairing_broadcasting = False
+        self._refresh_pairing_controls()
+
+    def _on_pair_windows_toggled(self) -> None:
+        if not self.pair_windows_var.get():
+            self._disable_window_pairing()
+            return
+
+        ready, eligible = self._pairing_eligibility()
+        if not eligible or self not in ready:
+            self._disable_window_pairing()
+            return
+
+        state = self._capture_pairing_state()
+        self._app_root._rfm_pairing_enabled = True
+        self._app_root._rfm_pairing_state = state
+        self._pair_last_local_state = state
+        self._app_root._rfm_pairing_broadcasting = True
+        try:
+            for window in ready:
+                if window is not self:
+                    window._apply_pairing_state(state)
+        finally:
+            self._app_root._rfm_pairing_broadcasting = False
+        self._refresh_pairing_controls()
+
+    def _capture_pairing_state(self) -> ViewerSyncState:
+        self._normalize_control_values()
+        timeline_start_ms, timeline_end_ms = self._timeline_selected_time_bounds_ms()
+        rf_start_ms, rf_end_ms = self._selected_time_bounds_ms()
+        current_bin = max(0, min(self._time_group_count() - 1, self.bin_var.get()))
+        anchor_center_ms = (
+            self._time_group_center_ms(self._timeline_range_anchor)
+            if self._timeline_range_anchor is not None
+            else None
+        )
+        selected_y_midpoint: float | None = None
+        selected_x_midpoint: float | None = None
+        if self.selected_cell is not None:
+            y_start, y_end, x_start, x_end = self.selected_cell
+            selected_y_midpoint = (float(y_start) + float(y_end)) / 2.0
+            selected_x_midpoint = (float(x_start) + float(x_end)) / 2.0
+
+        value_mode = self.value_mode_var.get()
+        if value_mode not in VALUE_MODES or not self.data.supports_value_mode(value_mode):
+            value_mode = VALUE_MODE_COUNT
+        palette = self.palette_var.get()
+        if palette not in PALETTES:
+            palette = PALETTES[0]
+        polar_radius = self.polar_radius_var.get()
+        if polar_radius not in POLAR_RADIUS_MODES:
+            polar_radius = POLAR_RADIUS_MODES[1]
+        selected_tab = self._active_tab_key()
+        if selected_tab not in {"rf", "delay", "timeline"}:
+            selected_tab = "rf"
+
+        return ViewerSyncState(
+            unit_index=max(0, min(self.data.n_units - 1, int(self.unit_idx.get()))),
+            value_mode=value_mode,
+            timeline_bin_center_ms=self._time_group_center_ms(current_bin),
+            timeline_selection_start_ms=timeline_start_ms,
+            timeline_selection_end_ms=timeline_end_ms,
+            timeline_anchor_center_ms=anchor_center_ms,
+            rf_start_ms=rf_start_ms,
+            rf_end_ms=rf_end_ms,
+            time_resolution_ms=float(self.time_res_ms_var.get()),
+            x_bins=self._x_target_bins(),
+            y_bins=self._y_target_bins(),
+            smooth_radius=self._smooth_radius(),
+            flip_y=bool(self.flip_y_var.get()),
+            palette=palette,
+            polar_radius=polar_radius,
+            polar_layout=bool(self.polar_layout_var.get()),
+            rgb_mode=bool(self.rgb_mode_var.get()),
+            selected_cell_y_midpoint=selected_y_midpoint,
+            selected_cell_x_midpoint=selected_x_midpoint,
+            timeline_scroll_fraction=round(
+                max(0.0, min(1.0, float(self._timeline_scroll_fraction))), 9
+            ),
+            selected_tab=selected_tab,
+        )
+
+    def _time_group_index_for_ms(self, time_ms: float) -> int:
+        groups = self._time_groups()
+        bounds = [self._time_group_bounds_ms(index) for index in range(len(groups))]
+        for index, (start_ms, end_ms) in enumerate(bounds):
+            if start_ms <= time_ms < end_ms or (
+                index == len(bounds) - 1 and time_ms == end_ms
+            ):
+                return index
+        return min(
+            range(len(bounds)),
+            key=lambda index: abs((bounds[index][0] + bounds[index][1]) / 2.0 - time_ms),
+        )
+
+    def _time_group_range_for_ms(self, start_ms: float, end_ms: float) -> AxisGroup:
+        if start_ms > end_ms:
+            start_ms, end_ms = end_ms, start_ms
+        groups = self._time_groups()
+        bounds = [self._time_group_bounds_ms(index) for index in range(len(groups))]
+        if math.isclose(start_ms, end_ms):
+            index = self._time_group_index_for_ms(start_ms)
+            return index, index
+        overlapping = [
+            index
+            for index, (group_start, group_end) in enumerate(bounds)
+            if group_end > start_ms and group_start < end_ms
+        ]
+        if overlapping:
+            return overlapping[0], overlapping[-1]
+        return (
+            self._time_group_index_for_ms(start_ms),
+            self._time_group_index_for_ms(end_ms),
+        )
+
+    @staticmethod
+    def _axis_group_for_midpoint(groups: list[AxisGroup], midpoint: float) -> AxisGroup:
+        if not groups:
+            return 0, 0
+        axis_start = min(group[0] for group in groups)
+        axis_end = max(group[1] for group in groups)
+        midpoint = max(float(axis_start), min(float(axis_end), float(midpoint)))
+        source_index = max(axis_start, min(axis_end, int(math.floor(midpoint + 0.5))))
+        return next(
+            (group for group in groups if group[0] <= source_index <= group[1]),
+            min(groups, key=lambda group: abs((group[0] + group[1]) / 2.0 - midpoint)),
+        )
+
+    def _cell_for_pairing_midpoint(
+        self,
+        y_midpoint: float | None,
+        x_midpoint: float | None,
+    ) -> CellRef | None:
+        if y_midpoint is None or x_midpoint is None:
+            return None
+        y_start, y_end = self._axis_group_for_midpoint(
+            self._display_y_groups(), y_midpoint
+        )
+        x_start, x_end = self._axis_group_for_midpoint(self._x_groups(), x_midpoint)
+        return y_start, y_end, x_start, x_end
+
+    def _select_tab_key(self, key: str) -> None:
+        if not hasattr(self, "notebook"):
+            return
+        for tab in self.notebook.tabs():
+            if self._tab_keys.get(str(tab)) == key:
+                self.notebook.select(tab)
+                return
+
+    def _apply_pairing_state(
+        self,
+        state: ViewerSyncState,
+        fields: frozenset[str] = PAIR_SYNC_ALL_FIELDS,
+    ) -> None:
+        if not self._viewer_ready:
+            return
+        self._pair_apply_in_progress = True
+        try:
+            preserved_active_time_ms: float | None = None
+            preserved_timeline_bounds_ms: tuple[float, float] | None = None
+            preserved_anchor_time_ms: float | None = None
+            if "time_resolution" in fields:
+                if "active_time" not in fields:
+                    preserved_active_time_ms = self._time_group_center_ms(self.bin_var.get())
+                if "timeline_selection" not in fields:
+                    preserved_timeline_bounds_ms = self._timeline_selected_time_bounds_ms()
+                    if self._timeline_range_anchor is not None:
+                        preserved_anchor_time_ms = self._time_group_center_ms(
+                            self._timeline_range_anchor
+                        )
+            preserved_cell_midpoint: tuple[float, float] | None = None
+            if (
+                fields.intersection({"x_bins", "y_bins"})
+                and "selected_cell" not in fields
+                and self.selected_cell is not None
+            ):
+                y_start, y_end, x_start, x_end = self.selected_cell
+                preserved_cell_midpoint = (
+                    (float(y_start) + float(y_end)) / 2.0,
+                    (float(x_start) + float(x_end)) / 2.0,
+                )
+            if "unit" in fields:
+                unit_index = max(0, min(self.data.n_units - 1, int(state.unit_index)))
+                self.unit_idx.set(unit_index)
+                if hasattr(self, "unit_combo"):
+                    self.unit_combo.current(unit_index)
+            if "value_mode" in fields:
+                value_mode = state.value_mode
+                if (
+                    value_mode not in VALUE_MODES
+                    or not self.data.supports_value_mode(value_mode)
+                ):
+                    value_mode = VALUE_MODE_COUNT
+                self.value_mode_var.set(value_mode)
+            if "time_resolution" in fields:
+                self.time_res_ms_var.set(format_ms(state.time_resolution_ms))
+            if "x_bins" in fields:
+                self.x_bins_var.set(max(1, min(self.data.n_x, int(state.x_bins))))
+            if "y_bins" in fields:
+                self.y_bins_var.set(max(1, min(self.data.n_y, int(state.y_bins))))
+            if "smoothing" in fields:
+                self.smooth_radius_var.set(max(0, min(3, int(state.smooth_radius))))
+            if "flip_y" in fields:
+                self.flip_y_var.set(bool(state.flip_y))
+            if "palette" in fields:
+                self.palette_var.set(
+                    state.palette if state.palette in PALETTES else PALETTES[0]
+                )
+            if "polar_radius" in fields:
+                self.polar_radius_var.set(
+                    state.polar_radius
+                    if state.polar_radius in POLAR_RADIUS_MODES
+                    else POLAR_RADIUS_MODES[1]
+                )
+            if "spatial_format" in fields:
+                self.polar_layout_var.set(bool(state.polar_layout))
+            if "delay_rgb" in fields:
+                self.rgb_mode_var.set(bool(state.rgb_mode))
+            if "rf_range" in fields:
+                self.range_start_ms_var.set(format_ms(state.rf_start_ms))
+                self.range_end_ms_var.set(format_ms(state.rf_end_ms))
+            if "timeline_scroll" in fields:
+                self._timeline_scroll_fraction = max(
+                    0.0, min(1.0, float(state.timeline_scroll_fraction))
+                )
+
+            self._normalize_control_values()
+            if "active_time" in fields:
+                self.bin_var.set(
+                    self._time_group_index_for_ms(state.timeline_bin_center_ms)
+                )
+            elif preserved_active_time_ms is not None:
+                self.bin_var.set(self._time_group_index_for_ms(preserved_active_time_ms))
+            if "timeline_selection" in fields:
+                timeline_start, timeline_end = self._time_group_range_for_ms(
+                    state.timeline_selection_start_ms,
+                    state.timeline_selection_end_ms,
+                )
+                self.range_start_var.set(timeline_start)
+                self.range_end_var.set(timeline_end)
+                self._timeline_range_anchor = (
+                    self._time_group_index_for_ms(state.timeline_anchor_center_ms)
+                    if state.timeline_anchor_center_ms is not None
+                    else None
+                )
+            elif preserved_timeline_bounds_ms is not None:
+                timeline_start, timeline_end = self._time_group_range_for_ms(
+                    *preserved_timeline_bounds_ms
+                )
+                self.range_start_var.set(timeline_start)
+                self.range_end_var.set(timeline_end)
+                self._timeline_range_anchor = (
+                    self._time_group_index_for_ms(preserved_anchor_time_ms)
+                    if preserved_anchor_time_ms is not None
+                    else None
+                )
+            if "selected_cell" in fields:
+                self.selected_cell = self._cell_for_pairing_midpoint(
+                    state.selected_cell_y_midpoint,
+                    state.selected_cell_x_midpoint,
+                )
+            elif preserved_cell_midpoint is not None:
+                self.selected_cell = self._cell_for_pairing_midpoint(
+                    *preserved_cell_midpoint
+                )
+            if "selected_tab" in fields:
+                self._select_tab_key(state.selected_tab)
+            if fields.intersection(
+                {
+                    "unit",
+                    "value_mode",
+                    "time_resolution",
+                    "x_bins",
+                    "y_bins",
+                    "smoothing",
+                    "flip_y",
+                    "palette",
+                    "polar_radius",
+                    "spatial_format",
+                    "delay_rgb",
+                    "rf_range",
+                }
+            ):
+                self._timeline_preview_cache_key = None
+                self._timeline_preview_images = {}
+            self._update_all()
+            if "timeline_scroll" in fields:
+                self._restore_timeline_scroll()
+            self._pair_last_local_state = self._capture_pairing_state()
+        finally:
+            self._pair_apply_in_progress = False
+
+    def _apply_pairing_scroll_fraction(self, fraction: float) -> None:
+        if not self._viewer_ready:
+            return
+        self._pair_apply_in_progress = True
+        try:
+            fraction = max(0.0, min(1.0, float(fraction)))
+            self._timeline_scroll_fraction = fraction
+            canvas = self.canvases.get("timeline") if hasattr(self, "canvases") else None
+            if canvas is not None:
+                try:
+                    first, last = canvas.yview()
+                except (tk.TclError, TypeError, ValueError):
+                    offset = None
+                else:
+                    offset = timeline_scroll_offset(fraction, first, last)
+                if offset is not None:
+                    self._restoring_timeline_scroll = True
+                    try:
+                        canvas.yview_moveto(offset)
+                    finally:
+                        self._restoring_timeline_scroll = False
+            baseline = self._pair_last_local_state or self._capture_pairing_state()
+            self._pair_last_local_state = replace(
+                baseline,
+                timeline_scroll_fraction=round(fraction, 9),
+            )
+        finally:
+            self._pair_apply_in_progress = False
+
+    def _publish_pairing_state_if_changed(self) -> None:
+        if not self.__dict__.get("_viewer_ready", False):
+            return
+        if self.__dict__.get("_pair_apply_in_progress", False):
+            return
+        if not getattr(self._app_root, "_rfm_pairing_enabled", False):
+            return
+        if getattr(self._app_root, "_rfm_pairing_broadcasting", False):
+            return
+
+        ready, eligible = self._pairing_eligibility()
+        if not eligible or self not in ready:
+            self._disable_window_pairing()
+            return
+        state = self._capture_pairing_state()
+        previous = self._pair_last_local_state
+        if previous is not None:
+            changed_fields = state.changed_fields(previous)
+        else:
+            changed_fields = PAIR_SYNC_ALL_FIELDS
+        self._pair_last_local_state = state
+        if not changed_fields:
+            return
+        canonical = getattr(self._app_root, "_rfm_pairing_state", None)
+        self._app_root._rfm_pairing_state = (
+            canonical.merging(state, changed_fields) if canonical is not None else state
+        )
+
+        self._app_root._rfm_pairing_broadcasting = True
+        try:
+            for window in ready:
+                if window is self:
+                    continue
+                if changed_fields == frozenset({"timeline_scroll"}):
+                    window._apply_pairing_scroll_fraction(state.timeline_scroll_fraction)
+                else:
+                    window._apply_pairing_state(state, changed_fields)
+        finally:
+            self._app_root._rfm_pairing_broadcasting = False
 
     def _dispatch_open_json(self, _event: object | None = None) -> None:
         self._active_viewer()._open_json()
@@ -1629,6 +2285,7 @@ class RFMViewer(tk.Toplevel):
             self.unit_idx.set(idx)
             self.selected_cell = None
             self._update_all()
+            self._publish_pairing_state_if_changed()
 
     def _step_unit(self, delta: int) -> None:
         idx = (self.unit_idx.get() + delta) % self.data.n_units
@@ -1636,6 +2293,7 @@ class RFMViewer(tk.Toplevel):
         self.unit_combo.current(idx)
         self.selected_cell = None
         self._update_all()
+        self._publish_pairing_state_if_changed()
 
     def _step_timeline_bin(self, delta: int) -> None:
         max_bin = max(0, self._time_group_count() - 1)
@@ -1646,6 +2304,7 @@ class RFMViewer(tk.Toplevel):
         self._timeline_range_anchor = target
         self._sync_time_range_controls()
         self._update_all()
+        self._publish_pairing_state_if_changed()
 
     def _step_time_resolution(self, delta_ms: float) -> None:
         try:
@@ -1663,6 +2322,7 @@ class RFMViewer(tk.Toplevel):
         self.range_end_var.set(max(0, self._time_group_count() - 1))
         self._sync_time_range_controls()
         self._update_all()
+        self._publish_pairing_state_if_changed()
 
     def _on_value_mode_changed(self, _event: object | None = None) -> None:
         value_mode = self.value_mode_var.get()
@@ -1676,10 +2336,12 @@ class RFMViewer(tk.Toplevel):
             )
             return
         self._update_all()
+        self._publish_pairing_state_if_changed()
 
     def _on_range_changed(self, _event: object | None = None) -> None:
         self._normalize_control_values()
         self._update_all()
+        self._publish_pairing_state_if_changed()
 
     def _reset_plot_range(self) -> None:
         start_ms, end_ms = self._default_plot_time_bounds_ms()
@@ -1726,10 +2388,14 @@ class RFMViewer(tk.Toplevel):
             self.range_end_var.set(display_group_index_for_source_bin(new_groups, source_end))
         self.bin_var.set(display_group_index_for_source_bin(new_groups, active_source_bin))
         self._update_all()
+        self._publish_pairing_state_if_changed()
 
     def _on_control_changed(self, _event: object | None = None) -> None:
+        if self.__dict__.get("_pair_apply_in_progress", False):
+            return
         self._normalize_control_values()
         self._update_all()
+        self._publish_pairing_state_if_changed()
 
     def _on_spatial_format_changed(self) -> None:
         self._timeline_preview_cache_key = None
@@ -1767,8 +2433,9 @@ class RFMViewer(tk.Toplevel):
             last_value = float(last)
         except ValueError:
             return
-        if last_value < 0.999:
-            self._timeline_scroll_fraction = max(0.0, min(1.0, first_value))
+        progress = timeline_scroll_progress(first_value, last_value)
+        if progress is not None:
+            self._timeline_scroll_fraction = progress
 
     def _timeline_yview(self, *args: object) -> None:
         canvas = self.canvases.get("timeline")
@@ -1776,6 +2443,7 @@ class RFMViewer(tk.Toplevel):
             return
         canvas.yview(*args)
         self._remember_timeline_scroll()
+        self._publish_pairing_state_if_changed()
 
     def _remember_timeline_scroll(self) -> None:
         canvas = self.canvases.get("timeline")
@@ -1785,19 +2453,26 @@ class RFMViewer(tk.Toplevel):
             first, last = canvas.yview()
         except tk.TclError:
             return
-        if last < 0.999:
-            self._timeline_scroll_fraction = max(0.0, min(1.0, float(first)))
+        progress = timeline_scroll_progress(first, last)
+        if progress is not None:
+            self._timeline_scroll_fraction = progress
 
     def _restore_timeline_scroll(self) -> None:
         canvas = self.canvases.get("timeline")
         if canvas is None:
             return
+        try:
+            first, last = canvas.yview()
+        except tk.TclError:
+            return
+        offset = timeline_scroll_offset(self._timeline_scroll_fraction, first, last)
+        if offset is None:
+            return
         self._restoring_timeline_scroll = True
         try:
-            canvas.yview_moveto(max(0.0, min(1.0, self._timeline_scroll_fraction)))
+            canvas.yview_moveto(offset)
         finally:
             self._restoring_timeline_scroll = False
-        self._remember_timeline_scroll()
 
     def _on_timeline_mousewheel(self, event: tk.Event) -> str:
         canvas = self.canvases.get("timeline")
@@ -1815,6 +2490,7 @@ class RFMViewer(tk.Toplevel):
             units *= 3
         canvas.yview_scroll(units, "units")
         self._remember_timeline_scroll()
+        self._publish_pairing_state_if_changed()
         return "break"
 
     def _normalize_control_values(self) -> None:
@@ -1836,6 +2512,13 @@ class RFMViewer(tk.Toplevel):
         self._sync_time_control_ranges()
         self._last_time_group_count = time_count
         self._last_time_groups = list(time_groups)
+        selected_cell = self.__dict__.get("selected_cell")
+        if selected_cell is not None:
+            y_start, y_end, x_start, x_end = selected_cell
+            self.selected_cell = self._cell_for_pairing_midpoint(
+                (float(y_start) + float(y_end)) / 2.0,
+                (float(x_start) + float(x_end)) / 2.0,
+            )
 
     def _parse_time_control(self, variable: tk.StringVar, fallback: float) -> float:
         try:
@@ -3627,6 +4310,7 @@ class RFMViewer(tk.Toplevel):
             if cell is not None:
                 self.selected_cell = cell
                 self._update_all()
+                self._publish_pairing_state_if_changed()
         elif key == "timeline":
             timeline_cell = self._timeline_cell_at(event)
             if timeline_cell is not None:
@@ -3637,6 +4321,7 @@ class RFMViewer(tk.Toplevel):
             if bin_idx is not None:
                 self._select_timeline_bin(bin_idx, event)
                 self._update_all()
+                self._publish_pairing_state_if_changed()
 
     def _select_timeline_bin(self, bin_idx: int, event: tk.Event) -> None:
         if self._event_has_range_modifier(event):
@@ -3895,7 +4580,7 @@ class RFMViewer(tk.Toplevel):
         except Exception as exc:
             messagebox.showerror("Could not load JSON", str(exc))
             return
-        self.title(f"{self.data.path.name} — RF Mapping Viewer")
+        self.title(f"{self.data.path.name} — RF Map Viewer")
         self.unit_idx.set(0)
         self.bin_var.set(0)
         self.range_start_var.set(0)
@@ -3919,6 +4604,7 @@ class RFMViewer(tk.Toplevel):
         self._timeline_cells_by_bin = {}
         self._timeline_range_anchor = None
         self._timeline_scroll_fraction = 0.0
+        self._pair_last_local_state = None
         self._sync_time_control_ranges()
         self.time_res_spin.configure(from_=self._base_bin_ms(), to=self._total_time_ms(), increment=self._base_bin_ms())
         self.x_bins_var.set(self.data.n_x)
@@ -3928,6 +4614,7 @@ class RFMViewer(tk.Toplevel):
         self._sync_json_combo()
         self._sync_unit_combo()
         self._update_all()
+        self._pair_ready_viewer_set_changed(adopt_viewer=self)
 
     def _export_current_matrix(self) -> None:
         raw_matrix = self._current_matrix()

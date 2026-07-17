@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP_NAME="RF Mapping Viewer"
+APP_NAME="RF Map Viewer"
 PRODUCT_NAME="RFMappingSwiftUI"
 EXECUTABLE_NAME="$PRODUCT_NAME"
 BUNDLE_ID="org.local.rfmapping.viewer.swift"
@@ -21,7 +21,7 @@ APP_MACOS="$APP_CONTENTS/MacOS"
 APP_RESOURCES="$APP_CONTENTS/Resources"
 APP_BINARY="$APP_MACOS/$EXECUTABLE_NAME"
 INFO_PLIST="$APP_CONTENTS/Info.plist"
-ARCHIVE_PATH="$DIST_DIR/RF_Mapping_Viewer-macos-arm64.zip"
+ARCHIVE_PATH="$DIST_DIR/RF_Map_Viewer-macos-arm64.zip"
 DATA_SOURCE="$ROOT_DIR/data"
 ICON_MASTER="${RF_MAPPING_ICON_SOURCE:-$ROOT_DIR/assets/rf-mapping-viewer-icon-1024.png}"
 PREBUILT_ICON_ICNS="${RF_MAPPING_ICON_ICNS:-}"

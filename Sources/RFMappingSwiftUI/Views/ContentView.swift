@@ -3,11 +3,17 @@ import UniformTypeIdentifiers
 
 struct ContentView: View {
     @Bindable var store: RFMappingStore
+    @Bindable var pairingCoordinator: WindowPairingCoordinator
+    let pairingWindowID: UUID
     let openJSONInNewWindow: (URL) -> Void
 
     var body: some View {
         HStack(spacing: 0) {
-            SidebarView(store: store)
+            SidebarView(
+                store: store,
+                pairingCoordinator: pairingCoordinator,
+                pairingWindowID: pairingWindowID
+            )
                 .frame(width: 318)
             Divider()
             mainContent
@@ -48,7 +54,7 @@ struct ContentView: View {
             }
         }
         .alert(
-            "RF Mapping Viewer",
+            "RF Map Viewer",
             isPresented: Binding(
                 get: { store.errorMessage != nil },
                 set: { if !$0 { store.errorMessage = nil } }
@@ -110,7 +116,7 @@ struct ContentView: View {
             }
         } else {
             ContentUnavailableView {
-                Label("RF Mapping Viewer", systemImage: "waveform.path.ecg.rectangle")
+                Label("RF Map Viewer", systemImage: "waveform.path.ecg.rectangle")
             } description: {
                 Text("Open a unitsSpikeCounts JSON file to begin.")
             } actions: {

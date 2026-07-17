@@ -1,14 +1,14 @@
-# RF Mapping Viewer
+# RF Map Viewer
 
-RF Mapping Viewer has native Swift/SwiftUI and Python/Tk macOS applications.
+RF Map Viewer has native Swift/SwiftUI and Python/Tk macOS applications.
 The build outputs are kept separate so either implementation can be rebuilt
 without deleting or replacing the other.
 
 ## Native app
 
 - Swift package entry point: `Sources/RFMappingSwiftUI`
-- Native app: `dist/RF Mapping Viewer.app`
-- Distributable archive: `dist/RF_Mapping_Viewer-macos-arm64.zip`
+- Native app: `dist/RF Map Viewer.app`
+- Distributable archive: `dist/RF_Map_Viewer-macos-arm64.zip`
 - Bundle identifier: `org.local.rfmapping.viewer.swift`
 - Minimum system: macOS 15 Sequoia
 - Architecture: Apple silicon (`arm64`)
@@ -25,9 +25,9 @@ provides the existing run/debug/log helper modes.
 
 ## Python app
 
-- Staged app: `dist/python/RF Mapping Viewer.app`
+- Staged app: `dist/python/RF Map Viewer.app`
 - Distributable archive:
-  `dist/python/RF_Mapping_Viewer-python-macos-universal2.zip`
+  `dist/python/RF_Map_Viewer-python-macos-universal2.zip`
 - Bundle identifier: `org.local.rfmapping.viewer`
 - Architecture: Intel and Apple silicon (`universal2`)
 
@@ -38,7 +38,7 @@ script/build_python_macos_app.sh
 ```
 
 The Python build uses its own output directory and does not modify the native
-Swift bundle. It also does not update `/Applications/RF Mapping Viewer.app`;
+Swift bundle. It also does not update `/Applications/RF Map Viewer.app`;
 installation is a separate, explicit step after validation.
 
 Both packaging scripts copy bundled JSON files from `data/` and verify them
