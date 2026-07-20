@@ -340,3 +340,39 @@ def reorder_subcycles(data):
         }
 
     return result
+
+
+def interp_replace(
+    target: list | np.ndarray,
+    start: int,
+    end: int,
+    new_length: int,
+) -> np.ndarray:
+    """
+    Replace target[start:end+1] with linear interpolation of new_length.
+
+    Both endpoint frames are retained. new_length is the total replacement
+    length, including both endpoint frames.
+    """
+
+    target = np.asarray(target)
+
+    if not 0 <= start < end < len(target):
+        raise ValueError("requires 0 <= start < end < len(target)")
+
+    if new_length < 2:
+        raise ValueError("new_length must be at least 2 to keep both endpoints")
+
+    interpolated = np.linspace(
+        target[start],
+        target[end],
+        num=new_length,
+    )
+
+    return np.concatenate(
+        [
+            target[:start],
+            interpolated,
+            target[end + 1 :],
+        ]
+    )

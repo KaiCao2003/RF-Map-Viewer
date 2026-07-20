@@ -43,7 +43,7 @@ class TkViewerTests(unittest.TestCase):
             ["RF", "Delay / RGB", "Timeline"],
         )
         self.assertEqual(float(self.app.range_start_ms_var.get()), 0.0)
-        self.assertEqual(float(self.app.range_end_ms_var.get()), 20.0)
+        self.assertEqual(float(self.app.range_end_ms_var.get()), 30.0)
 
     def test_global_polar_toggle_applies_to_spatial_tabs(self) -> None:
         self.app.polar_layout_var.set(True)
@@ -148,6 +148,71 @@ class TkViewerTests(unittest.TestCase):
         second._step_unit(1)
         self.assertEqual(self.app.unit_idx.get(), 0)
         self.assertEqual(second.unit_idx.get(), 1)
+
+    def test_pairing_navigates_union_and_shows_na_for_missing_units(self) -> None:
+        def write_units(name: str, unit_ids: list[int]) -> Path:
+            n_bins = 30
+            payload = {
+                "unitsSpikeCounts": [
+                    [
+                        [
+                            [(unit + x + y + bin_idx) % 4 for bin_idx in range(n_bins)]
+                            for x in range(3)
+                        ]
+                        for y in range(2)
+                    ]
+                    for unit in range(len(unit_ids))
+                ],
+                "unitsSpikeCountsSize": [len(unit_ids), 2, 3, n_bins],
+                "unitPool": unit_ids,
+                "xPositions": [-1, 0, 1],
+                "yPositions": [-1, 1],
+                "timeBinEdges": [index * 0.001 for index in range(n_bins + 1)],
+                "stimulusPresentationCounts": [[5, 5, 5], [5, 5, 5]],
+            }
+            path = Path(self.directory.name) / name
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            return path
+
+        main_path = write_units("main.json", [1, 3, 5, 7])
+        sync_one_path = write_units("sync-one.json", [1, 3, 5, 6, 7])
+        sync_two_path = write_units("sync-two.json", [2, 3, 5, 7])
+        self.app._load_json_path(main_path)
+        sync_one = self.app._open_json_window(sync_one_path)
+        sync_two = self.app._open_json_window(sync_two_path)
+        self.assertIsNotNone(sync_one)
+        self.assertIsNotNone(sync_two)
+        assert sync_one is not None and sync_two is not None
+        self.addCleanup(sync_one.destroy)
+        self.addCleanup(sync_two.destroy)
+
+        self.app.pair_windows_var.set(True)
+        self.app._on_pair_windows_toggled()
+        self.assertEqual(self.app._unit_combo_unit_ids, [1, 2, 3, 5, 6, 7])
+
+        self.app._step_unit(1)
+        self.assertEqual(
+            [
+                self.app._selected_unit_id,
+                sync_one._selected_unit_id,
+                sync_two._selected_unit_id,
+            ],
+            [2, 2, 2],
+        )
+        self.assertEqual(
+            [self.app.unit_idx.get(), sync_one.unit_idx.get(), sync_two.unit_idx.get()],
+            [-1, -1, 0],
+        )
+        self.assertIn("Unit N/A / cluster 2", self.app.header_label.cget("text"))
+        self.assertIn("Unit N/A / cluster 2", sync_one.header_label.cget("text"))
+        self.app._clear_hover()
+        self.assertIn("N/A: cluster 2", self.app.status_label.cget("text"))
+
+        self.app._step_unit(1)
+        self.assertEqual(
+            [self.app.unit_idx.get(), sync_one.unit_idx.get(), sync_two.unit_idx.get()],
+            [1, 1, 1],
+        )
 
     def test_arrow_keys_control_units_and_timeline_bin(self) -> None:
         event = SimpleNamespace(widget=self.app.canvases["timeline"])
