@@ -1,31 +1,194 @@
+"""Store one flattened delete/interpolation record per recording session."""
+
 from __future__ import annotations
+
+from collections.abc import Sequence
+from contextlib import contextmanager
+from itertools import chain
+import json
+from operator import index
+from pathlib import Path
+import sqlite3
+from typing import Iterator, TypeAlias, TypedDict
 
 import numpy as np
 
-"""Store delete/interpolation parameters for each recording session."""
-
-from collections.abc import Sequence
-from pathlib import Path
-import sqlite3
-from typing import TypeAlias
-
-# Interpolation execution lives in recording.
-# This module stores only its DB parameters.
 from Utils.recording import interp_replace
 
-# One normalized row-level edit read from or written to the new DB schema.
+
+# Compatibility shape for callers that use SessionEditStore.get_edits().
 StoredEdit: TypeAlias = dict[str, object]
 
 
+class StoredSessionEdit(TypedDict):
+    """The Python representation of one ``session_edits`` table row."""
+
+    date: str
+    session_id: str
+    delete_frames: list[int]
+    interp_start_end: tuple[int, int] | None
+    interp_frames_between: int | None
+
+
+_SESSION_EDIT_COLUMN_SPECS = [
+    ("date", "TEXT", True, 1),
+    ("session_id", "TEXT", True, 2),
+    ("delete_frames", "TEXT", True, 0),
+    ("interp_start_end", "TEXT", False, 0),
+    ("interp_frames_between", "INTEGER", False, 0),
+]
+
+_LEGACY_OPERATION_COLUMNS = {
+    "edit_id",
+    "mouse_id",
+    "date",
+    "session_id",
+    "edit_order",
+    "operation",
+    "interp_start_frame",
+    "interp_end_frame",
+    "interp_frames_between",
+}
+
+_CREATE_SESSION_EDITS_SQL = """
+CREATE TABLE IF NOT EXISTS session_edits (
+    date TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    delete_frames TEXT NOT NULL DEFAULT '[]'
+        CHECK (
+            CASE
+                WHEN json_valid(delete_frames)
+                THEN json_type(delete_frames) = 'array'
+                ELSE 0
+            END
+        ),
+    interp_start_end TEXT
+        CHECK (
+            interp_start_end IS NULL
+            OR CASE
+                WHEN json_valid(interp_start_end)
+                THEN json_type(interp_start_end) = 'array'
+                     AND json_array_length(interp_start_end) = 2
+                     AND json_type(interp_start_end, '$[0]') = 'integer'
+                     AND json_type(interp_start_end, '$[1]') = 'integer'
+                     AND json_extract(interp_start_end, '$[0]') >= 0
+                     AND json_extract(interp_start_end, '$[0]')
+                         < json_extract(interp_start_end, '$[1]')
+                ELSE 0
+            END
+        ),
+    interp_frames_between INTEGER
+        CHECK (
+            interp_frames_between IS NULL
+            OR (
+                typeof(interp_frames_between) = 'integer'
+                AND interp_frames_between >= 0
+            )
+        ),
+    PRIMARY KEY (date, session_id),
+    CHECK (
+        (
+            interp_start_end IS NULL
+            AND interp_frames_between IS NULL
+        )
+        OR (
+            interp_start_end IS NOT NULL
+            AND interp_frames_between IS NOT NULL
+        )
+    )
+)
+"""
+
+
+def _encode_json(value: object) -> str:
+    return json.dumps(value, separators=(",", ":"))
+
+
+def _normalize_integer(value: object, field_name: str) -> int:
+    if isinstance(value, (bool, np.bool_)):
+        raise TypeError(f"{field_name} must be an integer")
+    try:
+        return index(value)
+    except TypeError as conversion_error:
+        raise TypeError(f"{field_name} must be an integer") from conversion_error
+
+
+def _decode_delete_frames(encoded_frames: str) -> list[int]:
+    try:
+        decoded_frames = json.loads(encoded_frames)
+    except (TypeError, json.JSONDecodeError) as decode_error:
+        raise ValueError("saved delete_frames is not valid JSON") from decode_error
+
+    if not isinstance(decoded_frames, list):
+        raise ValueError("saved delete_frames must be a JSON array")
+
+    normalized_frames: list[int] = []
+    for frame in decoded_frames:
+        if isinstance(frame, bool) or not isinstance(frame, int):
+            raise ValueError("saved delete_frames must contain only integers")
+        normalized_frames.append(frame)
+
+    if len(set(normalized_frames)) != len(normalized_frames):
+        raise ValueError("saved delete_frames contains duplicate indices")
+
+    return normalized_frames
+
+
+def _decode_interp_start_end(
+    encoded_start_end: str | None,
+) -> tuple[int, int] | None:
+    if encoded_start_end is None:
+        return None
+
+    try:
+        decoded_start_end = json.loads(encoded_start_end)
+    except (TypeError, json.JSONDecodeError) as decode_error:
+        raise ValueError("saved interp_start_end is not valid JSON") from decode_error
+
+    if (
+        not isinstance(decoded_start_end, list)
+        or len(decoded_start_end) != 2
+        or any(
+            isinstance(frame, bool) or not isinstance(frame, int)
+            for frame in decoded_start_end
+        )
+    ):
+        raise ValueError("saved interp_start_end must contain exactly two integers")
+
+    start_frame, end_frame = decoded_start_end
+    if not 0 <= start_frame < end_frame:
+        raise ValueError("saved interpolation requires 0 <= start_frame < end_frame")
+    return start_frame, end_frame
+
+
+def _merge_unique_frames(
+    existing_frames: Sequence[int],
+    new_frames: Sequence[int],
+) -> list[int]:
+    """Append frames while preserving first appearance and removing overlap."""
+
+    merged_frames: list[int] = []
+    seen_frames: set[int] = set()
+    for frame in chain(existing_frames, new_frames):
+        normalized_frame = _normalize_integer(frame, "delete frame")
+        if normalized_frame not in seen_frames:
+            merged_frames.append(normalized_frame)
+            seen_frames.add(normalized_frame)
+    return merged_frames
+
+
 class SessionEditStore:
-    """Read and write only the new ``session_edits`` schema."""
+    """Read and write one flattened row per date/session pair."""
 
     def __init__(
-            self,
-            database_file: str | Path,
-            mouse_id: str | None = None,
+        self,
+        database_file: str | Path,
+        mouse_id: str | None = None,
     ):
         self.database_file = Path(database_file).expanduser().resolve()
+
+        # Keep this compatibility attribute for older callers. The database is
+        # already scoped by its mouse directory, so mouse_id is not persisted.
         self.mouse_id = (
             self.database_file.parent.name
             if mouse_id is None
@@ -35,14 +198,64 @@ class SessionEditStore:
             raise ValueError("mouse_id cannot be empty")
 
     @staticmethod
-    def _connect(database_file: str | Path) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(
+        database_file: str | Path,
+    ) -> Iterator[sqlite3.Connection]:
         """Connect with dot-file locking, which works on the lab CIFS mount."""
 
         database_path = Path(database_file).expanduser().resolve()
         database_uri = f"{database_path.as_uri()}?vfs=unix-dotfile"
         database_connection = sqlite3.connect(database_uri, uri=True, timeout=30)
         database_connection.execute("PRAGMA foreign_keys = ON")
-        return database_connection
+        try:
+            with database_connection:
+                yield database_connection
+        finally:
+            database_connection.close()
+
+    @staticmethod
+    def _table_names(database_connection: sqlite3.Connection) -> set[str]:
+        return {
+            str(row[0])
+            for row in database_connection.execute(
+                """
+                SELECT name
+                FROM sqlite_master
+                WHERE type = 'table'
+                """
+            )
+        }
+
+    @staticmethod
+    def _table_columns(
+        database_connection: sqlite3.Connection,
+        table_name: str,
+    ) -> set[str]:
+        return {
+            str(row[1])
+            for row in database_connection.execute(
+                f"PRAGMA table_info({table_name})"
+            )
+        }
+
+    @staticmethod
+    def _has_current_schema(
+        database_connection: sqlite3.Connection,
+    ) -> bool:
+        table_info = database_connection.execute(
+            "PRAGMA table_info(session_edits)"
+        ).fetchall()
+        actual_specs = [
+            (
+                str(row[1]),
+                str(row[2]).upper(),
+                bool(row[3]),
+                int(row[5]),
+            )
+            for row in table_info
+        ]
+        return actual_specs == _SESSION_EDIT_COLUMN_SPECS
 
     @staticmethod
     def is_database_initialized(database_file: str | Path) -> bool:
@@ -52,177 +265,51 @@ class SessionEditStore:
 
         try:
             with SessionEditStore._connect(database_path) as database_connection:
-                table_names = {
-                    row[0]
-                    for row in database_connection.execute(
-                        """
-                        SELECT name
-                        FROM sqlite_master
-                        WHERE type = 'table'
-                        """
-                    )
-                }
+                table_names = SessionEditStore._table_names(database_connection)
+                if "session_edits" not in table_names:
+                    return False
+                if "session_delete_frames" in table_names:
+                    return False
+                return SessionEditStore._has_current_schema(database_connection)
+        except (OSError, sqlite3.Error):
+            return False
+
+    @staticmethod
+    def has_legacy_operation_schema(database_file: str | Path) -> bool:
+        database_path = Path(database_file).expanduser().resolve()
+        if not database_path.is_file():
+            return False
+
+        try:
+            with SessionEditStore._connect(database_path) as database_connection:
+                table_names = SessionEditStore._table_names(database_connection)
                 if not {"session_edits", "session_delete_frames"}.issubset(
-                        table_names
+                    table_names
                 ):
                     return False
-
-                edit_columns = {
-                    row[1]
-                    for row in database_connection.execute(
-                        "PRAGMA table_info(session_edits)"
+                return _LEGACY_OPERATION_COLUMNS.issubset(
+                    SessionEditStore._table_columns(
+                        database_connection,
+                        "session_edits",
                     )
-                }
-                required_edit_columns = {
-                    "edit_id",
-                    "mouse_id",
-                    "date",
-                    "session_id",
-                    "edit_order",
-                    "operation",
-                    "interp_start_frame",
-                    "interp_end_frame",
-                    "interp_frames_between",
-                }
-                return required_edit_columns.issubset(edit_columns)
+                )
         except (OSError, sqlite3.Error):
             return False
 
     @staticmethod
     def create_database(database_file: str | Path) -> bool:
+        """Create the five-column table without altering an existing schema."""
+
         database_path = Path(database_file).expanduser().resolve()
 
         try:
             database_path.parent.mkdir(parents=True, exist_ok=True)
             with SessionEditStore._connect(database_path) as database_connection:
-                database_connection.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS session_edits
-                    (
-                        edit_id
-                        INTEGER
-                        PRIMARY
-                        KEY
-                        AUTOINCREMENT,
-                        mouse_id
-                        TEXT
-                        NOT
-                        NULL,
-                        date
-                        TEXT
-                        NOT
-                        NULL,
-                        session_id
-                        TEXT
-                        NOT
-                        NULL,
-                        edit_order
-                        INTEGER
-                        NOT
-                        NULL,
-                        operation
-                        TEXT
-                        NOT
-                        NULL
-                        CHECK (
-                        operation
-                        IN
-                    (
-                        'delete',
-                        'interpolate'
-                    )),
-                        interp_start_frame INTEGER,
-                        interp_end_frame INTEGER,
-                        interp_frames_between INTEGER,
-                        created_at TEXT NOT NULL,
-                        last_changed_at TEXT NOT NULL,
-                        UNIQUE
-                    (
-                        mouse_id,
-                        date,
-                        session_id,
-                        edit_order
-                    ),
-                        CHECK
-                    (
-                    (
-                        operation =
-                        'delete'
-                        AND
-                        interp_start_frame
-                        IS
-                        NULL
-                        AND
-                        interp_end_frame
-                        IS
-                        NULL
-                        AND
-                        interp_frames_between
-                        IS
-                        NULL
-                    )
-                        OR
-                    (
-                        operation =
-                        'interpolate'
-                        AND
-                        interp_start_frame
-                        IS
-                        NOT
-                        NULL
-                        AND
-                        interp_end_frame
-                        IS
-                        NOT
-                        NULL
-                        AND
-                        interp_frames_between
-                        IS
-                        NOT
-                        NULL
-                        AND
-                        interp_frames_between
-                        >=
-                        0
-                    )
-                        )
-                        )
-                    """
-                )
-                database_connection.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS session_delete_frames
-                    (
-                        edit_id
-                        INTEGER
-                        NOT
-                        NULL,
-                        frame_order
-                        INTEGER
-                        NOT
-                        NULL,
-                        frame_index
-                        INTEGER
-                        NOT
-                        NULL,
-                        PRIMARY
-                        KEY
-                    (
-                        edit_id,
-                        frame_order
-                    ),
-                        FOREIGN KEY
-                    (
-                        edit_id
-                    )
-                        REFERENCES session_edits
-                    (
-                        edit_id
-                    )
-                        ON DELETE CASCADE
-                        )
-                    """
-                )
+                table_names = SessionEditStore._table_names(database_connection)
+                if "session_edits" not in table_names:
+                    if "session_delete_frames" in table_names:
+                        return False
+                    database_connection.execute(_CREATE_SESSION_EDITS_SQL)
         except (OSError, sqlite3.Error):
             return False
 
@@ -230,8 +317,8 @@ class SessionEditStore:
 
     @staticmethod
     def _normalize_session_key(
-            date: str,
-            session_id: str,
+        date: str | int,
+        session_id: str | int,
     ) -> tuple[str, str]:
         normalized_date = str(date).strip()
         normalized_session_id = str(session_id).strip()
@@ -242,70 +329,48 @@ class SessionEditStore:
         return normalized_date, normalized_session_id
 
     @staticmethod
-    def _insert_delete_edit(
-            database_connection: sqlite3.Connection,
-            mouse_id: str,
-            date: str,
-            session_id: str,
-            edit_order: int,
-            frames: Sequence[int],
-    ) -> None:
-        edit_cursor = database_connection.execute(
-            """
-            INSERT INTO session_edits (mouse_id, date, session_id, edit_order, operation,
-                                       interp_start_frame, interp_end_frame, interp_frames_between,
-                                       created_at, last_changed_at)
-            VALUES (?, ?, ?, ?, 'delete',
-                    NULL, NULL, NULL,
-                    strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
-                    strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-            """,
-            (mouse_id, date, session_id, int(edit_order)),
+    def _decode_row(
+        date: str,
+        session_id: str,
+        row: tuple[object, object, object],
+    ) -> StoredSessionEdit:
+        encoded_delete_frames, encoded_start_end, frames_between = row
+        delete_frames = _decode_delete_frames(str(encoded_delete_frames))
+        interp_start_end = _decode_interp_start_end(
+            None if encoded_start_end is None else str(encoded_start_end)
         )
-        edit_id = int(edit_cursor.lastrowid)
-        database_connection.executemany(
-            """
-            INSERT INTO session_delete_frames (edit_id, frame_order, frame_index)
-            VALUES (?, ?, ?)
-            """,
-            [
-                (edit_id, frame_order, int(frame_index))
-                for frame_order, frame_index in enumerate(frames)
-            ],
+        normalized_frames_between = (
+            None
+            if frames_between is None
+            else _normalize_integer(
+                frames_between,
+                "saved interp_frames_between",
+            )
         )
 
-    @staticmethod
-    def _insert_interpolation_edit(
-            database_connection: sqlite3.Connection,
-            mouse_id: str,
-            date: str,
-            session_id: str,
-            edit_order: int,
-            start_frame: int,
-            end_frame: int,
-            frames_between: int,
-    ) -> None:
-        database_connection.execute(
-            """
-            INSERT INTO session_edits (mouse_id, date, session_id, edit_order, operation,
-                                       interp_start_frame, interp_end_frame, interp_frames_between,
-                                       created_at, last_changed_at)
-            VALUES (?, ?, ?, ?, 'interpolate', ?, ?, ?,
-                    strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
-                    strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-            """,
-            (
-                mouse_id,
-                date,
-                session_id,
-                int(edit_order),
-                int(start_frame),
-                int(end_frame),
-                int(frames_between),
-            ),
-        )
+        if (interp_start_end is None) != (normalized_frames_between is None):
+            raise ValueError(
+                "saved interpolation pair and frames_between must both be set or null"
+            )
+        if (
+            normalized_frames_between is not None
+            and normalized_frames_between < 0
+        ):
+            raise ValueError("saved interp_frames_between cannot be negative")
 
-    def get_edits(self, date: str, session_id: str) -> list[StoredEdit] | None:
+        return {
+            "date": date,
+            "session_id": session_id,
+            "delete_frames": delete_frames,
+            "interp_start_end": interp_start_end,
+            "interp_frames_between": normalized_frames_between,
+        }
+
+    def get_session_edit(
+        self,
+        date: str | int,
+        session_id: str | int,
+    ) -> StoredSessionEdit | None:
         normalized_date, normalized_session_id = self._normalize_session_key(
             date,
             session_id,
@@ -317,88 +382,60 @@ class SessionEditStore:
             )
 
         with self._connect(self.database_file) as database_connection:
-            edit_rows = database_connection.execute(
+            row = database_connection.execute(
                 """
-                SELECT edit_id,
-                       operation,
-                       interp_start_frame,
-                       interp_end_frame,
+                SELECT delete_frames,
+                       interp_start_end,
                        interp_frames_between
                 FROM session_edits
-                WHERE mouse_id = ? AND date = ? AND session_id = ?
-                ORDER BY edit_order
+                WHERE date = ? AND session_id = ?
                 """,
-                (self.mouse_id, normalized_date, normalized_session_id),
-            ).fetchall()
+                (normalized_date, normalized_session_id),
+            ).fetchone()
 
-            if not edit_rows:
-                return None
+        if row is None:
+            return None
+        return self._decode_row(normalized_date, normalized_session_id, row)
 
-            edits: list[StoredEdit] = []
+    def get_edits(
+        self,
+        date: str | int,
+        session_id: str | int,
+    ) -> list[StoredEdit] | None:
+        """Return the old facade shape, backed by one flattened table row."""
 
-            for (
-                    edit_id,
-                    operation,
-                    start_frame,
-                    end_frame,
-                    frames_between,
-            ) in edit_rows:
-                if operation == "delete":
-                    frames = [
-                        int(row[0])
-                        for row in database_connection.execute(
-                            """
-                            SELECT frame_index
-                            FROM session_delete_frames
-                            WHERE edit_id = ?
-                            ORDER BY frame_order
-                            """,
-                            (edit_id,),
-                        )
-                    ]
-                    edits.append(
-                        {
-                            "operation": "delete",
-                            "frames": frames,
-                        }
-                    )
-                elif operation == "interpolate":
-                    edits.append(
-                        {
-                            "operation": "interpolate",
-                            "start_frame": int(start_frame),
-                            "end_frame": int(end_frame),
-                            "frames_between": int(frames_between),
-                        }
-                    )
-                else:
-                    raise ValueError(f"Unknown saved operation: {operation}")
+        session_edit = self.get_session_edit(date, session_id)
+        if session_edit is None:
+            return None
 
+        edits: list[StoredEdit] = []
+        if session_edit["delete_frames"]:
+            edits.append(
+                {
+                    "operation": "delete",
+                    "frames": list(session_edit["delete_frames"]),
+                }
+            )
+
+        interp_start_end = session_edit["interp_start_end"]
+        if interp_start_end is not None:
+            edits.append(
+                {
+                    "operation": "interpolate",
+                    "start_frame": interp_start_end[0],
+                    "end_frame": interp_start_end[1],
+                    "frames_between": session_edit["interp_frames_between"],
+                }
+            )
         return edits
 
-    def _next_edit_order(
-            self,
-            database_connection: sqlite3.Connection,
-            date: str,
-            session_id: str,
-    ) -> int:
-        saved_maximum = database_connection.execute(
-            """
-            SELECT MAX(edit_order)
-            FROM session_edits
-            WHERE mouse_id = ? AND date = ? AND session_id = ?
-            """,
-            (self.mouse_id, date, session_id),
-        ).fetchone()[0]
-        return 0 if saved_maximum is None else int(saved_maximum) + 1
-
     def add_delete_frames(
-            self,
-            date: str,
-            session_id: str,
-            frames: Sequence[int],
+        self,
+        date: str | int,
+        session_id: str | int,
+        frames: Sequence[int],
     ) -> tuple[bool, str | None]:
-        """Append one delete operation using the exact supplied frame list."""
+        """Append frames to the session's one flat delete list."""
 
         try:
             normalized_date, normalized_session_id = self._normalize_session_key(
@@ -406,103 +443,142 @@ class SessionEditStore:
                 session_id,
             )
             normalized_frames = normalize_delete_frames(frames)
-        except (TypeError, ValueError) as edit_error:
-            return False, str(edit_error)
 
-        existing_edits = self.get_edits(normalized_date, normalized_session_id) or []
-        if any(edit["operation"] == "interpolate" for edit in existing_edits):
-            return (
-                False,
-                "clear saved interpolations before adding delete frames, because "
-                "interpolation indices are fixed after all deletes",
-            )
-
-        # Identical delete groups are valid: groups run sequentially, so deleting
-        # the same index again intentionally removes the next frame.
-        # ---end---
-
-        try:
             with self._connect(self.database_file) as database_connection:
-                edit_order = self._next_edit_order(
-                    database_connection,
-                    normalized_date,
-                    normalized_session_id,
-                )
-                self._insert_delete_edit(
-                    database_connection,
-                    self.mouse_id,
-                    normalized_date,
-                    normalized_session_id,
-                    edit_order,
+                database_connection.execute("BEGIN IMMEDIATE")
+                row = database_connection.execute(
+                    """
+                    SELECT delete_frames, interp_start_end
+                    FROM session_edits
+                    WHERE date = ? AND session_id = ?
+                    """,
+                    (normalized_date, normalized_session_id),
+                ).fetchone()
+
+                if row is None:
+                    existing_frames: list[int] = []
+                else:
+                    existing_frames = _decode_delete_frames(str(row[0]))
+                    if row[1] is not None:
+                        return (
+                            False,
+                            "clear the saved interpolation before adding delete "
+                            "frames because its indices are measured after deletes",
+                        )
+
+                merged_frames = _merge_unique_frames(
+                    existing_frames,
                     normalized_frames,
                 )
-        except sqlite3.Error as database_error:
-            return False, str(database_error)
+                encoded_frames = _encode_json(merged_frames)
+
+                database_connection.execute(
+                    """
+                    INSERT INTO session_edits (
+                        date,
+                        session_id,
+                        delete_frames,
+                        interp_start_end,
+                        interp_frames_between
+                    )
+                    VALUES (?, ?, ?, NULL, NULL)
+                    ON CONFLICT(date, session_id) DO UPDATE SET
+                        delete_frames = excluded.delete_frames
+                    """,
+                    (
+                        normalized_date,
+                        normalized_session_id,
+                        encoded_frames,
+                    ),
+                )
+        except (OSError, sqlite3.Error, TypeError, ValueError) as edit_error:
+            return False, str(edit_error)
 
         return True, None
 
     def add_interpolation(
-            self,
-            date: str,
-            session_id: str,
-            start_frame: int,
-            end_frame: int,
-            frames_between: int,
+        self,
+        date: str | int,
+        session_id: str | int,
+        start_frame: int,
+        end_frame: int,
+        frames_between: int,
     ) -> tuple[bool, str | None]:
-        """Append interpolation anchors measured after every delete group."""
+        """Set or replace the session's single interpolation."""
 
         try:
             normalized_date, normalized_session_id = self._normalize_session_key(
                 date,
                 session_id,
             )
-            normalized_start = int(start_frame)
-            normalized_end = int(end_frame)
-            normalized_count = int(frames_between)
+            normalized_start = _normalize_integer(start_frame, "start_frame")
+            normalized_end = _normalize_integer(end_frame, "end_frame")
+            normalized_count = _normalize_integer(
+                frames_between,
+                "frames_between",
+            )
+            if not 0 <= normalized_start < normalized_end:
+                raise ValueError(
+                    "interpolation requires 0 <= start_frame < end_frame"
+                )
             if normalized_count < 0:
-                raise ValueError("frames_between must be greater than or equal to zero")
-        except (TypeError, ValueError) as edit_error:
-            return False, str(edit_error)
+                raise ValueError(
+                    "frames_between must be greater than or equal to zero"
+                )
 
-        existing_edits = self.get_edits(normalized_date, normalized_session_id) or []
-        new_edit: StoredEdit = {
-            "operation": "interpolate",
-            "start_frame": normalized_start,
-            "end_frame": normalized_end,
-            "frames_between": normalized_count,
-        }
-        if new_edit in existing_edits:
-            return False, f"identical interpolation edit already exists: {new_edit}"
-
-        try:
+            encoded_start_end = _encode_json(
+                [normalized_start, normalized_end]
+            )
             with self._connect(self.database_file) as database_connection:
-                edit_order = self._next_edit_order(
-                    database_connection,
-                    normalized_date,
-                    normalized_session_id,
-                )
-                self._insert_interpolation_edit(
-                    database_connection,
-                    self.mouse_id,
-                    normalized_date,
-                    normalized_session_id,
-                    edit_order,
-                    normalized_start,
-                    normalized_end,
+                database_connection.execute("BEGIN IMMEDIATE")
+                saved_interpolation = database_connection.execute(
+                    """
+                    SELECT interp_start_end, interp_frames_between
+                    FROM session_edits
+                    WHERE date = ? AND session_id = ?
+                    """,
+                    (normalized_date, normalized_session_id),
+                ).fetchone()
+
+                if saved_interpolation == (
+                    encoded_start_end,
                     normalized_count,
+                ):
+                    return False, "identical interpolation is already saved"
+
+                database_connection.execute(
+                    """
+                    INSERT INTO session_edits (
+                        date,
+                        session_id,
+                        delete_frames,
+                        interp_start_end,
+                        interp_frames_between
+                    )
+                    VALUES (?, ?, '[]', ?, ?)
+                    ON CONFLICT(date, session_id) DO UPDATE SET
+                        interp_start_end = excluded.interp_start_end,
+                        interp_frames_between = excluded.interp_frames_between
+                    """,
+                    (
+                        normalized_date,
+                        normalized_session_id,
+                        encoded_start_end,
+                        normalized_count,
+                    ),
                 )
-        except sqlite3.Error as database_error:
-            return False, str(database_error)
+        except (OSError, sqlite3.Error, TypeError, ValueError) as edit_error:
+            return False, str(edit_error)
 
         return True, None
 
     def replace_edits(
-            self,
-            date: str,
-            session_id: str,
-            edits: Sequence[StoredEdit],
+        self,
+        date: str | int,
+        session_id: str | int,
+        edits: Sequence[StoredEdit],
     ) -> tuple[bool, str | None]:
-        """Replace a complete edit plan; used by migration and explicit rewrites."""
+        """Replace one session from the compatibility operation-list shape."""
 
         try:
             normalized_date, normalized_session_id = self._normalize_session_key(
@@ -510,52 +586,87 @@ class SessionEditStore:
                 session_id,
             )
             normalized_edits = normalize_session_edits(edits)
-        except (KeyError, TypeError, ValueError) as edit_error:
-            return False, str(edit_error)
+            delete_frames: list[int] = []
+            has_delete_operation = False
+            interpolation: tuple[int, int, int] | None = None
 
-        try:
-            with self._connect(self.database_file) as database_connection:
-                database_connection.execute(
-                    """
-                    DELETE
-                    FROM session_edits
-                    WHERE mouse_id = ? AND date = ? AND session_id = ?
-                    """,
-                    (self.mouse_id, normalized_date, normalized_session_id),
-                )
-
-                for edit_order, edit in enumerate(normalized_edits):
-                    if edit["operation"] == "delete":
-                        self._insert_delete_edit(
-                            database_connection,
-                            self.mouse_id,
-                            normalized_date,
-                            normalized_session_id,
-                            edit_order,
-                            edit["frames"],
+            for edit in normalized_edits:
+                if edit["operation"] == "delete":
+                    if has_delete_operation:
+                        raise ValueError(
+                            "replace_edits accepts one already-flattened delete "
+                            "list; multiple sequential delete groups cannot be "
+                            "merged safely"
                         )
-                    else:
-                        self._insert_interpolation_edit(
-                            database_connection,
-                            self.mouse_id,
-                            normalized_date,
-                            normalized_session_id,
-                            edit_order,
-                            edit["start_frame"],
-                            edit["end_frame"],
+                    delete_frames = list(edit["frames"])
+                    has_delete_operation = True
+                else:
+                    if interpolation is not None:
+                        raise ValueError(
+                            "one session row can contain only one interpolation"
+                        )
+                    interpolation = (
+                        _normalize_integer(edit["start_frame"], "start_frame"),
+                        _normalize_integer(edit["end_frame"], "end_frame"),
+                        _normalize_integer(
                             edit["frames_between"],
+                            "frames_between",
+                        ),
+                    )
+
+            with self._connect(self.database_file) as database_connection:
+                database_connection.execute("BEGIN IMMEDIATE")
+                if not delete_frames and interpolation is None:
+                    database_connection.execute(
+                        """
+                        DELETE FROM session_edits
+                        WHERE date = ? AND session_id = ?
+                        """,
+                        (normalized_date, normalized_session_id),
+                    )
+                else:
+                    interp_start_end = (
+                        None
+                        if interpolation is None
+                        else _encode_json(interpolation[:2])
+                    )
+                    interp_frames_between = (
+                        None if interpolation is None else interpolation[2]
+                    )
+                    database_connection.execute(
+                        """
+                        INSERT INTO session_edits (
+                            date,
+                            session_id,
+                            delete_frames,
+                            interp_start_end,
+                            interp_frames_between
                         )
-        except sqlite3.Error as database_error:
-            return False, str(database_error)
+                        VALUES (?, ?, ?, ?, ?)
+                        ON CONFLICT(date, session_id) DO UPDATE SET
+                            delete_frames = excluded.delete_frames,
+                            interp_start_end = excluded.interp_start_end,
+                            interp_frames_between = excluded.interp_frames_between
+                        """,
+                        (
+                            normalized_date,
+                            normalized_session_id,
+                            _encode_json(delete_frames),
+                            interp_start_end,
+                            interp_frames_between,
+                        ),
+                    )
+        except (OSError, sqlite3.Error, KeyError, TypeError, ValueError) as edit_error:
+            return False, str(edit_error)
 
         return True, None
 
     def clear_interpolations(
-            self,
-            date: str,
-            session_id: str,
+        self,
+        date: str | int,
+        session_id: str | int,
     ) -> tuple[bool, str | None]:
-        """Remove only interpolation edits and keep every delete group."""
+        """Clear the interpolation columns while retaining delete_frames."""
 
         try:
             normalized_date, normalized_session_id = self._normalize_session_key(
@@ -563,32 +674,32 @@ class SessionEditStore:
                 session_id,
             )
             with self._connect(self.database_file) as database_connection:
-                saved_interpolation_count = int(
-                    database_connection.execute(
-                        """
-                        SELECT COUNT(*)
-                        FROM session_edits
-                        WHERE mouse_id = ?
-                          AND date = ?
-                          AND session_id = ?
-                          AND operation = 'interpolate'
-                        """,
-                        (self.mouse_id, normalized_date, normalized_session_id),
-                    ).fetchone()[0]
+                database_connection.execute("BEGIN IMMEDIATE")
+                update_cursor = database_connection.execute(
+                    """
+                    UPDATE session_edits
+                    SET interp_start_end = NULL,
+                        interp_frames_between = NULL
+                    WHERE date = ?
+                      AND session_id = ?
+                      AND interp_start_end IS NOT NULL
+                    """,
+                    (normalized_date, normalized_session_id),
                 )
-                if saved_interpolation_count == 0:
-                    return False, "no saved interpolations to clear"
+                if update_cursor.rowcount == 0:
+                    return False, "no saved interpolation to clear"
 
+                # An interpolation-only record becomes an empty record after the
+                # update, so remove it to keep checkSaved/getSessionInfo truthful.
                 database_connection.execute(
                     """
-                    DELETE
-                    FROM session_edits
-                    WHERE mouse_id = ?
-                      AND date = ?
+                    DELETE FROM session_edits
+                    WHERE date = ?
                       AND session_id = ?
-                      AND operation = 'interpolate'
+                      AND json_array_length(delete_frames) = 0
+                      AND interp_start_end IS NULL
                     """,
-                    (self.mouse_id, normalized_date, normalized_session_id),
+                    (normalized_date, normalized_session_id),
                 )
         except (OSError, sqlite3.Error, TypeError, ValueError) as edit_error:
             return False, str(edit_error)
@@ -600,7 +711,11 @@ def normalize_delete_frames(frames: Sequence[int]) -> list[int]:
     if isinstance(frames, (str, bytes)):
         raise TypeError("frames must be a sequence of integers")
 
-    normalized_frames = [int(frame) for frame in frames]
+    normalized_frames = [
+        _normalize_integer(frame, "delete frame")
+        for frame in frames
+    ]
+
     if not normalized_frames:
         raise ValueError("frames cannot be empty")
     if len(set(normalized_frames)) != len(normalized_frames):
@@ -613,13 +728,11 @@ def normalize_session_edits(edits: Sequence[StoredEdit]) -> list[StoredEdit]:
         raise TypeError("edits must be a sequence")
 
     normalized_edits: list[StoredEdit] = []
-
     for edit_index, edit in enumerate(edits):
         if not isinstance(edit, dict):
             raise TypeError(f"edit {edit_index} must be a dictionary")
 
         operation = str(edit.get("operation", "")).strip().lower()
-
         if operation == "delete":
             normalized_edits.append(
                 {
@@ -628,14 +741,25 @@ def normalize_session_edits(edits: Sequence[StoredEdit]) -> list[StoredEdit]:
                 }
             )
         elif operation == "interpolate":
-            frames_between = int(edit["frames_between"])
+            start_frame = _normalize_integer(edit["start_frame"], "start_frame")
+            end_frame = _normalize_integer(edit["end_frame"], "end_frame")
+            frames_between = _normalize_integer(
+                edit["frames_between"],
+                "frames_between",
+            )
+            if not 0 <= start_frame < end_frame:
+                raise ValueError(
+                    "interpolation requires 0 <= start_frame < end_frame"
+                )
             if frames_between < 0:
-                raise ValueError("frames_between must be greater than or equal to zero")
+                raise ValueError(
+                    "frames_between must be greater than or equal to zero"
+                )
             normalized_edits.append(
                 {
                     "operation": "interpolate",
-                    "start_frame": int(edit["start_frame"]),
-                    "end_frame": int(edit["end_frame"]),
+                    "start_frame": start_frame,
+                    "end_frame": end_frame,
                     "frames_between": frames_between,
                 }
             )
@@ -643,26 +767,17 @@ def normalize_session_edits(edits: Sequence[StoredEdit]) -> list[StoredEdit]:
             raise ValueError(
                 f"edit {edit_index} has unknown operation: {operation!r}"
             )
-
     return normalized_edits
 
 
-# The DB module stores edit parameters only. The notebook deliberately performs
-# every np.delete group first and calls interp_replace only after deletes finish.
-
-
 class SessionEdit:
-    """Bind one date/recording to its delete and interpolation parameters.
-
-    Read methods return parameters directly. Write methods return
-    ``(success, message)`` so the notebook can keep its existing control style.
-    """
+    """Bind one date/recording to its flattened edit parameters."""
 
     def __init__(
-            self,
-            edit_store: SessionEditStore,
-            date: str | int,
-            num_of_rec: str | int,
+        self,
+        edit_store: SessionEditStore,
+        date: str | int,
+        num_of_rec: str | int,
     ):
         normalized_date, normalized_num_of_rec = edit_store._normalize_session_key(
             date,
@@ -672,88 +787,90 @@ class SessionEdit:
         self.date = normalized_date
         self.num_of_rec = normalized_num_of_rec
 
-    def getSessionInfo(self, *, target: list | np.ndarray | None = None) -> tuple[bool, list] | tuple[
-        tuple[bool, list], list | np.ndarray]:
-        deleteData = self.getDelete()
-        interpolData = self.getInterp()
-        result_info = []
-
-        if target is not None:
-            has_changed = False
-            if deleteData:
-                target = np.delete(target, deleteData)
-                result_info.append("delete")
-                has_changed = True
-            if len(interpolData) > 0:
-                result_info.append("interpolate")
-                has_changed = True
-                for interpInfo in interpolData:
-                    target = interp_replace(
-                        target,
-                        interpInfo[0],
-                        interpInfo[1],
-                        interpInfo[2]
-                    )
-            return (has_changed, result_info), target
-
-        else:
-            if deleteData:
-                result_info.append("delete")
-            if interpolData:
-                result_info.append("interpolate")
-            return (not result_info == []), result_info
-
-    def getDelete(self) -> list[list[int]]:
-        """Return delete groups in the order in which np.delete must run."""
-
-        saved_edits = (
-                self._edit_store.get_edits(self.date, self.num_of_rec) or []
+    def getSessionInfo(
+        self,
+        *,
+        target: list | np.ndarray | None = None,
+    ) -> (
+        tuple[bool, list[str]]
+        | tuple[tuple[bool, list[str]], list | np.ndarray]
+    ):
+        session_edit = self._edit_store.get_session_edit(
+            self.date,
+            self.num_of_rec,
         )
-        return [
-            [int(frame) for frame in edit["frames"]]
-            for edit in saved_edits
-            if edit["operation"] == "delete"
-        ]
+
+        if session_edit is None:
+            if target is None:
+                return False, []
+            return (False, []), target
+
+        if target is None:
+            return True, session_edit
+
+
+        delete_frames = session_edit["delete_frames"]
+        if delete_frames:
+            target = np.delete(target, delete_frames)
+
+        interp_start_end = session_edit["interp_start_end"]
+
+        if interp_start_end is not None:
+            start_frame, end_frame = interp_start_end
+            frames_between = session_edit["interp_frames_between"]
+
+            target = interp_replace(target, start_frame, end_frame, new_length=frames_between+2)
+
+        return (True, session_edit), target
+
+    def getDelete(self) -> list[int]:
+        """Return the one flat list of original target indices to delete."""
+
+        session_edit = self._edit_store.get_session_edit(
+            self.date,
+            self.num_of_rec,
+        )
+        return [] if session_edit is None else list(session_edit["delete_frames"])
 
     def getInterp(self) -> list[tuple[int, int, int]]:
-        """Return interpolation parameters from higher to lower start index."""
+        """Return zero or one interpolation tuple for notebook compatibility."""
 
-        saved_edits = (
-                self._edit_store.get_edits(self.date, self.num_of_rec) or []
+        session_edit = self._edit_store.get_session_edit(
+            self.date,
+            self.num_of_rec,
         )
-        interpolation_edits = [
-            (
-                int(edit["start_frame"]),
-                int(edit["end_frame"]),
-                int(edit["frames_between"]),
-            )
-            for edit in saved_edits
-            if edit["operation"] == "interpolate"
-        ]
-        return sorted(
-            interpolation_edits,
-            key=lambda interpolation: interpolation[0],
-            reverse=True,
-        )
+        if session_edit is None or session_edit["interp_start_end"] is None:
+            return []
+
+        start_frame, end_frame = session_edit["interp_start_end"]
+        frames_between = session_edit["interp_frames_between"]
+        if frames_between is None:
+            raise ValueError("saved interpolation is missing interp_frames_between")
+        return [(start_frame, end_frame, frames_between)]
 
     def checkSaved(self) -> tuple[bool, str | None]:
-        saved_edits = self._edit_store.get_edits(self.date, self.num_of_rec)
-        if saved_edits is None:
-            return False, (
-                f"no saved edits for {self.date} rec {self.num_of_rec}"
-            )
+        saved_edit = self._edit_store.get_session_edit(
+            self.date,
+            self.num_of_rec,
+        )
+        if saved_edit is None:
+            return False, f"no saved edits for {self.date} rec {self.num_of_rec}"
         return True, None
 
     def deleteByRange(
-            self,
-            startFrame: int,
-            endFrame: int | None,
+        self,
+        startFrame: int,
+        endFrame: int | None,
     ) -> tuple[bool, str | None]:
-        """Store the frames excluded by target[startFrame:endFrame]."""
+        """Append the frames excluded by target[startFrame:endFrame]."""
 
         try:
-            normalized_start = int(startFrame)
-            normalized_end = None if endFrame is None else int(endFrame)
+            normalized_start = _normalize_integer(startFrame, "startFrame")
+            normalized_end = (
+                None
+                if endFrame is None
+                else _normalize_integer(endFrame, "endFrame")
+            )
             if normalized_start < 0:
                 raise ValueError("startFrame must be greater than or equal to zero")
             if normalized_end is not None and normalized_end >= 0:
@@ -768,10 +885,10 @@ class SessionEdit:
         return self.deleteByFrame(frame_list)
 
     def deleteByFrame(
-            self,
-            frameList: Sequence[int],
+        self,
+        frameList: Sequence[int],
     ) -> tuple[bool, str | None]:
-        """Store one exact delete group without flattening earlier groups."""
+        """Append exact original target indices to the saved flat delete list."""
 
         return self._edit_store.add_delete_frames(
             self.date,
@@ -780,17 +897,20 @@ class SessionEdit:
         )
 
     def interp(
-            self,
-            startFrame: int,
-            endFrame: int,
-            framesInBetween: int,
+        self,
+        startFrame: int,
+        endFrame: int,
+        framesInBetween: int,
     ) -> tuple[bool, str | None]:
-        """Store interpolation indices measured after all deletes."""
+        """Set the one interpolation measured after all saved deletes."""
 
         try:
-            normalized_start = int(startFrame)
-            normalized_end = int(endFrame)
-            normalized_count = int(framesInBetween)
+            normalized_start = _normalize_integer(startFrame, "startFrame")
+            normalized_end = _normalize_integer(endFrame, "endFrame")
+            normalized_count = _normalize_integer(
+                framesInBetween,
+                "framesInBetween",
+            )
         except (TypeError, ValueError) as edit_error:
             return False, str(edit_error)
 
@@ -798,16 +918,6 @@ class SessionEdit:
             return False, "interpolation requires 0 <= startFrame < endFrame"
         if normalized_count < 0:
             return False, "framesInBetween must be greater than or equal to zero"
-
-        for saved_start, saved_end, _ in self.getInterp():
-            ranges_are_separate = (
-                    normalized_end < saved_start or normalized_start > saved_end
-            )
-            if not ranges_are_separate:
-                return False, (
-                    "interpolation range overlaps a saved interpolation: "
-                    f"({saved_start}, {saved_end})"
-                )
 
         return self._edit_store.add_interpolation(
             self.date,
@@ -825,8 +935,16 @@ class SessionEdit:
 
 
 def _check_session_edit_database(
-        database_path: str | Path,
+    database_path: str | Path,
 ) -> SessionEditStore:
+    if SessionEditStore.has_legacy_operation_schema(database_path):
+        raise RuntimeError(
+            "legacy ordered session-edit schema detected; it cannot be flattened "
+            "safely without remapping sequential delete indices. Back up or "
+            "migrate the database before using the flat session_edits schema: "
+            f"{Path(database_path).expanduser().resolve()}"
+        )
+
     if not SessionEditStore.is_database_initialized(database_path):
         database_was_created = SessionEditStore.create_database(database_path)
         if not database_was_created:
@@ -837,11 +955,11 @@ def _check_session_edit_database(
 
 
 def check_session_edits(
-        database_path: str | Path,
-        date: str | int,
-        num_of_rec: str | int,
+    database_path: str | Path,
+    date: str | int,
+    num_of_rec: str | int,
 ) -> SessionEdit:
-    """Return one session-bound edit object; date/recording are not repeated."""
+    """Return one session-bound edit object."""
 
     edit_store = _check_session_edit_database(database_path)
     return SessionEdit(edit_store, date, num_of_rec)
