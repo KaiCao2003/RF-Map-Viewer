@@ -1,5 +1,5 @@
 #define MyAppName "RF Map Viewer"
-#define MyAppVersion "1.6.0"
+#define MyAppVersion "1.6.1"
 #define MyAppPublisher "KaiCao2003"
 
 #ifndef SourceRoot

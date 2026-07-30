@@ -1634,6 +1634,7 @@ class RFMViewer(tk.Toplevel):
         sidebar = ttk.Frame(self, style="Panel.TFrame", padding=14)
         sidebar.grid(row=0, column=0, sticky="nsew")
         sidebar.columnconfigure(0, weight=1)
+        self.sidebar_frame = sidebar
 
         main = ttk.Frame(self, padding=(12, 12, 12, 12))
         main.grid(row=0, column=1, sticky="nsew")
@@ -1645,10 +1646,12 @@ class RFMViewer(tk.Toplevel):
 
     def _build_sidebar(self, parent: ttk.Frame) -> None:
         row = 0
-        ttk.Label(parent, text="RF Map Viewer", style="Title.TLabel").grid(row=row, column=0, sticky="w")
-        row += 1
-
-        ttk.Separator(parent).grid(row=row, column=0, sticky="ew", pady=(0, 12))
+        ttk.Label(parent, text="RF Map Viewer", style="Title.TLabel").grid(
+            row=row,
+            column=0,
+            sticky="w",
+            pady=(0, 8),
+        )
         row += 1
 
         self.pair_windows_toggle = ttk.Checkbutton(
@@ -1657,7 +1660,7 @@ class RFMViewer(tk.Toplevel):
             variable=self.pair_windows_var,
             command=self._on_pair_windows_toggled,
         )
-        self.pair_windows_toggle.grid(row=row, column=0, sticky="w", pady=(2, 8))
+        self.pair_windows_toggle.grid(row=row, column=0, sticky="w", pady=(0, 8))
         row += 1
         self.pair_status_label = ttk.Label(
             parent,
@@ -1668,9 +1671,6 @@ class RFMViewer(tk.Toplevel):
         )
         self.pair_status_label.grid(row=row, column=0, sticky="ew", pady=(4, 10))
         self.pair_status_label.grid_remove()
-        row += 1
-
-        ttk.Separator(parent).grid(row=row, column=0, sticky="ew", pady=(0, 12))
         row += 1
 
         ttk.Label(parent, text="Unit", style="Panel.TLabel").grid(row=row, column=0, sticky="w")
@@ -1734,7 +1734,7 @@ class RFMViewer(tk.Toplevel):
 
     def _build_main(self, parent: ttk.Frame) -> None:
         header = ttk.Frame(parent)
-        header.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        header.grid(row=0, column=0, sticky="ew", pady=(0, 6))
         header.columnconfigure(0, weight=1)
         self.header_label = ttk.Label(header, text="", font=("TkDefaultFont", 13, "bold"))
         self.header_label.grid(row=0, column=0, sticky="w")
@@ -1768,9 +1768,10 @@ class RFMViewer(tk.Toplevel):
             self._tab_keys[str(frame)] = key
 
     def _build_plot_controls(self, parent: ttk.Frame) -> None:
-        controls = ttk.Frame(parent, style="Panel.TFrame", padding=(10, 8))
-        controls.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+        controls = ttk.Frame(parent, style="Panel.TFrame", padding=(8, 6))
+        controls.grid(row=1, column=0, sticky="ew", pady=(0, 8))
         controls.columnconfigure(8, weight=1)
+        self.plot_controls_frame = controls
 
         ttk.Label(controls, text="Value", style="Panel.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 6))
         self.value_mode_combo = ttk.Combobox(
@@ -1794,11 +1795,24 @@ class RFMViewer(tk.Toplevel):
         )
         self.time_res_spin.grid(row=0, column=3, sticky="w", padx=(0, 18))
 
-        ttk.Label(controls, text="RF sum range (ms)", style="Panel.TLabel").grid(
-            row=1, column=0, columnspan=2, sticky="w", pady=(8, 0), padx=(0, 6)
+        range_controls = ttk.Frame(controls, style="Panel.TFrame")
+        range_controls.grid(
+            row=1,
+            column=0,
+            columnspan=9,
+            sticky="w",
+            pady=(6, 0),
+        )
+        self.range_controls_frame = range_controls
+
+        ttk.Label(range_controls, text="RF sum range (ms)", style="Panel.TLabel").grid(
+            row=0,
+            column=0,
+            sticky="w",
+            padx=(0, 6),
         )
         self.range_start_spin = ttk.Spinbox(
-            controls,
+            range_controls,
             from_=self._time_axis_start_ms(),
             to=self._time_axis_end_ms(),
             increment=self._base_bin_ms(),
@@ -1806,10 +1820,10 @@ class RFMViewer(tk.Toplevel):
             textvariable=self.range_start_ms_var,
             command=self._on_range_changed,
         )
-        self.range_start_spin.grid(row=1, column=2, sticky="w", pady=(8, 0))
-        ttk.Label(controls, text="to", style="Panel.TLabel").grid(row=1, column=3, padx=6, pady=(8, 0))
+        self.range_start_spin.grid(row=0, column=1, sticky="w")
+        ttk.Label(range_controls, text="to", style="Panel.TLabel").grid(row=0, column=2, padx=6)
         self.range_end_spin = ttk.Spinbox(
-            controls,
+            range_controls,
             from_=self._time_axis_start_ms(),
             to=self._time_axis_end_ms(),
             increment=self._base_bin_ms(),
@@ -1817,20 +1831,21 @@ class RFMViewer(tk.Toplevel):
             textvariable=self.range_end_ms_var,
             command=self._on_range_changed,
         )
-        self.range_end_spin.grid(row=1, column=4, sticky="w", pady=(8, 0), padx=(0, 18))
+        self.range_end_spin.grid(row=0, column=3, sticky="w", padx=(0, 12))
 
-        ttk.Button(
-            controls,
+        self.reset_plot_range_button = ttk.Button(
+            range_controls,
             text="Reset 0–200",
             command=self._reset_plot_range,
-        ).grid(row=1, column=8, sticky="e", pady=(8, 0), padx=(18, 0))
+        )
+        self.reset_plot_range_button.grid(row=0, column=4, sticky="w", padx=(0, 8))
 
         self.display_toggle_button = ttk.Button(
-            controls,
+            range_controls,
             text="Display ▸",
             command=self._toggle_display_controls,
         )
-        self.display_toggle_button.grid(row=2, column=0, sticky="w", pady=(10, 0))
+        self.display_toggle_button.grid(row=0, column=5, sticky="w")
         self.display_controls_frame = ttk.Frame(controls, style="Panel.TFrame")
         display = self.display_controls_frame
         for column in (1, 3, 5):
@@ -1959,7 +1974,7 @@ class RFMViewer(tk.Toplevel):
         self.display_expanded_var.set(expanded)
         self.display_toggle_button.configure(text="Display ▾" if expanded else "Display ▸")
         if expanded:
-            self.display_controls_frame.grid(row=3, column=0, columnspan=9, sticky="ew", pady=(8, 0))
+            self.display_controls_frame.grid(row=2, column=0, columnspan=9, sticky="ew", pady=(6, 0))
         else:
             self.display_controls_frame.grid_remove()
 
