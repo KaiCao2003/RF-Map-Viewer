@@ -11,6 +11,8 @@ import argparse
 import csv
 import json
 import math
+import os
+import re
 import sys
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -48,6 +50,8 @@ PALETTES = ("Gray", "Viridis", "Inferno")
 POLAR_RADIUS_MODES = ("MATLAB row 1 inner", "Display bottom inner")
 AxisGroup = tuple[int, int]
 CellRef = tuple[int, int, int, int]
+PROBE_CLICK_WIDTH_UM = 160.0
+PROBE_CLICK_HEIGHT_UM = 75.0
 PAIR_SYNC_ALL_FIELDS = frozenset(
     {
         "unit",
@@ -155,6 +159,261 @@ def startup_json_path() -> Path:
         resources = Path(sys.executable).resolve().parent.parent / "Resources"
         return latest_json_path(resources)
     return latest_json_path()
+
+
+@dataclass(frozen=True)
+class ProbeUnitPosition:
+    unit_index: int
+    unit_id: int
+    x_um: float
+    y_um: float
+
+
+@dataclass(frozen=True)
+class ProbeChannel:
+    channel_index: int
+    channel_id: int
+    raw_channel_index: int
+    x_um: float
+    y_um: float
+    shank_id: int
+
+
+@dataclass(frozen=True)
+class SpatialRegion:
+    x_min: float
+    y_min: float
+    x_max: float
+    y_max: float
+
+    @classmethod
+    def from_corners(cls, x0: float, y0: float, x1: float, y1: float) -> SpatialRegion:
+        return cls(min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
+
+    @classmethod
+    def centered(
+        cls,
+        x_um: float,
+        y_um: float,
+        width_um: float = PROBE_CLICK_WIDTH_UM,
+        height_um: float = PROBE_CLICK_HEIGHT_UM,
+    ) -> SpatialRegion:
+        return cls.from_corners(
+            x_um - width_um / 2.0,
+            y_um - height_um / 2.0,
+            x_um + width_um / 2.0,
+            y_um + height_um / 2.0,
+        )
+
+    def contains(self, x_um: float, y_um: float) -> bool:
+        return self.x_min <= x_um <= self.x_max and self.y_min <= y_um <= self.y_max
+
+
+@dataclass(frozen=True)
+class ProbeGeometry:
+    probe_name: str
+    positions_path: Path
+    channels_path: Path | None
+    units: tuple[ProbeUnitPosition, ...]
+    channels: tuple[ProbeChannel, ...]
+
+    @property
+    def units_by_id(self) -> dict[int, ProbeUnitPosition]:
+        return {unit.unit_id: unit for unit in self.units}
+
+    def unit_ids_in_region(self, region: SpatialRegion, available_ids: list[int]) -> list[int]:
+        positions = self.units_by_id
+        return [
+            int(unit_id)
+            for unit_id in available_ids
+            if int(unit_id) in positions
+            and region.contains(positions[int(unit_id)].x_um, positions[int(unit_id)].y_um)
+        ]
+
+
+def _csv_rows(path: Path, required: tuple[str, ...]) -> list[dict[str, str]]:
+    resolved = _resolve_existing_file(path)
+    if resolved is None:
+        raise ValueError(f"CSV file not found: {path}")
+    with resolved.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        fields = tuple(reader.fieldnames or ())
+        missing = [name for name in required if name not in fields]
+        if missing:
+            raise ValueError(f"{resolved.name} is missing columns: {', '.join(missing)}")
+        return list(reader)
+
+
+def load_probe_geometry(
+    positions_path: Path,
+    channels_path: Path | None = None,
+    *,
+    probe_name: str = "Probe",
+    infer_sibling_channels: bool = True,
+) -> ProbeGeometry:
+    """Load optional probe geometry CSVs without requiring third-party packages."""
+
+    positions_resolved = _resolve_existing_file(positions_path)
+    if positions_resolved is None:
+        raise ValueError(f"CSV file not found: {positions_path}")
+    if channels_path is None and infer_sibling_channels:
+        sibling = positions_resolved.with_name("channels.csv")
+        channels_path = sibling if sibling.is_file() else None
+
+    position_rows = _csv_rows(
+        positions_resolved,
+        ("unit_index", "unit_id", "x_um", "y_um"),
+    )
+    units: list[ProbeUnitPosition] = []
+    seen_unit_ids: set[int] = set()
+    for row_number, row in enumerate(position_rows, start=2):
+        try:
+            unit = ProbeUnitPosition(
+                int(row["unit_index"]),
+                int(row["unit_id"]),
+                float(row["x_um"]),
+                float(row["y_um"]),
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Invalid positions.csv value on row {row_number}: {exc}") from exc
+        if not math.isfinite(unit.x_um) or not math.isfinite(unit.y_um):
+            raise ValueError(f"Invalid positions.csv coordinate on row {row_number}")
+        if unit.unit_id in seen_unit_ids:
+            raise ValueError(f"Duplicate unit_id {unit.unit_id} in positions.csv")
+        seen_unit_ids.add(unit.unit_id)
+        units.append(unit)
+
+    channels: list[ProbeChannel] = []
+    channels_resolved = _resolve_existing_file(channels_path) if channels_path is not None else None
+    if channels_path is not None and channels_resolved is None:
+        raise ValueError(f"CSV file not found: {channels_path}")
+    if channels_resolved is not None:
+        channel_rows = _csv_rows(
+            channels_resolved,
+            ("channel_index", "channel_id", "raw_channel_index", "x_um", "y_um", "shank_id"),
+        )
+        for row_number, row in enumerate(channel_rows, start=2):
+            try:
+                channel = ProbeChannel(
+                    int(row["channel_index"]),
+                    int(row["channel_id"]),
+                    int(row["raw_channel_index"]),
+                    float(row["x_um"]),
+                    float(row["y_um"]),
+                    int(row["shank_id"]),
+                )
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"Invalid channels.csv value on row {row_number}: {exc}") from exc
+            if not math.isfinite(channel.x_um) or not math.isfinite(channel.y_um):
+                raise ValueError(f"Invalid channels.csv coordinate on row {row_number}")
+            channels.append(channel)
+
+    return ProbeGeometry(
+        probe_name=probe_name,
+        positions_path=positions_resolved,
+        channels_path=channels_resolved,
+        units=tuple(units),
+        channels=tuple(channels),
+    )
+
+
+def probe_name_for_json(path: Path) -> str | None:
+    """Infer ProbeA/ProbeB from a JSON filename or its containing folders."""
+
+    filename_match = re.search(r"(?:^|[\s_-])([ab])$", path.stem, re.IGNORECASE)
+    if filename_match:
+        return f"Probe{filename_match.group(1).upper()}"
+    for part in (path.name, *(parent.name for parent in path.parents)):
+        match = re.search(r"probe[\s_-]*([ab])(?:\b|[_-])", part, re.IGNORECASE)
+        if match:
+            return f"Probe{match.group(1).upper()}"
+    return None
+
+
+def _geometry_path_pairs(base: Path, probe_name: str) -> list[tuple[Path, Path | None]]:
+    return [
+        (
+            base / "spike_position" / probe_name / "positions.csv",
+            base / "waveform" / probe_name / "channels.csv",
+        ),
+        (base / probe_name / "positions.csv", base / probe_name / "channels.csv"),
+        (base / "positions.csv", base / "channels.csv"),
+    ]
+
+
+def _probe_geometry_search_roots(json_path: Path, data_root: Path | None) -> list[Path]:
+    roots: list[Path] = []
+    if data_root is not None:
+        roots.append(data_root.expanduser())
+    else:
+        configured = os.environ.get("RF_MAPPING_PROBE_DATA_ROOT")
+        if configured:
+            roots.append(Path(configured).expanduser())
+    roots.extend(json_path.expanduser().resolve().parents)
+
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for root in roots:
+        key = str(root)
+        if key not in seen:
+            seen.add(key)
+            unique.append(root)
+    return unique
+
+
+def discover_probe_geometry_paths(
+    json_path: Path,
+    *,
+    data_root: Path | None = None,
+) -> tuple[Path, Path | None, str] | None:
+    """Find matching positions/channels CSVs near a recording JSON."""
+
+    probe_name = probe_name_for_json(json_path)
+    if probe_name is None:
+        return None
+    for root in _probe_geometry_search_roots(json_path, data_root):
+        for positions, channels in _geometry_path_pairs(root, probe_name):
+            positions_resolved = _resolve_existing_file(positions)
+            if positions_resolved is None:
+                continue
+            return positions_resolved, _resolve_existing_file(channels) if channels else None, probe_name
+    return None
+
+
+def discover_probe_geometry(json_path: Path, *, data_root: Path | None = None) -> ProbeGeometry | None:
+    probe_name = probe_name_for_json(json_path)
+    if probe_name is None:
+        return None
+    positions_only: ProbeGeometry | None = None
+    for root in _probe_geometry_search_roots(json_path, data_root):
+        for positions, channels in _geometry_path_pairs(root, probe_name):
+            positions_resolved = _resolve_existing_file(positions)
+            if positions_resolved is None:
+                continue
+            channels_resolved = _resolve_existing_file(channels) if channels is not None else None
+            try:
+                geometry = load_probe_geometry(
+                    positions_resolved,
+                    channels_resolved,
+                    probe_name=probe_name,
+                )
+            except (OSError, ValueError):
+                if channels_resolved is None:
+                    continue
+                try:
+                    geometry = load_probe_geometry(
+                        positions_resolved,
+                        None,
+                        probe_name=probe_name,
+                        infer_sibling_channels=False,
+                    )
+                except (OSError, ValueError):
+                    continue
+            if geometry.channels:
+                return geometry
+            if positions_only is None:
+                positions_only = geometry
+    return positions_only
 
 
 @dataclass(frozen=True)
@@ -1220,12 +1479,18 @@ class RFMViewer(tk.Toplevel):
         self._tab_keys: dict[str, str] = {}
         self._hover_signature: tuple[object, ...] | None = None
         self._hover_tooltip_text = ""
+        self.probe_geometry = discover_probe_geometry(data.path)
+        self.spatial_region: SpatialRegion | None = None
+        self._probe_drag_start: tuple[float, float] | None = None
+        self._probe_drag_moved = False
+        self._probe_canvas_transform: tuple[float, float, float, float] | None = None
+        self.display_expanded_var = tk.BooleanVar(value=False)
 
         self._build_style()
         self._build_layout()
         self._build_menu()
         self._wire_events()
-        self._sync_json_combo()
+        self._sync_json_menu()
         self._sync_unit_combo()
         self._update_all()
         self._viewer_ready = True
@@ -1307,6 +1572,13 @@ class RFMViewer(tk.Toplevel):
             accelerator="⌘O" if sys.platform == "darwin" else "Ctrl+O",
             command=self._open_json,
         )
+        self._discovered_json_menu = tk.Menu(file_menu, tearoff=False)
+        file_menu.add_cascade(label="Open Discovered JSON", menu=self._discovered_json_menu)
+        file_menu.add_command(
+            label="Attach Probe Geometry…",
+            command=self._attach_probe_geometry,
+        )
+        file_menu.add_separator()
         file_menu.add_command(
             label="Export Displayed…",
             accelerator="⌘E" if sys.platform == "darwin" else "Ctrl+E",
@@ -1330,9 +1602,9 @@ class RFMViewer(tk.Toplevel):
         navigate_menu.add_command(label="Increase Time Resolution 1 ms", accelerator="⇧.", command=lambda: self._step_time_resolution(1.0))
         navigate_menu.add_separator()
         navigate_menu.add_command(
-            label="Show Full Timeline Range",
+            label="Clear Probe Region / Show Full Timeline",
             accelerator="Esc",
-            command=self._clear_timeline_selection,
+            command=self._handle_escape,
         )
         menu.add_cascade(label="Navigate", menu=navigate_menu)
 
@@ -1344,7 +1616,7 @@ class RFMViewer(tk.Toplevel):
                 command=lambda index=tab_index: self._select_tab(index),
             )
         view_menu.add_separator()
-        view_menu.add_command(label="Invert Y", accelerator="F", command=self._toggle_flip_y)
+        view_menu.add_command(label="Show / Hide Display Controls", command=self._toggle_display_controls)
         view_menu.add_command(label="Cycle Palette", accelerator="P", command=self._cycle_palette)
         menu.add_cascade(label="View", menu=view_menu)
 
@@ -1375,34 +1647,17 @@ class RFMViewer(tk.Toplevel):
         row = 0
         ttk.Label(parent, text="RF Map Viewer", style="Title.TLabel").grid(row=row, column=0, sticky="w")
         row += 1
-        self.data_label = ttk.Label(parent, text="", style="Muted.TLabel", wraplength=260, justify="left")
-        self.data_label.grid(row=row, column=0, sticky="ew", pady=(6, 14))
-        row += 1
 
         ttk.Separator(parent).grid(row=row, column=0, sticky="ew", pady=(0, 12))
         row += 1
 
-        ttk.Label(parent, text="Current JSON", style="Panel.TLabel").grid(row=row, column=0, sticky="w")
-        row += 1
-        json_row = ttk.Frame(parent, style="Panel.TFrame")
-        json_row.grid(row=row, column=0, sticky="ew", pady=(5, 10))
-        json_row.columnconfigure(0, weight=1)
-        self.json_combo = ttk.Combobox(json_row, state="readonly", width=23)
-        self.json_combo.grid(row=0, column=0, sticky="ew")
-        ttk.Button(json_row, text="Open…", width=6, command=self._open_json).grid(row=0, column=1, padx=(5, 0))
-        row += 1
-
-        ttk.Label(parent, text="Window pairing", style="Panel.TLabel").grid(
-            row=row, column=0, sticky="w", pady=(2, 0)
-        )
-        row += 1
         self.pair_windows_toggle = ttk.Checkbutton(
             parent,
-            text="Sync viewer windows",
+            text="Sync windows",
             variable=self.pair_windows_var,
             command=self._on_pair_windows_toggled,
         )
-        self.pair_windows_toggle.grid(row=row, column=0, sticky="w", pady=(5, 0))
+        self.pair_windows_toggle.grid(row=row, column=0, sticky="w", pady=(2, 8))
         row += 1
         self.pair_status_label = ttk.Label(
             parent,
@@ -1412,6 +1667,7 @@ class RFMViewer(tk.Toplevel):
             justify="left",
         )
         self.pair_status_label.grid(row=row, column=0, sticky="ew", pady=(4, 10))
+        self.pair_status_label.grid_remove()
         row += 1
 
         ttk.Separator(parent).grid(row=row, column=0, sticky="ew", pady=(0, 12))
@@ -1422,79 +1678,46 @@ class RFMViewer(tk.Toplevel):
         unit_row = ttk.Frame(parent, style="Panel.TFrame")
         unit_row.grid(row=row, column=0, sticky="ew", pady=(5, 10))
         unit_row.columnconfigure(1, weight=1)
-        ttk.Button(unit_row, text="<", width=3, command=lambda: self._step_unit(-1)).grid(row=0, column=0, padx=(0, 5))
+        self.previous_unit_button = ttk.Button(unit_row, text="<", width=3, command=lambda: self._step_unit(-1))
+        self.previous_unit_button.grid(row=0, column=0, padx=(0, 5))
         self.unit_combo = ttk.Combobox(unit_row, state="readonly", width=23)
         self.unit_combo.grid(row=0, column=1, sticky="ew")
-        ttk.Button(unit_row, text=">", width=3, command=lambda: self._step_unit(1)).grid(row=0, column=2, padx=(5, 0))
+        self.next_unit_button = ttk.Button(unit_row, text=">", width=3, command=lambda: self._step_unit(1))
+        self.next_unit_button.grid(row=0, column=2, padx=(5, 0))
         row += 1
 
-        self.unit_stats_label = ttk.Label(parent, text="", style="Value.TLabel", wraplength=260, justify="left")
-        self.unit_stats_label.grid(row=row, column=0, sticky="ew", pady=(0, 14))
-        row += 1
-
-        ttk.Separator(parent).grid(row=row, column=0, sticky="ew", pady=(0, 12))
-        row += 1
-
-        ttk.Label(parent, text="Display", style="Panel.TLabel").grid(row=row, column=0, sticky="w")
-        row += 1
-        display_frame = ttk.Frame(parent, style="Panel.TFrame")
-        display_frame.grid(row=row, column=0, sticky="ew", pady=(5, 10))
-        display_frame.columnconfigure(1, weight=1)
-        ttk.Checkbutton(display_frame, text="Invert Y (MATLAB flip)", variable=self.flip_y_var, command=self._on_control_changed).grid(row=0, column=0, columnspan=2, sticky="w")
-        ttk.Label(display_frame, text="X bins", style="Panel.TLabel").grid(row=1, column=0, sticky="w", pady=(8, 0))
-        self.x_bins_spin = ttk.Spinbox(
-            display_frame,
-            from_=1,
-            to=self.data.n_x,
-            increment=1,
-            width=8,
-            textvariable=self.x_bins_var,
-            command=self._on_control_changed,
+        probe_header = ttk.Frame(parent, style="Panel.TFrame")
+        probe_header.grid(row=row, column=0, sticky="ew", pady=(0, 5))
+        probe_header.columnconfigure(0, weight=1)
+        ttk.Label(probe_header, text="Probe", style="Panel.TLabel").grid(row=0, column=0, sticky="w")
+        self.clear_spatial_button = ttk.Button(
+            probe_header,
+            text="Clear",
+            width=6,
+            command=self._clear_spatial_filter,
         )
-        self.x_bins_spin.grid(row=1, column=1, sticky="ew", pady=(8, 0))
-        ttk.Label(display_frame, text="Y bins", style="Panel.TLabel").grid(row=2, column=0, sticky="w", pady=(8, 0))
-        self.y_bins_spin = ttk.Spinbox(
-            display_frame,
-            from_=1,
-            to=self.data.n_y,
-            increment=1,
-            width=8,
-            textvariable=self.y_bins_var,
-            command=self._on_control_changed,
-        )
-        self.y_bins_spin.grid(row=2, column=1, sticky="ew", pady=(8, 0))
-        ttk.Label(display_frame, text="Smooth", style="Panel.TLabel").grid(row=3, column=0, sticky="w", pady=(8, 0))
-        self.smooth_spin = ttk.Spinbox(
-            display_frame,
-            from_=0,
-            to=3,
-            increment=1,
-            width=8,
-            textvariable=self.smooth_radius_var,
-            command=self._on_control_changed,
-        )
-        self.smooth_spin.grid(row=3, column=1, sticky="ew", pady=(8, 0))
-        ttk.Label(display_frame, text="Palette", style="Panel.TLabel").grid(row=4, column=0, sticky="w", pady=(8, 0))
-        ttk.Combobox(display_frame, state="readonly", values=PALETTES, textvariable=self.palette_var, width=12).grid(row=4, column=1, sticky="ew", pady=(8, 0))
-        ttk.Label(display_frame, text="Polar radius", style="Panel.TLabel").grid(row=5, column=0, sticky="w", pady=(8, 0))
-        ttk.Combobox(display_frame, state="readonly", values=POLAR_RADIUS_MODES, textvariable=self.polar_radius_var, width=18).grid(row=5, column=1, sticky="ew", pady=(8, 0))
+        self.clear_spatial_button.grid(row=0, column=1, sticky="e")
         row += 1
 
-        ttk.Separator(parent).grid(row=row, column=0, sticky="ew", pady=(0, 12))
-        row += 1
-
-        ttk.Label(parent, text="Selected cell", style="Panel.TLabel").grid(row=row, column=0, sticky="w")
-        row += 1
-        self.cell_label = ttk.Label(parent, text="", style="Muted.TLabel", justify="left", wraplength=260)
-        self.cell_label.grid(row=row, column=0, sticky="ew", pady=(5, 12))
-        row += 1
-
-        button_frame = ttk.Frame(parent, style="Panel.TFrame")
-        button_frame.grid(row=row, column=0, sticky="ew", pady=(0, 12))
-        button_frame.columnconfigure(0, weight=1)
-        ttk.Button(button_frame, text="Export displayed", command=self._export_current_matrix).grid(
-            row=0, column=0, sticky="ew"
+        self.probe_canvas = tk.Canvas(
+            parent,
+            width=260,
+            height=330,
+            background="#f8fafc",
+            highlightthickness=1,
+            highlightbackground="#d0d5dd",
         )
+        probe_canvas_row = row
+        self.probe_canvas.grid(row=row, column=0, sticky="nsew")
+        row += 1
+        self.spatial_status_label = ttk.Label(
+            parent,
+            text="",
+            style="Muted.TLabel",
+            wraplength=260,
+            justify="left",
+        )
+        self.spatial_status_label.grid(row=row, column=0, sticky="ew", pady=(5, 10))
         row += 1
 
         ttk.Label(
@@ -1505,7 +1728,9 @@ class RFMViewer(tk.Toplevel):
         ).grid(row=row, column=0, sticky="ew", pady=(0, 8))
         row += 1
 
-        parent.rowconfigure(row, weight=1)
+        self.cell_label = ttk.Label(parent, text="", style="Muted.TLabel")
+        self.unit_stats_label = ttk.Label(parent, text="", style="Muted.TLabel")
+        parent.rowconfigure(probe_canvas_row, weight=1)
 
     def _build_main(self, parent: ttk.Frame) -> None:
         header = ttk.Frame(parent)
@@ -1594,28 +1819,89 @@ class RFMViewer(tk.Toplevel):
         )
         self.range_end_spin.grid(row=1, column=4, sticky="w", pady=(8, 0), padx=(0, 18))
 
-        self.polar_layout_toggle = ttk.Checkbutton(
-            controls,
-            text="Polar layout",
-            variable=self.polar_layout_var,
-            command=self._on_spatial_format_changed,
-        )
-        self.polar_layout_toggle.grid(row=1, column=5, sticky="w", pady=(8, 0), padx=(0, 18))
-        self.rgb_mode_toggle = ttk.Checkbutton(
-            controls,
-            text="RGB composite",
-            variable=self.rgb_mode_var,
-            command=self._on_control_changed,
-        )
-        self.rgb_mode_toggle.grid(row=1, column=6, columnspan=2, sticky="w", pady=(8, 0))
         ttk.Button(
             controls,
             text="Reset 0–200",
             command=self._reset_plot_range,
         ).grid(row=1, column=8, sticky="e", pady=(8, 0), padx=(18, 0))
 
+        self.display_toggle_button = ttk.Button(
+            controls,
+            text="Display ▸",
+            command=self._toggle_display_controls,
+        )
+        self.display_toggle_button.grid(row=2, column=0, sticky="w", pady=(10, 0))
+        self.display_controls_frame = ttk.Frame(controls, style="Panel.TFrame")
+        display = self.display_controls_frame
+        for column in (1, 3, 5):
+            display.columnconfigure(column, weight=1)
+
+        ttk.Label(display, text="X bins", style="Panel.TLabel").grid(row=0, column=0, sticky="w")
+        self.x_bins_spin = ttk.Spinbox(
+            display,
+            from_=1,
+            to=self.data.n_x,
+            increment=1,
+            width=8,
+            textvariable=self.x_bins_var,
+            command=self._on_control_changed,
+        )
+        self.x_bins_spin.grid(row=0, column=1, sticky="w", padx=(6, 18))
+        ttk.Label(display, text="Y bins", style="Panel.TLabel").grid(row=0, column=2, sticky="w")
+        self.y_bins_spin = ttk.Spinbox(
+            display,
+            from_=1,
+            to=self.data.n_y,
+            increment=1,
+            width=8,
+            textvariable=self.y_bins_var,
+            command=self._on_control_changed,
+        )
+        self.y_bins_spin.grid(row=0, column=3, sticky="w", padx=(6, 18))
+        ttk.Label(display, text="Smooth", style="Panel.TLabel").grid(row=0, column=4, sticky="w")
+        self.smooth_spin = ttk.Spinbox(
+            display,
+            from_=0,
+            to=3,
+            increment=1,
+            width=8,
+            textvariable=self.smooth_radius_var,
+            command=self._on_control_changed,
+        )
+        self.smooth_spin.grid(row=0, column=5, sticky="w", padx=(6, 18))
+
+        ttk.Label(display, text="Palette", style="Panel.TLabel").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        ttk.Combobox(
+            display,
+            state="readonly",
+            values=PALETTES,
+            textvariable=self.palette_var,
+            width=12,
+        ).grid(row=1, column=1, sticky="w", padx=(6, 18), pady=(8, 0))
+        ttk.Label(display, text="Polar radius", style="Panel.TLabel").grid(row=1, column=2, sticky="w", pady=(8, 0))
+        ttk.Combobox(
+            display,
+            state="readonly",
+            values=POLAR_RADIUS_MODES,
+            textvariable=self.polar_radius_var,
+            width=18,
+        ).grid(row=1, column=3, sticky="w", padx=(6, 18), pady=(8, 0))
+        self.polar_layout_toggle = ttk.Checkbutton(
+            display,
+            text="Polar layout",
+            variable=self.polar_layout_var,
+            command=self._on_spatial_format_changed,
+        )
+        self.polar_layout_toggle.grid(row=1, column=4, sticky="w", pady=(8, 0))
+        self.rgb_mode_toggle = ttk.Checkbutton(
+            display,
+            text="RGB composite",
+            variable=self.rgb_mode_var,
+            command=self._on_control_changed,
+        )
+        self.rgb_mode_toggle.grid(row=1, column=5, sticky="w", padx=(6, 0), pady=(8, 0))
+
     def _wire_events(self) -> None:
-        self.json_combo.bind("<<ComboboxSelected>>", self._on_json_selected)
         self.unit_combo.bind("<<ComboboxSelected>>", self._on_unit_selected)
         self.value_mode_combo.bind("<<ComboboxSelected>>", self._on_value_mode_changed)
         self.range_start_spin.bind("<Return>", self._on_range_changed)
@@ -1642,8 +1928,7 @@ class RFMViewer(tk.Toplevel):
         self.bind("<Down>", lambda event: self._run_navigation_shortcut(event, self._step_timeline_bin, 1))
         self.bind("<less>", lambda event: self._run_navigation_shortcut(event, self._step_time_resolution, -1.0))
         self.bind("<greater>", lambda event: self._run_navigation_shortcut(event, self._step_time_resolution, 1.0))
-        self.bind("<Escape>", lambda event: self._run_navigation_shortcut(event, self._clear_timeline_selection))
-        self.bind("<KeyPress-f>", lambda event: self._run_navigation_shortcut(event, self._toggle_flip_y))
+        self.bind("<Escape>", lambda event: self._run_navigation_shortcut(event, self._handle_escape))
         self.bind("<KeyPress-p>", lambda event: self._run_navigation_shortcut(event, self._cycle_palette))
         self.bind("<question>", lambda event: self._run_navigation_shortcut(event, self._show_shortcuts))
         for tab_index in range(3):
@@ -1664,6 +1949,25 @@ class RFMViewer(tk.Toplevel):
         self.canvases["timeline"].bind("<MouseWheel>", self._on_timeline_mousewheel)
         self.canvases["timeline"].bind("<Button-4>", self._on_timeline_mousewheel)
         self.canvases["timeline"].bind("<Button-5>", self._on_timeline_mousewheel)
+        self.probe_canvas.bind("<Configure>", lambda _event: self._draw_probe_canvas())
+        self.probe_canvas.bind("<ButtonPress-1>", self._on_probe_press)
+        self.probe_canvas.bind("<B1-Motion>", self._on_probe_drag)
+        self.probe_canvas.bind("<ButtonRelease-1>", self._on_probe_release)
+
+    def _toggle_display_controls(self) -> None:
+        expanded = not self.display_expanded_var.get()
+        self.display_expanded_var.set(expanded)
+        self.display_toggle_button.configure(text="Display ▾" if expanded else "Display ▸")
+        if expanded:
+            self.display_controls_frame.grid(row=3, column=0, columnspan=9, sticky="ew", pady=(8, 0))
+        else:
+            self.display_controls_frame.grid_remove()
+
+    def _handle_escape(self) -> None:
+        if self.spatial_region is not None:
+            self._clear_spatial_filter()
+        else:
+            self._clear_timeline_selection()
 
     def _on_window_focus(self, _event: object | None = None) -> None:
         self._app_root._rfm_active_viewer = self
@@ -1708,9 +2012,8 @@ class RFMViewer(tk.Toplevel):
             "↑ / ↓   Previous / next timeline bin\n"
             "Shift+, / Shift+.   Time resolution −/+ 1 ms\n"
             "1–3   Switch plot tab\n"
-            "F   Invert Y\n"
             "P   Cycle palette\n"
-            "Esc   Show Full Timeline Range\n"
+            "Esc   Clear probe region, then show full timeline\n"
             "[ / ]   Previous / next unit (legacy)\n"
             "Command-O   Open JSON in a new window\n"
             "Command-E   Export displayed matrix\n"
@@ -1796,6 +2099,9 @@ class RFMViewer(tk.Toplevel):
 
     def _selected_local_unit_index(self) -> int | None:
         unit_id = self._selected_unit_id_value()
+        if self.__dict__.get("spatial_region") is not None and unit_id not in self._unit_navigation_ids():
+            self.unit_idx.set(-1)
+            return None
         local_index = self._local_unit_index(unit_id)
         if local_index is None:
             return None
@@ -1835,8 +2141,16 @@ class RFMViewer(tk.Toplevel):
         if getattr(self._app_root, "_rfm_pairing_enabled", False):
             ready, eligible = self._pairing_eligibility()
             if eligible:
-                return self._pairing_unit_ids(ready)
-        return [int(unit_id) for unit_id in self.data.unit_pool]
+                unit_ids = self._pairing_unit_ids(ready)
+            else:
+                unit_ids = [int(unit_id) for unit_id in self.data.unit_pool]
+        else:
+            unit_ids = [int(unit_id) for unit_id in self.data.unit_pool]
+        region = self.__dict__.get("spatial_region")
+        geometry = self.__dict__.get("probe_geometry")
+        if region is not None and geometry is not None:
+            return geometry.unit_ids_in_region(region, unit_ids)
+        return unit_ids
 
     def _pairing_eligibility(self) -> tuple[list[RFMViewer], bool]:
         ready = self._ready_pairing_viewers()
@@ -1873,7 +2187,13 @@ class RFMViewer(tk.Toplevel):
                         ["!disabled"] if eligible else ["disabled"]
                     )
                 if hasattr(window, "pair_status_label"):
-                    window.pair_status_label.configure(text=status)
+                    label = window.pair_status_label
+                    label.configure(text=status)
+                    if hasattr(label, "grid"):
+                        if len(ready) >= 2 and not matching_units:
+                            label.grid()
+                        else:
+                            label.grid_remove()
                 if getattr(window, "_viewer_ready", False) and hasattr(window, "_sync_unit_combo"):
                     window._sync_unit_combo()
             except tk.TclError:
@@ -2109,6 +2429,11 @@ class RFMViewer(tk.Toplevel):
                     (float(x_start) + float(x_end)) / 2.0,
                 )
             if "unit" in fields:
+                if (
+                    self.__dict__.get("spatial_region") is not None
+                    and int(state.unit_id) not in self._unit_navigation_ids()
+                ):
+                    self.spatial_region = None
                 self._set_selected_unit_id(state.unit_id)
             if "value_mode" in fields:
                 value_mode = state.value_mode
@@ -2365,26 +2690,257 @@ class RFMViewer(tk.Toplevel):
                 stamp = ""
         return f"{rel}{stamp}"
 
-    def _sync_json_combo(self) -> None:
+    def _sync_json_menu(self) -> None:
         current = _resolve_existing_file(self.data.path) or self.data.path
         self.json_paths = discover_json_files(current_path=current)
         if current not in self.json_paths:
             self.json_paths.insert(0, current)
         labels = [self._json_choice_label(path) for path in self.json_paths]
         self._json_choice_to_path = dict(zip(labels, self.json_paths))
-        self.json_combo.configure(values=labels)
-        current_index = next((idx for idx, path in enumerate(self.json_paths) if path == current), None)
-        if current_index is not None and labels:
-            self.json_combo.current(current_index)
+        menu = getattr(self, "_discovered_json_menu", None)
+        if menu is None:
+            return
+        menu.delete(0, "end")
+        if not labels:
+            menu.add_command(label="No JSON files found", state="disabled")
+            return
+        for label, path in zip(labels, self.json_paths):
+            menu.add_command(
+                label=label,
+                command=lambda selected=path: self._open_json_window(selected),
+            )
+
+    def _sync_json_combo(self) -> None:
+        """Compatibility alias for older callers; JSON choices now live in File."""
+
+        self._sync_json_menu()
 
     def _on_json_selected(self, _event: object | None = None) -> None:
-        choice = self.json_combo.get()
+        combo = getattr(self, "json_combo", None)
+        if combo is None:
+            return
+        choice = combo.get()
         path = self._json_choice_to_path.get(choice)
         if path is None:
             return
-        if _resolve_existing_file(self.data.path) == path:
+        self._open_json_window(path)
+
+    def _infer_attached_channels_path(self, positions_path: Path) -> Path | None:
+        sibling = positions_path.with_name("channels.csv")
+        if sibling.is_file():
+            return sibling
+        probe_name = positions_path.parent.name
+        for ancestor in positions_path.parents:
+            if ancestor.name == "spike_position":
+                candidate = ancestor.parent / "waveform" / probe_name / "channels.csv"
+                return candidate if candidate.is_file() else None
+        return None
+
+    def _attach_probe_geometry(self) -> None:
+        path = filedialog.askopenfilename(
+            parent=self,
+            title="Attach probe positions.csv",
+            initialdir=str(self.data.path.parent),
+            filetypes=(("CSV files", "*.csv"), ("All files", "*.*")),
+        )
+        if not path:
             return
-        self._load_json_path(path)
+        positions = Path(path)
+        try:
+            self.probe_geometry = load_probe_geometry(
+                positions,
+                self._infer_attached_channels_path(positions),
+                probe_name=probe_name_for_json(self.data.path) or positions.parent.name,
+            )
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("Could not attach probe geometry", str(exc), parent=self)
+            return
+        self.spatial_region = None
+        self._sync_unit_combo()
+        self._draw_probe_canvas()
+
+    def _probe_to_canvas(self, x_um: float, y_um: float) -> tuple[float, float] | None:
+        transform = self._probe_canvas_transform
+        if transform is None:
+            return None
+        x_min, y_min, x_scale, y_scale = transform
+        height = max(self.probe_canvas.winfo_height(), 2)
+        margin = 14.0
+        return margin + (x_um - x_min) * x_scale, height - margin - (y_um - y_min) * y_scale
+
+    def _canvas_to_probe(self, canvas_x: float, canvas_y: float) -> tuple[float, float] | None:
+        transform = self._probe_canvas_transform
+        if transform is None:
+            return None
+        x_min, y_min, x_scale, y_scale = transform
+        if x_scale <= 0 or y_scale <= 0:
+            return None
+        height = max(self.probe_canvas.winfo_height(), 2)
+        margin = 14.0
+        return (
+            x_min + (canvas_x - margin) / x_scale,
+            y_min + (height - margin - canvas_y) / y_scale,
+        )
+
+    def _draw_probe_canvas(self) -> None:
+        if not hasattr(self, "probe_canvas"):
+            return
+        canvas = self.probe_canvas
+        canvas.delete("all")
+        geometry = self.probe_geometry
+        if geometry is None:
+            self._probe_canvas_transform = None
+            canvas.create_text(
+                max(canvas.winfo_width(), 260) / 2,
+                max(canvas.winfo_height(), 200) / 2,
+                text="No probe geometry\nFile → Attach Probe Geometry…",
+                justify="center",
+                fill="#667085",
+            )
+            self.spatial_status_label.configure(text="Geometry optional")
+            self.clear_spatial_button.state(["disabled"])
+            return
+
+        available = set(int(unit_id) for unit_id in self.data.unit_pool)
+        units = [unit for unit in geometry.units if unit.unit_id in available]
+        points = [(channel.x_um, channel.y_um) for channel in geometry.channels]
+        points.extend((unit.x_um, unit.y_um) for unit in units)
+        if not points:
+            self._probe_canvas_transform = None
+            canvas.create_text(130, 150, text="Geometry has no matching units", fill="#667085")
+            self.spatial_status_label.configure(text="No matching unit IDs")
+            return
+        xs, ys = zip(*points)
+        x_min, x_max = min(xs), max(xs)
+        y_min, y_max = min(ys), max(ys)
+        if x_max <= x_min:
+            x_min, x_max = x_min - 1.0, x_max + 1.0
+        if y_max <= y_min:
+            y_min, y_max = y_min - 1.0, y_max + 1.0
+        width = max(canvas.winfo_width(), 260)
+        height = max(canvas.winfo_height(), 200)
+        margin = 14.0
+        self._probe_canvas_transform = (
+            x_min,
+            y_min,
+            (width - margin * 2.0) / (x_max - x_min),
+            (height - margin * 2.0) / (y_max - y_min),
+        )
+        shank_colors = ("#98a2b3", "#7f8ea3", "#667085", "#475467")
+        for channel in geometry.channels:
+            point = self._probe_to_canvas(channel.x_um, channel.y_um)
+            if point is None:
+                continue
+            x, y = point
+            color = shank_colors[channel.shank_id % len(shank_colors)]
+            canvas.create_rectangle(x - 2, y - 2, x + 2, y + 2, fill=color, outline="")
+
+        region_ids = set(self._unit_navigation_ids()) if self.spatial_region is not None else set()
+        selected_id = self._selected_unit_id_value()
+        for unit in units:
+            point = self._probe_to_canvas(unit.x_um, unit.y_um)
+            if point is None:
+                continue
+            x, y = point
+            in_region = unit.unit_id in region_ids
+            fill = "#f79009" if in_region else "#2e90fa"
+            radius = 4 if in_region else 3
+            canvas.create_oval(x - radius, y - radius, x + radius, y + radius, fill=fill, outline="#ffffff")
+            if unit.unit_id == selected_id and (self.spatial_region is None or in_region):
+                canvas.create_oval(x - 7, y - 7, x + 7, y + 7, outline="#d92d20", width=2)
+
+        if self.spatial_region is not None:
+            top_left = self._probe_to_canvas(self.spatial_region.x_min, self.spatial_region.y_max)
+            bottom_right = self._probe_to_canvas(self.spatial_region.x_max, self.spatial_region.y_min)
+            if top_left is not None and bottom_right is not None:
+                canvas.create_rectangle(
+                    *top_left,
+                    *bottom_right,
+                    outline="#f04438",
+                    width=2,
+                    dash=(5, 3),
+                )
+        count = len(region_ids) if self.spatial_region is not None else len(units)
+        if self.spatial_region is None:
+            status = f"{geometry.probe_name} · {count} units"
+            self.clear_spatial_button.state(["disabled"])
+        elif count:
+            status = f"{count} unit{'s' if count != 1 else ''} in region"
+            self.clear_spatial_button.state(["!disabled"])
+        else:
+            status = "No units in region"
+            self.clear_spatial_button.state(["!disabled"])
+        self.spatial_status_label.configure(text=status)
+
+    def _on_probe_press(self, event: tk.Event) -> None:
+        point = self._canvas_to_probe(float(event.x), float(event.y))
+        self._probe_drag_start = point
+        self._probe_press_canvas = (float(event.x), float(event.y))
+        self._probe_drag_moved = False
+
+    def _on_probe_drag(self, event: tk.Event) -> None:
+        start_canvas = getattr(self, "_probe_press_canvas", None)
+        if start_canvas is None:
+            return
+        self._probe_drag_moved = math.hypot(event.x - start_canvas[0], event.y - start_canvas[1]) >= 4.0
+
+    def _on_probe_release(self, event: tk.Event) -> None:
+        start = self._probe_drag_start
+        end = self._canvas_to_probe(float(event.x), float(event.y))
+        self._probe_drag_start = None
+        if start is None or end is None or self.probe_geometry is None:
+            return
+        if self._probe_drag_moved:
+            region = SpatialRegion.from_corners(start[0], start[1], end[0], end[1])
+        else:
+            nearest: tuple[float, ProbeChannel] | None = None
+            for channel in self.probe_geometry.channels:
+                point = self._probe_to_canvas(channel.x_um, channel.y_um)
+                if point is None:
+                    continue
+                distance = math.hypot(event.x - point[0], event.y - point[1])
+                if nearest is None or distance < nearest[0]:
+                    nearest = distance, channel
+            if nearest is None or nearest[0] > 14.0:
+                return
+            channel = nearest[1]
+            region = SpatialRegion.centered(channel.x_um, channel.y_um)
+        self._apply_spatial_region(region)
+
+    def _apply_spatial_region(self, region: SpatialRegion) -> None:
+        self.spatial_region = region
+        eligible = self._unit_navigation_ids()
+        if eligible:
+            selected = self._selected_unit_id_value()
+            if selected not in eligible:
+                center_x = (region.x_min + region.x_max) / 2.0
+                center_y = (region.y_min + region.y_max) / 2.0
+                positions = self.probe_geometry.units_by_id if self.probe_geometry is not None else {}
+                target = min(
+                    eligible,
+                    key=lambda unit_id: (
+                        (positions[unit_id].x_um - center_x) ** 2 + (positions[unit_id].y_um - center_y) ** 2
+                        if unit_id in positions
+                        else math.inf
+                    ),
+                )
+                self._set_selected_unit_id(target)
+        else:
+            self.unit_idx.set(-1)
+        self.selected_cell = None
+        self._sync_unit_combo()
+        self._update_all()
+        self._publish_pairing_state_if_changed()
+
+    def _clear_spatial_filter(self) -> None:
+        if self.spatial_region is None:
+            return
+        self.spatial_region = None
+        if self._selected_local_unit_index() is None:
+            self._set_selected_unit_id(int(self.data.unit_pool[0]))
+        self._sync_unit_combo()
+        self._update_all()
+        self._publish_pairing_state_if_changed()
 
     def _sync_unit_combo(self) -> None:
         unit_ids = self._unit_navigation_ids()
@@ -2404,6 +2960,12 @@ class RFMViewer(tk.Toplevel):
             self.unit_combo.set("")
         else:
             self.unit_combo.current(selected_index)
+        state = ["!disabled"] if unit_ids else ["disabled"]
+        self.unit_combo.state(state)
+        for button_name in ("previous_unit_button", "next_unit_button"):
+            button = getattr(self, button_name, None)
+            if button is not None:
+                button.state(state)
 
     def _on_unit_selected(self, _event: object | None = None) -> None:
         combo_index = self.unit_combo.current()
@@ -2746,17 +3308,22 @@ class RFMViewer(tk.Toplevel):
         height = max(canvas.winfo_height(), 220)
         canvas.configure(scrollregion=(0, 0, width, height))
         unit_id = self._selected_unit_id_value()
+        no_spatial_matches = self.spatial_region is not None and not self._unit_navigation_ids()
         canvas.create_text(
             width / 2,
             height / 2 - 14,
-            text="N/A",
+            text="No match" if no_spatial_matches else "N/A",
             fill="#667085",
             font=("TkDefaultFont", 28, "bold"),
         )
         canvas.create_text(
             width / 2,
             height / 2 + 26,
-            text=f"Cluster {unit_id} is not available in this session.",
+            text=(
+                "No units are inside the selected probe region."
+                if no_spatial_matches else
+                f"Cluster {unit_id} is not available in this session."
+            ),
             fill="#667085",
             font=("TkDefaultFont", 12),
         )
@@ -2769,56 +3336,31 @@ class RFMViewer(tk.Toplevel):
         self.hover_cell = None
         self._hover_signature = None
         self._hover_tooltip_text = ""
-        self.data_label.configure(
-            text=(
-                f"{self.data.path}\n"
-                f"{self.data.n_units} units  {self.data.n_y} y x {self.data.n_x} x  "
-                f"{self.data.n_bins} bins\n"
-                f"Firing-rate metadata: {'yes' if self.data.presentation_counts is not None else 'no'}"
-            )
-        )
         unit_idx = self._selected_local_unit_index()
         cluster_id = self._selected_unit_id_value()
         if unit_idx is None:
             self.selected_cell = None
             self.header_label.configure(text=f"Unit N/A / cluster {cluster_id}")
+            no_spatial_matches = self.spatial_region is not None and not self._unit_navigation_ids()
             self.status_label.configure(
-                text=(
-                    f"N/A: cluster {cluster_id} is not available in this session. "
-                    "Use ←/→ to continue through the paired unit list."
-                )
+                text="No units match the probe region." if no_spatial_matches else
+                f"N/A: cluster {cluster_id} is not available in this session."
             )
             self.unit_stats_label.configure(
                 text="N/A\nThis unit is available only in another paired window."
             )
             self.cell_label.configure(text="N/A for this session")
             self._sync_context_controls()
+            self._draw_probe_canvas()
             self._draw_active_tab()
             return
 
-        metrics = self.data.metrics(unit_idx)
         self.header_label.configure(text=f"Unit {unit_idx:03d} / cluster {cluster_id}")
-        self.status_label.configure(
-            text=(
-                f"x: {format_pos(self.data.x_positions[0])}..{format_pos(self.data.x_positions[-1])}  "
-                f"y: {format_pos(self.data.y_positions[0])}..{format_pos(self.data.y_positions[-1])}  "
-                f"time: {format_ms(self._time_axis_start_ms())}..{format_ms(self._time_axis_end_ms())} ms  "
-                f"value: {self.value_mode_var.get()}"
-            )
-        )
-        best_delay = metrics.delay_ms[metrics.best_y][metrics.best_x]
-        self.unit_stats_label.configure(
-            text=(
-                f"Total spikes: {metrics.total_spikes:.0f}\n"
-                f"Best count cell: yIdx {metrics.best_y + 1}, xIdx {metrics.best_x + 1}\n"
-                f"Count-peak delay: {best_delay:.1f} ms" if best_delay is not None else
-                f"Total spikes: {metrics.total_spikes:.0f}\n"
-                f"Best count cell: yIdx {metrics.best_y + 1}, xIdx {metrics.best_x + 1}\n"
-                f"Count-peak delay: n/a"
-            )
-        )
+        self.status_label.configure(text="")
+        self.unit_stats_label.configure(text="")
         self._update_cell_label()
         self._sync_context_controls()
+        self._draw_probe_canvas()
         self._draw_active_tab()
 
     def _current_matrix(self) -> list[list[float | None]]:
@@ -4561,21 +5103,13 @@ class RFMViewer(tk.Toplevel):
         if had_hover and self._selected_local_unit_index() is not None:
             self._update_cell_label(cell=self.selected_cell)
         if self._selected_local_unit_index() is None:
+            no_spatial_matches = self.spatial_region is not None and not self._unit_navigation_ids()
             self.status_label.configure(
-                text=(
-                    f"N/A: cluster {self._selected_unit_id_value()} is not available in this "
-                    "session. Use ←/→ to continue through the paired unit list."
-                )
+                text="No units match the probe region." if no_spatial_matches else
+                f"N/A: cluster {self._selected_unit_id_value()} is not available in this session."
             )
             return
-        self.status_label.configure(
-            text=(
-                f"x: {format_pos(self.data.x_positions[0])}..{format_pos(self.data.x_positions[-1])}  "
-                f"y: {format_pos(self.data.y_positions[0])}..{format_pos(self.data.y_positions[-1])}  "
-                f"time: {format_ms(self._time_axis_start_ms())}..{format_ms(self._time_axis_end_ms())} ms  "
-                f"value: {self.value_mode_var.get()}"
-            )
-        )
+        self.status_label.configure(text="")
 
     def _set_hover_cell(
         self,
@@ -4820,13 +5354,17 @@ class RFMViewer(tk.Toplevel):
         self._timeline_range_anchor = None
         self._timeline_scroll_fraction = 0.0
         self._pair_last_local_state = None
+        self.probe_geometry = discover_probe_geometry(self.data.path)
+        self.spatial_region = None
+        self._probe_drag_start = None
+        self._probe_canvas_transform = None
         self._sync_time_control_ranges()
         self.time_res_spin.configure(from_=self._base_bin_ms(), to=self._total_time_ms(), increment=self._base_bin_ms())
         self.x_bins_var.set(self.data.n_x)
         self.y_bins_var.set(self.data.n_y)
         self.x_bins_spin.configure(to=self.data.n_x)
         self.y_bins_spin.configure(to=self.data.n_y)
-        self._sync_json_combo()
+        self._sync_json_menu()
         self._sync_unit_combo()
         self._update_all()
         self._pair_ready_viewer_set_changed(adopt_viewer=self)

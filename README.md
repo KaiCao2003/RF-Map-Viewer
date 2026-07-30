@@ -27,10 +27,12 @@ Choose an artifact from the latest GitHub Release:
 | Windows 64-bit | `RF_Map_Viewer-python-windows-x64-portable.zip` | Portable build; extract before running |
 | Windows 64-bit | `RF_Map_Viewer-python-windows-x64-setup.exe` | Windows installer |
 
-On macOS, extract the archive and move **RF Map Viewer.app** to Applications if
-desired. On Windows, either extract the complete portable archive or run the
-installer. Do not move only the `.exe` out of the extracted portable folder,
-because its supporting files are required.
+On macOS, extract the archive and replace the existing **RF Map Viewer.app** in
+Applications. Delete older extracted copies instead of keeping them elsewhere:
+Finder can list every copy that claims JSON files in the **Open With** menu. On
+Windows, either extract the complete portable archive or run the installer. Do
+not move only the `.exe` out of the extracted portable folder, because its
+supporting files are required.
 
 ## Try the synthetic example
 
@@ -51,6 +53,28 @@ The viewer expects these JSON fields:
   the number of time bins.
 - `stimulusPresentationCounts` (optional): a non-negative integer `y × x`
   array used by normalized response modes.
+
+## Optional probe positions
+
+The unit sidebar can also display four-shank probe geometry and filter the unit
+picker spatially. For JSON names ending in `_A.json` or `_B.json`, the viewer
+looks beside the recording data for:
+
+```text
+<data-root>/spike_position/ProbeA/positions.csv
+<data-root>/waveform/ProbeA/channels.csv
+```
+
+Use `ProbeB` for a `_B.json` document. Set `RF_MAPPING_PROBE_DATA_ROOT` to
+`<data-root>` when the JSON lives elsewhere, or choose **File > Attach Probe
+Geometry…** and select `positions.csv`. Unit positions are joined to JSON units
+by `unit_id`; CSV row order is not used.
+
+Clicking a channel selects a centered 160 × 75 µm neighborhood. Dragging
+selects an arbitrary region, and Escape clears the spatial filter. The unit
+picker and previous/next navigation only include units inside the active
+region. JSON choices in the File menu always open in a new window, while the
+main-area Display controls can be collapsed when more plot space is useful.
 
 ## Build from source
 
@@ -82,9 +106,10 @@ PyInstaller. Build the application and archive with:
 script/build_python_macos_app.sh
 ```
 
-The application is created at `dist/python/RF Map Viewer.app`, and the archive
-is created at
-`dist/python/RF_Map_Viewer-python-macos-universal2.zip`.
+The archive is created at
+`dist/python/RF_Map_Viewer-python-macos-universal2.zip`. The temporary app at
+`dist/python/RF Map Viewer.app` is unregistered and removed after packaging so
+Finder does not discover the build copy as another JSON **Open With** entry.
 
 ### Windows application
 

@@ -4,8 +4,8 @@ set -euo pipefail
 APP_NAME="RF Map Viewer"
 ARTIFACT_STEM="RF_Map_Viewer"
 BUNDLE_ID="org.local.rfmapping.viewer"
-APP_VERSION="${RF_MAP_VIEWER_VERSION:-1.5.0}"
-APP_BUILD="${RF_MAP_VIEWER_BUILD:-10500}"
+APP_VERSION="${RF_MAP_VIEWER_VERSION:-1.6.0}"
+APP_BUILD="${RF_MAP_VIEWER_BUILD:-10600}"
 PYINSTALLER_VERSION="${RF_MAPPING_PYINSTALLER_VERSION:-6.21.0}"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -23,6 +23,7 @@ ICON_MASTER="${RF_MAPPING_ICON_SOURCE:-$ROOT_DIR/assets/rf-mapping-viewer-icon-1
 ICONSET_DIR="$WORK_DIR/RFMappingViewer.iconset"
 ICON_ICNS="$WORK_DIR/RFMappingViewer.icns"
 PLIST_BUDDY=/usr/libexec/PlistBuddy
+LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 SIGNING_IDENTITY="${RF_MAPPING_CODESIGN_IDENTITY:-${CODE_SIGN_IDENTITY:--}}"
 
 fail() {
@@ -37,6 +38,18 @@ require_file() {
 require_nonempty_file() {
   [[ -s "$1" ]] || fail "Required non-empty file not found: $1"
 }
+
+cleanup_staged_bundle() {
+  if [[ -d "$APP_BUNDLE" && -x "$LSREGISTER" ]]; then
+    "$LSREGISTER" -u "$APP_BUNDLE" >/dev/null 2>&1 || true
+  fi
+  rm -rf "$APP_BUNDLE"
+}
+
+# The staged bundle claims public.json while it is being packaged. Always
+# remove it, including after a failed build, so Finder cannot rediscover it as
+# a second Open With entry alongside the copy installed in /Applications.
+trap cleanup_staged_bundle EXIT
 
 verify_plist_value() {
   local key="$1"
@@ -204,19 +217,14 @@ fi
 codesign "${SIGN_ARGUMENTS[@]}" "$APP_BUNDLE"
 codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE"
 
-# PyInstaller creates the bundle before the document metadata above is added.
-# Unregister the build-tree copy so Finder never caches that transient bundle
-# (version 0.0.0, with no JSON claim) instead of the installed application.
-LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
-if [[ -x "$LSREGISTER" ]]; then
-  "$LSREGISTER" -u "$APP_BUNDLE" >/dev/null 2>&1 || true
-fi
-
 ditto -c -k --norsrc --keepParent "$APP_BUNDLE" "$ARCHIVE_PATH"
 require_nonempty_file "$ARCHIVE_PATH"
 unzip -tq "$ARCHIVE_PATH" >/dev/null \
   || fail "Archive integrity check failed: $ARCHIVE_PATH"
 verify_archive_metadata "$ARCHIVE_PATH"
 
-echo "Built Python universal2 app: $APP_BUNDLE"
+cleanup_staged_bundle
+trap - EXIT
+
+echo "Packaged Python universal2 app and removed the staged bundle: $APP_BUNDLE"
 echo "Created archive: $ARCHIVE_PATH"
