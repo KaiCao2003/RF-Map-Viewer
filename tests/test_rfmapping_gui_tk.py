@@ -164,13 +164,28 @@ class TkViewerTests(unittest.TestCase):
     def test_display_controls_are_main_area_and_collapsible(self) -> None:
         self.assertEqual(self.app.display_controls_frame.winfo_manager(), "")
         self.assertFalse(self.app.display_expanded_var.get())
+        self.assertIs(self.app.range_start_spin.master, self.app.range_controls_frame)
+        self.assertIs(self.app.range_end_spin.master, self.app.range_controls_frame)
+        self.assertIs(self.app.reset_plot_range_button.master, self.app.range_controls_frame)
+        self.assertIs(self.app.display_toggle_button.master, self.app.range_controls_frame)
+        self.assertEqual(int(self.app.reset_plot_range_button.grid_info()["column"]), 4)
+        self.assertEqual(int(self.app.display_toggle_button.grid_info()["column"]), 5)
         self.app._toggle_display_controls()
         self.app.update_idletasks()
         self.assertEqual(self.app.display_controls_frame.winfo_manager(), "grid")
         self.assertTrue(self.app.display_expanded_var.get())
+        self.assertEqual(int(self.app.display_controls_frame.grid_info()["row"]), 2)
         self.assertIs(self.app.display_controls_frame.master.master, self.app.nametowidget(self.app.notebook.winfo_parent()))
         self.app._toggle_display_controls()
         self.assertEqual(self.app.display_controls_frame.winfo_manager(), "")
+
+    def test_sidebar_has_no_horizontal_separators(self) -> None:
+        separator_children = [
+            child
+            for child in self.app.sidebar_frame.winfo_children()
+            if child.winfo_class() == "TSeparator"
+        ]
+        self.assertEqual(separator_children, [])
 
     def test_spatial_region_filters_navigation_and_handles_no_matches(self) -> None:
         positions_path = Path(self.directory.name) / "positions.csv"
