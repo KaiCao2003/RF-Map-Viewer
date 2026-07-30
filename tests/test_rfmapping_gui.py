@@ -180,6 +180,138 @@ class RasterTests(unittest.TestCase):
         self.assertEqual(pixel(10, 1), b"\x12\x34\x56")
 
 
+class ProbeGeometryTests(unittest.TestCase):
+    def test_probe_name_supports_real_trailing_letter_filenames(self) -> None:
+        self.assertEqual(
+            gui.probe_name_for_json(Path("regular_260615_3_-100_200_A.json")),
+            "ProbeA",
+        )
+        self.assertEqual(gui.probe_name_for_json(Path("session-B.json")), "ProbeB")
+        self.assertEqual(gui.probe_name_for_json(Path("session ProbeA/rf.json")), "ProbeA")
+        self.assertIsNone(gui.probe_name_for_json(Path("session/rf.json")))
+
+    def test_csv_loading_and_region_filter_join_by_unit_id(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            positions = root / "positions.csv"
+            channels = root / "channels.csv"
+            positions.write_text(
+                "unit_index,unit_id,x_um,y_um\n0,42,10,20\n1,99,200,300\n",
+                encoding="utf-8",
+            )
+            channels.write_text(
+                "channel_index,channel_id,raw_channel_index,x_um,y_um,shank_id\n"
+                "0,10,11,0,0,0\n1,12,13,250,400,3\n",
+                encoding="utf-8",
+            )
+
+            geometry = gui.load_probe_geometry(positions, probe_name="ProbeA")
+
+            self.assertEqual(geometry.channels_path, channels.resolve())
+            self.assertEqual(geometry.units_by_id[42].unit_index, 0)
+            region = gui.SpatialRegion.centered(0, 0)
+            self.assertEqual((region.x_min, region.x_max), (-80.0, 80.0))
+            self.assertEqual((region.y_min, region.y_max), (-37.5, 37.5))
+            self.assertEqual(geometry.unit_ids_in_region(region, [99, 42, 7]), [42])
+            self.assertTrue(region.contains(10, 20))
+            self.assertFalse(region.contains(200, 300))
+
+    def test_discovery_uses_recording_layout_and_environment_root(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            json_path = root / "exports" / "regular_260615_3_A.json"
+            json_path.parent.mkdir()
+            json_path.write_text("{}", encoding="utf-8")
+            positions = root / "spike_position" / "ProbeA" / "positions.csv"
+            channels = root / "waveform" / "ProbeA" / "channels.csv"
+            positions.parent.mkdir(parents=True)
+            channels.parent.mkdir(parents=True)
+            positions.write_text("unit_index,unit_id,x_um,y_um\n0,42,1,2\n", encoding="utf-8")
+            channels.write_text(
+                "channel_index,channel_id,raw_channel_index,x_um,y_um,shank_id\n0,1,1,3,4,0\n",
+                encoding="utf-8",
+            )
+
+            with mock.patch.dict(gui.os.environ, {"RF_MAPPING_PROBE_DATA_ROOT": str(root)}):
+                discovered = gui.discover_probe_geometry_paths(json_path)
+                geometry = gui.discover_probe_geometry(json_path)
+
+            self.assertEqual(discovered, (positions.resolve(), channels.resolve(), "ProbeA"))
+            self.assertIsNotNone(geometry)
+            assert geometry is not None
+            self.assertEqual(geometry.units[0].unit_id, 42)
+
+    def test_bad_or_missing_geometry_is_nonfatal_during_discovery(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            json_path = root / "regular_A.json"
+            json_path.write_text("{}", encoding="utf-8")
+            positions = root / "spike_position" / "ProbeA" / "positions.csv"
+            positions.parent.mkdir(parents=True)
+            positions.write_text("wrong,columns\n1,2\n", encoding="utf-8")
+            self.assertIsNone(gui.discover_probe_geometry(json_path))
+
+    def test_malformed_optional_channels_still_loads_unit_positions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            json_path = root / "regular_A.json"
+            json_path.write_text("{}", encoding="utf-8")
+            positions = root / "spike_position" / "ProbeA" / "positions.csv"
+            channels = root / "waveform" / "ProbeA" / "channels.csv"
+            positions.parent.mkdir(parents=True)
+            channels.parent.mkdir(parents=True)
+            positions.write_text(
+                "unit_index,unit_id,x_um,y_um\n0,42,10,20\n",
+                encoding="utf-8",
+            )
+            channels.write_text("wrong,columns\n1,2\n", encoding="utf-8")
+
+            geometry = gui.discover_probe_geometry(json_path)
+
+            self.assertIsNotNone(geometry)
+            assert geometry is not None
+            self.assertEqual([unit.unit_id for unit in geometry.units], [42])
+            self.assertEqual(geometry.channels, ())
+            self.assertIsNone(geometry.channels_path)
+
+    def test_discovery_skips_malformed_root_and_uses_valid_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            configured = root / "configured"
+            bad_positions = configured / "spike_position" / "ProbeA" / "positions.csv"
+            bad_positions.parent.mkdir(parents=True)
+            bad_positions.write_text("wrong,columns\n1,2\n", encoding="utf-8")
+
+            recording = root / "recording"
+            json_path = recording / "exports" / "regular_A.json"
+            json_path.parent.mkdir(parents=True)
+            json_path.write_text("{}", encoding="utf-8")
+            positions = recording / "spike_position" / "ProbeA" / "positions.csv"
+            channels = recording / "waveform" / "ProbeA" / "channels.csv"
+            positions.parent.mkdir(parents=True)
+            channels.parent.mkdir(parents=True)
+            positions.write_text(
+                "unit_index,unit_id,x_um,y_um\n0,42,10,20\n",
+                encoding="utf-8",
+            )
+            channels.write_text(
+                "channel_index,channel_id,raw_channel_index,x_um,y_um,shank_id\n"
+                "0,1,1,10,20,0\n",
+                encoding="utf-8",
+            )
+
+            with mock.patch.dict(
+                gui.os.environ,
+                {"RF_MAPPING_PROBE_DATA_ROOT": str(configured)},
+            ):
+                geometry = gui.discover_probe_geometry(json_path)
+
+            self.assertIsNotNone(geometry)
+            assert geometry is not None
+            self.assertEqual(geometry.positions_path, positions.resolve())
+            self.assertEqual(geometry.channels_path, channels.resolve())
+
+
 class RFPlotRangeTests(unittest.TestCase):
     class FakeVar:
         def __init__(self, value) -> None:

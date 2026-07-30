@@ -20,6 +20,11 @@ jobs:
           python-version: "3.14"
       - name: Run model tests
         run: python -m unittest discover -s tests -p "test_rfmapping_gui.py"
+      - name: Run Tk integration tests
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes python3-tk xvfb
+          xvfb-run --auto-servernum /usr/bin/python3 -m unittest discover -s tests -p "test_rfmapping_gui_tk.py"
       - name: Validate synthetic demo
         run: python rfmapping_gui.py --self-test data/demo_rf_map.json
 

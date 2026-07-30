@@ -2,8 +2,10 @@ import csv
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 import rfmapping_gui as gui
 
@@ -148,6 +150,75 @@ class TkViewerTests(unittest.TestCase):
         second._step_unit(1)
         self.assertEqual(self.app.unit_idx.get(), 0)
         self.assertEqual(second.unit_idx.get(), 1)
+
+    def test_discovered_json_menu_always_opens_a_new_window(self) -> None:
+        labels = [
+            self.app._discovered_json_menu.entrycget(index, "label")
+            for index in range(self.app._discovered_json_menu.index("end") + 1)
+        ]
+        selected_index = next(index for index, label in enumerate(labels) if "viewer.json" in label)
+        with mock.patch.object(self.app, "_open_json_window") as opener:
+            self.app._discovered_json_menu.invoke(selected_index)
+        opener.assert_called_once_with(self.app.data.path.resolve())
+
+    def test_display_controls_are_main_area_and_collapsible(self) -> None:
+        self.assertEqual(self.app.display_controls_frame.winfo_manager(), "")
+        self.assertFalse(self.app.display_expanded_var.get())
+        self.app._toggle_display_controls()
+        self.app.update_idletasks()
+        self.assertEqual(self.app.display_controls_frame.winfo_manager(), "grid")
+        self.assertTrue(self.app.display_expanded_var.get())
+        self.assertIs(self.app.display_controls_frame.master.master, self.app.nametowidget(self.app.notebook.winfo_parent()))
+        self.app._toggle_display_controls()
+        self.assertEqual(self.app.display_controls_frame.winfo_manager(), "")
+
+    def test_spatial_region_filters_navigation_and_handles_no_matches(self) -> None:
+        positions_path = Path(self.directory.name) / "positions.csv"
+        self.app.probe_geometry = gui.ProbeGeometry(
+            probe_name="ProbeA",
+            positions_path=positions_path,
+            channels_path=None,
+            units=(
+                gui.ProbeUnitPosition(0, 7, 0.0, 0.0),
+                gui.ProbeUnitPosition(1, 8, 300.0, 300.0),
+            ),
+            channels=(),
+        )
+        self.app._set_selected_unit_id(8)
+
+        self.app._apply_spatial_region(gui.SpatialRegion.from_corners(-10, -10, 10, 10))
+        self.assertEqual(self.app._unit_combo_unit_ids, [7])
+        self.assertEqual(self.app._selected_unit_id_value(), 7)
+
+        self.app._apply_spatial_region(gui.SpatialRegion.from_corners(100, 100, 110, 110))
+        self.assertEqual(self.app._unit_combo_unit_ids, [])
+        self.assertEqual(self.app.unit_idx.get(), -1)
+        self.assertIn("No units match", self.app.status_label.cget("text"))
+
+        self.app._handle_escape()
+        self.assertIsNone(self.app.spatial_region)
+        self.assertEqual(self.app._unit_combo_unit_ids, [7, 8])
+
+    def test_paired_unit_outside_local_region_clears_spatial_filter(self) -> None:
+        self.app.probe_geometry = gui.ProbeGeometry(
+            probe_name="ProbeA",
+            positions_path=Path(self.directory.name) / "positions.csv",
+            channels_path=None,
+            units=(
+                gui.ProbeUnitPosition(0, 7, 0.0, 0.0),
+                gui.ProbeUnitPosition(1, 8, 300.0, 300.0),
+            ),
+            channels=(),
+        )
+        self.app._apply_spatial_region(gui.SpatialRegion.from_corners(-10, -10, 10, 10))
+        self.assertEqual(self.app._unit_combo_unit_ids, [7])
+
+        incoming = replace(self.app._capture_pairing_state(), unit_id=8)
+        self.app._apply_pairing_state(incoming, frozenset({"unit"}))
+
+        self.assertIsNone(self.app.spatial_region)
+        self.assertEqual(self.app._selected_unit_id_value(), 8)
+        self.assertEqual(self.app._unit_combo_unit_ids, [7, 8])
 
     def test_pairing_navigates_union_and_shows_na_for_missing_units(self) -> None:
         def write_units(name: str, unit_ids: list[int]) -> Path:
