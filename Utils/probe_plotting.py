@@ -1,4 +1,3 @@
-import builtins
 from dataclasses import dataclass
 from os import PathLike
 from pathlib import Path
@@ -15,7 +14,7 @@ from numpy.typing import NDArray
 from probeinterface import Probe
 from probeinterface.plotting import plot_probe
 
-from Utils.waveform_artifacts import WaveformArtifactStore, WaveformUnitArtifact
+from Utils.si_utils import WaveformArtifactStore, WaveformUnitArtifact
 
 
 type FloatArray = NDArray[np.floating[Any]]
@@ -25,51 +24,9 @@ type AxesArray = NDArray[np.object_]
 
 @dataclass(frozen=True)
 class PlotResult:
-    figure: Figure | None
+    figure: Figure
     plotted_unit_ids: list[int]
     message: str
-
-
-class _WaveformUnitPlotSelection:
-    """Bind collection plotting methods to one unit ID."""
-
-    def __init__(self, collection: 'WaveformUnitPlotCollection', unit_id: int):
-        self._collection = collection
-        self._unit_id = unit_id
-
-    def __getattr__(self, name: str) -> Any:
-        if not name.startswith('plot_') or name == 'plot_unit_locations':
-            raise AttributeError(name)
-        plot_method = getattr(self._collection, name, None)
-        if plot_method is None:
-            raise AttributeError(name)
-
-        def plot_selected(*args: Any, **kwargs: Any) -> PlotResult:
-            return plot_method(self._unit_id, *args, **kwargs)
-
-        return plot_selected
-
-
-class _WaveformUnitPlotList:
-    """Apply a single-unit plotting method to every requested unit."""
-
-    def __init__(self, collection: 'WaveformUnitPlotCollection'):
-        self._collection = collection
-
-    def __getattr__(self, name: str) -> Any:
-        if not name.startswith('plot_') or name == 'plot_unit_locations':
-            raise AttributeError(name)
-        plot_method = getattr(WaveformUnitPlotCollection, name, None)
-        if plot_method is None:
-            raise AttributeError(name)
-
-        def plot_each(*args: Any, **kwargs: Any) -> list[PlotResult]:
-            return [
-                getattr(self._collection, name)(unit_id, *args, **kwargs)
-                for unit_id in self._collection.requested_unit_ids
-            ]
-
-        return plot_each
 
 
 class WaveformUnitPlot:
@@ -133,11 +90,6 @@ class WaveformUnitPlot:
                 atol=1e-6,
             ))
 
-        if len(candidate_indices) < local_channel_count:
-            raise ValueError(
-                f'Unit {self.unit_id} has only {len(candidate_indices)} channels available '
-                f'for {local_channel_mode}; requested {local_channel_count}.'
-            )
         neighbor_count = local_channel_count - 1
         neighbor_candidates = candidate_indices[candidate_indices != best_channel_index]
         candidate_order = np.argsort(distances[neighbor_candidates], kind='stable')
@@ -358,7 +310,7 @@ class WaveformUnitPlotCollection:
     def __init__(
             self,
             analysis_dir: str | Path,
-            unit_ids: builtins.list[int],
+            unit_ids: list[int],
             *,
             heatmap_baseline_end_ms: float = -0.25,
             probe_ptp_scale: Literal['per_unit', 'global_uv'] = 'per_unit',
@@ -366,18 +318,7 @@ class WaveformUnitPlotCollection:
             save_figures: bool = False,
             output_dir: PathLike | None = None,
     ):
-        if not isinstance(unit_ids, list) or not all(
-                type(unit_id) is int
-                for unit_id in unit_ids
-        ):
-            raise TypeError('unit_ids must be a list[int].')
-        if not unit_ids:
-            raise ValueError('unit_ids must contain at least one unit ID.')
-        if len(set(unit_ids)) != len(unit_ids):
-            raise ValueError('unit_ids must not contain duplicate unit IDs.')
-
         self.store = WaveformArtifactStore(analysis_dir)
-        self.requested_unit_ids = unit_ids.copy()
         self.probe_ptp_scale = probe_ptp_scale
         self.save_figures = save_figures
         self.output_dir = Path(output_dir) if output_dir is not None else Path(analysis_dir) / 'figures'
@@ -390,140 +331,15 @@ class WaveformUnitPlotCollection:
         )
         self.probe.set_device_channel_indices(np.arange(len(self.store.channel_ids)))
 
-        self.units: list[WaveformUnitPlot | None] = []
-        self.load_messages: list[str] = []
-        for unit_number, unit_id in enumerate(self.requested_unit_ids):
-            try:
-                artifact = self.store.load_unit(unit_id)
-                unit = WaveformUnitPlot(
-                    artifact,
-                    self.store,
-                    self.unit_colors[unit_number % len(self.unit_colors)],
-                    heatmap_baseline_end_ms,
-                )
-            except (KeyError, FileNotFoundError, OSError, ValueError) as error:
-                self.units.append(None)
-                message = error.args[0] if error.args else str(error)
-                self.load_messages.append(str(message))
-            else:
-                self.units.append(unit)
-                self.load_messages.append(f'Loaded unit {unit_id}.')
-
-        self.load_success: NDArray[np.bool_] = np.asarray([
-            unit is not None
-            for unit in self.units
-        ])
-        self.loaded_units: list[WaveformUnitPlot] = [
-            unit
-            for unit in self.units
-            if unit is not None
-        ]
-
-    @property
-    def list(self) -> _WaveformUnitPlotList:
-        """Plot every requested unit separately instead of combining panels."""
-        return _WaveformUnitPlotList(self)
-
-    def get(self, unit_id: int) -> _WaveformUnitPlotSelection:
-        """Select one requested unit for chained plotting calls."""
-        if type(unit_id) is not int:
-            raise TypeError('unit_id must be an int.')
-        if unit_id not in self.requested_unit_ids:
-            raise KeyError(
-                f'Unit {unit_id} was not included when this plot collection was created.'
+        self.units = [
+            WaveformUnitPlot(
+                self.store.load_unit(unit_id),
+                self.store,
+                self.unit_colors[unit_number % len(self.unit_colors)],
+                heatmap_baseline_end_ms,
             )
-        return _WaveformUnitPlotSelection(self, unit_id)
-
-    def _single_unit_view(self, unit_id: int) -> 'WaveformUnitPlotCollection':
-        if type(unit_id) is not int:
-            raise TypeError('unit_id must be an int.')
-        try:
-            unit_index = self.requested_unit_ids.index(unit_id)
-        except ValueError as error:
-            raise KeyError(
-                f'Unit {unit_id} was not included when this plot collection was created.'
-            ) from error
-
-        view = object.__new__(type(self))
-        view.__dict__ = self.__dict__.copy()
-        view.requested_unit_ids = [unit_id]
-        view.units = [self.units[unit_index]]
-        view.load_messages = [self.load_messages[unit_index]]
-        view.load_success = self.load_success[[unit_index]].copy()
-        view.loaded_units = [
-            unit
-            for unit in view.units
-            if unit is not None
+            for unit_number, unit_id in enumerate(unit_ids)
         ]
-        view._single_unit_filename_id = unit_id
-        return view
-
-    def plot_waveform_spike_selection_times(self, unit_id: int) -> PlotResult:
-        return self._single_unit_view(unit_id)._plot_waveform_spike_selection_times()
-
-    def select_local_channel_indices(
-            self,
-            unit_id: int,
-            *,
-            local_channel_mode: Literal['same_shank', 'same_x_column'],
-            local_channel_count: int = 5,
-    ) -> IntArray:
-        """Select nearby channels and return their indices from probe top to bottom."""
-        if local_channel_mode not in ('same_shank', 'same_x_column'):
-            raise ValueError(
-                "local_channel_mode must be 'same_shank' or 'same_x_column'."
-            )
-        if type(local_channel_count) is not int:
-            raise TypeError('local_channel_count must be an int.')
-        if local_channel_count < 1:
-            raise ValueError('local_channel_count must be at least 1.')
-
-        view = self._single_unit_view(unit_id)
-        if not view.loaded_units:
-            raise ValueError(view.load_messages[0])
-        return view.loaded_units[0].select_local_channel_indices(
-            local_channel_mode,
-            local_channel_count,
-        )
-
-    def plot_local_average_heatmaps(
-            self,
-            unit_id: int,
-            *,
-            local_channel_mode: Literal['same_shank', 'same_x_column'],
-            local_channel_count: int = 5,
-    ) -> PlotResult:
-        return self._single_unit_view(unit_id)._plot_local_average_heatmaps(
-            local_channel_mode=local_channel_mode,
-            local_channel_count=local_channel_count,
-        )
-
-    def plot_best_channel_averages(self, unit_id: int) -> PlotResult:
-        return self._single_unit_view(unit_id)._plot_best_channel_averages()
-
-    def plot_ptp_gradients(self, unit_id: int) -> PlotResult:
-        return self._single_unit_view(unit_id)._plot_ptp_gradients()
-
-    def plot_max_ptp_contacts(
-            self,
-            unit_id: int,
-            *,
-            layout: Literal['panels', 'combined'] = 'panels',
-            show_other_units: bool = False,
-    ) -> PlotResult:
-        return self._single_unit_view(unit_id)._plot_max_ptp_contacts(
-            layout=layout,
-            show_other_units=show_other_units,
-        )
-
-    def print_load_summary(self) -> None:
-        for unit_id, success, message in zip(
-                self.requested_unit_ids,
-                self.load_success,
-                self.load_messages,
-        ):
-            status = 'ok' if success else 'skip'
-            print(f'Unit {unit_id}: {status} · {message}')
 
     @staticmethod
     def _make_panel_grid(
@@ -583,55 +399,27 @@ class WaveformUnitPlotCollection:
         ax.set_xlabel('Probe x (µm)')
         ax.set_ylabel('Probe y (µm)' if show_y_label else '')
 
-    def _result_message(self) -> str:
-        skipped = [
-            f'{unit_id}: {message}'
-            for unit_id, success, message in zip(
-                self.requested_unit_ids,
-                self.load_success,
-                self.load_messages,
-            )
-            if not success
-        ]
-        message = f'Plotted {len(self.loaded_units)} unit(s).'
-        if skipped:
-            message += ' Skipped ' + '; '.join(skipped)
-        return message
-
     def _finish(self, figure: Figure, filename: str) -> PlotResult:
         if self.save_figures:
             self.output_dir.mkdir(parents=True, exist_ok=True)
-            unit_id = getattr(self, '_single_unit_filename_id', None)
-            if unit_id is not None:
-                path = Path(filename)
-                filename = f'{path.stem}_unit_{unit_id}{path.suffix}'
             figure.savefig(self.output_dir / filename, dpi=200, bbox_inches='tight')
         plt.show()
+        plotted_unit_ids = [unit.unit_id for unit in self.units]
         return PlotResult(
             figure,
-            [unit.unit_id for unit in self.loaded_units],
-            self._result_message(),
+            plotted_unit_ids,
+            f'Plotted {len(plotted_unit_ids)} unit(s).',
         )
 
-    def _no_units(self) -> PlotResult | None:
-        if self.loaded_units:
-            return None
-        message = self._result_message()
-        print(message)
-        return PlotResult(None, [], message)
-
-    def _plot_waveform_spike_selection_times(self) -> PlotResult:
-        if (empty_result := self._no_units()) is not None:
-            return empty_result
-
+    def plot_waveform_spike_selection_times(self) -> PlotResult:
         print(f"{'unit':>6} {'selected':>10} {'total':>10} {'time coverage':>15}")
         print('-' * 47)
         figure, ax = plt.subplots(
-            figsize=(12.0, 2.2 + 1.15 * len(self.loaded_units)),
+            figsize=(12.0, 2.2 + 1.15 * len(self.units)),
             constrained_layout=True,
         )
         selection_labels: list[str] = []
-        for unit_number, unit in enumerate(self.loaded_units):
+        for unit_number, unit in enumerate(self.units):
             all_spike_minutes = unit.spike_minutes(selected=False)
             selected_spike_minutes = unit.spike_minutes(selected=True)
             summary = unit.summary
@@ -665,39 +453,35 @@ class WaveformUnitPlotCollection:
 
         duration_minutes = self.store.manifest['recording']['duration_minutes']
         ax.set_xlim(0, duration_minutes)
-        ax.set_ylim(len(self.loaded_units) - 0.35, -0.65)
-        ax.set_yticks(np.arange(len(self.loaded_units)), selection_labels)
+        ax.set_ylim(len(self.units) - 0.35, -0.65)
+        ax.set_yticks(np.arange(len(self.units)), selection_labels)
         ax.set_xlabel('Recording time (min)')
         ax.set_ylabel('Unit · selected / total spikes')
         self._style_axes(ax, grid=True)
         return self._finish(figure, 'waveform_spike_selection_times.png')
 
-    def _plot_local_average_heatmaps(
+    def plot_local_average_heatmaps(
             self,
             *,
             local_channel_mode: Literal['same_shank', 'same_x_column'],
-            local_channel_count: int,
+            local_channel_count: int = 5,
     ) -> PlotResult:
-        if (empty_result := self._no_units()) is not None:
-            return empty_result
-
         figure, axes = self._make_panel_grid(
-            len(self.loaded_units),
+            len(self.units),
             panel_width=4.6,
             panel_height=3.7,
             sharex=True,
         )
         template_limit_uv = max(
-            max(float(np.max(np.abs(unit.heatmap_template_uv))) for unit in self.loaded_units),
+            max(float(np.max(np.abs(unit.heatmap_template_uv))) for unit in self.units),
             np.finfo(float).eps,
         )
         mesh: QuadMesh
-        for unit_number, unit in enumerate(self.loaded_units):
+        for unit_number, unit in enumerate(self.units):
             ax = axes.ravel()[unit_number]
-            local_channel_indices = self.select_local_channel_indices(
-                unit.unit_id,
-                local_channel_mode=local_channel_mode,
-                local_channel_count=local_channel_count,
+            local_channel_indices = unit.select_local_channel_indices(
+                local_channel_mode,
+                local_channel_count,
             )
             mesh = unit.draw_local_average_heatmap(
                 ax,
@@ -713,10 +497,10 @@ class WaveformUnitPlotCollection:
             ax.set_ylabel(axis_label)
             self._style_axes(ax)
 
-        self._hide_unused_axes(axes, len(self.loaded_units))
+        self._hide_unused_axes(axes, len(self.units))
         colorbar: Colorbar = figure.colorbar(
             mesh,
-            ax=axes.ravel()[:len(self.loaded_units)].tolist(),
+            ax=axes.ravel()[:len(self.units)].tolist(),
             shrink=0.82,
             pad=0.02,
         )
@@ -724,29 +508,23 @@ class WaveformUnitPlotCollection:
         colorbar.ax.tick_params(colors=self.plot_colors['muted'], labelsize=9)
         return self._finish(figure, 'spikeinterface_local_average_heatmaps.png')
 
-    def _plot_best_channel_averages(self) -> PlotResult:
-        if (empty_result := self._no_units()) is not None:
-            return empty_result
-
+    def plot_best_channel_averages(self) -> PlotResult:
         figure, axes = self._make_panel_grid(
-            len(self.loaded_units),
+            len(self.units),
             panel_width=4.4,
             panel_height=3.8,
             sharex=True,
         )
-        for unit_number, unit in enumerate(self.loaded_units):
+        for unit_number, unit in enumerate(self.units):
             ax = axes.ravel()[unit_number]
             unit.draw_best_channel_average(ax, self.store.time_ms)
             self._style_axes(ax, grid=True)
-        self._hide_unused_axes(axes, len(self.loaded_units))
+        self._hide_unused_axes(axes, len(self.units))
         return self._finish(figure, 'spikeinterface_best_channel_averages.png')
 
-    def _plot_ptp_gradients(self) -> PlotResult:
-        if (empty_result := self._no_units()) is not None:
-            return empty_result
-
+    def plot_ptp_gradients(self) -> PlotResult:
         figure, axes = self._make_panel_grid(
-            len(self.loaded_units),
+            len(self.units),
             panel_width=3.9,
             panel_height=6.8,
             sharex=True,
@@ -754,14 +532,14 @@ class WaveformUnitPlotCollection:
         )
         global_ptp_max_uv = (
             max(
-                max(unit.summary.max_ptp_uv for unit in self.loaded_units),
+                max(unit.summary.max_ptp_uv for unit in self.units),
                 np.finfo(float).eps,
             )
             if self.probe_ptp_scale == 'global_uv'
             else 1.0
         )
         contact_poly: PolyCollection
-        for unit_number, unit in enumerate(self.loaded_units):
+        for unit_number, unit in enumerate(self.units):
             ax = axes.ravel()[unit_number]
             contact_poly = unit.draw_ptp_gradient(
                 ax,
@@ -774,10 +552,10 @@ class WaveformUnitPlotCollection:
                 show_y_label=unit_number % axes.shape[1] == 0,
             )
 
-        self._hide_unused_axes(axes, len(self.loaded_units))
+        self._hide_unused_axes(axes, len(self.units))
         colorbar: Colorbar = figure.colorbar(
             contact_poly,
-            ax=axes.ravel()[:len(self.loaded_units)].tolist(),
+            ax=axes.ravel()[:len(self.units)].tolist(),
             shrink=0.82,
             pad=0.02,
         )
@@ -789,16 +567,13 @@ class WaveformUnitPlotCollection:
         colorbar.ax.tick_params(colors=self.plot_colors['muted'], labelsize=9)
         return self._finish(figure, 'spikeinterface_ptp_probe_maps.png')
 
-    def _plot_max_ptp_contacts(
+    def plot_max_ptp_contacts(
             self,
             *,
             layout: Literal['panels', 'combined'] = 'panels',
             show_other_units: bool = False,
     ) -> PlotResult:
-        if (empty_result := self._no_units()) is not None:
-            return empty_result
-
-        panel_count = 1 if layout == 'combined' else len(self.loaded_units)
+        panel_count = 1 if layout == 'combined' else len(self.units)
         figure, axes = self._make_panel_grid(
             panel_count,
             panel_width=4.5 if layout == 'combined' else 3.9,
@@ -812,9 +587,9 @@ class WaveformUnitPlotCollection:
             self._plot_probe_background(ax, contact_alpha=0.78)
             if show_other_units:
                 foreground_ids = (
-                    {unit.unit_id for unit in self.loaded_units}
+                    {unit.unit_id for unit in self.units}
                     if layout == 'combined'
-                    else {self.loaded_units[panel_number].unit_id}
+                    else {self.units[panel_number].unit_id}
                 )
                 other_units = [
                     summary
@@ -837,7 +612,7 @@ class WaveformUnitPlotCollection:
                 show_y_label=panel_number % axes.shape[1] == 0,
             )
 
-        for unit_number, unit in enumerate(self.loaded_units):
+        for unit_number, unit in enumerate(self.units):
             panel_index = 0 if layout == 'combined' else unit_number
             ax = axes.ravel()[panel_index]
             unit.draw_max_ptp_contact(ax)
@@ -866,13 +641,10 @@ class WaveformUnitPlotCollection:
         return self._finish(figure, 'spikeinterface_max_ptp_contacts.png')
 
     def plot_unit_locations(self, *, show_other_units: bool = False) -> PlotResult:
-        if (empty_result := self._no_units()) is not None:
-            return empty_result
-
         figure, ax = plt.subplots(figsize=(7.2, 9.2), constrained_layout=True)
         self._plot_probe_background(ax, contact_alpha=0.85)
         if show_other_units:
-            requested_ids = {unit.unit_id for unit in self.loaded_units}
+            requested_ids = {unit.unit_id for unit in self.units}
             other_units = [
                 summary
                 for unit_id, summary in self.store.unit_summaries.items()
@@ -889,7 +661,7 @@ class WaveformUnitPlotCollection:
                 label=f'{len(other_units)} other units',
                 zorder=3,
             )
-        for unit in self.loaded_units:
+        for unit in self.units:
             unit.draw_unit_location(ax)
 
         self._style_probe_axes(ax)
