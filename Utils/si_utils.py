@@ -701,13 +701,8 @@ def get_unit_info(base_dir: str | Path,
 
     kilosort_run: str = f'kilosort_{session_id}'
     kilosort_dir: Path = session_dir / 'kilosort' / f'Probe{probe_name}' / kilosort_run
-    raw_file: Path = (
-            session_dir
-            / session_dir.parent.name
-            / 'Record Node 102/experiment1/recording1/continuous'
-            / f'OneBox-106.Probe{probe_name}'
-            / 'continuous.dat'
-    )
+    raw_file = next((session_dir / session_dir.parent.name)
+                    .glob(f"*/experiment1/recording1/continuous/OneBox-*.Probe{probe_name}/continuous.dat"))
 
     waveform_analyzer_folder: Path = (
             session_dir / 'data' / 'spikeinterface_analyzer' / f'Probe{probe_name}'
