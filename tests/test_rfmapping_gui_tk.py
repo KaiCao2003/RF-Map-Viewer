@@ -1,6 +1,8 @@
 import csv
 import json
 import tempfile
+import threading
+import time
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -33,7 +35,11 @@ class TkViewerTests(unittest.TestCase):
         }
         path = Path(self.directory.name) / "viewer.json"
         path.write_text(json.dumps(payload), encoding="utf-8")
-        self.app = gui.RFMViewer(gui.RFMappingData(path))
+        settings_path = Path(self.directory.name) / "settings.json"
+        # Keep the GUI suite independent from preferences saved by a real app
+        # session on the host running the tests.
+        with mock.patch.object(gui, "viewer_settings_path", return_value=settings_path):
+            self.app = gui.RFMViewer(gui.RFMappingData(path))
         self.addCleanup(self._destroy_app)
         self.app.notebook.select(2)
         self.app.update()
@@ -46,6 +52,789 @@ class TkViewerTests(unittest.TestCase):
         )
         self.assertEqual(float(self.app.range_start_ms_var.get()), 0.0)
         self.assertEqual(float(self.app.range_end_ms_var.get()), 30.0)
+
+    def test_app_level_help_and_resolution_actions_live_in_menus(self) -> None:
+        navigate_entries = {
+            self.app._navigate_menu.entrycget(index, "label"): self.app._navigate_menu.entrycget(
+                index, "accelerator"
+            )
+            for index in range(self.app._navigate_menu.index("end") + 1)
+            if self.app._navigate_menu.type(index) == "command"
+        }
+        self.assertEqual(navigate_entries["Decrease Time Resolution"], "⇧,")
+        self.assertEqual(navigate_entries["Increase Time Resolution"], "⇧.")
+        self.assertNotIn("Decrease Time Resolution 1 ms", navigate_entries)
+        self.assertNotIn("Increase Time Resolution 1 ms", navigate_entries)
+
+        help_labels = [
+            self.app._help_menu.entrycget(index, "label")
+            for index in range(self.app._help_menu.index("end") + 1)
+            if self.app._help_menu.type(index) == "command"
+        ]
+        self.assertEqual(self.app._help_menu.winfo_name(), "help")
+        self.assertEqual(help_labels, ["Keyboard Shortcuts", "Support Documentation"])
+
+        sidebar_text = [
+            str(child.cget("text"))
+            for child in self.app.sidebar_panel.winfo_children()
+            if "text" in child.keys()
+        ]
+        self.assertFalse(any("all shortcuts" in text for text in sidebar_text))
+
+    def test_background_startup_decode_keeps_tk_heartbeat_responsive(self) -> None:
+        startup_path = Path(self.directory.name) / "slow.json"
+        startup_path.write_text("{}", encoding="utf-8")
+        heartbeat: list[float] = []
+
+        def slow_decode(_path: Path) -> gui.RFMappingData:
+            time.sleep(0.14)
+            return self.app.data
+
+        with mock.patch.object(gui, "RFMappingData", side_effect=slow_decode):
+            viewer = gui.RFMViewer(startup_path=startup_path, master=self.app._app_root)
+            self.addCleanup(viewer.destroy)
+            viewer._cancel_startup_callback()
+            viewer._startup_after = viewer.after_idle(
+                lambda: viewer._load_startup_document(startup_path)
+            )
+            viewer.after(15, lambda: heartbeat.append(time.perf_counter()))
+            deadline = time.perf_counter() + 2.0
+            while not viewer._viewer_ready and time.perf_counter() < deadline:
+                viewer.update()
+                time.sleep(0.004)
+
+        self.assertTrue(viewer._viewer_ready)
+        self.assertTrue(heartbeat, "Tk callback did not run while RF data decoded")
+        self.assertIsNone(viewer._startup_loading_frame)
+
+    def test_rf_tab_tuning_pane_hides_and_restores_rf_space(self) -> None:
+        self.app.notebook.select(0)
+        self.app.update()
+        initial_rf_width = self.app.rf_map_pane.winfo_width()
+        self.assertTrue(self.app.tuning_curve_pane.winfo_ismapped())
+
+        hidden = replace(
+            self.app.settings,
+            show_tuning_curve=False,
+            auto_load_tuning_curve=False,
+        )
+        self.assertTrue(
+            self.app._apply_viewer_settings(
+                hidden,
+                persist=False,
+                broadcast=False,
+            )
+        )
+        self.app.update()
+        self.assertFalse(self.app.tuning_curve_pane.winfo_ismapped())
+        self.assertGreater(self.app.rf_map_pane.winfo_width(), initial_rf_width)
+
+        shown = replace(hidden, show_tuning_curve=True)
+        self.assertTrue(
+            self.app._apply_viewer_settings(
+                shown,
+                persist=False,
+                broadcast=False,
+            )
+        )
+        self.app.update()
+        self.assertTrue(self.app.tuning_curve_pane.winfo_ismapped())
+
+    def test_missing_tuning_curve_is_a_clickable_placeholder(self) -> None:
+        self.app.notebook.select(0)
+        self.app.tuning_curve_data = None
+        self.app._tuning_curve_error = None
+        self.app._draw_tuning_curve()
+
+        text = "\n".join(
+            self.app.tuning_curve_canvas.itemcget(item, "text")
+            for item in self.app.tuning_curve_canvas.find_all()
+            if self.app.tuning_curve_canvas.type(item) == "text"
+        )
+        self.assertIn("No tuning curves", text)
+        self.assertIn("Click here to choose a JSON file", text)
+        self.assertIn("optional", self.app.tuning_curve_status_label.cget("text").lower())
+
+        with mock.patch.object(self.app, "_attach_tuning_curve") as attach:
+            self.app._on_tuning_curve_click(SimpleNamespace(x=20, y=20))
+        attach.assert_called_once_with()
+
+    def test_loaded_tuning_curve_draws_line_and_polar_without_extending_units(self) -> None:
+        tuning_path = Path(self.directory.name) / "tuning_curves.json"
+        curve = tuple(float((index % 24) + 1) for index in range(gui.HD_RAW_BIN_COUNT))
+        self.app.tuning_curve_data = gui.TuningCurveData(
+            tuning_path,
+            {7: curve, 999: curve},
+        )
+        self.app.tuning_smoothing_var.set(False)
+        self.app.tuning_plot_mode_var.set("Line")
+        self.app._draw_tuning_curve()
+        line_text = "\n".join(
+            self.app.tuning_curve_canvas.itemcget(item, "text")
+            for item in self.app.tuning_curve_canvas.find_all()
+            if self.app.tuning_curve_canvas.type(item) == "text"
+        )
+        self.assertIn("Head direction (deg)", line_text)
+        self.assertIn("Cluster 7", line_text)
+        self.assertIn(
+            "legacy schema",
+            self.app.tuning_curve_status_label.cget("text"),
+        )
+
+        self.app._sync_unit_combo()
+        self.assertEqual(self.app._unit_combo_unit_ids, [7, 8])
+        self.assertNotIn(999, self.app._unit_combo_unit_ids)
+
+        self.app.tuning_plot_mode_var.set("Polar")
+        self.app._draw_tuning_curve()
+        polar_text = "\n".join(
+            self.app.tuning_curve_canvas.itemcget(item, "text")
+            for item in self.app.tuning_curve_canvas.find_all()
+            if self.app.tuning_curve_canvas.type(item) == "text"
+        )
+        item_types = {
+            self.app.tuning_curve_canvas.type(item)
+            for item in self.app.tuning_curve_canvas.find_all()
+        }
+        self.assertIn("0°", polar_text)
+        self.assertIn("90°", polar_text)
+        self.assertNotIn("polygon", item_types)
+        self.assertTrue(
+            any(
+                self.app.tuning_curve_canvas.type(item) == "line"
+                and self.app.tuning_curve_canvas.itemcget(item, "fill") == "#1570ef"
+                for item in self.app.tuning_curve_canvas.find_all()
+            )
+        )
+        self.assertTrue(any(label.endswith(" Hz") for label in polar_text.splitlines()))
+        self.assertFalse(
+            any(
+                self.app.tuning_curve_canvas.type(item) == "oval"
+                and self.app.tuning_curve_canvas.itemcget(item, "dash")
+                for item in self.app.tuning_curve_canvas.find_all()
+            )
+        )
+
+        self.app.tuning_plot_mode_var.set("Auto")
+        self.app.polar_layout_var.set(False)
+        self.assertEqual(self.app._effective_tuning_plot_mode(), "Line")
+        self.app.polar_layout_var.set(True)
+        self.assertEqual(self.app._effective_tuning_plot_mode(), "Polar")
+
+    def test_hd_class_label_tracks_selected_unit_and_hides_zero(self) -> None:
+        tuning_path = Path(self.directory.name) / "tuning_curves.json"
+        curve = tuple(float((index % 24) + 1) for index in range(gui.HD_RAW_BIN_COUNT))
+        self.app.tuning_curve_data = gui.TuningCurveData(
+            tuning_path,
+            {7: curve, 8: curve},
+            hd_classes={7: 1, 8: 2},
+        )
+        self.app.tuning_smoothing_var.set(False)
+
+        self.app._set_selected_unit_id(7)
+        self.app._draw_tuning_curve()
+        self.assertEqual(self.app.tuning_hd_class_label.cget("text"), "1")
+        self.assertEqual(str(self.app.tuning_hd_class_label.cget("foreground")), "#8a6508")
+
+        self.app._set_selected_unit_id(8)
+        self.app._draw_tuning_curve()
+        self.assertEqual(self.app.tuning_hd_class_label.cget("text"), "2")
+        self.assertEqual(str(self.app.tuning_hd_class_label.cget("foreground")), "#027a48")
+
+        self.app.tuning_curve_data = gui.TuningCurveData(
+            tuning_path,
+            {7: curve, 8: curve},
+            hd_classes={7: 0, 8: None},
+        )
+        self.app._set_selected_unit_id(7)
+        self.app._draw_tuning_curve()
+        self.assertEqual(self.app.tuning_hd_class_label.cget("text"), "")
+
+        self.app._set_selected_unit_id(8)
+        self.app._draw_tuning_curve()
+        self.assertEqual(self.app.tuning_hd_class_label.cget("text"), "")
+
+        self.app.tuning_curve_data = None
+        self.app._draw_tuning_curve()
+        self.assertEqual(self.app.tuning_hd_class_label.cget("text"), "")
+
+    def test_tuning_line_axis_starts_at_zero_and_ends_at_displayed_peak(self) -> None:
+        self.app.tuning_curve_canvas.delete("all")
+        self.app._draw_tuning_line((0.0, 180.0, 360.0), (8.0, 12.0, 10.0), 7)
+        labels = {
+            self.app.tuning_curve_canvas.itemcget(item, "text")
+            for item in self.app.tuning_curve_canvas.find_all()
+            if self.app.tuning_curve_canvas.type(item) == "text"
+        }
+        self.assertIn("0", labels)
+        self.assertIn("6", labels)
+        self.assertIn("12", labels)
+        self.assertNotIn("8", labels)
+        zero_tick = next(
+            item
+            for item in self.app.tuning_curve_canvas.find_all()
+            if self.app.tuning_curve_canvas.type(item) == "text"
+            and self.app.tuning_curve_canvas.itemcget(item, "text") == "0"
+        )
+        left = 54.0
+        right = max(self.app.tuning_curve_canvas.winfo_width(), 280) - 16.0
+        self.assertAlmostEqual(
+            self.app.tuning_curve_canvas.coords(zero_tick)[0],
+            (left + right) / 2.0,
+        )
+        self.assertEqual(sum(label == "180" for label in labels), 1)
+
+    def test_compare_scale_uses_one_processed_peak_for_line_and_polar(self) -> None:
+        tuning_path = Path(self.directory.name) / "tuning_curves.json"
+        self.app.tuning_curve_data = gui.TuningCurveData(
+            tuning_path,
+            {
+                7: (10.0,) * gui.HD_RAW_BIN_COUNT,
+                8: (20.0,) * gui.HD_RAW_BIN_COUNT,
+            },
+        )
+        self.app._set_selected_unit_id(7)
+        self.app.tuning_smoothing_var.set(False)
+        self.app.tuning_plot_mode_var.set("Line")
+
+        self.app.tuning_compare_scale_var.set(False)
+        self.app._draw_tuning_curve()
+        per_cell_labels = {
+            self.app.tuning_curve_canvas.itemcget(item, "text")
+            for item in self.app.tuning_curve_canvas.find_all()
+            if self.app.tuning_curve_canvas.type(item) == "text"
+        }
+        self.assertIn("10", per_cell_labels)
+        self.assertNotIn("20", per_cell_labels)
+
+        self.app.tuning_compare_scale_var.set(True)
+        self.app._draw_tuning_curve()
+        shared_labels = {
+            self.app.tuning_curve_canvas.itemcget(item, "text")
+            for item in self.app.tuning_curve_canvas.find_all()
+            if self.app.tuning_curve_canvas.type(item) == "text"
+        }
+        self.assertIn("20", shared_labels)
+        self.assertIn("shared 0–20 Hz scale", self.app.tuning_curve_status_label.cget("text"))
+
+        self.app.tuning_plot_mode_var.set("Polar")
+        self.app._draw_tuning_curve()
+        polar_labels = {
+            self.app.tuning_curve_canvas.itemcget(item, "text")
+            for item in self.app.tuning_curve_canvas.find_all()
+            if self.app.tuning_curve_canvas.type(item) == "text"
+        }
+        self.assertIn("20 Hz", polar_labels)
+        self.assertNotIn("polygon", {
+            self.app.tuning_curve_canvas.type(item)
+            for item in self.app.tuning_curve_canvas.find_all()
+        })
+
+    def test_one_and_two_bin_tuning_curves_remain_visible(self) -> None:
+        tuning_path = Path(self.directory.name) / "tuning_curves.json"
+        curve = tuple(float(index + 1) for index in range(gui.HD_RAW_BIN_COUNT))
+        self.app.tuning_curve_data = gui.TuningCurveData(tuning_path, {7: curve})
+        self.app.tuning_smoothing_var.set(False)
+
+        self.app.tuning_display_bins_var.set(1)
+        self.app.tuning_plot_mode_var.set("Line")
+        self.app._draw_tuning_curve()
+        line_markers = [
+            item
+            for item in self.app.tuning_curve_canvas.find_all()
+            if self.app.tuning_curve_canvas.type(item) == "oval"
+            and self.app.tuning_curve_canvas.itemcget(item, "fill") == "#1570ef"
+        ]
+        self.assertEqual(len(line_markers), 1)
+
+        self.app.tuning_display_bins_var.set(2)
+        self.app.tuning_plot_mode_var.set("Polar")
+        self.app._draw_tuning_curve()
+        polar_markers = [
+            item
+            for item in self.app.tuning_curve_canvas.find_all()
+            if self.app.tuning_curve_canvas.type(item) == "oval"
+            and self.app.tuning_curve_canvas.itemcget(item, "fill") == "#1570ef"
+        ]
+        self.assertEqual(len(polar_markers), 2)
+        self.assertFalse(
+            any(
+                self.app.tuning_curve_canvas.type(item) == "line"
+                and self.app.tuning_curve_canvas.itemcget(item, "fill") == "#1570ef"
+                for item in self.app.tuning_curve_canvas.find_all()
+            )
+        )
+
+        self.app.tuning_curve_data = gui.TuningCurveData(
+            tuning_path,
+            {7: (0.0,) * gui.HD_RAW_BIN_COUNT},
+        )
+        self.app.tuning_display_bins_var.set(30)
+        self.app._draw_tuning_curve()
+        zero_markers = [
+            item
+            for item in self.app.tuning_curve_canvas.find_all()
+            if self.app.tuning_curve_canvas.type(item) == "oval"
+            and self.app.tuning_curve_canvas.itemcget(item, "fill") == "#1570ef"
+        ]
+        self.assertEqual(len(zero_markers), 1)
+
+    def test_settings_tabs_and_dependent_controls(self) -> None:
+        self.app._show_settings()
+        settings = self.app._app_root._rfm_settings_window
+        self.assertIsInstance(settings, gui.SettingsWindow)
+        self.addCleanup(settings.destroy)
+        self.assertEqual(
+            [settings.notebook.tab(tab, "text") for tab in settings.notebook.tabs()],
+            ["General", "RF Map", "Tuning Curve"],
+        )
+
+        settings.show_tuning_curve_var.set(False)
+        settings.show_probe_layout_var.set(False)
+        settings.tuning_smoothing_var.set(False)
+        settings.update_idletasks()
+        self.assertIn("disabled", settings.auto_tuning_check.state())
+        self.assertIn("disabled", settings.auto_probe_check.state())
+        self.assertIn("disabled", settings.tuning_sigma_entry.state())
+
+        settings.show_tuning_curve_var.set(True)
+        settings.show_probe_layout_var.set(True)
+        settings.tuning_smoothing_var.set(True)
+        settings.update_idletasks()
+        self.assertNotIn("disabled", settings.auto_tuning_check.state())
+        self.assertNotIn("disabled", settings.auto_probe_check.state())
+        self.assertNotIn("disabled", settings.tuning_sigma_entry.state())
+
+        pending = list(settings.winfo_children())
+        button_labels = []
+        while pending:
+            widget = pending.pop()
+            pending.extend(widget.winfo_children())
+            if isinstance(widget, gui.ttk.Button):
+                button_labels.append(widget.cget("text"))
+        self.assertIn("Save", button_labels)
+        self.assertIn("Cancel", button_labels)
+        self.assertNotIn("Apply", button_labels)
+        self.assertNotIn("Restore Defaults", button_labels)
+
+    def test_applying_settings_updates_the_active_window(self) -> None:
+        self.app._app_root._rfm_active_viewer = self.app
+        self.app._show_settings()
+        settings = self.app._app_root._rfm_settings_window
+        self.assertIsInstance(settings, gui.SettingsWindow)
+        self.addCleanup(settings.destroy)
+
+        settings.rf_sum_start_var.set("4")
+        settings.rf_sum_end_var.set("24")
+        settings.rf_time_resolution_var.set("4")
+        settings.rf_layout_var.set("Polar")
+        settings.tuning_plot_mode_var.set("Line")
+        settings.tuning_layout_var.set("Stacked")
+        settings.tuning_display_bins_var.set("8")
+        settings.tuning_smoothing_var.set(False)
+        settings.tuning_smooth_sigma_var.set("2")
+        settings.tuning_compare_scale_var.set(True)
+        settings._commit(close=False)
+
+        self.assertEqual(settings.error_var.get(), "")
+        self.assertEqual(settings.tuning_display_bins_var.get(), "6")
+        self.assertEqual(self.app.range_start_ms_var.get(), "4")
+        self.assertEqual(self.app.range_end_ms_var.get(), "24")
+        self.assertEqual(self.app.time_res_ms_var.get(), "4")
+        self.assertTrue(self.app.polar_layout_var.get())
+        self.assertEqual(self.app.tuning_plot_mode_var.get(), "Line")
+        self.assertEqual(self.app.tuning_layout_var.get(), "Stacked")
+        self.assertEqual(int(self.app.tuning_curve_pane.grid_info()["row"]), 1)
+        self.assertEqual(int(self.app.tuning_curve_pane.grid_info()["column"]), 0)
+        self.assertEqual(self.app.tuning_display_bins_var.get(), 6)
+        self.assertFalse(self.app.tuning_smoothing_var.get())
+        self.assertEqual(self.app.tuning_smooth_sigma_var.get(), 2.0)
+        self.assertTrue(self.app.tuning_compare_scale_var.get())
+        saved = json.loads(
+            self.app._app_root._rfm_settings_path.read_text(encoding="utf-8")
+        )
+        self.assertEqual(saved["tuning_display_bins"], 6)
+        self.assertEqual(saved["tuning_layout"], "Stacked")
+        self.assertTrue(saved["tuning_compare_scale"])
+        self.assertTrue(saved["rf_polar_layout"])
+
+    def test_probe_and_tuning_views_fold_and_restore(self) -> None:
+        self.app.notebook.select(0)
+        self.app.update()
+        initial_split_width = self.app.rf_split_container.winfo_width()
+
+        self.app._toggle_probe_collapsed()
+        self.app.update_idletasks()
+        self.assertGreater(
+            self.app.rf_split_container.winfo_width(), initial_split_width
+        )
+        expanded_rf_width = self.app.rf_map_pane.winfo_width()
+        self.app._toggle_tuning_collapsed()
+        self.app.update_idletasks()
+        self.assertFalse(self.app.probe_canvas.winfo_ismapped())
+        self.assertFalse(self.app.tuning_curve_canvas.winfo_ismapped())
+        self.assertFalse(self.app.sidebar_panel.winfo_ismapped())
+        self.assertTrue(self.app.sidebar_collapsed_rail.winfo_ismapped())
+        self.assertFalse(self.app.tuning_curve_pane.winfo_ismapped())
+        self.assertTrue(self.app.tuning_collapsed_rail.winfo_ismapped())
+        self.assertGreater(self.app.rf_map_pane.winfo_width(), expanded_rf_width)
+
+        self.app._toggle_probe_collapsed()
+        self.app._toggle_tuning_collapsed()
+        self.app.update_idletasks()
+        self.assertTrue(self.app.probe_canvas.winfo_ismapped())
+        self.assertTrue(self.app.tuning_curve_canvas.winfo_ismapped())
+
+    def test_rf_navigation_uses_cheap_best_cell_path(self) -> None:
+        self.app.selected_cell = None
+        with mock.patch.object(
+            self.app.data,
+            "metrics",
+            side_effect=AssertionError("full metrics should remain lazy"),
+        ):
+            self.app._update_cell_label()
+        self.assertIsNotNone(self.app.selected_cell)
+
+    def test_probe_static_geometry_is_reused_across_unit_steps(self) -> None:
+        base = Path(self.directory.name)
+        self.app.probe_geometry = gui.ProbeGeometry(
+            probe_name="ProbeA",
+            positions_path=base / "positions.csv",
+            channels_path=base / "channels.csv",
+            units=(
+                gui.ProbeUnitPosition(0, 7, 0.0, 0.0),
+                gui.ProbeUnitPosition(1, 8, 10.0, 100.0),
+            ),
+            channels=(
+                gui.ProbeChannel(0, 0, 0, 0.0, 0.0, 0),
+                gui.ProbeChannel(1, 1, 1, 10.0, 100.0, 0),
+            ),
+        )
+        self.app._probe_static_signature = None
+        self.app._draw_probe_canvas()
+        static_before = tuple(self.app.probe_canvas.find_withtag("probe-static"))
+
+        self.app._set_selected_unit_id(8)
+        self.app._draw_probe_canvas()
+        static_after = tuple(self.app.probe_canvas.find_withtag("probe-static"))
+        self.assertEqual(static_after, static_before)
+
+    def test_optional_discovery_starts_off_the_tk_thread(self) -> None:
+        probe_finished = threading.Event()
+        worker_names = []
+
+        def slow_probe(_path: Path) -> None:
+            worker_names.append(threading.current_thread().name)
+            time.sleep(0.12)
+            probe_finished.set()
+            return None
+
+        self.app._optional_autoload_generation += 1
+        generation = self.app._optional_autoload_generation
+        with (
+            mock.patch.object(gui, "discover_probe_geometry", side_effect=slow_probe),
+            mock.patch.object(gui, "discover_tuning_curve_path", return_value=None),
+        ):
+            started = time.perf_counter()
+            self.app._autoload_optional_resources_deferred(generation)
+            elapsed = time.perf_counter() - started
+            self.assertLess(elapsed, 0.05)
+            self.assertTrue(probe_finished.wait(1.0))
+
+        self.assertTrue(worker_names)
+        self.assertNotEqual(worker_names[0], threading.current_thread().name)
+
+    def test_settings_newly_enabled_autoload_is_scheduled_off_tk(self) -> None:
+        hidden = replace(
+            self.app.settings,
+            show_probe_layout=False,
+            auto_load_probe_layout=False,
+            show_tuning_curve=False,
+            auto_load_tuning_curve=False,
+        )
+        self.assertTrue(
+            self.app._apply_viewer_settings(
+                hidden,
+                persist=False,
+                broadcast=False,
+            )
+        )
+        enabled = replace(
+            hidden,
+            show_probe_layout=True,
+            auto_load_probe_layout=True,
+            show_tuning_curve=True,
+            auto_load_tuning_curve=True,
+        )
+
+        with (
+            mock.patch.object(
+                gui,
+                "discover_probe_geometry",
+                side_effect=AssertionError("must not run on Tk"),
+            ),
+            mock.patch.object(
+                gui,
+                "discover_tuning_curve_path",
+                side_effect=AssertionError("must not run on Tk"),
+            ),
+            mock.patch.object(self.app, "_schedule_optional_autoload") as schedule,
+        ):
+            self.assertTrue(
+                self.app._apply_viewer_settings(
+                    enabled,
+                    persist=False,
+                    broadcast=False,
+                )
+            )
+
+        schedule.assert_called_once_with()
+
+    def test_optional_worker_always_enqueues_a_terminal_result(self) -> None:
+        self.app._optional_result_queue = gui.queue.SimpleQueue()
+        snapshot = {
+            "generation": 99,
+            "data_path": self.app.data.path,
+            "load_probe": True,
+            "load_tuning": True,
+            "cluster_id": 7,
+            "tuning_bins": 30,
+            "tuning_smoothing": True,
+            "tuning_sigma": 1.5,
+        }
+
+        with mock.patch.object(
+            gui,
+            "discover_probe_geometry",
+            side_effect=RuntimeError("unexpected discovery failure"),
+        ):
+            self.app._optional_autoload_worker(snapshot)
+
+        result = self.app._optional_result_queue.get_nowait()
+        self.assertEqual(result["generation"], 99)
+        self.assertIn("unexpected discovery failure", str(result["worker_error"]))
+
+    def test_settings_validation_selects_and_marks_the_owning_tab(self) -> None:
+        self.app._show_settings()
+        settings = self.app._app_root._rfm_settings_window
+        self.assertIsInstance(settings, gui.SettingsWindow)
+        self.addCleanup(settings.destroy)
+        settings.notebook.select(settings._tab_widget_by_name["General"])
+        settings.rf_sum_start_var.set("10")
+        settings.rf_sum_end_var.set("10")
+
+        settings._commit(close=False)
+
+        selected = settings._tab_name_by_widget[str(settings.notebook.select())]
+        self.assertEqual(selected, "RF Map")
+        self.assertIn("start before end", settings._tab_error_vars["RF Map"].get())
+        self.assertEqual(
+            settings.notebook.tab(settings._tab_widget_by_name["RF Map"], "text"),
+            "RF Map •",
+        )
+        self.assertEqual(settings.error_var.get(), "")
+
+        settings.rf_sum_start_var.set("0")
+        settings.rf_sum_end_var.set("20")
+        settings._commit(close=False)
+        self.assertEqual(settings._tab_error_vars["RF Map"].get(), "")
+        self.assertEqual(
+            settings.notebook.tab(settings._tab_widget_by_name["RF Map"], "text"),
+            "RF Map",
+        )
+
+    def test_disabled_invalid_tuning_sigma_keeps_last_valid_value(self) -> None:
+        expected_sigma = self.app._app_root._rfm_settings.tuning_smooth_sigma
+        self.app._show_settings()
+        settings = self.app._app_root._rfm_settings_window
+        self.assertIsInstance(settings, gui.SettingsWindow)
+        self.addCleanup(settings.destroy)
+        settings.tuning_smoothing_var.set(False)
+        settings.tuning_smooth_sigma_var.set("not-a-number")
+
+        settings._commit(close=False)
+
+        self.assertEqual(settings.error_var.get(), "")
+        self.assertEqual(settings._tab_error_vars["Tuning Curve"].get(), "")
+        self.assertEqual(
+            float(settings.tuning_smooth_sigma_var.get()),
+            expected_sigma,
+        )
+        self.assertFalse(self.app.tuning_smoothing_var.get())
+        self.assertEqual(self.app.tuning_smooth_sigma_var.get(), expected_sigma)
+
+        settings.tuning_smoothing_var.set(True)
+        settings.tuning_smooth_sigma_var.set("still-not-a-number")
+        settings._commit(close=False)
+        selected = settings._tab_name_by_widget[str(settings.notebook.select())]
+        self.assertEqual(selected, "Tuning Curve")
+        self.assertIn(
+            "must be a number",
+            settings._tab_error_vars["Tuning Curve"].get(),
+        )
+
+    def test_settings_apply_preserves_viewer_tab_and_suppresses_trace_publish(self) -> None:
+        self.app.notebook.select(2)
+        palette = next(
+            value for value in gui.PALETTES if value != self.app.palette_var.get()
+        )
+        polar_radius = next(
+            value
+            for value in gui.POLAR_RADIUS_MODES
+            if value != self.app.polar_radius_var.get()
+        )
+        updated = replace(
+            self.app.settings,
+            rf_palette=palette,
+            rf_polar_radius=polar_radius,
+            default_viewer_tab="rf",
+        )
+
+        with mock.patch.object(
+            self.app,
+            "_publish_pairing_state_if_changed",
+        ) as publish:
+            applied = self.app._apply_viewer_settings(
+                updated,
+                persist=False,
+                broadcast=False,
+            )
+
+        self.assertTrue(applied)
+        self.assertEqual(self.app._active_tab_key(), "timeline")
+        self.assertFalse(self.app._pair_apply_in_progress)
+        publish.assert_not_called()
+
+        def fail_during_redraw() -> None:
+            self.assertTrue(self.app._pair_apply_in_progress)
+            raise RuntimeError("redraw failed")
+
+        with mock.patch.object(self.app, "_update_all", side_effect=fail_during_redraw):
+            with self.assertRaisesRegex(RuntimeError, "redraw failed"):
+                self.app._apply_viewer_settings(
+                    updated,
+                    persist=False,
+                    broadcast=False,
+                )
+        self.assertFalse(self.app._pair_apply_in_progress)
+
+    def test_settings_commit_renders_each_visible_optional_view_once(self) -> None:
+        self.app.notebook.select(0)
+        self.app._show_settings()
+        settings = self.app._app_root._rfm_settings_window
+        self.assertIsInstance(settings, gui.SettingsWindow)
+        self.addCleanup(settings.destroy)
+
+        with (
+            mock.patch.object(
+                self.app,
+                "_draw_probe_canvas",
+                wraps=self.app._draw_probe_canvas,
+            ) as draw_probe,
+            mock.patch.object(
+                self.app,
+                "_draw_tuning_curve",
+                wraps=self.app._draw_tuning_curve,
+            ) as draw_tuning,
+        ):
+            settings._commit(close=False)
+
+        self.assertEqual(draw_probe.call_count, 1)
+        self.assertEqual(draw_tuning.call_count, 1)
+
+    def test_applying_settings_propagates_only_to_paired_windows(self) -> None:
+        paired = self.app._open_json_window(self.app.data.path)
+        self.assertIsNotNone(paired)
+        assert paired is not None
+        self.addCleanup(paired.destroy)
+        self.app.pair_windows_var.set(True)
+        self.app._on_pair_windows_toggled()
+        self.app._app_root._rfm_active_viewer = self.app
+        self.app._show_settings()
+        settings = self.app._app_root._rfm_settings_window
+        self.assertIsInstance(settings, gui.SettingsWindow)
+        self.addCleanup(settings.destroy)
+
+        settings.rf_flip_y_var.set(True)
+        settings.rf_palette_var.set("Viridis")
+        settings.tuning_plot_mode_var.set("Polar")
+        settings.tuning_display_bins_var.set("12")
+        settings.tuning_compare_scale_var.set(True)
+        settings.show_tuning_curve_var.set(False)
+        settings._commit(close=False)
+
+        self.assertEqual(settings.error_var.get(), "")
+        for viewer in (self.app, paired):
+            self.assertTrue(viewer.flip_y_var.get())
+            self.assertEqual(viewer.palette_var.get(), "Viridis")
+            self.assertEqual(viewer.tuning_plot_mode_var.get(), "Polar")
+            self.assertEqual(viewer.tuning_display_bins_var.get(), 12)
+            self.assertTrue(viewer.tuning_compare_scale_var.get())
+            self.assertFalse(viewer.show_tuning_curve_var.get())
+            self.assertFalse(viewer.tuning_curve_pane.winfo_ismapped())
+
+    def test_reused_settings_window_follows_the_active_viewer(self) -> None:
+        second = self.app._open_json_window(self.app.data.path)
+        self.assertIsNotNone(second)
+        assert second is not None
+        self.addCleanup(second.destroy)
+        self.app._app_root._rfm_active_viewer = self.app
+        self.app._show_settings()
+        settings = self.app._app_root._rfm_settings_window
+        self.assertIsInstance(settings, gui.SettingsWindow)
+        self.addCleanup(settings.destroy)
+
+        self.app._app_root._rfm_active_viewer = second
+        second._show_settings()
+
+        self.assertIs(settings.owner, second)
+        self.assertEqual(settings.transient(), str(second))
+
+    def test_optional_file_drop_returns_copy_only_after_successful_load(self) -> None:
+        event = SimpleNamespace(data=str(Path(self.directory.name) / "tuning_curves.json"))
+        with mock.patch.object(
+            self.app,
+            "_load_tuning_curve_path",
+            return_value=True,
+        ) as loader:
+            result = self.app._on_optional_file_drop("tuning", event)
+        self.assertEqual(result, self.app._dnd_copy_action)
+        loader.assert_called_once()
+
+        with mock.patch.object(
+            self.app,
+            "_load_tuning_curve_path",
+            return_value=False,
+        ):
+            result = self.app._on_optional_file_drop("tuning", event)
+        self.assertEqual(result, self.app._dnd_refuse_action)
+
+        self.app.show_tuning_curve_var.set(False)
+        with mock.patch.object(self.app, "_load_tuning_curve_path") as hidden_loader:
+            result = self.app._on_optional_file_drop("tuning", event)
+        self.assertEqual(result, self.app._dnd_refuse_action)
+        hidden_loader.assert_not_called()
+        self.assertEqual(
+            self.app._on_optional_file_drop("unknown", event),
+            self.app._dnd_refuse_action,
+        )
+
+    def test_missing_probe_click_opens_the_positions_picker(self) -> None:
+        self.app.show_probe_layout_var.set(True)
+        self.app.probe_geometry = None
+        self.app._draw_probe_canvas()
+        event = SimpleNamespace(x=40, y=40)
+
+        with mock.patch.object(
+            gui.filedialog,
+            "askopenfilename",
+            return_value="",
+        ) as picker:
+            self.app._on_probe_press(event)
+            self.app._on_probe_release(event)
+
+        picker.assert_called_once()
+        self.assertEqual(picker.call_args.kwargs["title"], "Attach probe positions.csv")
 
     def test_global_polar_toggle_applies_to_spatial_tabs(self) -> None:
         self.app.polar_layout_var.set(True)

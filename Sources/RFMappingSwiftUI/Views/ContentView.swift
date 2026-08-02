@@ -4,20 +4,23 @@ import UniformTypeIdentifiers
 struct ContentView: View {
     @Bindable var store: RFMappingStore
     @Bindable var pairingCoordinator: WindowPairingCoordinator
+    @State private var preferences = ViewerPreferences.shared
     let pairingWindowID: UUID
     let openJSONInNewWindow: (URL) -> Void
 
     var body: some View {
-        HStack(spacing: 0) {
+        HSplitView {
             SidebarView(
                 store: store,
                 pairingCoordinator: pairingCoordinator,
                 pairingWindowID: pairingWindowID
             )
-                .frame(width: 318)
-            Divider()
+            .frame(minWidth: 270, idealWidth: 304, maxWidth: 360)
+
             mainContent
+                .frame(minWidth: 720)
         }
+        .background(Color(nsColor: .windowBackgroundColor))
         .overlay {
             if store.isLoadingData {
                 ZStack {
@@ -32,11 +35,14 @@ struct ContentView: View {
         .fileImporter(
             isPresented: $store.isImporting,
             allowedContentTypes: [.json, .data],
-            allowsMultipleSelection: true
+            // A real RF document can transiently require about a gigabyte while
+            // Foundation decodes it. Keep the picker single-document so several
+            // full parses cannot overlap and exhaust memory.
+            allowsMultipleSelection: false
         ) { result in
             switch result {
             case .success(let urls):
-                urls.forEach(openJSONInNewWindow)
+                if let url = urls.first { openJSONInNewWindow(url) }
             case .failure(let error):
                 if (error as? CocoaError)?.code != .userCancelled {
                     store.errorMessage = error.localizedDescription
@@ -51,6 +57,23 @@ struct ContentView: View {
         ) { result in
             if case .failure(let error) = result {
                 store.errorMessage = error.localizedDescription
+            }
+        }
+        .fileImporter(
+            isPresented: $store.isImportingTuning,
+            allowedContentTypes: [.json, .data],
+            allowsMultipleSelection: false
+        ) { result in
+            switch result {
+            case .success(let urls):
+                guard let url = urls.first else { return }
+                Task { @MainActor in
+                    _ = await store.loadTuningCurveAsync(url)
+                }
+            case .failure(let error):
+                if (error as? CocoaError)?.code != .userCancelled {
+                    store.errorMessage = error.localizedDescription
+                }
             }
         }
         .alert(
@@ -76,6 +99,18 @@ struct ContentView: View {
                 }
             }
         }
+        .task(id: tuningAutoloadRequest) {
+            guard tuningAutoloadRequest.shouldLoad, store.tuningData == nil else { return }
+            await store.autoLoadTuningCurveIfAvailable()
+        }
+    }
+
+    private var tuningAutoloadRequest: TuningAutoloadRequest {
+        TuningAutoloadRequest(
+            rfPath: store.data?.url.path,
+            shouldLoad: preferences.showTuningCurve
+                && preferences.autoLoadTuningCurve
+        )
     }
 
     private var hoverContext: HoverContext {
@@ -112,7 +147,7 @@ struct ContentView: View {
                 Divider()
                 PlotControlBar(store: store)
                 Divider()
-                PlotTabsView(store: store)
+                PlotTabsView(store: store, preferences: preferences)
             }
         } else {
             ContentUnavailableView {
@@ -147,6 +182,11 @@ private struct HoverContext: Hashable {
     let timeResolutionMS: Double
     let smoothRadius: Int
     let selectedTab: PlotTab
+}
+
+private struct TuningAutoloadRequest: Hashable {
+    let rfPath: String?
+    let shouldLoad: Bool
 }
 
 private struct HeaderView: View {
@@ -310,6 +350,7 @@ private struct PlotControlBar: View {
 
 private struct PlotTabsView: View {
     @Bindable var store: RFMappingStore
+    @Bindable var preferences: ViewerPreferences
 
     var body: some View {
         VStack(spacing: 0) {
@@ -326,11 +367,7 @@ private struct PlotTabsView: View {
             Group {
                 switch store.selectedTab {
                 case .rf:
-                    if store.spatialPlotFormat == .polar {
-                        PolarMapView(store: store, kind: .rf)
-                    } else {
-                        HeatmapView(store: store, kind: .rf)
-                    }
+                    RFTuningSplitView(store: store, preferences: preferences)
                 case .delayRGB:
                     if store.delayRGBMode == .rgb {
                         RGBMapView(store: store)
@@ -344,6 +381,67 @@ private struct PlotTabsView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+}
+
+private struct RFTuningSplitView: View {
+    @Bindable var store: RFMappingStore
+    @Bindable var preferences: ViewerPreferences
+    @State private var isTuningCollapsed = false
+
+    var body: some View {
+        if !preferences.showTuningCurve {
+            rfMap
+        } else if isTuningCollapsed {
+            rfMap
+                .overlay(alignment: .topTrailing) {
+                    Button {
+                        isTuningCollapsed = false
+                    } label: {
+                        Label(
+                            "Show HD",
+                            systemImage: preferences.tuningLayout == .stacked
+                                ? "rectangle.bottomthird.inset.filled"
+                                : "rectangle.rightthird.inset.filled"
+                        )
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .help("Show HD tuning curve")
+                    .padding(10)
+                }
+        } else if preferences.tuningLayout == .stacked {
+            VSplitView {
+                rfMap
+                    .frame(minHeight: 320)
+                HDTuningCurveView(
+                    store: store,
+                    preferences: preferences,
+                    collapse: { isTuningCollapsed = true }
+                )
+                .frame(minHeight: 240, idealHeight: 320)
+            }
+        } else {
+            HSplitView {
+                rfMap
+                    .frame(minWidth: 420)
+                HDTuningCurveView(
+                    store: store,
+                    preferences: preferences,
+                    collapse: { isTuningCollapsed = true }
+                )
+                .frame(minWidth: 320, idealWidth: 430)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var rfMap: some View {
+        if store.spatialPlotFormat == .polar {
+            PolarMapView(store: store, kind: .rf)
+        } else {
+            HeatmapView(store: store, kind: .rf)
         }
     }
 }

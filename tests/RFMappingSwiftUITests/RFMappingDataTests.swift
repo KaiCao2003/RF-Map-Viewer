@@ -3,6 +3,78 @@ import XCTest
 @testable import RFMappingSwiftUI
 
 final class RFMappingDataTests: XCTestCase {
+    private actor ConcurrencyProbe {
+        private var active = 0
+        private(set) var maximum = 0
+
+        func enter() {
+            active += 1
+            maximum = max(maximum, active)
+        }
+
+        func leave() {
+            active -= 1
+        }
+    }
+
+    private actor BooleanProbe {
+        private(set) var value = false
+
+        func set() {
+            value = true
+        }
+    }
+
+    func testAsyncSerialGatePreventsConcurrentHighMemoryWork() async {
+        let gate = AsyncSerialGate()
+        let probe = ConcurrencyProbe()
+
+        await withTaskGroup(of: Void.self) { group in
+            for _ in 0..<4 {
+                group.addTask {
+                    try? await gate.enter()
+                    await probe.enter()
+                    try? await Task.sleep(for: .milliseconds(5))
+                    await probe.leave()
+                    await gate.leave()
+                }
+            }
+        }
+
+        let maximum = await probe.maximum
+        XCTAssertEqual(maximum, 1)
+    }
+
+    func testCancelledSerialGateWaiterReturnsBeforeHolderLeaves() async throws {
+        let gate = AsyncSerialGate()
+        let cancelled = BooleanProbe()
+        try await gate.enter()
+
+        let waiter = Task {
+            do {
+                try await gate.enter()
+            } catch is CancellationError {
+                await cancelled.set()
+            } catch {
+                XCTFail("Unexpected gate error: \(error)")
+            }
+        }
+        while await gate.waitingCount == 0 { await Task.yield() }
+        waiter.cancel()
+
+        for _ in 0..<100 {
+            if await cancelled.value { break }
+            try? await Task.sleep(for: .milliseconds(1))
+        }
+        let cancelledBeforeRelease = await cancelled.value
+        await gate.leave()
+        _ = await waiter.result
+
+        XCTAssertTrue(cancelledBeforeRelease)
+        try await gate.enter()
+        await gate.leave()
+    }
+
     func testExactEdgesDriveCountPerPresentationAndFiringRate() throws {
         let subject = try load(basePayload())
 
@@ -119,6 +191,52 @@ final class RFMappingDataTests: XCTestCase {
         XCTAssertEqual(reversed, forward, accuracy: 1e-12)
         XCTAssertEqual(subject.timeSpanSeconds(start: 2, end: 0), 0.3, accuracy: 1e-12)
         XCTAssertEqual(subject.countMatrix(unitIndex: 0, start: 2, end: 0), [[60.0, 30.0]])
+    }
+
+    func testFlatCountStoragePreservesUnitYXBinningOrder() throws {
+        let payload: [String: Any] = [
+            "unitsSpikeCounts": [
+                [
+                    [[0, 1, 2], [10, 11, 12]],
+                    [[100, 101, 102], [110, 111, 112]]
+                ],
+                [
+                    [[1000, 1001, 1002], [1010, 1011, 1012]],
+                    [[1100, 1101, 1102], [1110, 1111, 1112]]
+                ]
+            ],
+            "unitsSpikeCountsSize": [2, 2, 2, 3],
+            "unitPool": [7, 9],
+            "xPositions": [-1, 1],
+            "yPositions": [-2, 2],
+            "timeBinEdges": [0, 0.1, 0.2, 0.3]
+        ]
+        let subject = try load(payload)
+
+        for unitIndex in 0..<2 {
+            for yIndex in 0..<2 {
+                for xIndex in 0..<2 {
+                    for binIndex in 0..<3 {
+                        let expected = Double(
+                            unitIndex * 1000 + yIndex * 100 + xIndex * 10 + binIndex
+                        )
+                        XCTAssertEqual(
+                            subject.count(
+                                unitIndex: unitIndex,
+                                yIndex: yIndex,
+                                xIndex: xIndex,
+                                binIndex: binIndex
+                            ),
+                            expected
+                        )
+                    }
+                }
+            }
+        }
+        XCTAssertEqual(
+            subject.countMatrix(unitIndex: 1, start: 1, end: 2),
+            [[2003, 2023], [2203, 2223]]
+        )
     }
 
     func testPrefixRangesPreserveSmallCountsAfterLargeEarlierBins() throws {
@@ -315,6 +433,36 @@ final class RFMappingDataTests: XCTestCase {
         assertInvalid(invalidFlatPresentation, contains: "singleton dimensions")
     }
 
+    func testFlatDecoderRejectsRaggedNestedCountDimensions() throws {
+        var wrongYCount = basePayload()
+        wrongYCount["unitsSpikeCounts"] = [[
+            [[10.0, 20.0, 30.0], [5.0, 10.0, 15.0]],
+            [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+        ]]
+        assertInvalid(wrongYCount, contains: "wrong y dimension")
+
+        var wrongXCount = basePayload()
+        wrongXCount["unitsSpikeCounts"] = [[[[10.0, 20.0, 30.0]]]]
+        assertInvalid(wrongXCount, contains: "wrong x dimension")
+
+        let raggedX: [String: Any] = [
+            "unitsSpikeCounts": [[
+                [[1.0], [2.0]],
+                [[3.0]]
+            ]],
+            "unitsSpikeCountsSize": [1, 2, 2, 1],
+            "unitPool": [1],
+            "xPositions": [-1.0, 1.0],
+            "yPositions": [-1.0, 1.0],
+            "timeBinEdges": [0.0, 0.1]
+        ]
+        assertInvalid(raggedX, contains: "wrong x dimension")
+
+        var raggedBins = basePayload()
+        raggedBins["unitsSpikeCounts"] = [[[[10.0, 20.0, 30.0], [5.0, 10.0]]]]
+        assertInvalid(raggedBins, contains: "wrong bin dimension")
+    }
+
     func testInvalidEdgesAndNegativeValuesAreRejected() throws {
         var repeatedEdges = basePayload()
         repeatedEdges["timeBinEdges"] = [-0.1, 0.0, 0.0, 0.2]
@@ -349,7 +497,19 @@ final class RFMappingDataTests: XCTestCase {
         }
         """
 
-        XCTAssertThrowsError(try load(rawJSON: json))
+        assertInvalid(rawJSON: json, contains: "finite and non-negative")
+
+        let nonnumeric = """
+        {
+          "unitsSpikeCounts": [[[["not-a-count"]]]],
+          "unitsSpikeCountsSize": [1, 1, 1, 1],
+          "unitPool": [1],
+          "xPositions": [0],
+          "yPositions": [0],
+          "timeBinEdges": [0, 0.1]
+        }
+        """
+        assertInvalid(rawJSON: nonnumeric, contains: "finite and non-negative")
     }
 
     func testPeakTieUsesEarliestBinAndItsCenter() throws {
@@ -408,6 +568,28 @@ final class RFMappingDataTests: XCTestCase {
         line: UInt = #line
     ) {
         XCTAssertThrowsError(try load(payload), file: file, line: line) { error in
+            guard
+                let mappingError = error as? RFMappingError,
+                case .invalidData(let message) = mappingError
+            else {
+                return XCTFail("Expected invalidData, got \(error)", file: file, line: line)
+            }
+            XCTAssertTrue(
+                message.contains(expectedText),
+                "Expected error containing '\(expectedText)', got '\(message)'",
+                file: file,
+                line: line
+            )
+        }
+    }
+
+    private func assertInvalid(
+        rawJSON: String,
+        contains expectedText: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        XCTAssertThrowsError(try load(rawJSON: rawJSON), file: file, line: line) { error in
             guard
                 let mappingError = error as? RFMappingError,
                 case .invalidData(let message) = mappingError

@@ -153,7 +153,7 @@ final class WindowRouter {
         defer {
             if accessing { url.stopAccessingSecurityScopedResource() }
         }
-        return try await RFMappingData.decodeOffMain(url: url)
+        return try await RFMappingDecodeCoordinator.decode(url: url)
     }
 
     private func scheduleColdLaunchFallback() {
@@ -172,6 +172,7 @@ final class WindowRouter {
 
 struct RFMappingCommandActions {
     let openJSON: () -> Void
+    let attachTuningCurves: () -> Void
     let exportDisplayed: () -> Void
     let previousUnit: () -> Void
     let nextUnit: () -> Void
@@ -208,6 +209,10 @@ struct RFMappingSwiftUIApp: App {
         .windowResizability(.contentMinSize)
         .commands {
             RFMappingCommands()
+        }
+
+        Settings {
+            ViewerSettingsView(preferences: .shared)
         }
     }
 }
@@ -293,6 +298,7 @@ private struct RFMappingWindow: View {
     private var commandActions: RFMappingCommandActions {
         RFMappingCommandActions(
             openJSON: { store.isImporting = true },
+            attachTuningCurves: { store.isImportingTuning = true },
             exportDisplayed: store.prepareExport,
             previousUnit: { store.stepUnit(-1) },
             nextUnit: { store.stepUnit(1) },
@@ -393,38 +399,62 @@ private struct RFMappingCommands: Commands {
         }
 
         CommandGroup(after: .saveItem) {
+            Button("Attach Tuning Curves…") { actions?.attachTuningCurves() }
+                .disabled(actions == nil)
+
             Button("Export Displayed…") { actions?.exportDisplayed() }
                 .keyboardShortcut("e", modifiers: [.command])
                 .disabled(actions == nil)
         }
 
         CommandMenu("Navigate") {
-            Button("Previous Unit (← or [)") { actions?.previousUnit() }
-            Button("Next Unit (→ or ])") { actions?.nextUnit() }
+            Button("Previous Unit") { actions?.previousUnit() }
+                .keyboardShortcut(.leftArrow, modifiers: [])
+                .disabled(actions == nil)
+            Button("Next Unit") { actions?.nextUnit() }
+                .keyboardShortcut(.rightArrow, modifiers: [])
+                .disabled(actions == nil)
 
             Divider()
 
-            Button("Previous Timeline Bin (↑)") { actions?.previousBin() }
-            Button("Next Timeline Bin (↓)") { actions?.nextBin() }
-            Button("Decrease Time Resolution 1 ms (Shift-,)") { actions?.decreaseResolution() }
-            Button("Increase Time Resolution 1 ms (Shift-.)") { actions?.increaseResolution() }
+            Button("Previous Timeline Bin") { actions?.previousBin() }
+                .keyboardShortcut(.upArrow, modifiers: [])
+                .disabled(actions == nil)
+            Button("Next Timeline Bin") { actions?.nextBin() }
+                .keyboardShortcut(.downArrow, modifiers: [])
+                .disabled(actions == nil)
+            Button("Decrease Time Resolution") { actions?.decreaseResolution() }
+                .keyboardShortcut(",", modifiers: [.shift])
+                .disabled(actions == nil)
+            Button("Increase Time Resolution") { actions?.increaseResolution() }
+                .keyboardShortcut(".", modifiers: [.shift])
+                .disabled(actions == nil)
 
             Divider()
 
-            Button("Show Full Time Range (Esc)") { actions?.showFullRange() }
+            Button("Show Full Time Range") { actions?.showFullRange() }
+                .keyboardShortcut(.escape, modifiers: [])
+                .disabled(actions == nil)
         }
 
-        CommandMenu("View") {
+        CommandGroup(after: .toolbar) {
             ForEach(Array(PlotTab.allCases.enumerated()), id: \.element) { index, tab in
-                Button("\(tab.rawValue) (\(index + 1))") { actions?.selectTab(index) }
+                Button("Show \(tab.rawValue)") { actions?.selectTab(index) }
+                    .keyboardShortcut(KeyEquivalent(Character(String(index + 1))), modifiers: [])
+                    .disabled(actions == nil)
             }
             Divider()
-            Button("Invert Y (F)") { actions?.toggleFlipY() }
-            Button("Cycle Palette (P)") { actions?.cyclePalette() }
+            Button("Invert Y") { actions?.toggleFlipY() }
+                .keyboardShortcut("f", modifiers: [])
+                .disabled(actions == nil)
+            Button("Cycle Palette") { actions?.cyclePalette() }
+                .keyboardShortcut("p", modifiers: [])
+                .disabled(actions == nil)
         }
 
-        CommandGroup(after: .help) {
-            Button("RF Map Viewer Keyboard Shortcuts (?)") { showKeyboardShortcuts() }
+        CommandGroup(replacing: .help) {
+            Button("Support Documentation") { openSupportDocumentation() }
+                .keyboardShortcut("?", modifiers: [.command])
         }
     }
 }
@@ -446,10 +476,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-/// SwiftUI menu key equivalents are resolved before AppKit's field editor, so
-/// unmodified shortcuts would otherwise swallow digits/arrows typed in a
-/// TextField. A window-scoped monitor lets text controls handle those keys and
-/// dispatches the viewer shortcuts everywhere else.
+/// Native menu key equivalents make shortcuts discoverable in the menu bar.
+/// A window-scoped monitor routes those keys directly to an active field editor
+/// and dispatches viewer shortcuts everywhere else.
 private struct WindowShortcutMonitor: NSViewRepresentable {
     let actions: RFMappingCommandActions
 
@@ -491,7 +520,11 @@ private struct WindowShortcutMonitor: NSViewRepresentable {
                 guard let self, let window = self.view?.window, event.window === window else {
                     return event
                 }
-                guard !Self.isEditingText(in: window), self.handle(event) else {
+                if Self.isEditingText(in: window), Self.isViewerShortcut(event) {
+                    window.firstResponder?.keyDown(with: event)
+                    return nil
+                }
+                guard self.handle(event) else {
                     return event
                 }
                 return nil
@@ -517,6 +550,20 @@ private struct WindowShortcutMonitor: NSViewRepresentable {
             return false
         }
 
+        private static func isViewerShortcut(_ event: NSEvent) -> Bool {
+            var modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            modifiers.remove(.capsLock)
+            modifiers.remove(.numericPad)
+            modifiers.remove(.function)
+            let character = event.charactersIgnoringModifiers?.lowercased()
+
+            if modifiers.isEmpty {
+                if [53, 123, 124, 125, 126].contains(event.keyCode) { return true }
+                return ["[", "]", "f", "p", "1", "2", "3"].contains(character)
+            }
+            return modifiers == [.shift] && (character == "," || character == ".")
+        }
+
         private func handle(_ event: NSEvent) -> Bool {
             var modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
             modifiers.remove(.capsLock)
@@ -538,7 +585,6 @@ private struct WindowShortcutMonitor: NSViewRepresentable {
                 case "]": actions.nextUnit(); return true
                 case "f": actions.toggleFlipY(); return true
                 case "p": actions.cyclePalette(); return true
-                case "?": showKeyboardShortcuts(); return true
                 case "1", "2", "3":
                     actions.selectTab(Int(character!)! - 1)
                     return true
@@ -549,7 +595,6 @@ private struct WindowShortcutMonitor: NSViewRepresentable {
             if modifiers == [.shift] {
                 if character == "," { actions.decreaseResolution(); return true }
                 if character == "." { actions.increaseResolution(); return true }
-                if event.characters == "?" { showKeyboardShortcuts(); return true }
             }
             return false
         }
@@ -563,22 +608,23 @@ private struct WindowShortcutMonitor: NSViewRepresentable {
 }
 
 @MainActor
-private func showKeyboardShortcuts() {
+private func openSupportDocumentation() {
+    guard let url = URL(string: "https://github.com/KaiCao2003/RF-Map-Viewer") else {
+        showSupportDocumentationError()
+        return
+    }
+    guard NSWorkspace.shared.open(url) else {
+        showSupportDocumentationError()
+        return
+    }
+}
+
+@MainActor
+private func showSupportDocumentationError() {
     let alert = NSAlert()
-    alert.messageText = "RF Map Viewer Keyboard Shortcuts"
-    alert.informativeText = """
-    ← / →   Previous / next unit
-    ↑ / ↓   Previous / next timeline bin
-    Shift+, / Shift+.   Time resolution −/+ 1 ms
-    1–3   Switch plot tab
-    F   Invert Y
-    P   Cycle palette
-    Esc   Show full time range
-    [ / ]   Previous / next unit
-    Command-O   Open JSON in a new window
-    Command-E   Export displayed matrix
-    Command-W   Close current window
-    """
+    alert.alertStyle = .warning
+    alert.messageText = "Support Documentation Is Unavailable"
+    alert.informativeText = "RF Map Viewer could not open its documentation in your default browser."
     alert.addButton(withTitle: "OK")
     alert.runModal()
 }

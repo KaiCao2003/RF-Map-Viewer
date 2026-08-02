@@ -124,6 +124,9 @@ final class RFMappingStore {
     @ObservationIgnored private var cellAnalysisCaches: [(key: CellAnalysisCacheKey, value: CellAnalysis)] = []
     @ObservationIgnored private var loadRequestID: UUID?
     @ObservationIgnored private var activeDecodeTask: Task<RFMappingData, Error>?
+    @ObservationIgnored private var tuningLoadRequestID: UUID?
+    @ObservationIgnored private var activeTuningDecodeTask: Task<TuningCurveData, Error>?
+    @ObservationIgnored private var tuningAutoloadSuppressedRFPaths: Set<String> = []
     @ObservationIgnored var pairingDataDidChange: (() -> Void)?
 
     var data: RFMappingData?
@@ -158,9 +161,14 @@ final class RFMappingStore {
     var timelineScrollFraction = 0.0
 
     var isImporting = false
+    var isImportingTuning = false
     var isExporting = false
     var isLoadingData = false
+    var isLoadingTuning = false
     var isAwaitingStartupDocument = false
+    var tuningData: TuningCurveData?
+    var tuningURL: URL?
+    var tuningErrorMessage: String?
     var exportDocument: CSVMatrixDocument?
     var exportFilename = "rf_matrix.csv"
     var errorMessage: String?
@@ -198,6 +206,11 @@ final class RFMappingStore {
     }
 
     var hasData: Bool { data != nil }
+
+    var selectedClusterID: Int? {
+        guard let data, data.unitPool.indices.contains(unitIndex) else { return nil }
+        return data.clusterID(for: unitIndex)
+    }
 
     var viewerSyncState: ViewerSyncState {
         ViewerSyncState(
@@ -311,7 +324,9 @@ final class RFMappingStore {
 
         activeDecodeTask?.cancel()
         let accessing = url.startAccessingSecurityScopedResource()
-        let decodeTask = RFMappingData.makeDecodeTask(url: url)
+        let decodeTask = Task {
+            try await RFMappingDecodeCoordinator.decode(url: url)
+        }
         activeDecodeTask = decodeTask
         defer {
             if accessing { url.stopAccessingSecurityScopedResource() }
@@ -369,6 +384,13 @@ final class RFMappingStore {
     private func adopt(_ loaded: RFMappingData) {
         isAwaitingStartupDocument = false
         errorMessage = nil
+        activeTuningDecodeTask?.cancel()
+        activeTuningDecodeTask = nil
+        tuningLoadRequestID = nil
+        isLoadingTuning = false
+        tuningData = nil
+        tuningURL = nil
+        tuningErrorMessage = nil
         clearDerivedCaches()
         data = loaded
         selectedJSONPath = loaded.url.path
@@ -389,6 +411,80 @@ final class RFMappingStore {
         ensureSelectedCell()
         refreshJSONChoices()
         pairingDataDidChange?()
+    }
+
+    @MainActor
+    func autoLoadTuningCurveIfAvailable() async {
+        guard let rfURL = data?.url,
+              !tuningAutoloadSuppressedRFPaths.contains(rfURL.standardizedFileURL.path),
+              let discovered = TuningCurveDiscovery.discoverURL(for: rfURL) else { return }
+        _ = await loadTuningCurveAsync(discovered, reportInAlert: false)
+    }
+
+    @MainActor
+    @discardableResult
+    func loadTuningCurveAsync(
+        _ url: URL,
+        reportInAlert: Bool = true
+    ) async -> Bool {
+        let requestID = UUID()
+        tuningLoadRequestID = requestID
+        isLoadingTuning = true
+        tuningErrorMessage = nil
+        activeTuningDecodeTask?.cancel()
+
+        let accessing = url.startAccessingSecurityScopedResource()
+        let decodeTask = TuningCurveData.makeDecodeTask(url: url)
+        activeTuningDecodeTask = decodeTask
+        defer {
+            if accessing { url.stopAccessingSecurityScopedResource() }
+            if tuningLoadRequestID == requestID {
+                tuningLoadRequestID = nil
+                activeTuningDecodeTask = nil
+                isLoadingTuning = false
+            }
+        }
+
+        do {
+            let loaded = try await withTaskCancellationHandler {
+                try await decodeTask.value
+            } onCancel: {
+                decodeTask.cancel()
+            }
+            guard tuningLoadRequestID == requestID else { return false }
+            tuningData = loaded
+            tuningURL = loaded.url
+            tuningErrorMessage = nil
+            if let rfPath = data?.url.standardizedFileURL.path {
+                tuningAutoloadSuppressedRFPaths.remove(rfPath)
+            }
+            return true
+        } catch is CancellationError {
+            return false
+        } catch {
+            guard tuningLoadRequestID == requestID else { return false }
+            tuningErrorMessage = error.localizedDescription
+            if reportInAlert { errorMessage = error.localizedDescription }
+            return false
+        }
+    }
+
+    func clearTuningCurve() {
+        activeTuningDecodeTask?.cancel()
+        activeTuningDecodeTask = nil
+        tuningLoadRequestID = nil
+        isLoadingTuning = false
+        tuningData = nil
+        tuningURL = nil
+        tuningErrorMessage = nil
+        if let rfPath = data?.url.standardizedFileURL.path {
+            tuningAutoloadSuppressedRFPaths.insert(rfPath)
+        }
+    }
+
+    var isTuningAutoloadSuppressedForCurrentData: Bool {
+        guard let path = data?.url.standardizedFileURL.path else { return false }
+        return tuningAutoloadSuppressedRFPaths.contains(path)
     }
 
     /// Applies paired-window state in one normalization pass. A target may use
@@ -1247,11 +1343,15 @@ final class RFMappingStore {
         guard let data else { return [] }
         var hist = Array(repeating: 0.0, count: data.nBins)
         let pixelCount = max(1, (cell.yEnd - cell.yStart + 1) * (cell.xEnd - cell.xStart + 1))
-        let unit = data.counts[unitIndex]
         for yIndex in cell.yStart...cell.yEnd {
             for xIndex in cell.xStart...cell.xEnd {
                 for bin in 0..<data.nBins {
-                    hist[bin] += unit[yIndex][xIndex][bin] / Double(pixelCount)
+                    hist[bin] += data.count(
+                        unitIndex: unitIndex,
+                        yIndex: yIndex,
+                        xIndex: xIndex,
+                        binIndex: bin
+                    ) / Double(pixelCount)
                 }
             }
         }

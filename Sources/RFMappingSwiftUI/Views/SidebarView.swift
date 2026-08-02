@@ -7,25 +7,38 @@ struct SidebarView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 12) {
                 titleSection
-                Divider()
-                jsonSection
-                Divider()
-                pairingSection
-                Divider()
-                unitSection
-                Divider()
-                displaySection
-                Divider()
-                selectedCellSection
-                actionSection
-                shortcutHint
+                sectionCard { jsonSection }
+                sectionCard { unitSection }
+                sectionCard { displaySection }
+                sectionCard { pairingSection }
+                if !store.displayedCellText.isEmpty {
+                    sectionCard { selectedCellSection }
+                }
+                sectionCard { actionSection }
                 Spacer(minLength: 12)
             }
-            .padding(14)
+            .padding(12)
         }
         .background(.bar)
+        .controlSize(.small)
+    }
+
+    private func sectionCard<Content: View>(
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        content()
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(11)
+            .background(
+                Color(nsColor: .controlBackgroundColor),
+                in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(Color.secondary.opacity(0.12), lineWidth: 0.75)
+            }
     }
 
     private var pairingSection: some View {
@@ -59,13 +72,15 @@ struct SidebarView: View {
     private var titleSection: some View {
         VStack(alignment: .leading, spacing: 6) {
             Label("RF Map Viewer", systemImage: "waveform.path.ecg.rectangle")
-                .font(.system(size: 17, weight: .semibold))
+                .font(.title3.weight(.semibold))
             Text(store.dataSummary)
-                .font(.callout)
+                .font(.caption)
                 .foregroundStyle(.secondary)
-                .lineLimit(6)
+                .lineLimit(4)
                 .textSelection(.enabled)
         }
+        .padding(.horizontal, 4)
+        .padding(.vertical, 3)
     }
 
     private var jsonSection: some View {
@@ -95,7 +110,8 @@ struct SidebarView: View {
             Text("Unit").font(.headline)
             HStack(spacing: 6) {
                 Button { store.stepUnit(-1) } label: { Image(systemName: "chevron.left") }
-                    .help("Previous unit (← or [)")
+                    .accessibilityLabel("Previous unit")
+                    .help("Previous unit")
 
                 Picker("Unit", selection: Binding(
                     get: { store.unitIndex },
@@ -116,7 +132,8 @@ struct SidebarView: View {
                 .labelsHidden()
 
                 Button { store.stepUnit(1) } label: { Image(systemName: "chevron.right") }
-                    .help("Next unit (→ or ])")
+                    .accessibilityLabel("Next unit")
+                    .help("Next unit")
             }
 
             Text(store.unitStatsText)
@@ -215,17 +232,12 @@ struct SidebarView: View {
     }
 
     private var actionSection: some View {
-        HStack {
+        HStack(spacing: 8) {
             Button("Export displayed") { store.prepareExport() }
                 .disabled(!store.hasData)
             Button("Full range") { store.clearTimelineSelection() }
                 .disabled(!store.hasTimeSelection)
         }
-    }
-
-    private var shortcutHint: some View {
-        Text("←/→ unit   ↑/↓ timeline\n⇧,/⇧. time resolution   1–3 views")
-            .font(.caption)
-            .foregroundStyle(.tertiary)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }

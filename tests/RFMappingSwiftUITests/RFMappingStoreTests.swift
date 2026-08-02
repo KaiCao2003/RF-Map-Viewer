@@ -61,6 +61,45 @@ final class RFMappingStoreTests: XCTestCase {
         XCTAssertEqual(store.smoothRadius, 3)
     }
 
+    @MainActor
+    func testManualTuningDetachIsRememberedPerRFUntilManualAttach() async throws {
+        let fixture = try makeFixture()
+        let otherFixture = try makeFixture()
+        defer {
+            try? FileManager.default.removeItem(at: fixture.deletingLastPathComponent())
+            try? FileManager.default.removeItem(at: otherFixture.deletingLastPathComponent())
+        }
+        let store = RFMappingStore(initialURL: fixture)
+
+        store.clearTuningCurve()
+        XCTAssertTrue(store.isTuningAutoloadSuppressedForCurrentData)
+        XCTAssertTrue(store.loadJSON(fixture))
+        XCTAssertTrue(store.isTuningAutoloadSuppressedForCurrentData)
+
+        let tuningURL = fixture.deletingLastPathComponent()
+            .appendingPathComponent("tuning_curves.json")
+        let rates = (0..<hdRawBinCount).map(Double.init)
+        try JSONSerialization.data(withJSONObject: ["42": rates]).write(to: tuningURL)
+
+        let loaded = await store.loadTuningCurveAsync(tuningURL)
+        XCTAssertTrue(loaded)
+        XCTAssertFalse(store.isTuningAutoloadSuppressedForCurrentData)
+
+        store.clearTuningCurve()
+        XCTAssertTrue(store.isTuningAutoloadSuppressedForCurrentData)
+        XCTAssertTrue(store.loadJSON(otherFixture))
+        XCTAssertFalse(store.isTuningAutoloadSuppressedForCurrentData)
+        XCTAssertTrue(store.loadJSON(fixture))
+        XCTAssertTrue(store.isTuningAutoloadSuppressedForCurrentData)
+    }
+
+    func testRequestBoundValueNeverExposesAStaleUnitResult() {
+        let result = RequestBoundValue(request: 7, value: "cluster 7 curve")
+
+        XCTAssertEqual(result.value(for: 7), "cluster 7 curve")
+        XCTAssertNil(result.value(for: 8))
+    }
+
     func testValueModesAndViewSpecificFullWindowSemantics() throws {
         let fixture = try makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.deletingLastPathComponent()) }
