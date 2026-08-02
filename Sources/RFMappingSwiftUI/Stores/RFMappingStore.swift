@@ -22,6 +22,10 @@ final class RFMappingStore {
         let unitIndex: Int
         let timeGroupSize: Int
         let floor: Double
+        let xBins: Int
+        let yBins: Int
+        let flipY: Bool
+        let smoothRadius: Int
     }
 
     private struct SpatialPlotCacheKey: Equatable {
@@ -113,7 +117,10 @@ final class RFMappingStore {
 
     @ObservationIgnored private var timelineCaches: [(key: TimelineCacheKey, value: TimelineMatrixSnapshot)] = []
     @ObservationIgnored private var currentMatrixCache: (key: RawMatrixCacheKey, value: OptionalMatrix)?
-    @ObservationIgnored private var delayMatrixCache: (key: DelayCacheKey, value: OptionalMatrix)?
+    @ObservationIgnored private var temporalMetricMatrixCache: (
+        key: DelayCacheKey,
+        value: (delay: OptionalMatrix, entropy: OptionalMatrix)
+    )?
     @ObservationIgnored private var spatialPlotCaches: [(key: SpatialPlotCacheKey, value: HeatmapPlot)] = []
     @ObservationIgnored private var rgbPlotCache: (key: RGBPlotCacheKey, value: RGBPlot)?
     @ObservationIgnored private var timeAxisMetadataCache: TimeAxisMetadata?
@@ -241,9 +248,8 @@ final class RFMappingStore {
     var dataSummary: String {
         guard let data else { return "No JSON loaded" }
         return """
-        \(data.url.path)
-        \(data.nUnits) units  \(data.nY) y x \(data.nX) x  \(data.nBins) bins
-        Firing-rate metadata: \(data.hasPresentationCounts ? "yes" : "no")
+        \(data.nUnits) units · \(data.nY) × \(data.nX) positions · \(data.nBins) time bins
+        \(data.hasPresentationCounts ? "Normalized values available" : "Pooled counts only")
         """
     }
 
@@ -574,7 +580,7 @@ final class RFMappingStore {
     private func clearDerivedCaches() {
         timelineCaches.removeAll(keepingCapacity: true)
         currentMatrixCache = nil
-        delayMatrixCache = nil
+        temporalMetricMatrixCache = nil
         spatialPlotCaches.removeAll(keepingCapacity: true)
         rgbPlotCache = nil
         timeAxisMetadataCache = nil
@@ -610,8 +616,9 @@ final class RFMappingStore {
         selectTimelineBin(target, extending: false)
     }
 
-    func stepTimeResolution(_ deltaMS: Double) {
-        timeResolutionMS = max(baseBinMS(), min(totalTimeMS(), timeResolutionMS + deltaMS))
+    func stepTimeResolution(_ deltaGroups: Double) {
+        let base = baseBinMS()
+        timeResolutionMS = max(base, min(totalTimeMS(), timeResolutionMS + deltaGroups * base))
         timelineRangeAnchor = nil
         normalizeControls()
     }
@@ -913,7 +920,7 @@ final class RFMappingStore {
                 groupSize: 1,
                 groups: [AxisGroup(start: 0, end: 0)],
                 bounds: [(0, 1)],
-                labels: ["0 ms"],
+                labels: ["0–1 ms"],
                 intervalLabels: ["0–1 ms"],
                 centers: [0.5]
             )
@@ -926,19 +933,24 @@ final class RFMappingStore {
             return timeGroupingCache
         }
         let metadata = timeAxisMetadata()
-        let groups = stride(from: 0, to: data.nBins, by: size).map {
-            AxisGroup(start: $0, end: min($0 + size - 1, data.nBins - 1))
-        }
+        let targetDurationMS = Double(size) * metadata.baseBinMS
+        let groups = physicalTimeGroups(
+            edgesMS: metadata.edgesMS,
+            targetDurationMS: targetDurationMS
+        )
         let bounds = groups.map {
             (metadata.edgesMS[$0.start], metadata.edgesMS[$0.end + 1])
         }
+        let intervalLabels = bounds.map { "\(formatMS($0.0))–\(formatMS($0.1)) ms" }
         let grouping = TimeGroupingCache(
             dataID: dataID,
             groupSize: size,
             groups: groups,
             bounds: bounds,
-            labels: bounds.map { "\(formatMS($0.0)) ms" },
-            intervalLabels: bounds.map { "\(formatMS($0.0))–\(formatMS($0.1)) ms" },
+            // Every label reports the measured interval. The requested control
+            // value is only a target when native source-bin widths differ.
+            labels: intervalLabels,
+            intervalLabels: intervalLabels,
             centers: bounds.map { ($0.0 + $0.1) / 2 }
         )
         timeGroupingCache = grouping
@@ -1029,36 +1041,108 @@ final class RFMappingStore {
             dataID: ObjectIdentifier(data),
             unitIndex: unitIndex,
             timeGroupSize: timeGroupSize(),
-            floor: safeFloor
+            floor: safeFloor,
+            xBins: xBins,
+            yBins: yBins,
+            flipY: flipY,
+            smoothRadius: smoothRadius
         )
-        if let delayMatrixCache, delayMatrixCache.key == key {
-            return delayMatrixCache.value
+        if let temporalMetricMatrixCache, temporalMetricMatrixCache.key == key {
+            return temporalMetricMatrixCache.value.delay
         }
-        let metrics = data.metrics(for: unitIndex)
-        let grouping = timeGrouping()
-        let matrix: OptionalMatrix = (0..<data.nY).map { yIndex in
-            (0..<data.nX).map { xIndex -> Double? in
-                guard metrics.total[yIndex][xIndex] > safeFloor else { return nil }
-                var peakIndex = 0
-                var peakCount = 0.0
-                for (index, group) in grouping.groups.enumerated() {
-                    let count = data.rangeCount(
-                        unitIndex: unitIndex,
-                        yIndex: yIndex,
-                        xIndex: xIndex,
-                        start: group.start,
-                        end: group.end
-                    )
-                    if count > peakCount {
-                        peakIndex = index
-                        peakCount = count
-                    }
-                }
-                return peakCount > 0 ? grouping.centers[peakIndex] : nil
+        return groupedTemporalMetricMatrices(floor: safeFloor, key: key).delay
+    }
+
+    private func groupedTemporalMetricMatrices(
+        floor: Double,
+        key suppliedKey: DelayCacheKey? = nil
+    ) -> (delay: OptionalMatrix, entropy: OptionalMatrix) {
+        guard let data else { return ([], []) }
+        let safeFloor = max(0.0, floor)
+        let key = suppliedKey ?? DelayCacheKey(
+            dataID: ObjectIdentifier(data),
+            unitIndex: unitIndex,
+            timeGroupSize: timeGroupSize(),
+            floor: safeFloor,
+            xBins: xBins,
+            yBins: yBins,
+            flipY: flipY,
+            smoothRadius: smoothRadius
+        )
+        if let temporalMetricMatrixCache, temporalMetricMatrixCache.key == key {
+            return temporalMetricMatrixCache.value
+        }
+        let groups = timeGrouping().groups
+        let xGroups = xGroups()
+        let yGroups = displayYGroups()
+        var histograms = yGroups.map { yGroup in
+            xGroups.map { xGroup -> [Double] in
+                let pixelCount = max(
+                    1,
+                    data.spatialGroupSourcePixelCount(yGroup: yGroup, xGroup: xGroup)
+                )
+                return data.spatialGroupCountHistogram(
+                    unitIndex: unitIndex,
+                    yGroup: yGroup,
+                    xGroup: xGroup
+                ).map { $0 / Double(pixelCount) }
             }
         }
-        delayMatrixCache = (key, matrix)
-        return matrix
+        histograms = smoothedSpatialHistograms(histograms)
+        var delay: OptionalMatrix = []
+        var entropy: OptionalMatrix = []
+        delay.reserveCapacity(yGroups.count)
+        entropy.reserveCapacity(yGroups.count)
+        for yIndex in yGroups.indices {
+            var delayRow: [Double?] = []
+            var entropyRow: [Double?] = []
+            delayRow.reserveCapacity(xGroups.count)
+            entropyRow.reserveCapacity(xGroups.count)
+            for xIndex in xGroups.indices {
+                let metrics = data.temporalMetrics(
+                    histogram: histograms[yIndex][xIndex],
+                    timeGroups: groups
+                )
+                delayRow.append(
+                    metrics.meanTotalCount > safeFloor ? metrics.delayMS : nil
+                )
+                entropyRow.append(metrics.entropy)
+            }
+            delay.append(delayRow)
+            entropy.append(entropyRow)
+        }
+        let value = (delay: delay, entropy: entropy)
+        temporalMetricMatrixCache = (key, value)
+        return value
+    }
+
+    private func smoothedSpatialHistograms(_ histograms: [[[Double]]]) -> [[[Double]]] {
+        guard
+            let data,
+            smoothRadius > 0,
+            !histograms.isEmpty,
+            let firstRow = histograms.first,
+            !firstRow.isEmpty
+        else { return histograms }
+        var output = Array(
+            repeating: Array(
+                repeating: Array(repeating: 0.0, count: data.nBins),
+                count: firstRow.count
+            ),
+            count: histograms.count
+        )
+        for binIndex in 0..<data.nBins {
+            let slice: OptionalMatrix = histograms.map { row in
+                row.map { Optional($0[binIndex]) }
+            }
+            let smoothed = smoothMatrix(slice, radius: smoothRadius)
+            for yIndex in smoothed.indices {
+                for xIndex in smoothed[yIndex].indices {
+                    output[yIndex][xIndex][binIndex] = smoothed[yIndex][xIndex] ?? 0.0
+                }
+            }
+        }
+        return output
     }
 
     func currentHeatmapPlot() -> HeatmapPlot {
@@ -1079,8 +1163,12 @@ final class RFMappingStore {
             smoothRadius: smoothRadius
         )
         if let cached = spatialPlot(for: key) { return cached }
-        let prepared = preparePlotMatrix(currentMatrix(), smooth: true)
-        let valueRange = finiteMinMax(prepared.0)
+        let prepared = preparedResponseMatrix(
+            sourceStart: range.start,
+            sourceEnd: range.end,
+            smooth: true
+        )
+        let valueRange = nonnegativeResponseRange(prepared.0)
         let plot = HeatmapPlot(
             matrix: prepared.0,
             xGroups: prepared.1,
@@ -1110,7 +1198,11 @@ final class RFMappingStore {
             smoothRadius: smoothRadius
         )
         if let cached = spatialPlot(for: key) { return cached }
-        let prepared = preparePlotMatrix(delayMatrixForTimeGroups(floor: safeFloor), smooth: true)
+        let prepared = (
+            delayMatrixForTimeGroups(floor: safeFloor),
+            xGroups(),
+            displayYGroups()
+        )
         let range = timeAxisRangeMS()
         let plot = HeatmapPlot(
             matrix: prepared.0,
@@ -1150,15 +1242,22 @@ final class RFMappingStore {
             return rgbPlotCache.value
         }
 
-        let fullWindowResponse = (try? data.responseMatrix(
-            unitIndex: unitIndex,
-            start: 0,
-            end: data.nBins - 1,
-            valueMode: valueMode
-        )) ?? []
-        let totalPrepared = preparePlotMatrix(fullWindowResponse)
-        let delayPrepared = preparePlotMatrix(delayMatrixForTimeGroups(floor: 0.0))
-        let entropyPrepared = preparePlotMatrix(optionalMatrix(data.metrics(for: unitIndex).entropy))
+        let totalPrepared = preparedResponseMatrix(
+            sourceStart: 0,
+            sourceEnd: data.nBins - 1,
+            smooth: true
+        )
+        let temporal = groupedTemporalMetricMatrices(floor: 0.0)
+        let delayPrepared = (
+            temporal.delay,
+            xGroups(),
+            displayYGroups()
+        )
+        let entropyPrepared = (
+            temporal.entropy,
+            xGroups(),
+            displayYGroups()
+        )
         let responseRange = finiteMinMax(totalPrepared.0)
         let maxResponse = max(responseRange.1, 1.0)
         let reference = HeatmapPlot(
@@ -1235,20 +1334,15 @@ final class RFMappingStore {
         }
 
         let groups = timeGrouping().groups
-        let xGroups = xGroups()
-        let yGroups = displayYGroups()
         var matrices: [OptionalMatrix] = []
         matrices.reserveCapacity(groups.count)
         var sharedHigh = 0.0
         for group in groups {
-            let raw = (try? data.responseMatrix(
-                unitIndex: unitIndex,
-                start: group.start,
-                end: group.end,
-                valueMode: valueMode
-            )) ?? []
-            var prepared = reduceMatrixXY(raw, yGroups: yGroups, xGroups: xGroups)
-            prepared = smoothMatrix(prepared, radius: smoothRadius)
+            let prepared = preparedResponseMatrix(
+                sourceStart: group.start,
+                sourceEnd: group.end,
+                smooth: true
+            ).0
             for row in prepared {
                 for value in row {
                     if let value, value.isFinite { sharedHigh = max(sharedHigh, value) }
@@ -1339,48 +1433,98 @@ final class RFMappingStore {
         return (prepared, xGroups, yGroups)
     }
 
-    func groupHist(_ cell: CellRef) -> [Double] {
-        guard let data else { return [] }
-        var hist = Array(repeating: 0.0, count: data.nBins)
-        let pixelCount = max(1, (cell.yEnd - cell.yStart + 1) * (cell.xEnd - cell.xStart + 1))
-        for yIndex in cell.yStart...cell.yEnd {
-            for xIndex in cell.xStart...cell.xEnd {
-                for bin in 0..<data.nBins {
-                    hist[bin] += data.count(
-                        unitIndex: unitIndex,
-                        yIndex: yIndex,
-                        xIndex: xIndex,
-                        binIndex: bin
-                    ) / Double(pixelCount)
-                }
+    /// Produces display-cell estimands from pooled source observations. For
+    /// normalized modes, smoothing is applied separately to counts and
+    /// presentation exposures before their ratio is taken.
+    func preparedResponseMatrix(
+        sourceStart: Int,
+        sourceEnd: Int,
+        smooth: Bool = true
+    ) -> (OptionalMatrix, [AxisGroup], [AxisGroup]) {
+        guard let data else { return ([], [], []) }
+        let xGroups = xGroups()
+        let yGroups = displayYGroups()
+        guard !xGroups.isEmpty, !yGroups.isEmpty else { return ([], xGroups, yGroups) }
+        let observations = yGroups.map { yGroup in
+            xGroups.map { xGroup in
+                data.spatialGroupObservations(
+                    unitIndex: unitIndex,
+                    yGroup: yGroup,
+                    xGroup: xGroup,
+                    start: sourceStart,
+                    end: sourceEnd
+                )
             }
         }
-        return hist
+
+        if valueMode == .spikeCount {
+            var matrix: OptionalMatrix = observations.map { row in
+                row.map { value in
+                    guard value.sourcePixelCount > 0 else { return nil }
+                    return value.count / Double(value.sourcePixelCount)
+                }
+            }
+            if smooth { matrix = smoothMatrix(matrix, radius: smoothRadius) }
+            return (matrix, xGroups, yGroups)
+        }
+
+        let valid = observations.map { row in
+            row.map { $0.sourcePixelCount > 0 }
+        }
+        var counts: OptionalMatrix = observations.map { row in
+            row.map { $0.sourcePixelCount > 0 ? Optional($0.count) : nil }
+        }
+        var presentations: OptionalMatrix = observations.map { row in
+            row.map {
+                $0.sourcePixelCount > 0 ? Optional($0.presentations ?? 0.0) : nil
+            }
+        }
+        if smooth {
+            counts = smoothMatrix(counts, radius: smoothRadius)
+            presentations = smoothMatrix(presentations, radius: smoothRadius)
+        }
+        let duration = data.timeSpanSeconds(start: sourceStart, end: sourceEnd)
+        let matrix: OptionalMatrix = counts.indices.map { yIndex in
+            counts[yIndex].indices.map { xIndex in
+                guard
+                    valid[yIndex][xIndex],
+                    let count = counts[yIndex][xIndex],
+                    let exposure = presentations[yIndex][xIndex],
+                    exposure > 0
+                else { return nil }
+                var value = count / exposure
+                if valueMode == .meanFiringRate { value /= duration }
+                return value
+            }
+        }
+        return (matrix, xGroups, yGroups)
+    }
+
+    func groupHist(_ cell: CellRef) -> [Double] {
+        guard let data else { return [] }
+        let yGroup = AxisGroup(start: cell.yStart, end: cell.yEnd)
+        let xGroup = AxisGroup(start: cell.xStart, end: cell.xEnd)
+        let pixelCount = max(
+            1,
+            data.spatialGroupSourcePixelCount(yGroup: yGroup, xGroup: xGroup)
+        )
+        return data.spatialGroupCountHistogram(
+            unitIndex: unitIndex,
+            yGroup: yGroup,
+            xGroup: xGroup
+        ).map { $0 / Double(pixelCount) }
     }
 
     func groupResponseValue(_ cell: CellRef, sourceStart: Int, sourceEnd: Int) -> Double? {
         guard let data else { return nil }
-        var values: [Double] = []
-        for yIndex in cell.yStart...cell.yEnd {
-            for xIndex in cell.xStart...cell.xEnd {
-                do {
-                    if let value = try data.responseValue(
-                        unitIndex: unitIndex,
-                        yIndex: yIndex,
-                        xIndex: xIndex,
-                        start: sourceStart,
-                        end: sourceEnd,
-                        valueMode: valueMode
-                    ), value.isFinite {
-                        values.append(value)
-                    }
-                } catch {
-                    return nil
-                }
-            }
-        }
-        guard !values.isEmpty else { return nil }
-        return compensatedSum(values) / Double(values.count)
+        return try? data.spatialGroupResponseValue(
+            unitIndex: unitIndex,
+            yGroup: AxisGroup(start: cell.yStart, end: cell.yEnd),
+            xGroup: AxisGroup(start: cell.xStart, end: cell.xEnd),
+            start: sourceStart,
+            end: sourceEnd,
+            valueMode: valueMode
+        )
     }
 
     func groupResponseValues(_ cell: CellRef) -> [Double?] {
@@ -1430,7 +1574,13 @@ final class RFMappingStore {
         let bin = max(0, min(displayValues.count - 1, displayBin ?? binIndex))
 
         let grouped = cell.yStart != cell.yEnd || cell.xStart != cell.xEnd
-        let groupNote = grouped ? "avg over source pixels\n" : ""
+        let groupNote = grouped
+            ? (valueMode == .spikeCount
+                ? (data.presentationCounts == nil
+                    ? "mean over source pixels\n"
+                    : "mean over exposed source pixels\n")
+                : "pooled over source pixels\n")
+            : ""
         let peakText = analysis.peakBin.map { "\($0 + 1) (\(timeGroupLabel($0)))" } ?? "n/a"
         let delayText = analysis.delayMS.map { String(format: "%.1f ms", $0) } ?? "n/a"
         let plotBounds = plotTimeBoundsMS()
@@ -1442,7 +1592,7 @@ final class RFMappingStore {
         full window \(valueMode.format(analysis.totalValue)) \(valueMode.unit)
         peak \(valueMode.format(analysis.peakValue)) \(valueMode.unit)
         peak bin \(peakText)
-        delay \(delayText), count entropy \(String(format: "%.3f", analysis.entropy))
+        count-rate peak delay \(delayText), count entropy \(String(format: "%.3f", analysis.entropy))
         """
     }
 
@@ -1497,54 +1647,16 @@ final class RFMappingStore {
 
         let displayValues = groupResponseValues(cell)
         let groups = timeGrouping().groups
-        let pixelCount = Double(max(1, (cell.yEnd - cell.yStart + 1) * (cell.xEnd - cell.xStart + 1)))
-        let countHist: [Double]
-        if valueMode == .spikeCount {
-            countHist = displayValues.map { $0 ?? 0.0 }
-        } else {
-            var values: [Double] = []
-            values.reserveCapacity(groups.count)
-            for group in groups {
-                var counts: [Double] = []
-                counts.reserveCapacity(Int(pixelCount))
-                for yIndex in cell.yStart...cell.yEnd {
-                    for xIndex in cell.xStart...cell.xEnd {
-                        counts.append(data.rangeCount(
-                            unitIndex: unitIndex,
-                            yIndex: yIndex,
-                            xIndex: xIndex,
-                            start: group.start,
-                            end: group.end
-                        ))
-                    }
-                }
-                values.append(compensatedSum(counts) / pixelCount)
-            }
-            countHist = values
-        }
-
-        var peakBin: Int?
-        var peakValue: Double?
-        for (index, value) in displayValues.enumerated() {
-            guard let value, value.isFinite else { continue }
-            if peakValue == nil || value > (peakValue ?? -.infinity) {
-                peakBin = index
-                peakValue = value
-            }
-        }
-        if (peakValue ?? 0) <= 0 {
-            peakBin = nil
-            peakValue = nil
-        }
-
-        let countTotal = compensatedSum(countHist)
-        var entropy = 0.0
-        if countTotal > 0 {
-            for count in countHist where count > 0 {
-                let probability = count / countTotal
-                entropy -= probability * log(probability)
-            }
-            if countHist.count > 1 { entropy /= log(Double(countHist.count)) }
+        let countHist = timeGroupedHist(groupHist(cell))
+        let temporal = data.spatialGroupTemporalMetrics(
+            unitIndex: unitIndex,
+            yGroup: AxisGroup(start: cell.yStart, end: cell.yEnd),
+            xGroup: AxisGroup(start: cell.xStart, end: cell.xEnd),
+            timeGroups: groups
+        )
+        let peakBin = temporal.peakGroupIndex
+        let peakValue = peakBin.flatMap { index in
+            displayValues.indices.contains(index) ? displayValues[index] : nil
         }
 
         let analysis = CellAnalysis(
@@ -1562,8 +1674,8 @@ final class RFMappingStore {
             ),
             peakBin: peakBin,
             peakValue: peakValue,
-            delayMS: peakBin.map { timeGrouping().centers[$0] },
-            entropy: entropy
+            delayMS: temporal.delayMS,
+            entropy: temporal.entropy
         )
         cellAnalysisCaches.insert((key, analysis), at: 0)
         if cellAnalysisCaches.count > 12 { cellAnalysisCaches.removeLast() }
@@ -1666,4 +1778,45 @@ final class RFMappingStore {
         }
         return value
     }
+}
+
+/// Partitions consecutive native time bins using their measured edge
+/// timestamps. Each boundary is the available edge nearest the requested
+/// duration from the current group's start; an exact tie uses the earlier edge
+/// so the target is not silently exceeded. A final residual group is retained.
+///
+/// For uniformly spaced edges and a target equal to an integer number of native
+/// bins, this is identical to fixed-count grouping.
+func physicalTimeGroups(edgesMS: [Double], targetDurationMS: Double) -> [AxisGroup] {
+    guard edgesMS.count >= 2 else { return [] }
+    let sourceBinCount = edgesMS.count - 1
+    let finitePositiveTarget = targetDurationMS.isFinite && targetDurationMS > 0
+        ? targetDurationMS
+        : max(edgesMS[1] - edgesMS[0], Double.leastNonzeroMagnitude)
+    var groups: [AxisGroup] = []
+    groups.reserveCapacity(sourceBinCount)
+    var start = 0
+
+    while start < sourceBinCount {
+        let targetEdge = edgesMS[start] + finitePositiveTarget
+        var low = start + 1
+        var high = sourceBinCount
+        while low < high {
+            let middle = (low + high) / 2
+            if edgesMS[middle] < targetEdge {
+                low = middle + 1
+            } else {
+                high = middle
+            }
+        }
+
+        let upper = low
+        let lower = max(start + 1, upper - 1)
+        let lowerError = abs(edgesMS[lower] - targetEdge)
+        let upperError = abs(edgesMS[upper] - targetEdge)
+        let endExclusive = lowerError <= upperError ? lower : upper
+        groups.append(AxisGroup(start: start, end: endExclusive - 1))
+        start = endExclusive
+    }
+    return groups
 }

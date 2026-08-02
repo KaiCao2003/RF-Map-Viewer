@@ -8,6 +8,54 @@ struct HeatmapPlot {
     let high: Double
 }
 
+enum SpatialSampleEncoding: Equatable {
+    case missing
+    case normalized(Double)
+}
+
+/// Response maps are ratio/count measurements with a meaningful zero. Their
+/// color scale therefore starts at zero and ends at the largest finite response
+/// in the map. Missing samples do not participate in the scale.
+func nonnegativeResponseRange(_ matrix: OptionalMatrix) -> (low: Double, high: Double) {
+    var peak = 0.0
+    for row in matrix {
+        for value in row {
+            guard let value, value.isFinite else { continue }
+            peak = max(peak, value)
+        }
+    }
+    return (0.0, peak)
+}
+
+/// Keeps absence separate from a measured zero. The enum is also the single
+/// decision point shared by rectangular and polar renderers.
+func spatialSampleEncoding(_ value: Double?, low: Double, high: Double) -> SpatialSampleEncoding {
+    guard let value, value.isFinite else { return .missing }
+    let span = high - low
+    let normalized = span > 1e-12 ? clamp((value - low) / span) : 0.0
+    return .normalized(normalized)
+}
+
+func responseValueAccessibilityDescription(
+    _ value: Double?,
+    mode: ResponseValueMode,
+    hasPresentationMetadata: Bool = false
+) -> String {
+    guard let value, value.isFinite else {
+        return mode.requiresPresentationCounts || hasPresentationMetadata
+            ? "Missing value; no stimulus presentations"
+            : "Missing value; no data"
+    }
+    return "\(mode.format(value)) \(mode.unit)"
+}
+
+func responseMissingLegendLabel(
+    _ mode: ResponseValueMode,
+    hasPresentationMetadata: Bool = false
+) -> String {
+    mode.requiresPresentationCounts || hasPresentationMetadata ? "No presentations" : "No data"
+}
+
 struct HeatmapLayout {
     let x0: CGFloat
     let y0: CGFloat
@@ -52,11 +100,11 @@ func makeHeatmapPlot(
     smooth: Bool = true
 ) -> HeatmapPlot {
     let prepared = store.preparePlotMatrix(matrix, smooth: smooth)
-    let range = fixedRange ?? finiteMinMax(prepared.0)
+    let range = fixedRange ?? nonnegativeResponseRange(prepared.0)
     return HeatmapPlot(matrix: prepared.0, xGroups: prepared.1, yGroups: prepared.2, low: range.0, high: range.1)
 }
 
-func makeHeatmapLayout(size: CGSize, plot: HeatmapPlot, margins: EdgeInsets = EdgeInsets(top: 56, leading: 78, bottom: 68, trailing: 104)) -> HeatmapLayout {
+func makeHeatmapLayout(size: CGSize, plot: HeatmapPlot, margins: EdgeInsets = EdgeInsets(top: 56, leading: 78, bottom: 68, trailing: 160)) -> HeatmapLayout {
     let plotWidth = max(10, size.width - margins.leading - margins.trailing)
     let plotHeight = max(10, size.height - margins.top - margins.bottom)
     let rows = max(1, plot.yGroups.count)
@@ -78,11 +126,13 @@ func drawHeatmap(
     subtitle: String,
     palette: RFPalette?,
     valueSuffix: String = "",
+    missingLabel: String = "No data",
     drawLegend: Bool = true,
     drawInteraction: Bool = true
 ) {
     drawTitle(context: &context, title: title, subtitle: subtitle)
 
+    var missingCells = Path()
     for displayY in plot.matrix.indices {
         for groupIndex in plot.matrix[displayY].indices {
             let rect = CGRect(
@@ -92,11 +142,16 @@ func drawHeatmap(
                 height: layout.cell
             )
             let value = plot.matrix[displayY][groupIndex]
+            guard case .normalized = spatialSampleEncoding(value, low: plot.low, high: plot.high) else {
+                missingCells.addRect(rect)
+                continue
+            }
             let fill = palette.map { paletteColor(value, low: plot.low, high: plot.high, palette: $0) }
                 ?? delayColor(value, low: plot.low, high: plot.high)
             context.fill(Path(rect), with: .color(fill))
         }
     }
+    drawMissingSamples(context: &context, path: missingCells)
 
     if drawInteraction {
         drawSelectionAndHover(context: &context, store: store, layout: layout)
@@ -111,9 +166,29 @@ func drawHeatmap(
             low: plot.low,
             high: plot.high,
             palette: palette,
-            suffix: valueSuffix
+            suffix: valueSuffix,
+            missingLabel: missingLabel
         )
     }
+}
+
+func drawMissingSamples(context: inout GraphicsContext, path: Path) {
+    guard !path.isEmpty else { return }
+    context.fill(path, with: .color(.primary.opacity(0.055)))
+    context.drawLayer { layer in
+        layer.clip(to: path)
+        let bounds = path.boundingRect
+        let spacing: CGFloat = 7
+        var hatch = Path()
+        var offset = -bounds.height
+        while offset <= bounds.width {
+            hatch.move(to: CGPoint(x: bounds.minX + offset, y: bounds.maxY))
+            hatch.addLine(to: CGPoint(x: bounds.minX + offset + bounds.height, y: bounds.minY))
+            offset += spacing
+        }
+        layer.stroke(hatch, with: .color(.secondary.opacity(0.58)), lineWidth: 0.8)
+    }
+    context.stroke(path, with: .color(.secondary.opacity(0.32)), lineWidth: 0.5)
 }
 
 struct RectangularPlotInteractionLayer: View {
@@ -239,7 +314,8 @@ func drawColorbar(
     low: Double,
     high: Double,
     palette: RFPalette?,
-    suffix: String
+    suffix: String,
+    missingLabel: String
 ) {
     let steps = 90
     let width: CGFloat = 16
@@ -261,6 +337,14 @@ func drawColorbar(
     context.draw(
         Text(String(format: "%.1f%@", low, suffix)).font(.system(size: 9)).foregroundStyle(.secondary),
         at: CGPoint(x: x + width + 8, y: y + height),
+        anchor: .leading
+    )
+
+    let missingRect = CGRect(x: x, y: y + height + 18, width: width, height: 11)
+    drawMissingSamples(context: &context, path: Path(missingRect))
+    context.draw(
+        Text(missingLabel).font(.system(size: 9)).foregroundStyle(.secondary),
+        at: CGPoint(x: x + width + 8, y: missingRect.midY),
         anchor: .leading
     )
 }

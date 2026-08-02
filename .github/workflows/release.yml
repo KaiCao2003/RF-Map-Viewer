@@ -1,4 +1,4 @@
-name: Build distributions
+name: Build Apple silicon distributions
 
 on:
   workflow_dispatch:
@@ -50,6 +50,7 @@ jobs:
       - name: Inspect application architecture
         run: |
           test "$(lipo -archs 'dist/RF Map Viewer.app/Contents/MacOS/RFMappingSwiftUI')" = "arm64"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' 'dist/RF Map Viewer.app/Contents/Info.plist')" = "2.1.0"
           test "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' 'dist/RF Map Viewer.app/Contents/Info.plist')" = "15.0"
       - uses: actions/upload-artifact@v6
         with:
@@ -80,6 +81,7 @@ jobs:
       - name: Inspect archive
         run: |
           unzip -tq dist/python/RF_Map_Viewer-python-macos-arm64.zip
+          test "$(unzip -p dist/python/RF_Map_Viewer-python-macos-arm64.zip 'RF Map Viewer.app/Contents/Info.plist' | plutil -extract CFBundleShortVersionString raw -o - -)" = "1.8.0"
           test "$(unzip -p dist/python/RF_Map_Viewer-python-macos-arm64.zip 'RF Map Viewer.app/Contents/Info.plist' | plutil -extract LSMinimumSystemVersion raw -o - -)" = "14.0"
           if unzip -Z1 dist/python/RF_Map_Viewer-python-macos-arm64.zip | grep -Eq '(^|/)__MACOSX/|(^|/)\._'; then
             echo "Archive contains AppleDouble metadata" >&2
@@ -92,101 +94,6 @@ jobs:
           if-no-files-found: error
           compression-level: 0
 
-  build-python-windows:
-    name: Build Python Windows x64
-    runs-on: windows-2025
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.14"
-          architecture: x64
-          cache: pip
-          cache-dependency-path: requirements-python-runtime.txt
-      - name: Install runtime dependencies and packaging tools
-        shell: pwsh
-        run: |
-          python -m pip install --disable-pip-version-check --requirement requirements-python-runtime.txt pyinstaller==6.21.0 pillow
-          python -c "import tkinterdnd2; print('runtime dependency:', tkinterdnd2.__file__)"
-          choco install innosetup --yes --no-progress
-      - name: Run Python model tests
-        run: python -m unittest discover -s tests -p "test_rfmapping_gui.py"
-      - name: Build and stage portable application
-        shell: pwsh
-        run: |
-          $distRoot = Join-Path $env:RUNNER_TEMP "rf-map-viewer-dist"
-          $workRoot = Join-Path $env:RUNNER_TEMP "rf-map-viewer-work"
-          $specRoot = Join-Path $env:RUNNER_TEMP "rf-map-viewer-spec"
-          $icon = (Resolve-Path "assets\rf-mapping-viewer-icon-1024.png").Path
-          $hookDir = (Resolve-Path "packaging\pyinstaller-hooks").Path
-          python -m PyInstaller `
-            --noconfirm `
-            --clean `
-            --windowed `
-            --onedir `
-            --noupx `
-            --name "RF Map Viewer" `
-            --icon $icon `
-            --distpath $distRoot `
-            --workpath $workRoot `
-            --specpath $specRoot `
-            --additional-hooks-dir $hookDir `
-            "rfmapping_gui.py"
-          if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed with exit code $LASTEXITCODE" }
-
-          $stage = Join-Path $PWD "dist\windows\RF Map Viewer"
-          New-Item -ItemType Directory -Force "$stage\App", "$stage\Resources\data" | Out-Null
-          Copy-Item "$distRoot\RF Map Viewer\*" "$stage\App" -Recurse -Force
-          Copy-Item "data\*" "$stage\Resources\data" -Recurse -Force
-          Copy-Item "README.md" "$stage\Resources\README.md" -Force
-
-          if (-not (Test-Path "$stage\Resources\README.md")) {
-            throw "Support documentation was not staged"
-          }
-
-          & "$stage\App\RF Map Viewer.exe" --self-test "$stage\Resources\data\demo_rf_map.json"
-          if ($LASTEXITCODE -ne 0) { throw "Portable executable self-test failed with exit code $LASTEXITCODE" }
-          & "$stage\App\RF Map Viewer.exe" --self-test-dnd
-          if ($LASTEXITCODE -ne 0) { throw "Portable TkDND self-test failed with exit code $LASTEXITCODE" }
-
-          Compress-Archive `
-            -Path "$stage\*" `
-            -DestinationPath "dist\windows\RF_Map_Viewer-python-windows-x64-portable.zip" `
-            -CompressionLevel Optimal
-      - name: Build and test installer
-        shell: pwsh
-        run: |
-          $stage = Join-Path $PWD "dist\windows\RF Map Viewer"
-          $iscc = Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"
-          if (-not (Test-Path $iscc)) { throw "Inno Setup compiler not found: $iscc" }
-          & $iscc "/DSourceRoot=$stage" "packaging\windows\RFMapViewer.iss"
-          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE" }
-
-          $setup = Join-Path $PWD "dist\windows\RF_Map_Viewer-python-windows-x64-setup.exe"
-          $installed = Join-Path $env:RUNNER_TEMP "rf-map-viewer-installed"
-          $installer = Start-Process `
-            -FilePath $setup `
-            -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/DIR=$installed") `
-            -Wait `
-            -PassThru
-          if ($installer.ExitCode -ne 0) { throw "Installer smoke test failed with exit code $($installer.ExitCode)" }
-
-          $installedExecutable = "$installed\App\RF Map Viewer.exe"
-          if (-not (Test-Path $installedExecutable)) {
-            Get-ChildItem $installed -Recurse -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName
-            throw "Installer completed but executable is missing: $installedExecutable"
-          }
-          & $installedExecutable --self-test "$installed\Resources\data\demo_rf_map.json"
-          if ($LASTEXITCODE -ne 0) { throw "Installed executable self-test failed with exit code $LASTEXITCODE" }
-      - uses: actions/upload-artifact@v6
-        with:
-          name: python-windows-x64
-          path: |
-            dist/windows/RF_Map_Viewer-python-windows-x64-portable.zip
-            dist/windows/RF_Map_Viewer-python-windows-x64-setup.exe
-          if-no-files-found: error
-          compression-level: 0
-
   publish-release:
     name: Publish GitHub Release
     if: startsWith(github.ref, 'refs/tags/v')
@@ -194,7 +101,6 @@ jobs:
       - validate-python
       - build-swift-macos
       - build-python-macos
-      - build-python-windows
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -210,8 +116,6 @@ jobs:
           sha256sum \
             RF_Map_Viewer-macos-arm64.zip \
             RF_Map_Viewer-python-macos-arm64.zip \
-            RF_Map_Viewer-python-windows-x64-portable.zip \
-            RF_Map_Viewer-python-windows-x64-setup.exe \
             > SHA256SUMS.txt
       - name: Create or update release
         env:

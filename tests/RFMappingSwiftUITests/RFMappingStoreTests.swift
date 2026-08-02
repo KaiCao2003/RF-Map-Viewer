@@ -7,7 +7,7 @@ final class RFMappingStoreTests: XCTestCase {
         XCTAssertEqual(compensatedSum([1e16, 1, 1]), 1.0000000000000002e16)
     }
 
-    func testSpatialGroupingAndWeightedSmoothingMatchPython() {
+    func testSpatialGroupingAndWeightedSmoothingPreserveMissingSamples() {
         XCTAssertEqual(
             axisGroupsForTarget(sourceCount: 5, targetCount: 2),
             [AxisGroup(start: 0, end: 1), AxisGroup(start: 2, end: 4)]
@@ -21,11 +21,10 @@ final class RFMappingStoreTests: XCTestCase {
         XCTAssertEqual(reduced[0][0], 4)
 
         let smoothed = smoothMatrix([[1, nil], [nil, nil]], radius: 1)
-        for row in smoothed {
-            for value in row {
-                XCTAssertEqual(value, 1)
-            }
-        }
+        XCTAssertEqual(smoothed[0][0], 1)
+        XCTAssertNil(smoothed[0][1])
+        XCTAssertNil(smoothed[1][0])
+        XCTAssertNil(smoothed[1][1])
     }
 
     func testExactRangeSnappingAndTimeGroupingMatchPython() throws {
@@ -39,15 +38,60 @@ final class RFMappingStoreTests: XCTestCase {
         store.rangeEndMS = 55
         store.normalizeControls()
 
-        XCTAssertEqual(store.timeGroups(), [AxisGroup(start: 0, end: 1), AxisGroup(start: 2, end: 2)])
+        XCTAssertEqual(store.timeGroups(), [
+            AxisGroup(start: 0, end: 0),
+            AxisGroup(start: 1, end: 1),
+            AxisGroup(start: 2, end: 2)
+        ])
+        XCTAssertEqual(store.timeGroupLabel(0), "-100–0 ms")
+        XCTAssertEqual(store.timeGroupLabel(1), "0–50 ms")
+        XCTAssertEqual(store.timeGroupLabel(2), "50–200 ms")
         XCTAssertEqual(store.sourceBinsForSelectedRange(), AxisGroup(start: 0, end: 1))
         XCTAssertEqual(store.selectedTimeBoundsMS().0, -100, accuracy: 1e-9)
         XCTAssertEqual(store.selectedTimeBoundsMS().1, 50, accuracy: 1e-9)
 
-        store.selectTimelineBin(1, extending: false)
+        store.selectTimelineBin(2, extending: false)
         XCTAssertEqual(store.sourceBinsForSelectedRange(), AxisGroup(start: 2, end: 2))
-        XCTAssertEqual(store.visibleTimelineBins(displayBins: 2), [0, 1])
-        XCTAssertEqual(store.timelineSnapshot().matrices.count, 2)
+        XCTAssertEqual(store.visibleTimelineBins(displayBins: 3), [0, 1, 2])
+        XCTAssertEqual(store.timelineSnapshot().matrices.count, 3)
+    }
+
+    func testPhysicalTimeGroupingPreservesUniformGroupingAndUsesMeasuredEdges() {
+        XCTAssertEqual(
+            physicalTimeGroups(
+                edgesMS: [0, 10, 20, 30, 40, 50],
+                targetDurationMS: 20
+            ),
+            [
+                AxisGroup(start: 0, end: 1),
+                AxisGroup(start: 2, end: 3),
+                AxisGroup(start: 4, end: 4)
+            ]
+        )
+        XCTAssertEqual(
+            physicalTimeGroups(
+                edgesMS: [-100, 0, 50, 200],
+                targetDurationMS: 100
+            ),
+            [
+                AxisGroup(start: 0, end: 0),
+                AxisGroup(start: 1, end: 1),
+                AxisGroup(start: 2, end: 2)
+            ]
+        )
+    }
+
+    func testTimeResolutionStepsByOneSourceBinWidth() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.deletingLastPathComponent()) }
+        let store = RFMappingStore(initialURL: fixture)
+
+        XCTAssertEqual(store.baseBinMS(), 50, accuracy: 1e-9)
+        store.timeResolutionMS = 50
+        store.stepTimeResolution(1)
+        XCTAssertEqual(store.timeResolutionMS, 100, accuracy: 1e-9)
+        store.stepTimeResolution(-1)
+        XCTAssertEqual(store.timeResolutionMS, 50, accuracy: 1e-9)
     }
 
     func testReloadPreservesSmoothingLikePython() throws {
@@ -108,6 +152,7 @@ final class RFMappingStoreTests: XCTestCase {
         XCTAssertEqual(store.sourceBinsForPlotRange(), AxisGroup(start: 1, end: 1))
         XCTAssertEqual(store.currentMatrix()[0][0], 20)
         XCTAssertEqual(store.currentMatrix()[0][1], 10)
+        XCTAssertNil(store.currentMatrix()[1][0])
         store.setValueMode(.meanFiringRate)
         XCTAssertEqual(try XCTUnwrap(store.currentMatrix()[0][0]), 40, accuracy: 1e-9)
         XCTAssertEqual(try XCTUnwrap(store.currentMatrix()[0][1]), 40, accuracy: 1e-9)
@@ -126,6 +171,86 @@ final class RFMappingStoreTests: XCTestCase {
             valueMode: store.valueMode
         )
         XCTAssertEqual(try XCTUnwrap(fullWindow[0][0]), 20, accuracy: 1e-9)
+    }
+
+    func testZeroExposureCountRemainsMissingAcrossRFAndRGBPlotsAndTooltip() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.deletingLastPathComponent()) }
+        let store = RFMappingStore(initialURL: fixture)
+        store.flipY = false
+        store.xBins = 2
+        store.yBins = 2
+        store.smoothRadius = 0
+        store.setValueMode(.spikeCount)
+
+        XCTAssertNil(store.currentHeatmapPlot().matrix[1][0])
+        XCTAssertNil(store.cachedRGBPlot().total[1][0])
+        XCTAssertTrue(
+            store.tooltipText(CellRef(yStart: 1, yEnd: 1, xStart: 0, xEnd: 0))
+                .contains("n/a")
+        )
+    }
+
+    func testDisplayGroupingPoolsUnequalExposureAndSmoothsNumeratorDenominator() throws {
+        let fixture = try makeSpatialEstimandFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.deletingLastPathComponent()) }
+        let store = RFMappingStore(initialURL: fixture)
+        store.flipY = false
+        store.yBins = 1
+        store.xBins = 1
+        store.smoothRadius = 0
+        store.setValueMode(.spikesPerPresentation)
+
+        let pooled = store.preparedResponseMatrix(sourceStart: 0, sourceEnd: 1, smooth: false)
+        XCTAssertEqual(try XCTUnwrap(pooled.0[0][0]), 109.0 / 101.0, accuracy: 1e-12)
+
+        store.xBins = 2
+        store.smoothRadius = 1
+        store.setValueMode(.meanFiringRate)
+        let smoothed = store.preparedResponseMatrix(sourceStart: 0, sourceEnd: 0, smooth: true).0
+        XCTAssertEqual(
+            try XCTUnwrap(smoothed[0][0]),
+            ((4.0 * 100.0 + 2.0 * 0.0) / (4.0 * 100.0 + 2.0 * 1.0)) / 0.1,
+            accuracy: 1e-12
+        )
+        XCTAssertEqual(
+            try XCTUnwrap(smoothed[0][1]),
+            ((4.0 * 0.0 + 2.0 * 100.0) / (4.0 * 1.0 + 2.0 * 100.0)) / 0.1,
+            accuracy: 1e-12
+        )
+        XCTAssertNotEqual(try XCTUnwrap(smoothed[0][0]), (4.0 * 10.0 + 2.0 * 0.0) / 6.0)
+    }
+
+    func testGroupedDelayAndRGBEntropyAreRecomputedFromPooledHistogram() throws {
+        let fixture = try makeSpatialEstimandFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.deletingLastPathComponent()) }
+        let store = RFMappingStore(initialURL: fixture)
+        store.flipY = false
+        store.yBins = 1
+        store.xBins = 1
+        store.smoothRadius = 0
+        store.timeResolutionMS = 100
+        store.normalizeControls()
+
+        let delay = store.delayHeatmapPlot(floor: 0)
+        XCTAssertEqual(try XCTUnwrap(delay.matrix[0][0]), 50.0, accuracy: 1e-12)
+
+        let probabilities = [100.0 / 109.0, 9.0 / 109.0]
+        let expectedEntropy = -probabilities.reduce(0.0) {
+            $0 + $1 * log($1)
+        } / log(2.0)
+        let rgb = store.cachedRGBPlot()
+        XCTAssertEqual(try XCTUnwrap(rgb.entropy[0][0]), expectedEntropy, accuracy: 1e-12)
+        XCTAssertGreaterThan(try XCTUnwrap(rgb.entropy[0][0]), 0.0)
+
+        store.xBins = 2
+        store.smoothRadius = 1
+        let smoothedDelay = store.delayHeatmapPlot(floor: 0).matrix
+        XCTAssertEqual(try XCTUnwrap(smoothedDelay[0][0]), 50.0, accuracy: 1e-12)
+        XCTAssertEqual(try XCTUnwrap(smoothedDelay[0][1]), 50.0, accuracy: 1e-12)
+        let smoothedRGB = store.cachedRGBPlot()
+        XCTAssertGreaterThan(try XCTUnwrap(smoothedRGB.entropy[0][0]), 0.0)
+        XCTAssertGreaterThan(try XCTUnwrap(smoothedRGB.entropy[0][1]), 0.0)
     }
 
     func testDisplayedCSVHasExactFortyColumnSchemaAndProvenance() throws {
@@ -151,7 +276,7 @@ final class RFMappingStoreTests: XCTestCase {
         XCTAssertEqual(row.count, 40)
 
         let record = Dictionary(uniqueKeysWithValues: zip(header, row))
-        XCTAssertEqual(record["value"], "25.5")
+        XCTAssertEqual(record["value"], "34.0")
         XCTAssertEqual(record["value_mode"], "Spike count")
         XCTAssertEqual(record["value_unit"], "spikes")
         XCTAssertEqual(record["presentation_count_min"], "0.0")
@@ -205,11 +330,16 @@ final class RFMappingStoreTests: XCTestCase {
         store.normalizeControls()
         store.selectTimelineBin(0, extending: false)
 
-        XCTAssertEqual(store.sourceBinsForSelectedRange(), AxisGroup(start: 0, end: 1))
+        XCTAssertEqual(store.sourceBinsForSelectedRange(), AxisGroup(start: 0, end: 0))
         XCTAssertEqual(store.sourceBinsForPlotRange(), originalPlotRange)
         XCTAssertEqual(store.currentMatrix(), originalMatrix)
 
         store.selectTimelineBin(1, extending: false)
+        XCTAssertEqual(store.sourceBinsForSelectedRange(), AxisGroup(start: 1, end: 1))
+        XCTAssertEqual(store.sourceBinsForPlotRange(), originalPlotRange)
+        XCTAssertEqual(store.currentMatrix(), originalMatrix)
+
+        store.selectTimelineBin(2, extending: false)
         XCTAssertEqual(store.sourceBinsForSelectedRange(), AxisGroup(start: 2, end: 2))
         XCTAssertEqual(store.sourceBinsForPlotRange(), originalPlotRange)
         XCTAssertEqual(store.currentMatrix(), originalMatrix)
@@ -225,6 +355,23 @@ final class RFMappingStoreTests: XCTestCase {
 
         XCTAssertTrue(tooltip.contains("bin 1: 10 spikes"))
         XCTAssertTrue(tooltip.contains("RF sum range 0–50 ms: 20 spikes"))
+    }
+
+    func testRFResponseScaleIsZeroToPeakWhileDelayKeepsTimeRange() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.deletingLastPathComponent()) }
+        let store = RFMappingStore(initialURL: fixture)
+        store.smoothRadius = 0
+
+        let response = store.currentHeatmapPlot()
+        XCTAssertEqual(response.low, 0.0, accuracy: 1e-12)
+        XCTAssertEqual(response.high, 20.0, accuracy: 1e-12)
+
+        let delay = store.delayHeatmapPlot(floor: 0)
+        let timeRange = store.timeAxisRangeMS()
+        XCTAssertEqual(delay.low, timeRange.0, accuracy: 1e-12)
+        XCTAssertEqual(delay.high, timeRange.1, accuracy: 1e-12)
+        XCTAssertLessThan(delay.low, 0)
     }
 
     func testFullCirclePolarSectorUsesEnoughArcSamplesToRemainVisible() {
@@ -263,6 +410,24 @@ final class RFMappingStoreTests: XCTestCase {
             "yPositions": [-1, 1],
             "timeBinEdges": [-0.1, 0, 0.05, 0.2],
             "stimulusPresentationCounts": [[10, 5], [0, 2]]
+        ]
+        try JSONSerialization.data(withJSONObject: payload).write(to: url)
+        return url
+    }
+
+    private func makeSpatialEstimandFixture() throws -> URL {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("RFMappingSpatialEstimandTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let url = directory.appendingPathComponent("fixture.json")
+        let payload: [String: Any] = [
+            "unitsSpikeCounts": [[[[100, 0], [0, 9]]]],
+            "unitsSpikeCountsSize": [1, 1, 2, 2],
+            "unitPool": [42],
+            "xPositions": [-1, 1],
+            "yPositions": [0],
+            "timeBinEdges": [0, 0.1, 0.2],
+            "stimulusPresentationCounts": [[100, 1]]
         ]
         try JSONSerialization.data(withJSONObject: payload).write(to: url)
         return url

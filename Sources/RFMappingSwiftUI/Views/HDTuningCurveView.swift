@@ -87,7 +87,7 @@ struct HDTuningCurveView: View {
             Divider()
             status
         }
-        .background(Color(nsColor: .controlBackgroundColor))
+        .background(Color(nsColor: .textBackgroundColor))
         .task(id: curveRequest) {
             await updateProcessedCurve(for: curveRequest)
         }
@@ -158,6 +158,7 @@ struct HDTuningCurveView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 9)
+        .background(.bar)
     }
 
     @ViewBuilder
@@ -253,6 +254,7 @@ struct HDTuningCurveView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 7)
+        .background(.bar)
     }
 
     private var statusText: String {
@@ -264,7 +266,7 @@ struct HDTuningCurveView: View {
         let smooth = preferences.tuningSmoothing
             ? "σ=\(formatAngle(preferences.tuningSmoothingDegrees))°"
             : "smoothing off"
-        let scale = preferences.tuningCompareScale ? "shared scale" : "per-cell scale"
+        let scale = preferences.tuningCompareScale ? "shared within file" : "per-cell scale"
         let missing = currentProcessedCurve?.firingRatesHz.filter { $0 == nil }.count ?? 0
         let missingText = missing > 0 ? " · \(missing) no-occupancy bins" : ""
         let legacy = data.schema == .legacy ? " · occupancy provenance unavailable" : ""
@@ -578,40 +580,16 @@ private struct HDPolarPlot: View {
             let radius = max(24, min(size.width, size.height) / 2 - 36)
             let denominator = scaleHigh > 1e-12 ? scaleHigh : 1.0
 
-            let ringFractions = scaleHigh > 1e-12 ? [0.25, 0.5, 0.75, 1.0] : [1.0]
-            for fraction in ringFractions {
-                let ring = radius * fraction
-                context.stroke(
-                    Path(ellipseIn: CGRect(
-                        x: center.x - ring,
-                        y: center.y - ring,
-                        width: ring * 2,
-                        height: ring * 2
-                    )),
-                    with: .color(.secondary.opacity(0.2)),
-                    lineWidth: 0.75
-                )
-                if scaleHigh > 1e-12 {
-                    context.draw(
-                        Text("\(formatHz(scaleHigh * fraction)) Hz")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary),
-                        at: CGPoint(
-                            x: center.x - ring * 0.707 + 4,
-                            y: center.y - ring * 0.707 - 3
-                        ),
-                        anchor: .bottomLeading
-                    )
-                } else {
-                    context.draw(
-                        Text("0 Hz")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary),
-                        at: CGPoint(x: center.x + 5, y: center.y - 5),
-                        anchor: .bottomLeading
-                    )
-                }
-            }
+            context.stroke(
+                Path(ellipseIn: CGRect(
+                    x: center.x - radius,
+                    y: center.y - radius,
+                    width: radius * 2,
+                    height: radius * 2
+                )),
+                with: .color(.secondary.opacity(0.32)),
+                lineWidth: 0.9
+            )
 
             for (angle, label) in [(0.0, "0°"), (90.0, "90°"), (180.0, "180°"), (270.0, "270°")] {
                 let vector = headDirectionVector(angle)
@@ -628,6 +606,46 @@ private struct HDPolarPlot: View {
                         x: center.x + vector.x * (radius + 15),
                         y: center.y + vector.y * (radius + 15)
                     )
+                )
+            }
+
+            // Radial values use one explicit Hz axis. Interior rings imply
+            // additional measured contours, so keep only short ticks and the
+            // outer direction outline.
+            let scaleVector = headDirectionVector(315)
+            let scaleNormal = CGPoint(x: -scaleVector.y, y: scaleVector.x)
+            var scaleAxis = Path()
+            scaleAxis.move(to: center)
+            scaleAxis.addLine(to: CGPoint(
+                x: center.x + scaleVector.x * radius,
+                y: center.y + scaleVector.y * radius
+            ))
+            context.stroke(scaleAxis, with: .color(.secondary.opacity(0.28)), lineWidth: 0.75)
+            let radialTicks = scaleHigh > 1e-12 ? [0.0, 0.5, 1.0] : [0.0]
+            for fraction in radialTicks {
+                let point = CGPoint(
+                    x: center.x + scaleVector.x * radius * fraction,
+                    y: center.y + scaleVector.y * radius * fraction
+                )
+                var tick = Path()
+                tick.move(to: CGPoint(
+                    x: point.x - scaleNormal.x * 3,
+                    y: point.y - scaleNormal.y * 3
+                ))
+                tick.addLine(to: CGPoint(
+                    x: point.x + scaleNormal.x * 3,
+                    y: point.y + scaleNormal.y * 3
+                ))
+                context.stroke(tick, with: .color(.secondary), lineWidth: 0.9)
+                context.draw(
+                    Text("\(formatHz(scaleHigh * fraction)) Hz")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary),
+                    at: CGPoint(
+                        x: point.x + scaleNormal.x * 7,
+                        y: point.y + scaleNormal.y * 7
+                    ),
+                    anchor: .leading
                 )
             }
 
@@ -718,6 +736,34 @@ private struct TuningProvenanceView: View {
                 if let ttl = metadata.ttlQC {
                     if let count = ttl.pulseCount { provenanceRow("Motive trigger TTLs", "\(count)") }
                     if let rate = ttl.measuredRateHz { provenanceRow("Measured rate", "\(formatHz(rate)) Hz") }
+                    if let period = ttl.medianPeriodSeconds {
+                        provenanceRow("Median period", "\(formatNumber(period)) s")
+                    }
+                    if let channel = ttl.cameraInputChannel {
+                        provenanceRow("Camera input", "\(channel)")
+                    }
+                    if let threshold = ttl.cameraTTLThreshold {
+                        provenanceRow("TTL threshold", formatNumber(threshold))
+                    }
+                    if let activeHigh = ttl.cameraTTLActiveHigh {
+                        provenanceRow("TTL polarity", activeHigh ? "Active high" : "Active low")
+                    }
+                    if let matched = ttl.matchedMotiveFrameCount,
+                       let raw = ttl.rawMotiveFrameCount {
+                        provenanceRow("Matched frames", "\(matched) / \(raw)")
+                    }
+                    if let policy = ttl.frameAlignmentPolicyApplied {
+                        provenanceRow("Alignment", policy)
+                    }
+                    if let dropped = ttl.droppedMotiveFrameIDs, !dropped.isEmpty {
+                        provenanceRow(
+                            "Dropped frame IDs",
+                            dropped.map(String.init).joined(separator: ", ")
+                        )
+                    }
+                    if let mapping = ttl.frameTimestampMapping {
+                        provenanceRow("Frame mapping", mapping)
+                    }
                 }
             } else {
                 Text("This file does not provide timing or direction metadata.")

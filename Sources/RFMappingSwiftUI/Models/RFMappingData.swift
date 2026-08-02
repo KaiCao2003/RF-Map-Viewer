@@ -486,6 +486,9 @@ final class RFMappingData: @unchecked Sendable {
             start: low,
             end: high
         )
+        if let presentationCounts, presentationCounts[yIndex][xIndex] <= 0 {
+            return nil
+        }
         if valueMode == .spikeCount {
             return count
         }
@@ -532,6 +535,10 @@ final class RFMappingData: @unchecked Sendable {
                     low: low,
                     high: high
                 )
+                if let presentationCounts,
+                   presentationCounts[yIndex][xIndex] <= 0 {
+                    return nil
+                }
                 if valueMode == .spikeCount { return count }
                 guard let presentationCounts else { return nil }
                 let presentations = presentationCounts[yIndex][xIndex]
@@ -540,6 +547,220 @@ final class RFMappingData: @unchecked Sendable {
                 return count / divisor
             }
         }
+    }
+
+    /// Pools raw observations before normalizing a displayed spatial cell.
+    /// `stimulusPresentationCounts` is the exposure for each source position,
+    /// so averaging already-normalized source rates would overweight positions
+    /// with fewer presentations.
+    func spatialGroupObservations(
+        unitIndex: Int,
+        yGroup: AxisGroup,
+        xGroup: AxisGroup,
+        start: Int,
+        end: Int
+    ) -> SpatialGroupObservations {
+        let yLow = max(0, min(nY - 1, min(yGroup.start, yGroup.end)))
+        let yHigh = max(0, min(nY - 1, max(yGroup.start, yGroup.end)))
+        let xLow = max(0, min(nX - 1, min(xGroup.start, xGroup.end)))
+        let xHigh = max(0, min(nX - 1, max(xGroup.start, xGroup.end)))
+        var counts: [Double] = []
+        var presentations: [Double] = []
+        counts.reserveCapacity((yHigh - yLow + 1) * (xHigh - xLow + 1))
+        presentations.reserveCapacity(counts.capacity)
+        for yIndex in yLow...yHigh {
+            for xIndex in xLow...xHigh {
+                if let presentationCounts {
+                    let exposure = presentationCounts[yIndex][xIndex]
+                    guard exposure > 0 else { continue }
+                    presentations.append(exposure)
+                }
+                counts.append(rangeCount(
+                    unitIndex: unitIndex,
+                    yIndex: yIndex,
+                    xIndex: xIndex,
+                    start: start,
+                    end: end
+                ))
+            }
+        }
+        return SpatialGroupObservations(
+            count: compensatedSum(counts),
+            presentations: presentationCounts == nil ? nil : compensatedSum(presentations),
+            sourcePixelCount: counts.count
+        )
+    }
+
+    func spatialGroupResponseValue(
+        unitIndex: Int,
+        yGroup: AxisGroup,
+        xGroup: AxisGroup,
+        start: Int,
+        end: Int,
+        valueMode: ResponseValueMode
+    ) throws -> Double? {
+        let observations = spatialGroupObservations(
+            unitIndex: unitIndex,
+            yGroup: yGroup,
+            xGroup: xGroup,
+            start: start,
+            end: end
+        )
+        if valueMode == .spikeCount {
+            guard observations.sourcePixelCount > 0 else { return nil }
+            return observations.count / Double(observations.sourcePixelCount)
+        }
+        guard let presentations = observations.presentations else {
+            throw RFMappingError.presentationCountsRequired(valueMode)
+        }
+        guard presentations > 0 else { return nil }
+        var value = observations.count / presentations
+        if valueMode == .meanFiringRate {
+            value /= timeSpanSeconds(start: start, end: end)
+        }
+        return value
+    }
+
+    func spatialGroupResponseMatrix(
+        unitIndex: Int,
+        start: Int,
+        end: Int,
+        valueMode: ResponseValueMode,
+        yGroups: [AxisGroup],
+        xGroups: [AxisGroup]
+    ) throws -> OptionalMatrix {
+        try yGroups.map { yGroup in
+            try xGroups.map { xGroup in
+                try spatialGroupResponseValue(
+                    unitIndex: unitIndex,
+                    yGroup: yGroup,
+                    xGroup: xGroup,
+                    start: start,
+                    end: end,
+                    valueMode: valueMode
+                )
+            }
+        }
+    }
+
+    func spatialGroupCountHistogram(
+        unitIndex: Int,
+        yGroup: AxisGroup,
+        xGroup: AxisGroup
+    ) -> [Double] {
+        let yLow = max(0, min(nY - 1, min(yGroup.start, yGroup.end)))
+        let yHigh = max(0, min(nY - 1, max(yGroup.start, yGroup.end)))
+        let xLow = max(0, min(nX - 1, min(xGroup.start, xGroup.end)))
+        let xHigh = max(0, min(nX - 1, max(xGroup.start, xGroup.end)))
+        return (0..<nBins).map { binIndex in
+            var values: [Double] = []
+            values.reserveCapacity((yHigh - yLow + 1) * (xHigh - xLow + 1))
+            for yIndex in yLow...yHigh {
+                for xIndex in xLow...xHigh {
+                    if let presentationCounts,
+                       presentationCounts[yIndex][xIndex] <= 0 {
+                        continue
+                    }
+                    values.append(count(
+                        unitIndex: unitIndex,
+                        yIndex: yIndex,
+                        xIndex: xIndex,
+                        binIndex: binIndex
+                    ))
+                }
+            }
+            return compensatedSum(values)
+        }
+    }
+
+    /// Number of source positions that contribute measured observations to a
+    /// displayed spatial group. Legacy files without exposure metadata retain
+    /// their historical behavior and count every source position.
+    func spatialGroupSourcePixelCount(
+        yGroup: AxisGroup,
+        xGroup: AxisGroup
+    ) -> Int {
+        let yLow = max(0, min(nY - 1, min(yGroup.start, yGroup.end)))
+        let yHigh = max(0, min(nY - 1, max(yGroup.start, yGroup.end)))
+        let xLow = max(0, min(nX - 1, min(xGroup.start, xGroup.end)))
+        let xHigh = max(0, min(nX - 1, max(xGroup.start, xGroup.end)))
+        guard let presentationCounts else {
+            return (yHigh - yLow + 1) * (xHigh - xLow + 1)
+        }
+        var count = 0
+        for yIndex in yLow...yHigh {
+            for xIndex in xLow...xHigh where presentationCounts[yIndex][xIndex] > 0 {
+                count += 1
+            }
+        }
+        return count
+    }
+
+    /// Derives temporal metrics only after pooling every source histogram in
+    /// the displayed spatial cell. Entropy retains native source-bin support;
+    /// delay retains the viewer's current time-group support.
+    func spatialGroupTemporalMetrics(
+        unitIndex: Int,
+        yGroup: AxisGroup,
+        xGroup: AxisGroup,
+        timeGroups: [AxisGroup]
+    ) -> SpatialGroupTemporalMetrics {
+        let histogram = spatialGroupCountHistogram(
+            unitIndex: unitIndex,
+            yGroup: yGroup,
+            xGroup: xGroup
+        )
+        let pixelCount = spatialGroupSourcePixelCount(yGroup: yGroup, xGroup: xGroup)
+        return temporalMetrics(
+            histogram: histogram,
+            timeGroups: timeGroups,
+            sourcePixelCount: pixelCount
+        )
+    }
+
+    func temporalMetrics(
+        histogram: [Double],
+        timeGroups: [AxisGroup],
+        sourcePixelCount: Int = 1
+    ) -> SpatialGroupTemporalMetrics {
+        precondition(histogram.count == nBins, "Temporal histogram must match the source-bin count.")
+        let total = compensatedSum(histogram)
+        let grouped = timeGroups.map { group -> (start: Int, end: Int, count: Double, rate: Double) in
+            let start = max(0, min(nBins - 1, min(group.start, group.end)))
+            let end = max(0, min(nBins - 1, max(group.start, group.end)))
+            let count = compensatedSum(histogram[start...end])
+            let durationSeconds = timeBinEdges[end + 1] - timeBinEdges[start]
+            return (start, end, count, count / durationSeconds)
+        }
+
+        let peakGroupIndex: Int?
+        let delayMS: Double?
+        var entropy = 0.0
+        if total > 0, !grouped.isEmpty {
+            var earliestBest = 0
+            var peakRate = grouped[0].rate
+            for index in 1..<grouped.count where grouped[index].rate > peakRate {
+                peakRate = grouped[index].rate
+                earliestBest = index
+            }
+            peakGroupIndex = earliestBest
+            let peakGroup = grouped[earliestBest]
+            delayMS = (timeBinEdges[peakGroup.start] + timeBinEdges[peakGroup.end + 1]) * 500.0
+            for count in histogram where count > 0 {
+                let probability = count / total
+                entropy -= probability * log(probability)
+            }
+            if nBins > 1 { entropy /= log(Double(nBins)) }
+        } else {
+            peakGroupIndex = nil
+            delayMS = nil
+        }
+        return SpatialGroupTemporalMetrics(
+            meanTotalCount: total / Double(max(1, sourcePixelCount)),
+            peakGroupIndex: peakGroupIndex,
+            delayMS: delayMS,
+            entropy: entropy
+        )
     }
 
     private func prefixRangeCount(

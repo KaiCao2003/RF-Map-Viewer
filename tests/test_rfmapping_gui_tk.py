@@ -112,6 +112,10 @@ class TkViewerTests(unittest.TestCase):
         self.app.update()
         initial_rf_width = self.app.rf_map_pane.winfo_width()
         self.assertTrue(self.app.tuning_curve_pane.winfo_ismapped())
+        self.assertGreater(
+            initial_rf_width,
+            2 * self.app.tuning_curve_pane.winfo_width(),
+        )
 
         hidden = replace(
             self.app.settings,
@@ -140,7 +144,19 @@ class TkViewerTests(unittest.TestCase):
         self.app.update()
         self.assertTrue(self.app.tuning_curve_pane.winfo_ismapped())
 
-    def test_missing_tuning_curve_is_a_clickable_placeholder(self) -> None:
+    def test_narrow_window_uses_responsive_stacked_tuning_layout(self) -> None:
+        self.app.notebook.select(0)
+        self.app.geometry("1120x720")
+        self.app.update()
+        self.assertEqual(int(self.app.tuning_curve_pane.grid_info()["row"]), 1)
+        self.assertEqual(int(self.app.tuning_curve_pane.grid_info()["column"]), 0)
+
+        self.app.geometry("1440x900")
+        self.app.update()
+        self.assertEqual(int(self.app.tuning_curve_pane.grid_info()["row"]), 0)
+        self.assertEqual(int(self.app.tuning_curve_pane.grid_info()["column"]), 1)
+
+    def test_missing_tuning_curve_has_a_real_attach_action(self) -> None:
         self.app.notebook.select(0)
         self.app.tuning_curve_data = None
         self.app._tuning_curve_error = None
@@ -152,7 +168,17 @@ class TkViewerTests(unittest.TestCase):
             if self.app.tuning_curve_canvas.type(item) == "text"
         )
         self.assertIn("No tuning curves", text)
-        self.assertIn("Click here to choose a JSON file", text)
+        self.assertIn("Attach head-direction data", text)
+        self.assertTrue(
+            any(
+                self.app.tuning_curve_canvas.type(item) == "window"
+                for item in self.app.tuning_curve_canvas.find_all()
+            )
+        )
+        self.assertEqual(
+            self.app.tuning_attach_button.cget("text"),
+            "Choose tuning_curves.json…",
+        )
         self.assertIn("optional", self.app.tuning_curve_status_label.cget("text").lower())
 
         with mock.patch.object(self.app, "_attach_tuning_curve") as attach:
@@ -175,7 +201,7 @@ class TkViewerTests(unittest.TestCase):
             if self.app.tuning_curve_canvas.type(item) == "text"
         )
         self.assertIn("Head direction (deg)", line_text)
-        self.assertIn("Cluster 7", line_text)
+        self.assertEqual(self.app.tuning_cluster_label.cget("text"), "Cluster 7")
         self.assertIn(
             "legacy schema",
             self.app.tuning_curve_status_label.cget("text"),
@@ -234,12 +260,12 @@ class TkViewerTests(unittest.TestCase):
         self.app._set_selected_unit_id(7)
         self.app._draw_tuning_curve()
         self.assertEqual(self.app.tuning_hd_class_label.cget("text"), "1")
-        self.assertEqual(str(self.app.tuning_hd_class_label.cget("foreground")), "#8a6508")
+        self.assertEqual(self.app.tuning_hd_class_label.cget("style"), "HDClass1.TLabel")
 
         self.app._set_selected_unit_id(8)
         self.app._draw_tuning_curve()
         self.assertEqual(self.app.tuning_hd_class_label.cget("text"), "2")
-        self.assertEqual(str(self.app.tuning_hd_class_label.cget("foreground")), "#027a48")
+        self.assertEqual(self.app.tuning_hd_class_label.cget("style"), "HDClass2.TLabel")
 
         self.app.tuning_curve_data = gui.TuningCurveData(
             tuning_path,
@@ -257,6 +283,84 @@ class TkViewerTests(unittest.TestCase):
         self.app.tuning_curve_data = None
         self.app._draw_tuning_curve()
         self.assertEqual(self.app.tuning_hd_class_label.cget("text"), "")
+
+    def test_tuning_provenance_info_is_visible_and_reports_ttl_timebase(self) -> None:
+        tuning_path = Path(self.directory.name) / "tuning_curves.json"
+        curve = tuple(2.0 for _index in range(gui.HD_RAW_BIN_COUNT))
+        metadata = gui.TuningCurveMetadata(
+            timebase="Open Ephys ADC seconds",
+            timestamp_reference="Exposure TTL rising edge",
+            angle_convention_note="0° up; positive counterclockwise",
+            feature_fs_hz=119.82,
+            classification=gui.TuningCurveClassificationProvenance(
+                method="Rayleigh and circular shuffle",
+                rayleigh_alpha=0.05,
+                shuffle_alpha=0.01,
+                num_shuffle=1000,
+            ),
+            ttl_qc=gui.TuningCurveTTLProvenance(
+                ttl_pulse_count=12_345,
+                median_period_s=0.008346,
+                measured_rate_hz=119.82,
+                camera_input_channel=2,
+                camera_ttl_threshold=1.5,
+                camera_ttl_active_high=True,
+                motive_frame_count_raw=451_971,
+                matched_motive_frame_count=451_970,
+                dropped_motive_frame_ids=(451_970,),
+                frame_alignment_policy_requested="drop_unmatched_last_frame",
+                frame_alignment_policy_applied="drop_unmatched_last_frame",
+                frame_timestamp_mapping="one_gated_exposure_pulse_center_per_matched_motive_frame",
+            ),
+        )
+        self.app.tuning_curve_data = gui.TuningCurveData(
+            tuning_path,
+            {7: curve},
+            metadata=metadata,
+        )
+        self.app.notebook.select(0)
+        self.app._set_selected_unit_id(7)
+        self.app._draw_tuning_curve()
+        self.app.update()
+
+        self.assertTrue(self.app.tuning_provenance_button.winfo_ismapped())
+        with mock.patch.object(gui.messagebox, "showinfo") as show_info:
+            self.app._show_tuning_provenance()
+        show_info.assert_called_once()
+        title, detail = show_info.call_args.args
+        self.assertEqual(title, "Tuning Provenance")
+        self.assertIn("Exposure TTL rising edge", detail)
+        self.assertIn("0° up; positive counterclockwise", detail)
+        self.assertIn("Motive trigger TTLs", detail)
+        self.assertIn("12345", detail)
+        self.assertIn("451970 / 451971", detail)
+        self.assertIn("drop_unmatched_last_frame", detail)
+        self.assertIn("451970", detail)
+
+        self.app.tuning_curve_data = gui.TuningCurveData(tuning_path, {7: curve})
+        self.app._draw_tuning_curve()
+        self.app.update()
+        self.assertFalse(self.app.tuning_provenance_button.winfo_ismapped())
+
+    def test_tuning_polar_uses_one_outline_and_an_explicit_hz_axis(self) -> None:
+        rates = tuple(float(index + 1) for index in range(30))
+        angles = tuple(index * 12.0 for index in range(30))
+
+        self.app.tuning_curve_canvas.delete("all")
+        self.app._draw_tuning_polar(angles, rates, 7, max(rates))
+
+        item_types = [
+            self.app.tuning_curve_canvas.type(item)
+            for item in self.app.tuning_curve_canvas.find_all()
+        ]
+        labels = {
+            self.app.tuning_curve_canvas.itemcget(item, "text")
+            for item in self.app.tuning_curve_canvas.find_all()
+            if self.app.tuning_curve_canvas.type(item) == "text"
+        }
+        self.assertEqual(item_types.count("oval"), 1)
+        self.assertIn("0 Hz", labels)
+        self.assertIn(f"{max(rates):.3g} Hz", labels)
 
     def test_tuning_line_axis_starts_at_zero_and_ends_at_displayed_peak(self) -> None:
         self.app.tuning_curve_canvas.delete("all")
@@ -315,7 +419,7 @@ class TkViewerTests(unittest.TestCase):
             if self.app.tuning_curve_canvas.type(item) == "text"
         }
         self.assertIn("20", shared_labels)
-        self.assertIn("shared 0–20 Hz scale", self.app.tuning_curve_status_label.cget("text"))
+        self.assertIn("shared within file: 0–20 Hz", self.app.tuning_curve_status_label.cget("text"))
 
         self.app.tuning_plot_mode_var.set("Polar")
         self.app._draw_tuning_curve()
@@ -432,7 +536,7 @@ class TkViewerTests(unittest.TestCase):
         settings.tuning_layout_var.set("Stacked")
         settings.tuning_display_bins_var.set("8")
         settings.tuning_smoothing_var.set(False)
-        settings.tuning_smooth_sigma_var.set("2")
+        settings.tuning_smooth_sigma_var.set("24")
         settings.tuning_compare_scale_var.set(True)
         settings._commit(close=False)
 
@@ -658,7 +762,7 @@ class TkViewerTests(unittest.TestCase):
         self.assertEqual(settings._tab_error_vars["Tuning Curve"].get(), "")
         self.assertEqual(
             float(settings.tuning_smooth_sigma_var.get()),
-            expected_sigma,
+            expected_sigma * 360.0 / gui.DEFAULT_HD_DISPLAY_BINS,
         )
         self.assertFalse(self.app.tuning_smoothing_var.get())
         self.assertEqual(self.app.tuning_smooth_sigma_var.get(), expected_sigma)
@@ -956,14 +1060,14 @@ class TkViewerTests(unittest.TestCase):
         self.assertIs(self.app.range_start_spin.master, self.app.range_controls_frame)
         self.assertIs(self.app.range_end_spin.master, self.app.range_controls_frame)
         self.assertIs(self.app.reset_plot_range_button.master, self.app.range_controls_frame)
-        self.assertIs(self.app.display_toggle_button.master, self.app.range_controls_frame)
-        self.assertEqual(int(self.app.reset_plot_range_button.grid_info()["column"]), 4)
-        self.assertEqual(int(self.app.display_toggle_button.grid_info()["column"]), 5)
+        self.assertIs(self.app.display_toggle_button.master, self.app.plot_controls_frame)
+        self.assertEqual(int(self.app.reset_plot_range_button.grid_info()["column"]), 5)
+        self.assertEqual(int(self.app.display_toggle_button.grid_info()["column"]), 8)
         self.app._toggle_display_controls()
         self.app.update_idletasks()
         self.assertEqual(self.app.display_controls_frame.winfo_manager(), "grid")
         self.assertTrue(self.app.display_expanded_var.get())
-        self.assertEqual(int(self.app.display_controls_frame.grid_info()["row"]), 2)
+        self.assertEqual(int(self.app.display_controls_frame.grid_info()["row"]), 1)
         self.assertIs(self.app.display_controls_frame.master.master, self.app.nametowidget(self.app.notebook.winfo_parent()))
         self.app._toggle_display_controls()
         self.assertEqual(self.app.display_controls_frame.winfo_manager(), "")
@@ -975,6 +1079,17 @@ class TkViewerTests(unittest.TestCase):
             if child.winfo_class() == "TSeparator"
         ]
         self.assertEqual(separator_children, [])
+
+    def test_sidebar_selection_inspector_is_visible_and_updates(self) -> None:
+        self.app.notebook.select(0)
+        self.app._update_all()
+        self.app.update_idletasks()
+
+        self.assertTrue(self.app.cell_label.winfo_ismapped())
+        self.assertIn("cluster", self.app.cell_label.cget("text"))
+        self.app.selected_cell = (0, 0, 0, 0)
+        self.app._update_cell_label()
+        self.assertIn("xIdx 1", self.app.cell_label.cget("text"))
 
     def test_spatial_region_filters_navigation_and_handles_no_matches(self) -> None:
         positions_path = Path(self.directory.name) / "positions.csv"

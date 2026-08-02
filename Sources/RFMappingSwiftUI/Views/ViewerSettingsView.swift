@@ -47,13 +47,13 @@ struct ViewerSettingsView: View {
                 .disabled(!preferences.tuningSmoothing)
 
                 Toggle(
-                    "Compare cells on one shared 0–peak Hz scale",
+                    "Compare cells in this file on one shared 0–peak Hz scale",
                     isOn: $preferences.tuningCompareScale
                 )
 
                 Text(
                     preferences.tuningCompareScale
-                        ? "Every attached cell uses the same radial or y-axis scale."
+                        ? "Every cell in the attached tuning file uses the same radial or y-axis scale; other windows keep their own scale."
                         : "Each cell starts at 0 Hz and uses its own peak so low-rate tuning remains legible."
                 )
                 .font(.caption)

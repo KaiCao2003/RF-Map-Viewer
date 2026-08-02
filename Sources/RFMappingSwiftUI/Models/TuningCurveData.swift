@@ -42,6 +42,12 @@ struct TuningCurveTTLProvenance: Equatable, Sendable {
     let cameraInputChannel: Int?
     let cameraTTLThreshold: Double?
     let cameraTTLActiveHigh: Bool?
+    let rawMotiveFrameCount: Int?
+    let matchedMotiveFrameCount: Int?
+    let droppedMotiveFrameIDs: [Int]?
+    let frameAlignmentPolicyRequested: String?
+    let frameAlignmentPolicyApplied: String?
+    let frameTimestampMapping: String?
 }
 
 struct TuningCurveMetadata: Equatable, Sendable {
@@ -169,55 +175,58 @@ final class TuningCurveData: @unchecked Sendable {
 
         if let spikeCounts = unit.spikeCounts,
            let occupancyTimeSeconds {
-            let observations = try aggregateHDTuningObservations(
-                spikeCounts: spikeCounts,
-                occupancyTimeSeconds: occupancyTimeSeconds,
-                displayBins: normalizedBins
-            )
+            let sourceCounts: [Double]
+            let sourceOccupancy: [Double]
             if smoothing {
                 let sigmaBins = try hdTuningSmoothingSigmaBins(
                     sigmaAtThirtyBins,
-                    displayBins: normalizedBins
+                    displayBins: hdRawBinCount
                 )
-                let smoothedCounts = try circularGaussianSmooth(
-                    observations.spikeCounts,
+                sourceCounts = try circularGaussianSmooth(
+                    spikeCounts.map(Double.init),
                     sigma: sigmaBins
                 )
-                let smoothedOccupancy = try circularGaussianSmooth(
-                    observations.occupancyTimeSeconds,
+                sourceOccupancy = try circularGaussianSmooth(
+                    occupancyTimeSeconds,
                     sigma: sigmaBins
                 )
-                return ProcessedTuningCurve(
-                    anglesDeg: observations.anglesDeg,
-                    firingRatesHz: zip(smoothedCounts, smoothedOccupancy).map { count, occupiedSeconds in
-                        occupiedSeconds > 1e-12 ? count / occupiedSeconds : nil
-                    }
-                )
+            } else {
+                sourceCounts = spikeCounts.map(Double.init)
+                sourceOccupancy = occupancyTimeSeconds
             }
+            let observations = try aggregateHDTuningObservations(
+                spikeCounts: sourceCounts,
+                occupancyTimeSeconds: sourceOccupancy,
+                displayBins: normalizedBins
+            )
+            let minimumOccupancy = smoothing ? 1e-12 : 0.0
             return ProcessedTuningCurve(
                 anglesDeg: observations.anglesDeg,
                 firingRatesHz: zip(
                     observations.spikeCounts,
                     observations.occupancyTimeSeconds
                 ).map { count, occupiedSeconds in
-                    occupiedSeconds > 0.0 ? count / occupiedSeconds : nil
+                    occupiedSeconds > minimumOccupancy ? count / occupiedSeconds : nil
                 }
             )
         }
 
-        let legacy = try aggregateLegacyHDTuningRates(
-            unit.firingRatesHz,
+        let sourceRates: [Double?]
+        if smoothing {
+            let sigmaBins = try hdTuningSmoothingSigmaBins(
+                sigmaAtThirtyBins,
+                displayBins: hdRawBinCount
+            )
+            sourceRates = try circularGaussianSmoothMissingAware(
+                unit.firingRatesHz,
+                sigma: sigmaBins
+            )
+        } else {
+            sourceRates = unit.firingRatesHz
+        }
+        return try aggregateLegacyHDTuningRates(
+            sourceRates,
             displayBins: normalizedBins
-        )
-        guard smoothing else { return legacy }
-        let sigmaBins = try hdTuningSmoothingSigmaBins(
-            sigmaAtThirtyBins,
-            displayBins: normalizedBins
-        )
-        let values = legacy.firingRatesHz.map { $0 ?? 0.0 }
-        return ProcessedTuningCurve(
-            anglesDeg: legacy.anglesDeg,
-            firingRatesHz: try circularGaussianSmooth(values, sigma: sigmaBins).map(Optional.some)
         )
     }
 
@@ -538,7 +547,13 @@ final class TuningCurveData: @unchecked Sendable {
             measuredRateHz: try optionalFiniteNumber(object, key: "measured_rate_hz", context: "metadata.ttl_qc"),
             cameraInputChannel: try optionalInteger(object, key: "camera_input_channel", context: "metadata.ttl_qc"),
             cameraTTLThreshold: try optionalFiniteNumber(object, key: "camera_ttl_threshold", context: "metadata.ttl_qc"),
-            cameraTTLActiveHigh: try optionalBoolean(object, key: "camera_ttl_active_high", context: "metadata.ttl_qc")
+            cameraTTLActiveHigh: try optionalBoolean(object, key: "camera_ttl_active_high", context: "metadata.ttl_qc"),
+            rawMotiveFrameCount: try optionalInteger(object, key: "motive_frame_count_raw", context: "metadata.ttl_qc"),
+            matchedMotiveFrameCount: try optionalInteger(object, key: "matched_motive_frame_count", context: "metadata.ttl_qc"),
+            droppedMotiveFrameIDs: try optionalIntegerArray(object, key: "dropped_motive_frame_ids", context: "metadata.ttl_qc"),
+            frameAlignmentPolicyRequested: try optionalString(object, key: "frame_alignment_policy_requested", context: "metadata.ttl_qc"),
+            frameAlignmentPolicyApplied: try optionalString(object, key: "frame_alignment_policy_applied", context: "metadata.ttl_qc"),
+            frameTimestampMapping: try optionalString(object, key: "frame_timestamp_mapping", context: "metadata.ttl_qc")
         )
     }
 
@@ -591,6 +606,27 @@ final class TuningCurveData: @unchecked Sendable {
             throw TuningCurveError.invalidData("\(context).\(key) must be a boolean or null.")
         }
         return number.boolValue
+    }
+
+    private static func optionalIntegerArray(
+        _ object: [String: Any],
+        key: String,
+        context: String
+    ) throws -> [Int]? {
+        guard let rawValue = object[key], !(rawValue is NSNull) else { return nil }
+        guard let values = rawValue as? [Any] else {
+            throw TuningCurveError.invalidData(
+                "\(context).\(key) must be an integer list or null."
+            )
+        }
+        return try values.map { rawElement in
+            guard let value = strictInteger(rawElement) else {
+                throw TuningCurveError.invalidData(
+                    "\(context).\(key) must be an integer list or null."
+                )
+            }
+            return value
+        }
     }
 
     private static func strictInteger(_ rawValue: Any) -> Int? {
@@ -690,6 +726,27 @@ func circularGaussianSmooth(_ values: [Double], sigma: Double) throws -> [Double
     }
 }
 
+func circularGaussianSmoothMissingAware(
+    _ values: [Double?],
+    sigma: Double
+) throws -> [Double?] {
+    let observed = values.map { value -> Double in
+        guard let value, value.isFinite else { return 0.0 }
+        return 1.0
+    }
+    let numerator = try circularGaussianSmooth(
+        values.map { value in
+            guard let value, value.isFinite else { return 0.0 }
+            return value
+        },
+        sigma: sigma
+    )
+    let denominator = try circularGaussianSmooth(observed, sigma: sigma)
+    return zip(numerator, denominator).map { value, weight in
+        weight > 1e-12 ? value / weight : nil
+    }
+}
+
 private struct AggregatedHDTuningObservations {
     let anglesDeg: [Double]
     let spikeCounts: [Double]
@@ -697,7 +754,7 @@ private struct AggregatedHDTuningObservations {
 }
 
 private func aggregateHDTuningObservations(
-    spikeCounts: [Int],
+    spikeCounts: [Double],
     occupancyTimeSeconds: [Double],
     displayBins: Int
 ) throws -> AggregatedHDTuningObservations {
@@ -719,7 +776,7 @@ private func aggregateHDTuningObservations(
     occupancy.reserveCapacity(bins)
     for start in stride(from: 0, to: hdRawBinCount, by: groupSize) {
         let end = start + groupSize
-        counts.append(compensatedSum(spikeCounts[start..<end].map(Double.init)))
+        counts.append(compensatedSum(Array(spikeCounts[start..<end])))
         occupancy.append(compensatedSum(Array(occupancyTimeSeconds[start..<end])))
     }
     let width = 360.0 / Double(bins)

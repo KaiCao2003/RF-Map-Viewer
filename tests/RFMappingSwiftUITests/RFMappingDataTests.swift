@@ -168,6 +168,107 @@ final class RFMappingDataTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(rateMatrix[0][1]), 20.0, accuracy: 1e-12)
     }
 
+    func testSpatialGroupsPoolCountsAndUnequalPresentationExposure() throws {
+        let subject = try load(spatialEstimandPayload())
+        let yGroup = AxisGroup(start: 0, end: 0)
+        let xGroup = AxisGroup(start: 0, end: 1)
+
+        XCTAssertEqual(
+            try XCTUnwrap(subject.spatialGroupResponseValue(
+                unitIndex: 0,
+                yGroup: yGroup,
+                xGroup: xGroup,
+                start: 0,
+                end: 1,
+                valueMode: .spikesPerPresentation
+            )),
+            109.0 / 101.0,
+            accuracy: 1e-12
+        )
+        XCTAssertEqual(
+            try XCTUnwrap(subject.spatialGroupResponseValue(
+                unitIndex: 0,
+                yGroup: yGroup,
+                xGroup: xGroup,
+                start: 0,
+                end: 1,
+                valueMode: .meanFiringRate
+            )),
+            109.0 / 101.0 / 0.2,
+            accuracy: 1e-12
+        )
+        XCTAssertEqual(
+            try XCTUnwrap(subject.spatialGroupResponseValue(
+                unitIndex: 0,
+                yGroup: yGroup,
+                xGroup: xGroup,
+                start: 0,
+                end: 1,
+                valueMode: .spikeCount
+            )),
+            54.5,
+            accuracy: 1e-12
+        )
+    }
+
+    func testGroupedDelayAndEntropyUsePooledFullHistogram() throws {
+        let subject = try load(spatialEstimandPayload())
+        let metrics = subject.spatialGroupTemporalMetrics(
+            unitIndex: 0,
+            yGroup: AxisGroup(start: 0, end: 0),
+            xGroup: AxisGroup(start: 0, end: 1),
+            timeGroups: [AxisGroup(start: 0, end: 0), AxisGroup(start: 1, end: 1)]
+        )
+        let probabilities = [100.0 / 109.0, 9.0 / 109.0]
+        let expectedEntropy = -probabilities.reduce(0.0) {
+            $0 + $1 * log($1)
+        } / log(2.0)
+
+        XCTAssertEqual(metrics.peakGroupIndex, 0)
+        XCTAssertEqual(try XCTUnwrap(metrics.delayMS), 50.0, accuracy: 1e-12)
+        XCTAssertEqual(metrics.entropy, expectedEntropy, accuracy: 1e-12)
+        XCTAssertGreaterThan(metrics.entropy, 0.0)
+    }
+
+    func testDelayPeakUsesExactIntervalCountRateWhileCountsRemainSummed() throws {
+        let payload: [String: Any] = [
+            "unitsSpikeCounts": [[[[5.0, 5.0, 12.0]]]],
+            "unitsSpikeCountsSize": [1, 1, 1, 3],
+            "unitPool": [42],
+            "xPositions": [0.0],
+            "yPositions": [0.0],
+            "timeBinEdges": [0.0, 0.1, 0.2, 0.5]
+        ]
+        let subject = try load(payload)
+        let groups = [AxisGroup(start: 0, end: 1), AxisGroup(start: 2, end: 2)]
+
+        let metrics = subject.temporalMetrics(
+            histogram: [5.0, 5.0, 12.0],
+            timeGroups: groups
+        )
+
+        // Displayed/exported count sums remain 10 and 12. Delay compares
+        // 10 / 0.2 s with 12 / 0.3 s, so the first interval wins.
+        XCTAssertEqual(try subject.responseValue(
+            unitIndex: 0,
+            yIndex: 0,
+            xIndex: 0,
+            start: 0,
+            end: 1,
+            valueMode: .spikeCount
+        ), 10.0)
+        XCTAssertEqual(try subject.responseValue(
+            unitIndex: 0,
+            yIndex: 0,
+            xIndex: 0,
+            start: 2,
+            end: 2,
+            valueMode: .spikeCount
+        ), 12.0)
+        XCTAssertEqual(metrics.peakGroupIndex, 0)
+        XCTAssertEqual(try XCTUnwrap(metrics.delayMS), 100.0, accuracy: 1e-12)
+    }
+
     func testReversedRangesAreNormalizedWithoutDroppingBins() throws {
         let subject = try load(basePayload())
 
@@ -269,7 +370,9 @@ final class RFMappingDataTests: XCTestCase {
     }
 
     func testLegacyPayloadIsCountOnlyAndGatesNormalizedModes() throws {
-        let subject = try load(basePayload(withPresentations: false))
+        var payload = basePayload(withPresentations: false)
+        payload["unitsSpikeCounts"] = [[[[10.0, 20.0, 30.0], [0.0, 0.0, 0.0]]]]
+        let subject = try load(payload)
 
         XCTAssertFalse(subject.hasPresentationCounts)
         XCTAssertTrue(subject.supports(.spikeCount))
@@ -285,6 +388,29 @@ final class RFMappingDataTests: XCTestCase {
                 valueMode: .spikeCount
             )),
             10.0
+        )
+        XCTAssertEqual(
+            try XCTUnwrap(subject.responseValue(
+                unitIndex: 0,
+                yIndex: 0,
+                xIndex: 1,
+                start: 0,
+                end: 2,
+                valueMode: .spikeCount
+            )),
+            0.0
+        )
+        XCTAssertEqual(
+            try XCTUnwrap(subject.spatialGroupResponseValue(
+                unitIndex: 0,
+                yGroup: AxisGroup(start: 0, end: 0),
+                xGroup: AxisGroup(start: 0, end: 1),
+                start: 0,
+                end: 2,
+                valueMode: .spikeCount
+            )),
+            30.0,
+            accuracy: 1e-12
         )
 
         XCTAssertThrowsError(
@@ -327,6 +453,14 @@ final class RFMappingDataTests: XCTestCase {
             xIndex: 1,
             start: 0,
             end: 2,
+            valueMode: .spikeCount
+        ))
+        XCTAssertNil(try subject.responseValue(
+            unitIndex: 0,
+            yIndex: 0,
+            xIndex: 1,
+            start: 0,
+            end: 2,
             valueMode: .spikesPerPresentation
         ))
         XCTAssertNil(try subject.responseValue(
@@ -344,6 +478,40 @@ final class RFMappingDataTests: XCTestCase {
             valueMode: .meanFiringRate
         )
         XCTAssertNil(matrix[0][1])
+        let countMatrix = try subject.responseMatrix(
+            unitIndex: 0,
+            start: 0,
+            end: 2,
+            valueMode: .spikeCount
+        )
+        XCTAssertNil(countMatrix[0][1])
+        XCTAssertEqual(
+            try XCTUnwrap(subject.spatialGroupResponseValue(
+                unitIndex: 0,
+                yGroup: AxisGroup(start: 0, end: 0),
+                xGroup: AxisGroup(start: 0, end: 1),
+                start: 0,
+                end: 2,
+                valueMode: .spikeCount
+            )),
+            60.0,
+            accuracy: 1e-12
+        )
+        XCTAssertNil(try subject.spatialGroupResponseValue(
+            unitIndex: 0,
+            yGroup: AxisGroup(start: 0, end: 0),
+            xGroup: AxisGroup(start: 1, end: 1),
+            start: 0,
+            end: 2,
+            valueMode: .spikeCount
+        ))
+        XCTAssertEqual(
+            subject.spatialGroupSourcePixelCount(
+                yGroup: AxisGroup(start: 0, end: 0),
+                xGroup: AxisGroup(start: 0, end: 1)
+            ),
+            1
+        )
     }
 
     func testZeroPresentationsWithNonzeroCountsIsRejected() throws {
@@ -541,6 +709,18 @@ final class RFMappingDataTests: XCTestCase {
             payload["stimulusPresentationCounts"] = [[10.0, 5.0]]
         }
         return payload
+    }
+
+    private func spatialEstimandPayload() -> [String: Any] {
+        [
+            "unitsSpikeCounts": [[[[100.0, 0.0], [0.0, 9.0]]]],
+            "unitsSpikeCountsSize": [1, 1, 2, 2],
+            "unitPool": [42],
+            "xPositions": [-1.0, 1.0],
+            "yPositions": [0.0],
+            "timeBinEdges": [0.0, 0.1, 0.2],
+            "stimulusPresentationCounts": [[100.0, 1.0]]
+        ]
     }
 
     private func load(_ payload: [String: Any]) throws -> RFMappingData {

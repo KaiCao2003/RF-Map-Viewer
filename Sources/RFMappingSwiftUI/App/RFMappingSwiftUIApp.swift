@@ -304,8 +304,9 @@ private struct RFMappingWindow: View {
             nextUnit: { store.stepUnit(1) },
             previousBin: { store.stepBin(-1) },
             nextBin: { store.stepBin(1) },
-            decreaseResolution: { store.stepTimeResolution(-1.0) },
-            increaseResolution: { store.stepTimeResolution(1.0) },
+            // Resolution increases when the sampling interval becomes finer.
+            decreaseResolution: { store.stepTimeResolution(1.0) },
+            increaseResolution: { store.stepTimeResolution(-1.0) },
             showFullRange: store.clearTimelineSelection,
             selectTab: store.selectTab,
             toggleFlipY: { store.flipY.toggle() },
@@ -453,6 +454,8 @@ private struct RFMappingCommands: Commands {
         }
 
         CommandGroup(replacing: .help) {
+            Button("Keyboard Shortcuts") { showKeyboardShortcuts() }
+            Divider()
             Button("Support Documentation") { openSupportDocumentation() }
                 .keyboardShortcut("?", modifiers: [.command])
         }
@@ -605,6 +608,26 @@ private struct WindowShortcutMonitor: NSViewRepresentable {
             }
         }
     }
+}
+
+@MainActor
+private func showKeyboardShortcuts() {
+    let alert = NSAlert()
+    alert.alertStyle = .informational
+    alert.messageText = "Keyboard Shortcuts"
+    alert.informativeText = """
+    ← / →   Previous / next unit
+    ↑ / ↓   Previous / next timeline bin
+    ⇧, / ⇧.   Coarser / finer time resolution
+    1 / 2 / 3   RF / Delay–RGB / Timeline
+    F   Invert Y
+    P   Cycle palette
+    Esc   Show full time range
+    ⌘O   Open JSON in a new window
+    ⌘E   Export displayed values
+    """
+    alert.addButton(withTitle: "OK")
+    alert.runModal()
 }
 
 @MainActor

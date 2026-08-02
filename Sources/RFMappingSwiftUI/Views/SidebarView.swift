@@ -6,44 +6,39 @@ struct SidebarView: View {
     let pairingWindowID: UUID
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
-                titleSection
-                sectionCard { jsonSection }
-                sectionCard { unitSection }
-                sectionCard { displaySection }
-                sectionCard { pairingSection }
-                if !store.displayedCellText.isEmpty {
-                    sectionCard { selectedCellSection }
-                }
-                sectionCard { actionSection }
-                Spacer(minLength: 12)
+        List {
+            Section("Source") {
+                jsonSection
             }
-            .padding(12)
+
+            if store.hasData {
+                Section("Current Unit") {
+                    unitSummary
+                }
+
+                Section("Display") {
+                    displaySection
+                }
+
+                Section("Windows") {
+                    pairingSection
+                }
+
+                if !store.displayedCellText.isEmpty {
+                    Section("Selection") {
+                        selectedCellSection
+                    }
+                }
+            }
         }
-        .background(.bar)
+        .listStyle(.sidebar)
+        .scrollContentBackground(.hidden)
+        .background(.thinMaterial)
         .controlSize(.small)
     }
 
-    private func sectionCard<Content: View>(
-        @ViewBuilder content: () -> Content
-    ) -> some View {
-        content()
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(11)
-            .background(
-                Color(nsColor: .controlBackgroundColor),
-                in: RoundedRectangle(cornerRadius: 10, style: .continuous)
-            )
-            .overlay {
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .stroke(Color.secondary.opacity(0.12), lineWidth: 0.75)
-            }
-    }
-
     private var pairingSection: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            Text("Window pairing").font(.headline)
+        VStack(alignment: .leading, spacing: 5) {
             Toggle("Sync viewer windows", isOn: Binding(
                 get: { pairingCoordinator.isPairingEnabled },
                 set: { pairingCoordinator.setPairingEnabled($0, sourceID: pairingWindowID) }
@@ -69,23 +64,8 @@ struct SidebarView: View {
         }
     }
 
-    private var titleSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Label("RF Map Viewer", systemImage: "waveform.path.ecg.rectangle")
-                .font(.title3.weight(.semibold))
-            Text(store.dataSummary)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(4)
-                .textSelection(.enabled)
-        }
-        .padding(.horizontal, 4)
-        .padding(.vertical, 3)
-    }
-
     private var jsonSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Current JSON").font(.headline)
+        VStack(alignment: .leading, spacing: 7) {
             Picker("JSON", selection: Binding(
                 get: { store.selectedJSONPath },
                 set: { path in
@@ -100,52 +80,52 @@ struct SidebarView: View {
             }
             .labelsHidden()
             .disabled(store.isAwaitingStartupDocument || store.isLoadingData)
-            Button("Open…") { store.isImporting = true }
+            Text(store.dataSummary)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(3)
+                .textSelection(.enabled)
+                .help(store.data?.url.path ?? "No JSON loaded")
+            Button {
+                store.isImporting = true
+            } label: {
+                Label("Open JSON…", systemImage: "doc.badge.plus")
+            }
                 .disabled(store.isLoadingData)
         }
     }
 
-    private var unitSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Unit").font(.headline)
-            HStack(spacing: 6) {
-                Button { store.stepUnit(-1) } label: { Image(systemName: "chevron.left") }
-                    .accessibilityLabel("Previous unit")
-                    .help("Previous unit")
-
-                Picker("Unit", selection: Binding(
-                    get: { store.unitIndex },
-                    set: {
-                        store.unitIndex = $0
-                        store.selectedCell = nil
-                        store.clearHover()
-                        store.ensureSelectedCell()
-                    }
-                )) {
-                    if let data = store.data {
-                        ForEach(0..<data.nUnits, id: \.self) { index in
-                            Text("\(String(format: "%03d", index))  cluster \(data.clusterID(for: index))")
-                                .tag(index)
-                        }
-                    }
-                }
-                .labelsHidden()
-
-                Button { store.stepUnit(1) } label: { Image(systemName: "chevron.right") }
-                    .accessibilityLabel("Next unit")
-                    .help("Next unit")
+    @ViewBuilder
+    private var unitSummary: some View {
+        if let data = store.data {
+            let metrics = data.metrics(for: store.unitIndex)
+            let delay = metrics.delayMS[metrics.bestY][metrics.bestX]
+            LabeledContent("Spikes") {
+                Text(String(format: "%.0f", metrics.totalSpikes))
+                    .monospacedDigit()
             }
-
-            Text(store.unitStatsText)
-                .font(.callout.weight(.semibold))
-                .lineLimit(4)
+            LabeledContent("Best cell") {
+                Text("y\(metrics.bestY + 1) · x\(metrics.bestX + 1)")
+                    .monospacedDigit()
+            }
+            LabeledContent("Peak delay") {
+                Text(delay.map { String(format: "%.1f ms", $0) } ?? "n/a")
+                    .monospacedDigit()
+            }
         }
     }
 
     private var displaySection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Display").font(.headline)
-            Toggle("Invert Y (MATLAB flip)", isOn: $store.flipY)
+        VStack(alignment: .leading, spacing: 9) {
+            Picker("Map layout", selection: $store.spatialPlotFormat) {
+                ForEach(SpatialPlotFormat.allCases) { format in
+                    Text(format.rawValue).tag(format)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            Toggle("Invert Y", isOn: $store.flipY)
+                .help("Match MATLAB flip-y display convention")
 
             integerControl(
                 title: "X bins",
@@ -221,23 +201,13 @@ struct SidebarView: View {
     }
 
     private var selectedCellSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Selected cell").font(.headline)
-            Text(store.displayedCellText)
-                .font(.system(size: 11, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
+        Text(store.displayedCellText)
+            .font(.system(size: 11, design: .monospaced))
+            .foregroundStyle(.secondary)
+            .lineLimit(nil)
+            .fixedSize(horizontal: false, vertical: true)
+            .textSelection(.enabled)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private var actionSection: some View {
-        HStack(spacing: 8) {
-            Button("Export displayed") { store.prepareExport() }
-                .disabled(!store.hasData)
-            Button("Full range") { store.clearTimelineSelection() }
-                .disabled(!store.hasTimeSelection)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
 }

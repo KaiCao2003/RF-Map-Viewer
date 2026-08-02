@@ -5,22 +5,25 @@ struct ContentView: View {
     @Bindable var store: RFMappingStore
     @Bindable var pairingCoordinator: WindowPairingCoordinator
     @State private var preferences = ViewerPreferences.shared
+    @State private var columnVisibility: NavigationSplitViewVisibility = .all
     let pairingWindowID: UUID
     let openJSONInNewWindow: (URL) -> Void
 
     var body: some View {
-        HSplitView {
+        NavigationSplitView(columnVisibility: $columnVisibility) {
             SidebarView(
                 store: store,
                 pairingCoordinator: pairingCoordinator,
                 pairingWindowID: pairingWindowID
             )
-            .frame(minWidth: 270, idealWidth: 304, maxWidth: 360)
-
+            .navigationSplitViewColumnWidth(min: 236, ideal: 272, max: 320)
+        } detail: {
             mainContent
                 .frame(minWidth: 720)
         }
+        .navigationSplitViewStyle(.balanced)
         .background(Color(nsColor: .windowBackgroundColor))
+        .toolbar { viewerToolbar }
         .overlay {
             if store.isLoadingData {
                 ZStack {
@@ -143,8 +146,6 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if store.hasData {
             VStack(spacing: 0) {
-                HeaderView(store: store)
-                Divider()
                 PlotControlBar(store: store)
                 Divider()
                 PlotTabsView(store: store, preferences: preferences)
@@ -159,6 +160,95 @@ struct ContentView: View {
                     .keyboardShortcut("o", modifiers: [.command])
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    @ToolbarContentBuilder
+    private var viewerToolbar: some ToolbarContent {
+        ToolbarItemGroup(placement: .navigation) {
+            ControlGroup {
+                Button { store.stepUnit(-1) } label: {
+                    Image(systemName: "chevron.left")
+                }
+                .accessibilityLabel("Previous unit")
+                .help("Previous unit")
+                .disabled(!store.hasData)
+
+                unitPicker
+
+                Button { store.stepUnit(1) } label: {
+                    Image(systemName: "chevron.right")
+                }
+                .accessibilityLabel("Next unit")
+                .help("Next unit")
+                .disabled(!store.hasData)
+            }
+            .controlSize(.small)
+        }
+
+        ToolbarItem(placement: .principal) {
+            Picker("View", selection: $store.selectedTab) {
+                ForEach(PlotTab.allCases) { tab in
+                    Text(tab.rawValue).tag(tab)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(width: 320)
+            .disabled(!store.hasData)
+        }
+
+        ToolbarItemGroup(placement: .primaryAction) {
+            Button { store.isImporting = true } label: {
+                Label("Open JSON", systemImage: "doc.badge.plus")
+            }
+            .labelStyle(.iconOnly)
+            .help("Open JSON in a new window")
+
+            Button { store.prepareExport() } label: {
+                Label("Export Displayed", systemImage: "square.and.arrow.up")
+            }
+            .labelStyle(.iconOnly)
+            .help("Export displayed values")
+            .disabled(!store.hasData)
+
+            Menu {
+                Button("Attach Tuning Curves…") {
+                    store.isImportingTuning = true
+                }
+                SettingsLink {
+                    Label("Viewer Settings…", systemImage: "gearshape")
+                }
+            } label: {
+                Label("More", systemImage: "ellipsis.circle")
+            }
+            .help("More viewer actions")
+        }
+    }
+
+    @ViewBuilder
+    private var unitPicker: some View {
+        if let data = store.data {
+            Picker("Unit", selection: Binding(
+                get: { store.unitIndex },
+                set: {
+                    store.unitIndex = $0
+                    store.selectedCell = nil
+                    store.clearHover()
+                    store.ensureSelectedCell()
+                }
+            )) {
+                ForEach(0..<data.nUnits, id: \.self) { index in
+                    Text("Unit \(String(format: "%03d", index)) · Cluster \(data.clusterID(for: index))")
+                        .tag(index)
+                }
+            }
+            .labelsHidden()
+            .frame(width: 190)
+        } else {
+            Text("No unit")
+                .foregroundStyle(.secondary)
+                .frame(width: 190)
         }
     }
 }
@@ -189,131 +279,105 @@ private struct TuningAutoloadRequest: Hashable {
     let shouldLoad: Bool
 }
 
-private struct HeaderView: View {
-    @Bindable var store: RFMappingStore
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(store.headerTitle)
-                .font(.system(size: 17, weight: .semibold))
-            Text(store.statusText)
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-    }
-}
-
 private struct PlotControlBar: View {
     @Bindable var store: RFMappingStore
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 12) {
-                LabeledContent("Value") {
-                    Picker("Value", selection: Binding(
-                        get: { store.valueMode },
-                        set: { store.setValueMode($0) }
-                    )) {
-                        ForEach(ResponseValueMode.allCases) { mode in
-                            Text(mode.rawValue)
-                                .tag(mode)
-                                .disabled(mode.requiresPresentationCounts && !store.supportsNormalizedValues)
-                        }
+        HStack(spacing: 10) {
+            Picker("Metric", selection: Binding(
+                get: { store.valueMode },
+                set: { store.setValueMode($0) }
+            )) {
+                ForEach(ResponseValueMode.allCases) { mode in
+                    Text(mode.rawValue)
+                        .tag(mode)
+                        .disabled(mode.requiresPresentationCounts && !store.supportsNormalizedValues)
+                }
+            }
+            .frame(width: 188)
+
+            Divider().frame(height: 22)
+
+            compactTimeControl(
+                title: "Target width",
+                normalizedValue: Binding(
+                    get: { store.timeResolutionMS },
+                    set: {
+                        store.timeResolutionMS = $0
+                        store.timelineRangeAnchor = nil
+                        store.normalizeControls()
                     }
-                    .labelsHidden()
-                    .frame(width: 190)
-                }
+                ),
+                range: store.baseBinMS()...store.totalTimeMS(),
+                step: store.baseBinMS()
+            )
 
-                Divider().frame(height: 24)
+            Divider().frame(height: 22)
 
-                compactTimeControl(
-                    title: "Time resolution",
-                    normalizedValue: Binding(
-                        get: { store.timeResolutionMS },
-                        set: { store.timeResolutionMS = $0; store.timelineRangeAnchor = nil; store.normalizeControls() }
-                    ),
-                    range: store.baseBinMS()...store.totalTimeMS(),
-                    step: store.baseBinMS()
-                )
+            contextControls
 
-                Divider().frame(height: 24)
-
-                Toggle("Polar layout", isOn: Binding(
-                    get: { store.spatialPlotFormat == .polar },
-                    set: { store.spatialPlotFormat = $0 ? .polar : .rectangular }
-                ))
-                .toggleStyle(.switch)
-                .help("Off: rectangular spatial maps. On: polar spatial maps.")
-
-                Spacer(minLength: 0)
-            }
-
-            switch store.selectedTab {
-            case .rf:
-                HStack(spacing: 8) {
-                    Text("RF sum range (ms)")
-                        .foregroundStyle(.secondary)
-                    compactTimeControl(
-                        title: "Start",
-                        normalizedValue: Binding(
-                            get: { store.plotRangeStartMS },
-                            set: { store.plotRangeStartMS = $0; store.normalizePlotTimeRange() }
-                        ),
-                        range: store.timeAxisStartMS()...store.timeAxisEndMS(),
-                        step: store.baseBinMS(),
-                        showTitle: false,
-                        showUnit: false
-                    )
-                    Text("to").foregroundStyle(.secondary)
-                    compactTimeControl(
-                        title: "End",
-                        normalizedValue: Binding(
-                            get: { store.plotRangeEndMS },
-                            set: { store.plotRangeEndMS = $0; store.normalizePlotTimeRange() }
-                        ),
-                        range: store.timeAxisStartMS()...store.timeAxisEndMS(),
-                        step: store.baseBinMS(),
-                        showTitle: false,
-                        showUnit: false
-                    )
-                    Button("Reset 0–20") { store.resetPlotRangeToDefault() }
-                        .help("Use 0–20 ms, clamped and snapped to the available source bins")
-                    Text("Timeline remains full and independent")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                    Spacer(minLength: 0)
-                }
-            case .delayRGB:
-                HStack(spacing: 8) {
-                    Toggle("RGB composite", isOn: Binding(
-                        get: { store.delayRGBMode == .rgb },
-                        set: { store.delayRGBMode = $0 ? .rgb : .delay }
-                    ))
-                    .toggleStyle(.switch)
-                    .help("Off: delay only. On: RGB response/delay/entropy composite.")
-                    Text("Off: Delay   On: RGB")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                    Spacer(minLength: 0)
-                }
-            case .timeline:
-                HStack(spacing: 8) {
-                    Text("Timeline always shows the full time axis")
-                        .foregroundStyle(.secondary)
-                    Button("Clear selection") { store.clearTimelineSelection() }
-                        .disabled(!store.hasTimeSelection)
-                    Spacer(minLength: 0)
-                }
-            }
+            Spacer(minLength: 0)
         }
         .controlSize(.small)
         .padding(.horizontal, 12)
-        .padding(.vertical, 8)
+        .padding(.vertical, 7)
         .background(.bar)
+    }
+
+    @ViewBuilder
+    private var contextControls: some View {
+        switch store.selectedTab {
+        case .rf:
+            Text("RF window")
+                .foregroundStyle(.secondary)
+            compactTimeControl(
+                title: "Start",
+                normalizedValue: Binding(
+                    get: { store.plotRangeStartMS },
+                    set: { store.plotRangeStartMS = $0; store.normalizePlotTimeRange() }
+                ),
+                range: store.timeAxisStartMS()...store.timeAxisEndMS(),
+                step: store.baseBinMS(),
+                showTitle: false,
+                showUnit: false
+            )
+            Text("–").foregroundStyle(.tertiary)
+            compactTimeControl(
+                title: "End",
+                normalizedValue: Binding(
+                    get: { store.plotRangeEndMS },
+                    set: { store.plotRangeEndMS = $0; store.normalizePlotTimeRange() }
+                ),
+                range: store.timeAxisStartMS()...store.timeAxisEndMS(),
+                step: store.baseBinMS(),
+                showTitle: false,
+                showUnit: false
+            )
+            Text("ms").foregroundStyle(.secondary)
+            Button { store.resetPlotRangeToDefault() } label: {
+                Image(systemName: "arrow.counterclockwise")
+            }
+            .help("Reset the RF display window to 0–20 ms; the timeline remains full")
+            .accessibilityLabel("Reset RF display window")
+
+        case .delayRGB:
+            Picker("Map", selection: Binding(
+                get: { store.delayRGBMode },
+                set: { store.delayRGBMode = $0 }
+            )) {
+                Text("Delay").tag(DelayRGBMode.delay)
+                Text("RGB").tag(DelayRGBMode.rgb)
+            }
+            .pickerStyle(.segmented)
+            .frame(width: 142)
+            .help("RGB maps response, delay, and temporal entropy to color channels")
+
+        case .timeline:
+            Text("Full time axis")
+                .foregroundStyle(.secondary)
+            Button("Clear Selection") { store.clearTimelineSelection() }
+                .disabled(!store.hasTimeSelection)
+        }
     }
 
     private func compactTimeControl(
@@ -353,35 +417,24 @@ private struct PlotTabsView: View {
     @Bindable var preferences: ViewerPreferences
 
     var body: some View {
-        VStack(spacing: 0) {
-            Picker("View", selection: $store.selectedTab) {
-                ForEach(PlotTab.allCases) { tab in
-                    Text(tab.rawValue).tag(tab)
+        Group {
+            switch store.selectedTab {
+            case .rf:
+                RFTuningSplitView(store: store, preferences: preferences)
+            case .delayRGB:
+                if store.delayRGBMode == .rgb {
+                    RGBMapView(store: store)
+                } else if store.spatialPlotFormat == .polar {
+                    PolarMapView(store: store, kind: .delay)
+                } else {
+                    HeatmapView(store: store, kind: .delay)
                 }
+            case .timeline:
+                TimelineView(store: store)
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .padding([.horizontal, .top], 12)
-            .padding(.bottom, 8)
-
-            Group {
-                switch store.selectedTab {
-                case .rf:
-                    RFTuningSplitView(store: store, preferences: preferences)
-                case .delayRGB:
-                    if store.delayRGBMode == .rgb {
-                        RGBMapView(store: store)
-                    } else if store.spatialPlotFormat == .polar {
-                        PolarMapView(store: store, kind: .delay)
-                    } else {
-                        HeatmapView(store: store, kind: .delay)
-                    }
-                case .timeline:
-                    TimelineView(store: store)
-                }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(nsColor: .textBackgroundColor))
     }
 }
 
@@ -425,13 +478,13 @@ private struct RFTuningSplitView: View {
         } else {
             HSplitView {
                 rfMap
-                    .frame(minWidth: 420)
+                    .frame(minWidth: 520, idealWidth: 780)
                 HDTuningCurveView(
                     store: store,
                     preferences: preferences,
                     collapse: { isTuningCollapsed = true }
                 )
-                .frame(minWidth: 320, idealWidth: 430)
+                .frame(minWidth: 300, idealWidth: 350, maxWidth: 430)
             }
         }
     }

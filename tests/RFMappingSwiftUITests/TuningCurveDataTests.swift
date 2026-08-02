@@ -33,7 +33,7 @@ final class TuningCurveDataTests: XCTestCase {
                 "session": "260729_1",
                 "probe": "A",
                 "timebase": "open_ephys_adc_t0_relative_seconds",
-                "timestamp_reference": "motive_exposure_ttl_midpoint",
+                "timestamp_reference": "motive_frame_time_from_gated_exposure_pulse_centers",
                 "angle_convention_note": "0 degrees up, positive counter-clockwise",
                 "num_angle_bins": 180,
                 "feature_fs_hz": 120.006,
@@ -49,7 +49,13 @@ final class TuningCurveDataTests: XCTestCase {
                 "ttl_qc": [
                     "ttl_pulse_count": 478_692,
                     "measured_rate_hz": 120.006,
-                    "camera_ttl_active_high": true
+                    "camera_ttl_active_high": true,
+                    "motive_frame_count_raw": 478_692,
+                    "matched_motive_frame_count": 478_692,
+                    "dropped_motive_frame_ids": [],
+                    "frame_alignment_policy_requested": "strict",
+                    "frame_alignment_policy_applied": "strict_one_exposure_pulse_per_frame",
+                    "frame_timestamp_mapping": "one_gated_exposure_pulse_center_per_matched_motive_frame"
                 ]
             ]
         )
@@ -59,7 +65,10 @@ final class TuningCurveDataTests: XCTestCase {
         XCTAssertEqual(subject.schema, .version2)
         XCTAssertEqual(subject.unitIDs, [7])
         XCTAssertEqual(subject.hdClass(for: 7), .oneTestSignificant)
-        XCTAssertEqual(subject.metadata?.timestampReference, "motive_exposure_ttl_midpoint")
+        XCTAssertEqual(
+            subject.metadata?.timestampReference,
+            "motive_frame_time_from_gated_exposure_pulse_centers"
+        )
         XCTAssertEqual(
             subject.metadata?.classification?.method,
             "occupancy_adjusted_rayleigh_or_circular_shift_v1"
@@ -67,6 +76,13 @@ final class TuningCurveDataTests: XCTestCase {
         XCTAssertEqual(subject.metadata?.classification?.numberOfShuffles, 1000)
         XCTAssertEqual(subject.metadata?.ttlQC?.pulseCount, 478_692)
         XCTAssertEqual(subject.metadata?.ttlQC?.cameraTTLActiveHigh, true)
+        XCTAssertEqual(subject.metadata?.ttlQC?.rawMotiveFrameCount, 478_692)
+        XCTAssertEqual(subject.metadata?.ttlQC?.matchedMotiveFrameCount, 478_692)
+        XCTAssertEqual(subject.metadata?.ttlQC?.droppedMotiveFrameIDs, [])
+        XCTAssertEqual(
+            subject.metadata?.ttlQC?.frameAlignmentPolicyApplied,
+            "strict_one_exposure_pulse_per_frame"
+        )
 
         let processed = try XCTUnwrap(subject.processedCurve(
             for: 7,
@@ -125,12 +141,12 @@ final class TuningCurveDataTests: XCTestCase {
             sigmaAtThirtyBins: 1.5
         ))
         let pythonGolden = [
-            68.56321685550363,
-            36.2290617168899,
-            22.547650225074413,
-            22.068667571806824,
-            26.701135176419378,
-            32.51605979235437
+            69.38884552796897,
+            37.80938559371693,
+            23.619615308939817,
+            22.457267048062615,
+            26.781605881776276,
+            32.523482671131845
         ]
         for (actual, expected) in zip(processed.firingRatesHz.prefix(6), pythonGolden) {
             XCTAssertEqual(try XCTUnwrap(actual), expected, accuracy: 1e-11)
@@ -143,6 +159,71 @@ final class TuningCurveDataTests: XCTestCase {
         XCTAssertEqual(normalizeHDTuningBinCount(8), 6)
         XCTAssertEqual(normalizeHDTuningBinCount(181), 180)
         XCTAssertEqual(normalizeHDTuningBinCount(0), 1)
+    }
+
+    func testBoundaryImpulseSmoothingIsInvariantAcrossDisplayBins() throws {
+        let occupancy = Array(repeating: 1.0, count: hdRawBinCount)
+        var counts = Array(repeating: 0, count: hdRawBinCount)
+        counts[hdRawBinCount - 1] = hdRawBinCount
+        let rates = counts.map(Double.init)
+        let schemaV2 = try load(version2Payload(
+            occupancy: occupancy,
+            units: [version2Unit(
+                unitID: 7,
+                counts: counts,
+                occupancy: occupancy,
+                hdClass: 2
+            )]
+        ))
+        let legacy = try load(["7": rates])
+
+        for (schema, subject) in [("schema-v2", schemaV2), ("legacy", legacy)] {
+            var curves: [Int: ProcessedTuningCurve] = [:]
+            for bins in [6, 30, 180] {
+                curves[bins] = try XCTUnwrap(subject.processedCurve(
+                    for: 7,
+                    displayBins: bins,
+                    smoothing: true,
+                    sigmaAtThirtyBins: 1.5
+                ))
+            }
+            let fine = try XCTUnwrap(curves[180])
+            XCTAssertGreaterThan(try XCTUnwrap(fine.firingRatesHz[0]), 0.0, schema)
+            XCTAssertGreaterThan(
+                try XCTUnwrap(fine.firingRatesHz[hdRawBinCount - 1]),
+                0.0,
+                schema
+            )
+            for bins in [6, 30] {
+                let coarse = try XCTUnwrap(curves[bins])
+                let groupSize = hdRawBinCount / bins
+                for coarseIndex in 0..<bins {
+                    let start = coarseIndex * groupSize
+                    let fineRates = try fine.firingRatesHz[start..<(start + groupSize)].map {
+                        try XCTUnwrap($0)
+                    }
+                    let expected = fineRates.reduce(0.0, +) / Double(groupSize)
+                    XCTAssertEqual(
+                        try XCTUnwrap(coarse.firingRatesHz[coarseIndex]),
+                        expected,
+                        accuracy: 1e-12,
+                        "\(schema), \(bins) bins, group \(coarseIndex)"
+                    )
+                }
+            }
+        }
+    }
+
+    func testLegacySmoothingDoesNotTreatMissingRatesAsZeroHz() throws {
+        let smoothed = try circularGaussianSmoothMissingAware(
+            [nil, 4.0, nil],
+            sigma: 1.0
+        )
+
+        XCTAssertEqual(smoothed.count, 3)
+        for rate in smoothed {
+            XCTAssertEqual(try XCTUnwrap(rate), 4.0, accuracy: 1e-12)
+        }
     }
 
     func testLegacySchemaNormalizesIDsAndAveragesOnlyBecauseOccupancyIsUnavailable() throws {
@@ -205,6 +286,15 @@ final class TuningCurveDataTests: XCTestCase {
 
         let duplicate = version2Payload(occupancy: occupancy, units: [unit, unit])
         assertInvalid(duplicate, contains: "Duplicate schema v2 unit_id")
+
+        let invalidDroppedFrames = version2Payload(
+            occupancy: occupancy,
+            units: [unit],
+            metadata: [
+                "ttl_qc": ["dropped_motive_frame_ids": [1, 2.5]]
+            ]
+        )
+        assertInvalid(invalidDroppedFrames, contains: "dropped_motive_frame_ids")
 
         allZeroOccupancy["schema_version"] = 3
         assertInvalid(allZeroOccupancy, contains: "Unsupported tuning-curve schema version")
