@@ -870,14 +870,14 @@ class TuningCurveModelTests(unittest.TestCase):
                 sigma_bins = gui.tuning_smoothing_sigma(1.5, display_bins)
                 self.assertAlmostEqual(sigma_bins * 360.0 / display_bins, 18.0)
 
-    def test_line_plot_unwraps_head_direction_with_zero_in_the_center(self) -> None:
+    def test_line_plot_mirrors_head_direction_with_zero_in_the_center(self) -> None:
         angles, values = gui.center_tuning_curve_on_zero(
             (0.0, 90.0, 180.0, 270.0),
             (10.0, 20.0, 30.0, 40.0),
         )
 
         self.assertEqual(angles, (-180.0, -90.0, 0.0, 90.0))
-        self.assertEqual(values, (30.0, 40.0, 10.0, 20.0))
+        self.assertEqual(values, (30.0, 20.0, 10.0, 40.0))
 
         with self.assertRaisesRegex(ValueError, "same length"):
             gui.center_tuning_curve_on_zero((0.0,), ())
@@ -1213,6 +1213,18 @@ class ScientificScaleTests(unittest.TestCase):
             (0.0, 5.5),
         )
         self.assertEqual(gui.nonnegative_response_range([[None, 0.0]]), (0.0, 0.0))
+
+    def test_gray_restores_previous_contrast_range_only_for_gray(self) -> None:
+        matrix = [[None, 2.0], [5.5, float("nan")]]
+
+        self.assertEqual(gui.palette_response_range(matrix, "Gray"), (2.0, 5.5))
+        self.assertEqual(gui.palette_response_range(matrix, "Viridis"), (0.0, 5.5))
+        self.assertEqual(gui.palette_response_range(matrix, "Inferno"), (0.0, 5.5))
+
+        low, high = gui.palette_response_range([[10.0, 15.0, 20.0]], "Gray")
+        self.assertEqual(gui.palette_color(10.0, low, high, "Gray"), "#121212")
+        self.assertEqual(gui.palette_color(15.0, low, high, "Gray"), "#868686")
+        self.assertEqual(gui.palette_color(20.0, low, high, "Gray"), "#fafafa")
 
 
 class RFPlotRangeTests(unittest.TestCase):
@@ -2341,30 +2353,32 @@ class TimelineGeometryTests(unittest.TestCase):
         self.assertEqual(points[1::2], [50.0, 30.0, 10.0, 50.0])
         self.assertTrue(all(10.0 <= y <= 50.0 for y in points[1::2]))
 
-    def test_overlaid_response_traces_share_one_y_scale(self) -> None:
+    def test_overlaid_response_traces_use_independent_y_scales(self) -> None:
         rect = (0.0, 10.0, 100.0, 40.0)
-        high = gui.timeline_response_high([10.0, 5.0], [2.0, 2.0])
+        blue_high = gui.timeline_response_high([10.0, 5.0])
+        red_high = gui.timeline_response_high([2.0, 2.0])
 
         all_position_point = gui.timeline_chart_points(
             [2.0],
             [0.5],
             (0.0, 1.0),
-            high,
+            blue_high,
             rect,
         )
         selected_point = gui.timeline_chart_points(
             [2.0],
             [0.5],
             (0.0, 1.0),
-            high,
+            red_high,
             rect,
         )
 
-        self.assertEqual(high, 10.0)
-        self.assertEqual(all_position_point, selected_point)
-        self.assertEqual(selected_point[1], 42.0)
-        self.assertGreater(selected_point[1], rect[1])
-        self.assertEqual(gui.timeline_response_high([3.0], [12.0]), 12.0)
+        self.assertEqual(blue_high, 10.0)
+        self.assertEqual(red_high, 2.0)
+        self.assertEqual(all_position_point[1], 42.0)
+        self.assertEqual(selected_point[1], rect[1])
+        self.assertNotEqual(all_position_point, selected_point)
+        self.assertEqual(gui.timeline_response_high([]), 1.0)
 
     def test_timeline_bin_boundaries_are_half_open_in_physical_time(self) -> None:
         ends = [-50.0, 50.0, 200.0]

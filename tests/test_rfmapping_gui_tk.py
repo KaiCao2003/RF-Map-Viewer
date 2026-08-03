@@ -365,11 +365,11 @@ class TkViewerTests(unittest.TestCase):
     def test_tuning_line_axis_starts_at_zero_and_ends_at_displayed_peak(self) -> None:
         self.app.tuning_curve_canvas.delete("all")
         self.app._draw_tuning_line((0.0, 180.0, 360.0), (8.0, 12.0, 10.0), 7)
-        labels = {
+        labels = [
             self.app.tuning_curve_canvas.itemcget(item, "text")
             for item in self.app.tuning_curve_canvas.find_all()
             if self.app.tuning_curve_canvas.type(item) == "text"
-        }
+        ]
         self.assertIn("0", labels)
         self.assertIn("6", labels)
         self.assertIn("12", labels)
@@ -386,7 +386,20 @@ class TkViewerTests(unittest.TestCase):
             self.app.tuning_curve_canvas.coords(zero_tick)[0],
             (left + right) / 2.0,
         )
-        self.assertEqual(sum(label == "180" for label in labels), 1)
+        bottom = max(self.app.tuning_curve_canvas.winfo_height(), 220) - 44.0
+        direction_labels = sorted(
+            (
+                self.app.tuning_curve_canvas.coords(item)[0],
+                self.app.tuning_curve_canvas.itemcget(item, "text"),
+            )
+            for item in self.app.tuning_curve_canvas.find_all()
+            if self.app.tuning_curve_canvas.type(item) == "text"
+            and self.app.tuning_curve_canvas.coords(item)[1] == bottom + 16.0
+        )
+        self.assertEqual(
+            [label for _x, label in direction_labels],
+            ["180", "90", "0", "270", "180"],
+        )
 
     def test_compare_scale_uses_one_processed_peak_for_line_and_polar(self) -> None:
         tuning_path = Path(self.directory.name) / "tuning_curves.json"
@@ -1003,6 +1016,35 @@ class TkViewerTests(unittest.TestCase):
         self.app._draw_timeline()
         self.assertIsNot(self.app._timeline_preview_images[-1], first_atlas)
         self.assertNotEqual(self.app._timeline_preview_cache_key, first_cache_key)
+
+    def test_timeline_draws_separate_red_and_blue_y_axes(self) -> None:
+        self.app.selected_cell = (0, 0, 0, 0)
+        self.app._draw_timeline()
+        canvas = self.app.canvases["timeline"]
+        layout = self.app._canvas_layouts["timeline"]
+        chart_x = float(layout["chart_x"])
+        chart_y = float(layout["chart_y"])
+        chart_w = float(layout["chart_w"])
+        chart_h = float(layout["chart_h"])
+
+        def has_vertical_axis(x: float, fill: str) -> bool:
+            expected = [x, chart_y, x, chart_y + chart_h]
+            return any(
+                canvas.type(item) == "line"
+                and canvas.itemcget(item, "fill") == fill
+                and canvas.coords(item) == expected
+                for item in canvas.find_all()
+            )
+
+        self.assertTrue(has_vertical_axis(chart_x - 20, "#dc2626"))
+        self.assertTrue(has_vertical_axis(chart_x + chart_w + 20, "#2563eb"))
+        labels = [
+            canvas.itemcget(item, "text")
+            for item in canvas.find_all()
+            if canvas.type(item) == "text"
+        ]
+        self.assertIn("Selected cell", labels)
+        self.assertNotIn("Selected cell · same y", labels)
 
     def test_same_cell_hover_reuses_computed_text(self) -> None:
         self.app.notebook.select(0)

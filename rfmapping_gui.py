@@ -190,20 +190,15 @@ def timeline_chart_points(
     return points
 
 
-def timeline_response_high(
-    all_position_values: Sequence[float],
-    selected_position_values: Sequence[float] | None = None,
-) -> float:
-    """Return the shared non-negative y-axis maximum for overlaid traces."""
+def timeline_response_high(values: Sequence[float]) -> float:
+    """Return one trace's non-negative y-axis maximum."""
 
     high = 0.0
-    selected_values = selected_position_values if selected_position_values is not None else ()
-    for values in (all_position_values, selected_values):
-        for value in values:
-            numeric = float(value)
-            if math.isfinite(numeric):
-                high = max(high, numeric)
-    return high
+    for value in values:
+        numeric = float(value)
+        if math.isfinite(numeric):
+            high = max(high, numeric)
+    return max(high, 1.0)
 
 
 def timeline_bin_index(time_ms: float, end_bounds_ms: Sequence[float]) -> int | None:
@@ -1139,13 +1134,13 @@ def center_tuning_curve_on_zero(
     angles_deg: Sequence[float],
     rates: Sequence[float],
 ) -> tuple[tuple[float, ...], tuple[float, ...]]:
-    """Unwrap a circular HD curve onto -180..180 with 0 degrees centered."""
+    """Mirror a circular HD curve onto -180..180 with 0 degrees centered."""
 
     if len(angles_deg) != len(rates):
         raise ValueError("Tuning-curve angles and rates must have the same length.")
     centered = sorted(
         (
-            ((float(angle) + 180.0) % 360.0) - 180.0,
+            ((-float(angle) + 180.0) % 360.0) - 180.0,
             float(rate),
         )
         for angle, rate in zip(angles_deg, rates)
@@ -2469,6 +2464,21 @@ def nonnegative_response_range(
         default=0.0,
     )
     return 0.0, peak
+
+
+def palette_response_range(
+    matrix: list[list[float | None]],
+    palette: str,
+) -> tuple[float, float]:
+    """Return the response range used by each display palette.
+
+    Gray retains the previous Python viewer's contrast-stretched range, while
+    color palettes keep the explicit zero baseline.
+    """
+
+    if palette == "Gray":
+        return finite_min_max(matrix)
+    return nonnegative_response_range(matrix)
 
 
 def clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
@@ -6365,7 +6375,7 @@ class RFMViewer(tk.Toplevel):
         canvas.create_line(left, top, left, bottom, right, bottom, fill="#98a2b3")
         for angle, label in zip(
             (-180, -90, 0, 90, 180),
-            ("180", "270", "0", "90", "180"),
+            ("180", "90", "0", "270", "180"),
         ):
             x = left + plot_width * (angle + 180.0) / 360.0
             canvas.create_line(x, bottom, x, bottom + 4, fill="#98a2b3")
@@ -7999,7 +8009,7 @@ class RFMViewer(tk.Toplevel):
         x0 = margin_l + (plot_w - grid_w) / 2
         y0 = margin_t + (plot_h - grid_h) / 2
         if fixed_range is None:
-            low, high = nonnegative_response_range(disp)
+            low, high = palette_response_range(disp, palette)
         else:
             low, high = fixed_range
 
@@ -8225,7 +8235,7 @@ class RFMViewer(tk.Toplevel):
         low, high = (
             fixed_range
             if fixed_range is not None
-            else nonnegative_response_range(disp)
+            else palette_response_range(disp, palette)
         )
         total_deg = self.data.infer_total_deg()
         n_rows = len(y_groups)
@@ -8909,7 +8919,12 @@ class RFMViewer(tk.Toplevel):
                 float(value) if value is not None else 0.0
                 for value in selected_values_optional
             ]
-        response_high = timeline_response_high(time_totals, selected_values)
+        blue_high = timeline_response_high(time_totals)
+        red_high = (
+            timeline_response_high(selected_values)
+            if selected_values is not None
+            else None
+        )
         zero_x: float | None = None
         if axis_start_ms <= 0.0 <= axis_end_ms and axis_end_ms > axis_start_ms:
             zero_x = chart_x + chart_w * (0.0 - axis_start_ms) / (axis_end_ms - axis_start_ms)
@@ -8937,12 +8952,12 @@ class RFMViewer(tk.Toplevel):
         )
         if self.selected_cell is not None:
             canvas.create_line(chart_x + 196, legend_y, chart_x + 212, legend_y, fill="#dc2626", width=2)
-            canvas.create_text(chart_x + 217, legend_y, anchor="w", text="Selected cell · same y", fill="#dc2626", font=("TkDefaultFont", 10))
+            canvas.create_text(chart_x + 217, legend_y, anchor="w", text="Selected cell", fill="#dc2626", font=("TkDefaultFont", 10))
         points = timeline_chart_points(
             time_totals,
             time_group_centers_ms,
             (axis_start_ms, axis_end_ms),
-            response_high,
+            blue_high,
             (chart_x, chart_y, chart_w, chart_h),
         )
         if len(points) >= 4:
@@ -8957,11 +8972,12 @@ class RFMViewer(tk.Toplevel):
                 outline="",
             )
         if selected_values is not None:
+            assert red_high is not None
             selected_points = timeline_chart_points(
                 selected_values,
                 time_group_centers_ms,
                 (axis_start_ms, axis_end_ms),
-                response_high,
+                red_high,
                 (chart_x, chart_y, chart_w, chart_h),
             )
             if len(selected_points) >= 4:
@@ -8980,20 +8996,41 @@ class RFMViewer(tk.Toplevel):
                     fill="#dc2626",
                     outline="",
                 )
-        response_axis_x = chart_x + chart_w + 20
+        red_axis_x = chart_x - 20
+        blue_axis_x = chart_x + chart_w + 20
         axis_font = ("TkDefaultFont", 10)
-        canvas.create_line(response_axis_x, chart_y, response_axis_x, chart_y + chart_h, fill="#667085", width=1)
-        canvas.create_line(response_axis_x, chart_y, response_axis_x + 4, chart_y, fill="#667085")
-        canvas.create_line(response_axis_x, chart_y + chart_h, response_axis_x + 4, chart_y + chart_h, fill="#667085")
+        if red_high is not None:
+            canvas.create_line(red_axis_x, chart_y, red_axis_x, chart_y + chart_h, fill="#dc2626", width=1)
+            canvas.create_line(red_axis_x - 4, chart_y, red_axis_x, chart_y, fill="#dc2626")
+            canvas.create_line(red_axis_x - 4, chart_y + chart_h, red_axis_x, chart_y + chart_h, fill="#dc2626")
+            canvas.create_text(
+                red_axis_x - 7,
+                chart_y,
+                anchor="e",
+                text=format_response_value(red_high, self.value_mode_var.get()),
+                fill="#dc2626",
+                font=axis_font,
+            )
+            canvas.create_text(
+                red_axis_x - 7,
+                chart_y + chart_h,
+                anchor="e",
+                text="0",
+                fill="#dc2626",
+                font=axis_font,
+            )
+        canvas.create_line(blue_axis_x, chart_y, blue_axis_x, chart_y + chart_h, fill="#2563eb", width=1)
+        canvas.create_line(blue_axis_x, chart_y, blue_axis_x + 4, chart_y, fill="#2563eb")
+        canvas.create_line(blue_axis_x, chart_y + chart_h, blue_axis_x + 4, chart_y + chart_h, fill="#2563eb")
         canvas.create_text(
-            response_axis_x + 7,
+            blue_axis_x + 7,
             chart_y,
             anchor="w",
-            text=format_response_value(response_high, self.value_mode_var.get()),
-            fill="#667085",
+            text=format_response_value(blue_high, self.value_mode_var.get()),
+            fill="#2563eb",
             font=axis_font,
         )
-        canvas.create_text(response_axis_x + 7, chart_y + chart_h, anchor="w", text="0", fill="#667085", font=axis_font)
+        canvas.create_text(blue_axis_x + 7, chart_y + chart_h, anchor="w", text="0", fill="#2563eb", font=axis_font)
         if self._has_time_selection():
             selected_start_ms, selected_end_ms = self._timeline_selected_time_bounds_ms()
             time_span_ms = max(axis_end_ms - axis_start_ms, self._base_bin_ms())
@@ -9199,7 +9236,7 @@ class RFMViewer(tk.Toplevel):
         last_col_count = min(cols, len(visible_bins))
         content_right = max(
             w,
-            response_axis_x + 54,
+            blue_axis_x + 54,
             mini_left
             + last_col_count * slot_w
             + max(0, last_col_count - 1) * gap_x

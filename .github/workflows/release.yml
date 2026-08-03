@@ -81,7 +81,7 @@ jobs:
       - name: Inspect archive
         run: |
           unzip -tq dist/python/RF_Map_Viewer-python-macos-arm64.zip
-          test "$(unzip -p dist/python/RF_Map_Viewer-python-macos-arm64.zip 'RF Map Viewer.app/Contents/Info.plist' | plutil -extract CFBundleShortVersionString raw -o - -)" = "1.8.0"
+          test "$(unzip -p dist/python/RF_Map_Viewer-python-macos-arm64.zip 'RF Map Viewer.app/Contents/Info.plist' | plutil -extract CFBundleShortVersionString raw -o - -)" = "1.8.2"
           test "$(unzip -p dist/python/RF_Map_Viewer-python-macos-arm64.zip 'RF Map Viewer.app/Contents/Info.plist' | plutil -extract LSMinimumSystemVersion raw -o - -)" = "14.0"
           if unzip -Z1 dist/python/RF_Map_Viewer-python-macos-arm64.zip | grep -Eq '(^|/)__MACOSX/|(^|/)\._'; then
             echo "Archive contains AppleDouble metadata" >&2
