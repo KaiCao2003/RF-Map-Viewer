@@ -118,6 +118,19 @@ struct UnitMetrics: Sendable {
     let bestX: Int
 }
 
+struct SpatialGroupObservations: Sendable {
+    let count: Double
+    let presentations: Double?
+    let sourcePixelCount: Int
+}
+
+struct SpatialGroupTemporalMetrics: Sendable {
+    let meanTotalCount: Double
+    let peakGroupIndex: Int?
+    let delayMS: Double?
+    let entropy: Double
+}
+
 struct TimelineMatrixSnapshot {
     let timeGroups: [AxisGroup]
     let matrices: [OptionalMatrix]

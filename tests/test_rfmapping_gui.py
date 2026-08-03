@@ -1,4 +1,6 @@
+import hashlib
 import json
+import math
 import tempfile
 import unittest
 from dataclasses import replace
@@ -67,6 +69,168 @@ class RFMappingRateTests(unittest.TestCase):
         new_matrix = data.response_matrix(0, 1, 2, gui.VALUE_MODE_COUNT)
         self.assertEqual(new_matrix, old_matrix)
 
+    def test_spatial_groups_pool_counts_and_unequal_presentations(self) -> None:
+        payload = {
+            "unitsSpikeCounts": [[[[100, 0], [0, 9]]]],
+            "unitsSpikeCountsSize": [1, 1, 2, 2],
+            "unitPool": [42],
+            "xPositions": [-1, 1],
+            "yPositions": [0],
+            "timeBinEdges": [0, 0.1, 0.2],
+            "stimulusPresentationCounts": [[100, 1]],
+        }
+        data = self.load(payload)
+
+        self.assertAlmostEqual(
+            data.spatial_group_response_value(
+                0,
+                (0, 0),
+                (0, 1),
+                0,
+                1,
+                gui.VALUE_MODE_PER_PRESENTATION,
+            ),
+            109 / 101,
+        )
+        self.assertAlmostEqual(
+            data.spatial_group_response_value(
+                0,
+                (0, 0),
+                (0, 1),
+                0,
+                1,
+                gui.VALUE_MODE_RATE,
+            ),
+            109 / 101 / 0.2,
+        )
+        self.assertEqual(
+            data.spatial_group_response_value(
+                0,
+                (0, 0),
+                (0, 1),
+                0,
+                1,
+                gui.VALUE_MODE_COUNT,
+            ),
+            54.5,
+        )
+
+    def test_grouped_delay_and_entropy_use_the_pooled_full_histogram(self) -> None:
+        payload = {
+            "unitsSpikeCounts": [[[[100, 0], [0, 9]]]],
+            "unitsSpikeCountsSize": [1, 1, 2, 2],
+            "unitPool": [42],
+            "xPositions": [-1, 1],
+            "yPositions": [0],
+            "timeBinEdges": [0, 0.1, 0.2],
+            "stimulusPresentationCounts": [[100, 1]],
+        }
+        data = self.load(payload)
+        metrics = data.spatial_group_temporal_metrics(
+            0,
+            (0, 0),
+            (0, 1),
+            [(0, 0), (1, 1)],
+        )
+        expected_entropy = -sum(
+            probability * math.log(probability)
+            for probability in (100 / 109, 9 / 109)
+        ) / math.log(2)
+
+        self.assertEqual(metrics.peak_group_index, 0)
+        self.assertEqual(metrics.delay_ms, 50.0)
+        self.assertAlmostEqual(metrics.entropy, expected_entropy)
+        self.assertGreater(metrics.entropy, 0.0)
+
+        viewer = SimpleNamespace(
+            data=data,
+            _x_groups=lambda: [(0, 1)],
+            _display_y_groups=lambda: [(0, 0)],
+            _selected_local_unit_index=lambda: 0,
+            _time_groups=lambda: [(0, 0), (1, 1)],
+            _smooth_radius=lambda: 0,
+        )
+        delay, entropy, _x_groups, _y_groups = (
+            gui.RFMViewer._grouped_temporal_metric_matrices(
+                viewer,
+                0.0,
+                smooth=False,
+            )
+        )
+        self.assertEqual(delay, [[50.0]])
+        self.assertAlmostEqual(entropy[0][0], expected_entropy)
+
+        viewer._x_groups = lambda: [(0, 0), (1, 1)]
+        viewer._smooth_radius = lambda: 1
+        smoothed_delay, smoothed_entropy, _x_groups, _y_groups = (
+            gui.RFMViewer._grouped_temporal_metric_matrices(
+                viewer,
+                0.0,
+                smooth=True,
+            )
+        )
+        self.assertEqual(smoothed_delay, [[50.0, 50.0]])
+        self.assertGreater(smoothed_entropy[0][0], 0.0)
+        self.assertGreater(smoothed_entropy[0][1], 0.0)
+
+    def test_delay_peak_uses_exact_interval_count_rate_while_counts_stay_summed(self) -> None:
+        payload = {
+            "unitsSpikeCounts": [[[[5, 5, 12]]]],
+            "unitsSpikeCountsSize": [1, 1, 1, 3],
+            "unitPool": [42],
+            "xPositions": [0],
+            "yPositions": [0],
+            "timeBinEdges": [0.0, 0.1, 0.2, 0.5],
+        }
+        data = self.load(payload)
+        groups = [(0, 1), (2, 2)]
+
+        metrics = data.temporal_metrics_from_histogram([5, 5, 12], groups)
+
+        # Count sums stay 10 and 12. Delay compares 10 / 0.2 s with
+        # 12 / 0.3 s, so the first physical interval wins.
+        self.assertEqual(data.response_value(0, 0, 0, 0, 1, gui.VALUE_MODE_COUNT), 10)
+        self.assertEqual(data.response_value(0, 0, 0, 2, 2, gui.VALUE_MODE_COUNT), 12)
+        self.assertEqual(metrics.peak_group_index, 0)
+        self.assertEqual(metrics.delay_ms, 100.0)
+
+    def test_normalized_spatial_smoothing_smooths_counts_and_exposure(self) -> None:
+        payload = {
+            "unitsSpikeCounts": [[[[100], [9]]]],
+            "unitsSpikeCountsSize": [1, 1, 2, 1],
+            "unitPool": [42],
+            "xPositions": [-1, 1],
+            "yPositions": [0],
+            "timeBinEdges": [0, 0.1],
+            "stimulusPresentationCounts": [[100, 1]],
+        }
+        data = self.load(payload)
+        viewer = SimpleNamespace(
+            data=data,
+            value_mode_var=mock.Mock(),
+            _x_groups=lambda: [(0, 0), (1, 1)],
+            _display_y_groups=lambda: [(0, 0)],
+            _selected_local_unit_index=lambda: 0,
+            _smooth_radius=lambda: 1,
+        )
+        viewer.value_mode_var.get.return_value = gui.VALUE_MODE_RATE
+        matrix, _x_groups, _y_groups = gui.RFMViewer._prepare_response_plot_matrix(
+            viewer,
+            0,
+            0,
+            smooth=True,
+        )
+
+        self.assertAlmostEqual(matrix[0][0], ((4 * 100 + 2 * 9) / (4 * 100 + 2 * 1)) / 0.1)
+        self.assertAlmostEqual(matrix[0][1], ((4 * 9 + 2 * 100) / (4 * 1 + 2 * 100)) / 0.1)
+        self.assertNotAlmostEqual(matrix[0][0], (4 * 10 + 2 * 90) / 6)
+
+    def test_best_cell_does_not_force_full_metrics(self) -> None:
+        data = self.load(base_payload())
+        self.assertEqual(data.best_cell(0), (0, 0))
+        self.assertEqual(data._metrics_cache, {})
+        self.assertEqual(data.best_cell(0), (0, 0))
+
     def test_reversed_range_is_normalized_without_losing_bins(self) -> None:
         data = self.load(base_payload())
         forward = data.response_value(0, 0, 0, 0, 2, gui.VALUE_MODE_RATE)
@@ -75,9 +239,26 @@ class RFMappingRateTests(unittest.TestCase):
         self.assertAlmostEqual(data.time_span_seconds(2, 0), 0.3)
 
     def test_legacy_json_remains_count_only(self) -> None:
-        data = self.load(base_payload(with_presentations=False))
+        payload = base_payload(with_presentations=False)
+        payload["unitsSpikeCounts"][0][0][1] = [0, 0, 0]
+        data = self.load(payload)
         self.assertTrue(data.supports_value_mode(gui.VALUE_MODE_COUNT))
         self.assertFalse(data.supports_value_mode(gui.VALUE_MODE_RATE))
+        self.assertEqual(
+            data.response_value(0, 0, 1, 0, 2, gui.VALUE_MODE_COUNT),
+            0.0,
+        )
+        self.assertEqual(
+            data.spatial_group_response_value(
+                0,
+                (0, 0),
+                (0, 1),
+                0,
+                2,
+                gui.VALUE_MODE_COUNT,
+            ),
+            30.0,
+        )
         with self.assertRaisesRegex(ValueError, "stimulusPresentationCounts"):
             data.response_matrix(0, 0, 0, gui.VALUE_MODE_RATE)
 
@@ -87,6 +268,64 @@ class RFMappingRateTests(unittest.TestCase):
         payload["stimulusPresentationCounts"][0][1] = 0
         data = self.load(payload)
         self.assertIsNone(data.response_value(0, 0, 1, 0, 2, gui.VALUE_MODE_RATE))
+        self.assertIsNone(data.response_value(0, 0, 1, 0, 2, gui.VALUE_MODE_COUNT))
+        self.assertIsNone(data.response_matrix(0, 0, 2, gui.VALUE_MODE_COUNT)[0][1])
+        self.assertEqual(
+            data.spatial_group_response_value(
+                0,
+                (0, 0),
+                (0, 1),
+                0,
+                2,
+                gui.VALUE_MODE_COUNT,
+            ),
+            60.0,
+        )
+        self.assertIsNone(
+            data.spatial_group_response_value(
+                0,
+                (0, 0),
+                (1, 1),
+                0,
+                2,
+                gui.VALUE_MODE_COUNT,
+            )
+        )
+        self.assertEqual(
+            data.spatial_group_source_pixel_count((0, 0), (0, 1)),
+            1,
+        )
+
+    def test_zero_exposure_count_stays_missing_after_display_smoothing(self) -> None:
+        payload = base_payload()
+        payload["unitsSpikeCounts"][0][0][1] = [0, 0, 0]
+        payload["stimulusPresentationCounts"][0][1] = 0
+        data = self.load(payload)
+        viewer = SimpleNamespace(
+            data=data,
+            value_mode_var=mock.Mock(),
+            _x_groups=lambda: [(0, 0), (1, 1)],
+            _display_y_groups=lambda: [(0, 0)],
+            _selected_local_unit_index=lambda: 0,
+            _smooth_radius=lambda: 1,
+        )
+        viewer.value_mode_var.get.return_value = gui.VALUE_MODE_COUNT
+
+        matrix, _x_groups, _y_groups = gui.RFMViewer._prepare_response_plot_matrix(
+            viewer,
+            0,
+            2,
+            smooth=True,
+        )
+
+        self.assertEqual(matrix[0][0], 60.0)
+        self.assertIsNone(matrix[0][1])
+
+    def test_repeated_spatial_smoothing_does_not_impute_missing_centers(self) -> None:
+        self.assertEqual(
+            gui.smooth_matrix([[60.0, None, 30.0]], 2),
+            [[60.0, None, 30.0]],
+        )
 
     def test_zero_presentations_with_nonzero_counts_is_rejected(self) -> None:
         payload = base_payload()
@@ -128,6 +367,584 @@ class RFMappingRateTests(unittest.TestCase):
             self.load(payload)
 
 
+class ViewerSettingsTests(unittest.TestCase):
+    def test_platform_settings_paths_use_native_locations_and_fallbacks(self) -> None:
+        home = Path("/Users/tester")
+        self.assertEqual(
+            gui.viewer_settings_path(platform="darwin", environ={}, home=home),
+            home / "Library" / "Application Support" / "RF Map Viewer" / "settings.json",
+        )
+        self.assertEqual(
+            gui.viewer_settings_path(
+                platform="win32",
+                environ={"APPDATA": r"C:\Users\tester\AppData\Roaming"},
+                home=Path(r"C:\Users\tester"),
+            ),
+            Path(r"C:\Users\tester\AppData\Roaming") / "RF Map Viewer" / "settings.json",
+        )
+        self.assertEqual(
+            gui.viewer_settings_path(platform="win32", environ={}, home=home),
+            home / "AppData" / "Roaming" / "RF Map Viewer" / "settings.json",
+        )
+        self.assertEqual(
+            gui.viewer_settings_path(
+                platform="linux",
+                environ={"XDG_CONFIG_HOME": "/var/config/tester"},
+                home=home,
+            ),
+            Path("/var/config/tester/rf-map-viewer/settings.json"),
+        )
+        self.assertEqual(
+            gui.viewer_settings_path(platform="linux", environ={}, home=home),
+            home / ".config" / "rf-map-viewer" / "settings.json",
+        )
+
+    def test_settings_save_and_load_round_trip_through_default_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "nested" / "settings.json"
+            settings = replace(
+                gui.ViewerSettings(),
+                show_tuning_curve=False,
+                rf_sum_start_ms=-50.0,
+                rf_sum_end_ms=125.0,
+                rf_palette="Inferno",
+                tuning_plot_mode="Line",
+                tuning_layout="Stacked",
+                tuning_display_bins=36,
+                tuning_smoothing=False,
+                tuning_compare_scale=True,
+            )
+            with mock.patch.object(gui, "viewer_settings_path", return_value=path):
+                written = gui.save_viewer_settings(settings)
+                loaded = gui.load_viewer_settings()
+
+            self.assertEqual(written, path)
+            self.assertEqual(loaded, settings)
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["schema_version"], 1)
+            self.assertTrue(
+                json.loads(path.read_text(encoding="utf-8"))["tuning_compare_scale"]
+            )
+            self.assertEqual(list(path.parent.glob("*.tmp")), [])
+
+    def test_missing_malformed_and_unknown_schema_settings_use_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.json"
+            self.assertEqual(gui.load_viewer_settings(path), gui.ViewerSettings())
+
+            path.write_text("not JSON", encoding="utf-8")
+            self.assertEqual(gui.load_viewer_settings(path), gui.ViewerSettings())
+
+            path.write_text(json.dumps(["not", "a", "mapping"]), encoding="utf-8")
+            self.assertEqual(gui.load_viewer_settings(path), gui.ViewerSettings())
+
+            path.write_text(json.dumps({"schema_version": 99}), encoding="utf-8")
+            self.assertEqual(gui.load_viewer_settings(path), gui.ViewerSettings())
+
+    def test_invalid_settings_fall_back_per_field_without_discarding_valid_fields(self) -> None:
+        defaults = gui.ViewerSettings()
+        settings = gui.ViewerSettings.from_mapping(
+            {
+                "schema_version": gui.SETTINGS_SCHEMA_VERSION,
+                "show_tuning_curve": 1,
+                "auto_load_tuning_curve": False,
+                "show_probe_layout": "yes",
+                "auto_load_probe_layout": False,
+                "rf_sum_start_ms": 20,
+                "rf_sum_end_ms": 10,
+                "rf_time_resolution_ms": 0,
+                "rf_value_mode": "unsupported",
+                "rf_x_bins": -2,
+                "rf_y_bins": 17,
+                "rf_smooth_radius": 50,
+                "rf_flip_y": True,
+                "rf_palette": "Viridis",
+                "rf_polar_radius": "unsupported",
+                "rf_polar_layout": True,
+                "rf_rgb_mode": "yes",
+                "default_viewer_tab": "settings",
+                "tuning_plot_mode": "Radar",
+                "tuning_layout": "Diagonal",
+                "tuning_display_bins": 8,
+                "tuning_smoothing": False,
+                "tuning_smooth_sigma": math.inf,
+                "tuning_compare_scale": "yes",
+            }
+        )
+
+        self.assertEqual(settings.show_tuning_curve, defaults.show_tuning_curve)
+        self.assertFalse(settings.auto_load_tuning_curve)
+        self.assertEqual(settings.show_probe_layout, defaults.show_probe_layout)
+        self.assertFalse(settings.auto_load_probe_layout)
+        self.assertEqual(
+            (settings.rf_sum_start_ms, settings.rf_sum_end_ms),
+            (defaults.rf_sum_start_ms, defaults.rf_sum_end_ms),
+        )
+        self.assertEqual(settings.rf_time_resolution_ms, defaults.rf_time_resolution_ms)
+        self.assertEqual(settings.rf_value_mode, defaults.rf_value_mode)
+        self.assertEqual(settings.rf_x_bins, 0)
+        self.assertEqual(settings.rf_y_bins, 17)
+        self.assertEqual(settings.rf_smooth_radius, 3)
+        self.assertTrue(settings.rf_flip_y)
+        self.assertEqual(settings.rf_palette, "Viridis")
+        self.assertEqual(settings.rf_polar_radius, defaults.rf_polar_radius)
+        self.assertTrue(settings.rf_polar_layout)
+        self.assertEqual(settings.rf_rgb_mode, defaults.rf_rgb_mode)
+        self.assertEqual(settings.default_viewer_tab, defaults.default_viewer_tab)
+        self.assertEqual(settings.tuning_plot_mode, defaults.tuning_plot_mode)
+        self.assertEqual(settings.tuning_layout, defaults.tuning_layout)
+        self.assertEqual(settings.tuning_display_bins, 6)
+        self.assertFalse(settings.tuning_smoothing)
+        self.assertEqual(settings.tuning_smooth_sigma, defaults.tuning_smooth_sigma)
+        self.assertEqual(settings.tuning_compare_scale, defaults.tuning_compare_scale)
+
+
+class TuningCurveModelTests(unittest.TestCase):
+    @staticmethod
+    def rates(offset: float = 0.0) -> list[float]:
+        return [offset + float(index) for index in range(gui.HD_RAW_BIN_COUNT)]
+
+    def load(self, payload: object) -> gui.TuningCurveData:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        path = Path(directory.name) / "tuning_curves.json"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        return gui.TuningCurveData.load(path)
+
+    def test_hd_display_bin_count_uses_greatest_divisor_at_or_below_request(self) -> None:
+        self.assertEqual(gui.normalize_hd_bin_count(8), 6)
+        self.assertEqual(gui.normalize_hd_bin_count(30), 30)
+        self.assertEqual(gui.normalize_hd_bin_count(0), 1)
+        self.assertEqual(gui.normalize_hd_bin_count(-10), 1)
+        self.assertEqual(gui.normalize_hd_bin_count(181), 180)
+
+    def test_valid_tuning_curve_schema_normalizes_cluster_ids_and_rates(self) -> None:
+        data = self.load({"42": self.rates(), "007": self.rates(1.5)})
+
+        self.assertEqual(set(data.curves), {7, 42})
+        self.assertEqual(data.rates_for(42), tuple(self.rates()))
+        self.assertEqual(data.rates_for(7), tuple(self.rates(1.5)))
+        self.assertIsNone(data.rates_for(99))
+        self.assertTrue(data.path.is_absolute())
+
+    def test_schema_v2_loads_classes_and_aggregates_counts_over_occupancy(self) -> None:
+        occupancy = [1.0] * gui.HD_RAW_BIN_COUNT
+        occupancy[5] = 5.0
+        counts = [0] * gui.HD_RAW_BIN_COUNT
+        counts[0] = 10
+        rates = [count / occupied for count, occupied in zip(counts, occupancy)]
+        second_counts = [2] * gui.HD_RAW_BIN_COUNT
+        second_rates = [count / occupied for count, occupied in zip(second_counts, occupancy)]
+        data = self.load(
+            {
+                "schema_version": 2,
+                "metadata": {
+                    "session": "260730_1",
+                    "probe": "ProbeA",
+                    "timebase": "Open Ephys ADC seconds",
+                    "timestamp_reference": "Exposure TTL rising edge",
+                    "angle_convention_note": "0° up; positive counterclockwise",
+                    "num_angle_bins": 180,
+                    "feature_fs_hz": 119.82,
+                    "classification": {
+                        "method": "Rayleigh and circular shuffle",
+                        "rayleigh_alpha": 0.05,
+                        "shuffle_alpha": 0.01,
+                        "num_shuffle": 1000,
+                        "shuffle_seed": 7,
+                    },
+                    "ttl_qc": {
+                        "ttl_pulse_count": 12_345,
+                        "median_period_s": 0.008346,
+                        "measured_rate_hz": 119.82,
+                        "camera_input_channel": 2,
+                        "camera_ttl_threshold": 1.5,
+                        "camera_ttl_active_high": True,
+                        "motive_frame_count_raw": 451_971,
+                        "matched_motive_frame_count": 451_970,
+                        "dropped_motive_frame_ids": [451_970],
+                        "frame_alignment_policy_requested": "drop_unmatched_last_frame",
+                        "frame_alignment_policy_applied": "drop_unmatched_last_frame",
+                        "frame_timestamp_mapping": "one_gated_exposure_pulse_center_per_matched_motive_frame",
+                    },
+                },
+                "angle_bin_edges_deg": [2.0 * index for index in range(181)],
+                "occupancy_time_s": occupancy,
+                "units": [
+                    {
+                        "unit_id": 7,
+                        "spike_counts": counts,
+                        "firing_rate_hz": rates,
+                        "hd_class": 1,
+                    },
+                    {
+                        "unit_id": 8,
+                        "spike_counts": second_counts,
+                        "firing_rate_hz": second_rates,
+                        "hd_class": 2,
+                    },
+                ],
+            }
+        )
+
+        self.assertEqual(data.hd_class_for(7), 1)
+        self.assertEqual(data.hd_class_for(8), 2)
+        self.assertIsNone(data.hd_class_for(99))
+        self.assertIsNotNone(data.metadata)
+        self.assertEqual(data.metadata.timestamp_reference, "Exposure TTL rising edge")
+        self.assertEqual(
+            data.metadata.angle_convention_note,
+            "0° up; positive counterclockwise",
+        )
+        self.assertEqual(data.metadata.classification.num_shuffle, 1000)
+        self.assertEqual(data.metadata.ttl_qc.ttl_pulse_count, 12_345)
+        self.assertTrue(data.metadata.ttl_qc.camera_ttl_active_high)
+        self.assertEqual(data.metadata.ttl_qc.motive_frame_count_raw, 451_971)
+        self.assertEqual(data.metadata.ttl_qc.matched_motive_frame_count, 451_970)
+        self.assertEqual(data.metadata.ttl_qc.dropped_motive_frame_ids, (451_970,))
+        self.assertEqual(
+            data.metadata.ttl_qc.frame_alignment_policy_applied,
+            "drop_unmatched_last_frame",
+        )
+        processed = data.processed_for(7, 30, smoothing=False, sigma=1.5)
+        self.assertIsNotNone(processed)
+        centers, values = processed
+        self.assertEqual(centers[0], 6.0)
+        self.assertAlmostEqual(values[0], 1.0)
+        self.assertNotAlmostEqual(values[0], sum(rates[:6]) / 6)
+
+    def test_schema_v2_keeps_zero_occupancy_missing_and_smooths_counts_over_time(self) -> None:
+        occupancy = [0.0] * 6 + [1.0] * (gui.HD_RAW_BIN_COUNT - 6)
+        counts = [0] * 6 + [2] * (gui.HD_RAW_BIN_COUNT - 6)
+        rates = [None] * 6 + [2.0] * (gui.HD_RAW_BIN_COUNT - 6)
+        data = self.load(
+            {
+                "schema_version": 2,
+                "angle_bin_edges_deg": [2.0 * index for index in range(181)],
+                "occupancy_time_s": occupancy,
+                "units": [
+                    {
+                        "unit_id": 7,
+                        "spike_counts": counts,
+                        "firing_rate_hz": rates,
+                        "hd_class": 0,
+                    }
+                ],
+            }
+        )
+
+        self.assertTrue(math.isnan(data.rates_for(7)[0]))
+        _centers, unsmoothed = data.processed_for(
+            7,
+            30,
+            smoothing=False,
+            sigma=1.5,
+        )
+        self.assertTrue(math.isnan(unsmoothed[0]))
+        self.assertTrue(all(value == 2.0 for value in unsmoothed[1:]))
+
+        def circular_three_bin_mean(values, _sigma):
+            return tuple(
+                (values[index - 1] + values[index] + values[(index + 1) % len(values)])
+                / 3.0
+                for index in range(len(values))
+            )
+
+        with mock.patch.object(
+            gui,
+            "smooth_tuning_curve",
+            side_effect=circular_three_bin_mean,
+        ) as smoother:
+            _centers, smoothed = data.processed_for(
+                7,
+                30,
+                smoothing=True,
+                sigma=1.5,
+            )
+
+        self.assertEqual(smoother.call_count, 2)
+        self.assertTrue(
+            all(len(call.args[0]) == gui.HD_RAW_BIN_COUNT for call in smoother.call_args_list)
+        )
+        self.assertTrue(all(call.args[1] == 9.0 for call in smoother.call_args_list))
+        self.assertTrue(all(math.isclose(value, 2.0) for value in smoothed))
+
+    def test_schema_v2_rejects_invalid_class_duplicate_unit_and_unknown_version(self) -> None:
+        unit = {
+            "unit_id": 7,
+            "spike_counts": [1] * gui.HD_RAW_BIN_COUNT,
+            "firing_rate_hz": [1.0] * gui.HD_RAW_BIN_COUNT,
+            "hd_class": 1,
+        }
+        payload = {
+            "schema_version": 2,
+            "angle_bin_edges_deg": [2.0 * index for index in range(181)],
+            "occupancy_time_s": [1.0] * gui.HD_RAW_BIN_COUNT,
+            "units": [unit],
+        }
+
+        invalid_class = json.loads(json.dumps(payload))
+        invalid_class["units"][0]["hd_class"] = 3
+        with self.assertRaisesRegex(ValueError, "hd_class"):
+            self.load(invalid_class)
+
+        duplicate = json.loads(json.dumps(payload))
+        duplicate["units"].append(dict(duplicate["units"][0]))
+        with self.assertRaisesRegex(ValueError, "Duplicate schema v2 unit_id"):
+            self.load(duplicate)
+
+        invalid_metadata = json.loads(json.dumps(payload))
+        invalid_metadata["metadata"] = {"timestamp_reference": 120}
+        with self.assertRaisesRegex(ValueError, "timestamp_reference must be a string"):
+            self.load(invalid_metadata)
+
+        invalid_ttl_metadata = json.loads(json.dumps(payload))
+        invalid_ttl_metadata["metadata"] = {
+            "ttl_qc": {"camera_ttl_active_high": 1}
+        }
+        with self.assertRaisesRegex(ValueError, "camera_ttl_active_high must be boolean"):
+            self.load(invalid_ttl_metadata)
+
+        invalid_frame_ids = json.loads(json.dumps(payload))
+        invalid_frame_ids["metadata"] = {
+            "ttl_qc": {"dropped_motive_frame_ids": [1, 2.5]}
+        }
+        with self.assertRaisesRegex(ValueError, "dropped_motive_frame_ids"):
+            self.load(invalid_frame_ids)
+
+        unknown_version = dict(payload)
+        unknown_version["schema_version"] = 3
+        with self.assertRaisesRegex(ValueError, "Unsupported tuning-curve schema version"):
+            self.load(unknown_version)
+
+    def test_tuning_curve_schema_rejects_bad_top_level_and_duplicate_clusters(self) -> None:
+        with self.assertRaisesRegex(ValueError, "non-empty cluster mapping"):
+            self.load([])
+        with self.assertRaisesRegex(ValueError, "non-empty cluster mapping"):
+            self.load({})
+        with self.assertRaisesRegex(ValueError, "Invalid cluster ID"):
+            self.load({"unit-42": self.rates()})
+        with self.assertRaisesRegex(ValueError, "Duplicate cluster ID"):
+            self.load({"1": self.rates(), "01": self.rates(1.0)})
+
+    def test_tuning_curve_schema_rejects_bad_lengths_and_rates(self) -> None:
+        with self.assertRaisesRegex(ValueError, "exactly 180 rates"):
+            self.load({"42": self.rates()[:-1]})
+
+        invalid_cases = (
+            (True, "not numeric"),
+            ("1.0", "not numeric"),
+            (-0.1, "finite and non-negative"),
+            (math.inf, "finite and non-negative"),
+            (math.nan, "finite and non-negative"),
+        )
+        for invalid_rate, message in invalid_cases:
+            with self.subTest(rate=invalid_rate):
+                rates = self.rates()
+                rates[9] = invalid_rate
+                with self.assertRaisesRegex(ValueError, message):
+                    self.load({"42": rates})
+
+    def test_discovery_uses_earliest_matching_session_and_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            day_root = Path(directory)
+            rf_path = (
+                day_root
+                / "260730_3"
+                / "data"
+                / "rfmapping"
+                / "good"
+                / "-100_400_1ms"
+                / "ProbeA"
+                / "regular_unitsSpikeCounts_260730_3.json"
+            )
+            rf_path.parent.mkdir(parents=True)
+            rf_path.write_text("{}", encoding="utf-8")
+
+            first_probe_a = (
+                day_root / "260730_1" / "data" / "tuning_curves" / "ProbeA" / "tuning_curves.json"
+            )
+            later_probe_a = (
+                day_root / "260730_2" / "data" / "tuning_curves" / "ProbeA" / "tuning_curves.json"
+            )
+            probe_b = (
+                day_root / "260730_1" / "data" / "tuning_curves" / "ProbeB" / "tuning_curves.json"
+            )
+            for path in (first_probe_a, later_probe_a, probe_b):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("{}", encoding="utf-8")
+
+            self.assertEqual(gui.discover_tuning_curve_path(rf_path), first_probe_a.resolve())
+
+            first_probe_a.unlink()
+            self.assertEqual(gui.discover_tuning_curve_path(rf_path), later_probe_a.resolve())
+
+            later_probe_a.unlink()
+            self.assertIsNone(gui.discover_tuning_curve_path(rf_path))
+
+    def test_aggregation_averages_consecutive_raw_bins_and_uses_hd_centers(self) -> None:
+        centers, values = gui.aggregate_tuning_curve(self.rates(), 30)
+
+        self.assertEqual(len(centers), 30)
+        self.assertEqual(len(values), 30)
+        self.assertEqual(centers[:2], (6.0, 18.0))
+        self.assertEqual(centers[-1], 354.0)
+        self.assertEqual(values[:2], (2.5, 8.5))
+        self.assertEqual(values[-1], 176.5)
+
+    def test_legacy_processing_smooths_raw_rates_before_aggregation(self) -> None:
+        raw_rates = tuple(self.rates())
+        smoothed_raw = tuple(value + 0.25 for value in raw_rates)
+        expected_centers, expected_values = gui.aggregate_tuning_curve(smoothed_raw, 30)
+        with mock.patch.object(
+            gui,
+            "smooth_tuning_rates_missing_aware",
+            return_value=smoothed_raw,
+        ) as smoother:
+            centers, values = gui.processed_tuning_curve(
+                raw_rates,
+                30,
+                smoothing=True,
+                sigma=1.5,
+            )
+
+        smoother.assert_called_once_with(raw_rates, 9.0)
+        self.assertEqual(centers, expected_centers)
+        self.assertEqual(values, expected_values)
+
+    def test_boundary_impulse_smoothing_is_invariant_across_display_bins(self) -> None:
+        occupancy = [1.0] * gui.HD_RAW_BIN_COUNT
+        counts = [0] * gui.HD_RAW_BIN_COUNT
+        counts[-1] = gui.HD_RAW_BIN_COUNT
+        rates = [count / occupied for count, occupied in zip(counts, occupancy)]
+        schema_v2 = self.load(
+            {
+                "schema_version": 2,
+                "angle_bin_edges_deg": [2.0 * index for index in range(181)],
+                "occupancy_time_s": occupancy,
+                "units": [
+                    {
+                        "unit_id": 7,
+                        "spike_counts": counts,
+                        "firing_rate_hz": rates,
+                        "hd_class": 2,
+                    }
+                ],
+            }
+        )
+        legacy = self.load({"7": rates})
+
+        for schema, subject in (("schema-v2", schema_v2), ("legacy", legacy)):
+            with self.subTest(schema=schema):
+                curves = {
+                    bins: subject.processed_for(
+                        7,
+                        bins,
+                        smoothing=True,
+                        sigma=1.5,
+                    )[1]
+                    for bins in (6, 30, 180)
+                }
+                fine = curves[180]
+                self.assertGreater(fine[0], 0.0)
+                self.assertGreater(fine[-1], 0.0)
+                for bins in (6, 30):
+                    group_size = gui.HD_RAW_BIN_COUNT // bins
+                    expected = tuple(
+                        sum(fine[start : start + group_size]) / group_size
+                        for start in range(0, gui.HD_RAW_BIN_COUNT, group_size)
+                    )
+                    for actual, rebinned_fine in zip(curves[bins], expected):
+                        self.assertAlmostEqual(actual, rebinned_fine, delta=1e-12)
+
+    def test_legacy_smoothing_does_not_treat_missing_rates_as_zero_hz(self) -> None:
+        smoothed = gui.smooth_tuning_rates_missing_aware(
+            (math.nan, 4.0, math.nan),
+            1.0,
+        )
+
+        self.assertTrue(all(math.isclose(rate, 4.0) for rate in smoothed))
+
+    def test_smoothing_sigma_keeps_one_angular_width_across_display_bins(self) -> None:
+        for display_bins in (6, 30, 60, 180):
+            with self.subTest(display_bins=display_bins):
+                sigma_bins = gui.tuning_smoothing_sigma(1.5, display_bins)
+                self.assertAlmostEqual(sigma_bins * 360.0 / display_bins, 18.0)
+
+    def test_line_plot_mirrors_head_direction_with_zero_in_the_center(self) -> None:
+        angles, values = gui.center_tuning_curve_on_zero(
+            (0.0, 90.0, 180.0, 270.0),
+            (10.0, 20.0, 30.0, 40.0),
+        )
+
+        self.assertEqual(angles, (-180.0, -90.0, 0.0, 90.0))
+        self.assertEqual(values, (30.0, 20.0, 10.0, 40.0))
+
+        with self.assertRaisesRegex(ValueError, "same length"):
+            gui.center_tuning_curve_on_zero((0.0,), ())
+
+    def test_smoothing_matches_scipy_circular_gaussian_goldens(self) -> None:
+        cases = (
+            (
+                (1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+                1.0,
+                (
+                    0.39894346935609776,
+                    0.24197144565660073,
+                    0.05399112742070441,
+                    0.0044318616200312655,
+                    0.0002676612492294835,
+                    0.0044318616200312655,
+                    0.05399112742070441,
+                    0.24197144565660073,
+                ),
+            ),
+            (
+                (1.0, 2.0, 4.0),
+                1.25,
+                (2.2900252837261768, 2.322506320931544, 2.3874683953422795),
+            ),
+            (
+                (0.0, 1.0, 3.0, 7.0, 2.0),
+                1.5,
+                (
+                    2.1153176857216525,
+                    2.2380028130107616,
+                    2.8599662115132154,
+                    3.1247508343151122,
+                    2.661962455439259,
+                ),
+            ),
+        )
+
+        for rates, sigma, expected in cases:
+            with self.subTest(rates=rates, sigma=sigma):
+                actual = gui.smooth_tuning_curve(rates, sigma)
+                self.assertEqual(len(actual), len(expected))
+                for value, golden in zip(actual, expected):
+                    self.assertAlmostEqual(value, golden, delta=1e-15)
+                self.assertAlmostEqual(sum(actual), sum(rates), delta=1e-14)
+
+    def test_smoothing_matches_scipy_radius_rounding_and_empty_input(self) -> None:
+        self.assertEqual(
+            gui.smooth_tuning_curve((1.0, 2.0, 3.0), 0.1),
+            (1.0, 2.0, 3.0),
+        )
+        self.assertEqual(gui.smooth_tuning_curve((), 1.5), ())
+
+    def test_head_direction_vectors_are_north_zero_and_counter_clockwise(self) -> None:
+        expected = {
+            0.0: (0.0, -1.0),
+            90.0: (-1.0, 0.0),
+            180.0: (0.0, 1.0),
+            270.0: (1.0, 0.0),
+        }
+        for angle, vector in expected.items():
+            with self.subTest(angle=angle):
+                actual = gui.head_direction_unit_vector(angle)
+                self.assertAlmostEqual(actual[0], vector[0], places=12)
+                self.assertAlmostEqual(actual[1], vector[1], places=12)
+
+
 class RasterTests(unittest.TestCase):
     def test_matrix_ppm_nearest_neighbor_colors(self) -> None:
         ppm = gui.matrix_ppm_data(
@@ -162,6 +979,31 @@ class RasterTests(unittest.TestCase):
         self.assertEqual(pixel(2, 2), b"\x10\x20\x30")
         self.assertEqual(pixel(3, 3), b"\xff\xff\xff")
 
+    def test_rectangle_atlas_matches_fractional_overlap_golden_bytes(self) -> None:
+        colors = {
+            None: "#abcdef",
+            0.0: "#000000",
+            1.0: "#112233",
+            2.0: "#445566",
+            3.0: "#778899",
+            4.0: "#aabbcc",
+            5.0: "#ddeeff",
+        }
+        ppm = gui.matrix_atlas_ppm_data(
+            [
+                ([[0.0, 1.0], [2.0, None]], -0.4, 0.6, 1.75),
+                ([[3.0, 4.0, 5.0]], 1.2, 2.1, 0.9),
+            ],
+            8,
+            6,
+            lambda value: colors[value],
+        )
+
+        self.assertEqual(
+            hashlib.sha256(ppm).hexdigest(),
+            "f88929559cff9e4d11836ab90983abde0451c6c201fcae04fa244e4ba1107c16",
+        )
+
     def test_polar_atlas_preserves_blank_center_and_colors_rings(self) -> None:
         ppm = gui.polar_matrix_atlas_ppm_data(
             [([[1.0, 1.0]], 0.0, 0.0, 2.0, 360.0, [0])],
@@ -178,6 +1020,58 @@ class RasterTests(unittest.TestCase):
 
         self.assertEqual(pixel(10, 10), b"\xff\xff\xff")
         self.assertEqual(pixel(10, 1), b"\x12\x34\x56")
+
+    def test_polar_atlas_matches_fractional_clipped_golden_bytes(self) -> None:
+        colors = {
+            0.0: "#000000",
+            1.0: "#112233",
+            2.0: "#445566",
+            3.0: "#778899",
+            4.0: "#aabbcc",
+            5.0: "#ddeeff",
+            6.0: "#13579b",
+            7.0: "#2468ac",
+        }
+        ppm = gui.polar_matrix_atlas_ppm_data(
+            [
+                (
+                    [[0.0, 1.0, 2.0, 3.0], [4.0, 5.0, 6.0, 7.0]],
+                    -0.4,
+                    0.25,
+                    2.0,
+                    360.0,
+                    [1, 0],
+                ),
+                ([[7.0, 6.0, 5.0]], 10.6, 5.4, 1.5, 270.0, [0]),
+            ],
+            28,
+            25,
+            lambda value: colors[value],
+        )
+
+        self.assertEqual(
+            hashlib.sha256(ppm).hexdigest(),
+            "747fbb1ae383d0f4721971e5f9cf6fd0005448da1ae2d76a356cf7347c08367a",
+        )
+
+    def test_polar_atlas_reuses_translated_tile_geometry(self) -> None:
+        gui._polar_tile_pixel_runs.cache_clear()
+        tile = [[1.0, 2.0], [3.0, 4.0]]
+
+        gui.polar_matrix_atlas_ppm_data(
+            [
+                (tile, 0.25, 0.5, 2.0, 360.0, [1, 0]),
+                (tile, 20.25, 0.5, 2.0, 360.0, [1, 0]),
+            ],
+            50,
+            30,
+            lambda value: f"#{int(value):02x}0000",
+        )
+
+        cache = gui._polar_tile_pixel_runs.cache_info()
+        self.assertEqual(cache.misses, 1)
+        self.assertGreaterEqual(cache.hits, 1)
+        self.assertLessEqual(cache.currsize, cache.maxsize)
 
 
 class ProbeGeometryTests(unittest.TestCase):
@@ -312,6 +1206,27 @@ class ProbeGeometryTests(unittest.TestCase):
             self.assertEqual(geometry.channels_path, channels.resolve())
 
 
+class ScientificScaleTests(unittest.TestCase):
+    def test_nonnegative_response_range_starts_at_zero_and_ignores_missing(self) -> None:
+        self.assertEqual(
+            gui.nonnegative_response_range([[None, 2.0], [5.5, float("nan")]]),
+            (0.0, 5.5),
+        )
+        self.assertEqual(gui.nonnegative_response_range([[None, 0.0]]), (0.0, 0.0))
+
+    def test_gray_restores_previous_contrast_range_only_for_gray(self) -> None:
+        matrix = [[None, 2.0], [5.5, float("nan")]]
+
+        self.assertEqual(gui.palette_response_range(matrix, "Gray"), (2.0, 5.5))
+        self.assertEqual(gui.palette_response_range(matrix, "Viridis"), (0.0, 5.5))
+        self.assertEqual(gui.palette_response_range(matrix, "Inferno"), (0.0, 5.5))
+
+        low, high = gui.palette_response_range([[10.0, 15.0, 20.0]], "Gray")
+        self.assertEqual(gui.palette_color(10.0, low, high, "Gray"), "#121212")
+        self.assertEqual(gui.palette_color(15.0, low, high, "Gray"), "#868686")
+        self.assertEqual(gui.palette_color(20.0, low, high, "Gray"), "#fafafa")
+
+
 class RFPlotRangeTests(unittest.TestCase):
     class FakeVar:
         def __init__(self, value) -> None:
@@ -401,6 +1316,81 @@ class RFPlotRangeTests(unittest.TestCase):
 
 
 class MacOSLifecycleTests(unittest.TestCase):
+    def test_support_documentation_uses_adjacent_readme(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            module = root / "rfmapping_gui.py"
+            readme = root / "README.md"
+            module.touch()
+            readme.write_text("# RF Map Viewer\n", encoding="utf-8")
+
+            self.assertEqual(
+                gui.support_documentation_path(module_path=module, frozen=False),
+                readme.resolve(),
+            )
+
+    def test_frozen_support_documentation_uses_bundle_resources(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            contents = Path(directory) / "RF Map Viewer.app" / "Contents"
+            executable = contents / "MacOS" / "RF Map Viewer"
+            readme = contents / "Resources" / "README.md"
+            executable.parent.mkdir(parents=True)
+            readme.parent.mkdir(parents=True)
+            executable.touch()
+            readme.write_text("# RF Map Viewer\n", encoding="utf-8")
+
+            self.assertEqual(
+                gui.support_documentation_path(
+                    module_path=Path(directory) / "missing" / "rfmapping_gui.py",
+                    executable_path=executable,
+                    frozen=True,
+                ),
+                readme.resolve(),
+            )
+
+    def test_support_documentation_opens_local_file_uri(self) -> None:
+        readme = Path("/tmp/RF Map Viewer README.md")
+        viewer = SimpleNamespace()
+        with (
+            mock.patch.object(gui, "support_documentation_path", return_value=readme),
+            mock.patch.object(gui.webbrowser, "open", return_value=True) as open_document,
+        ):
+            gui.RFMViewer._open_support_documentation(viewer)
+
+        open_document.assert_called_once_with(readme.as_uri())
+
+    def test_settings_request_is_deferred_until_the_viewer_is_ready(self) -> None:
+        class FakeViewer:
+            def __init__(self) -> None:
+                self._viewer_ready = False
+                self._show_settings_when_ready = False
+
+            def _active_viewer(self):
+                return self
+
+        viewer = FakeViewer()
+        gui.RFMViewer._show_settings(viewer)
+        self.assertTrue(viewer._show_settings_when_ready)
+
+    def test_settings_commit_does_not_persist_to_an_unready_viewer(self) -> None:
+        active = SimpleNamespace(
+            _viewer_ready=False,
+            _apply_viewer_settings=mock.Mock(),
+        )
+        window = SimpleNamespace(
+            error_var=mock.Mock(),
+            _clear_tab_errors=mock.Mock(),
+            _validated_settings=mock.Mock(return_value=gui.ViewerSettings()),
+            owner=SimpleNamespace(_active_viewer=lambda: active),
+        )
+
+        gui.SettingsWindow._commit(window, close=False)
+
+        active._apply_viewer_settings.assert_not_called()
+        window.error_var.set.assert_called_with(
+            "The viewer is still opening. Try again when it is ready."
+        )
+
     def test_frozen_startup_uses_bundled_json_without_modal_picker(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             contents = Path(directory) / "RF Map Viewer.app" / "Contents"
@@ -434,6 +1424,7 @@ class MacOSLifecycleTests(unittest.TestCase):
                 self._close_window = lambda *_args: None
                 self._dispatch_open_json = lambda *_args: None
                 self._dispatch_macos_open_documents = lambda *_args: None
+                self._open_support_documentation = lambda *_args: None
 
             def protocol(self, name, callback) -> None:
                 self.protocols[name] = callback
@@ -448,6 +1439,10 @@ class MacOSLifecycleTests(unittest.TestCase):
         self.assertIs(viewer.protocols["WM_DELETE_WINDOW"], viewer._close_window)
         self.assertIs(viewer.tk.commands["::tk::mac::OpenDocument"], viewer._dispatch_macos_open_documents)
         self.assertIs(viewer.tk.commands["::tk::mac::Quit"], viewer._quit_application)
+        self.assertIs(
+            viewer.tk.commands["::tk::mac::ShowHelp"],
+            viewer._open_support_documentation,
+        )
 
     def test_open_document_creates_independent_windows(self) -> None:
         class FakeViewer:
@@ -1275,15 +2270,15 @@ class ShortcutBehaviorTests(unittest.TestCase):
         self.assertEqual((viewer.range_start_var.get(), viewer.range_end_var.get()), (9, 4))
         self.assertEqual((viewer.range_start_ms_var.get(), viewer.range_end_ms_var.get()), ("0", "20"))
 
-    def test_time_resolution_step_is_exactly_one_ms_before_data_clamping(self) -> None:
+    def test_time_resolution_step_is_one_source_bin_before_data_clamping(self) -> None:
         viewer = mock.Mock()
         viewer.time_res_ms_var = self.FakeVar("8")
-        viewer._base_bin_ms.return_value = 1.0
+        viewer._base_bin_ms.return_value = 2.5
         viewer._total_time_ms.return_value = 30.0
 
         gui.RFMViewer._step_time_resolution(viewer, 1.0)
 
-        self.assertEqual(viewer.time_res_ms_var.get(), "9")
+        self.assertEqual(viewer.time_res_ms_var.get(), "10.5")
         viewer._on_time_resolution_changed.assert_called_once_with()
 
     def test_time_resolution_change_preserves_partial_timeline_source_bounds(self) -> None:
@@ -1321,6 +2316,77 @@ class ShortcutBehaviorTests(unittest.TestCase):
         self.assertEqual(viewer.bin_var.get(), 0)
         self.assertEqual((viewer.range_start_var.get(), viewer.range_end_var.get()), (0, 11))
         self.assertIsNone(viewer._timeline_range_anchor)
+
+
+class TimelineGeometryTests(unittest.TestCase):
+    def test_physical_grouping_preserves_uniform_bins_and_uses_measured_edges(self) -> None:
+        self.assertEqual(
+            gui.physical_time_groups([0, 10, 20, 30, 40, 50], 20),
+            [(0, 1), (2, 3), (4, 4)],
+        )
+        self.assertEqual(
+            gui.physical_time_groups([-100, 0, 50, 200], 100),
+            [(0, 0), (1, 1), (2, 2)],
+        )
+
+    def test_nonuniform_bin_centers_use_physical_time_geometry(self) -> None:
+        points = gui.timeline_chart_points(
+            [1.0, 2.0, 3.0],
+            [-75.0, 0.0, 125.0],
+            (-100.0, 200.0),
+            3.0,
+            (10.0, 20.0, 300.0, 60.0),
+        )
+
+        self.assertEqual(points[::2], [35.0, 110.0, 235.0])
+        self.assertNotEqual(points[::2], [60.0, 160.0, 260.0])
+
+    def test_timeline_points_stay_inside_measured_nonnegative_range(self) -> None:
+        points = gui.timeline_chart_points(
+            [-2.0, 5.0, 12.0, math.nan],
+            [0.0, 1.0, 2.0, 3.0],
+            (0.0, 3.0),
+            10.0,
+            (0.0, 10.0, 100.0, 40.0),
+        )
+
+        self.assertEqual(points[1::2], [50.0, 30.0, 10.0, 50.0])
+        self.assertTrue(all(10.0 <= y <= 50.0 for y in points[1::2]))
+
+    def test_overlaid_response_traces_use_independent_y_scales(self) -> None:
+        rect = (0.0, 10.0, 100.0, 40.0)
+        blue_high = gui.timeline_response_high([10.0, 5.0])
+        red_high = gui.timeline_response_high([2.0, 2.0])
+
+        all_position_point = gui.timeline_chart_points(
+            [2.0],
+            [0.5],
+            (0.0, 1.0),
+            blue_high,
+            rect,
+        )
+        selected_point = gui.timeline_chart_points(
+            [2.0],
+            [0.5],
+            (0.0, 1.0),
+            red_high,
+            rect,
+        )
+
+        self.assertEqual(blue_high, 10.0)
+        self.assertEqual(red_high, 2.0)
+        self.assertEqual(all_position_point[1], 42.0)
+        self.assertEqual(selected_point[1], rect[1])
+        self.assertNotEqual(all_position_point, selected_point)
+        self.assertEqual(gui.timeline_response_high([]), 1.0)
+
+    def test_timeline_bin_boundaries_are_half_open_in_physical_time(self) -> None:
+        ends = [-50.0, 50.0, 200.0]
+
+        self.assertEqual(gui.timeline_bin_index(-75.0, ends), 0)
+        self.assertEqual(gui.timeline_bin_index(-50.0, ends), 1)
+        self.assertEqual(gui.timeline_bin_index(125.0, ends), 2)
+        self.assertEqual(gui.timeline_bin_index(200.0, ends), 2)
 
 
 class TimelineHitTestingTests(unittest.TestCase):
@@ -1402,6 +2468,46 @@ class TimelineHitTestingTests(unittest.TestCase):
             viewer, 13.0, 33.0, include_label=True
         )
         self.assertEqual(label["bin_idx"], 0)
+
+    def test_chart_hit_testing_uses_physical_interval_widths(self) -> None:
+        canvas = mock.Mock()
+        canvas.canvasx.side_effect = lambda value: value
+        canvas.canvasy.side_effect = lambda value: value
+        viewer = SimpleNamespace(
+            canvases={"timeline": canvas},
+            _canvas_layouts={
+                "timeline": {
+                    "chart_x": 0.0,
+                    "chart_y": 0.0,
+                    "chart_w": 300.0,
+                    "chart_h": 60.0,
+                    "display_bins": 3,
+                    "axis_start_ms": -100.0,
+                    "axis_end_ms": 200.0,
+                    "time_group_end_bounds_ms": [-50.0, 50.0, 200.0],
+                }
+            },
+            _time_group_count=lambda: 3,
+        )
+
+        event = SimpleNamespace(x=75.0, y=30.0)
+
+        self.assertEqual(gui.RFMViewer._timeline_bin_at(viewer, event), 1)
+
+
+class CommandLineTests(unittest.TestCase):
+    def test_tkdnd_smoke_flag_runs_without_requiring_a_json_path(self) -> None:
+        with mock.patch.object(gui, "run_tkdnd_self_test") as smoke:
+            self.assertEqual(gui.main(["--self-test-dnd"]), 0)
+        smoke.assert_called_once_with()
+
+    def test_tkdnd_smoke_failure_returns_nonzero(self) -> None:
+        with mock.patch.object(
+            gui,
+            "run_tkdnd_self_test",
+            side_effect=RuntimeError("missing TkDND"),
+        ):
+            self.assertEqual(gui.main(["--self-test-dnd"]), 1)
 
 
 if __name__ == "__main__":

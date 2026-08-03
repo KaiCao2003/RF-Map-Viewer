@@ -28,6 +28,12 @@ struct HeatmapView: View {
                         subtitle: subtitle,
                         palette: kind == .delay ? nil : store.palette,
                         valueSuffix: kind == .delay ? " ms" : store.valueMode.suffix,
+                        missingLabel: kind == .delay
+                            ? "No detected peak"
+                            : responseMissingLegendLabel(
+                                store.valueMode,
+                                hasPresentationMetadata: store.data?.presentationCounts != nil
+                            ),
                         drawInteraction: false
                     )
                 }
@@ -42,9 +48,14 @@ struct HeatmapView: View {
                     yGroups: plot.yGroups,
                     valueDescription: { _, _, value in
                         if kind == .delay {
-                            return value.map { String(format: "%.1f milliseconds", $0) } ?? "no delay"
+                            return value.map { String(format: "%.1f milliseconds", $0) }
+                                ?? "Delay unavailable; no detected response"
                         }
-                        return "\(store.valueMode.format(value)) \(store.valueMode.unit)"
+                        return responseValueAccessibilityDescription(
+                            value,
+                            mode: store.valueMode,
+                            hasPresentationMetadata: store.data?.presentationCounts != nil
+                        )
                     }
                 )
             }
@@ -66,7 +77,7 @@ struct HeatmapView: View {
         case .rf:
             return "2D RF map - \(store.currentMatrixLabel())"
         case .delay:
-            return "Delay map - peak displayed bin center"
+            return "Delay map - peak count-rate interval center"
         }
     }
 
