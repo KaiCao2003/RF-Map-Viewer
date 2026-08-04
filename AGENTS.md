@@ -1,5 +1,8 @@
 # Agent Instructions
 
+- Unless the user explicitly requests another target, only consider developing,
+  validating, and releasing the Python/Tk macOS Apple Silicon version.
+- Do not modify or validate the Swift or Windows versions unless the user explicitly requests them.
 - Run this project only on the remote host reached with `ssh hhw9l84`.
 - Use the remote virtual environment at `~/.virtualenvs/rfmapping`.
 - Do not run the project from the local checkout; run commands through SSH, for example:
