@@ -44,8 +44,6 @@ def plot_1d_rfmap(unitsSpikeCounts: np.ndarray, targetList, *, isNormalize: bool
             cmap="viridis",
             interpolation="nearest",
         )
-        if isNormalize:
-            imshow_kwargs.update(vmin=0, vmax=1)
         if xinDeg:
             imshow_kwargs["extent"] = [0, 360, n_units - 0.5, -0.5]
 
