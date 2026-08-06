@@ -15,10 +15,15 @@ def plot_1d_rfmap(unitsSpikeCounts: np.ndarray, targetList, *, isNormalize: bool
     x_label = "Angle (deg)" if xinDeg else "x"
 
     if isNormalize:
+        min_per_unit = unitsSpikeCounts.min(axis=1, keepdims=True)
         max_per_unit = unitsSpikeCounts.max(axis=1, keepdims=True)
-        max_per_unit[max_per_unit == 0] = 1  # incase divided by 0 later
-
-        unitsSpikeCounts = unitsSpikeCounts / max_per_unit
+        range_per_unit = max_per_unit - min_per_unit
+        unitsSpikeCounts = np.divide(
+            unitsSpikeCounts - min_per_unit,
+            range_per_unit,
+            out=np.zeros_like(unitsSpikeCounts, dtype=float),
+            where=range_per_unit != 0,
+        )
 
     fig, ax = plt.subplots(figsize=(10, 8))
 
@@ -39,6 +44,8 @@ def plot_1d_rfmap(unitsSpikeCounts: np.ndarray, targetList, *, isNormalize: bool
             cmap="viridis",
             interpolation="nearest",
         )
+        if isNormalize:
+            imshow_kwargs.update(vmin=0, vmax=1)
         if xinDeg:
             imshow_kwargs["extent"] = [0, 360, n_units - 0.5, -0.5]
 
