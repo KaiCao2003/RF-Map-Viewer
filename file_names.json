@@ -1,0 +1,8 @@
+{
+  "session_info_filename": "session_info",
+  "sync_data_filename": "sync_data",
+  "head_direction_filename": "head_direction",
+  "valid_events_filename": "valid_events",
+  "interval_table_filename": "interval_table",
+  "kilosort_info_filename": "kilosort_info"
+}

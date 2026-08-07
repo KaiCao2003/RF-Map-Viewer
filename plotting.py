@@ -4,7 +4,7 @@ import numpy as np
 is_norm: bool = False
 
 
-def plot_1d_rfmap(unitsSpikeCounts: np.ndarray, targetList, *, isNormalize: bool = False, isLineplot: bool = False,
+def plot_1d_rfmap(unitsSpikeCounts: np.ndarray, label_list, *, isNormalize: bool = False, isLineplot: bool = False,
                   isHeatmap: bool = False, offset: float = 1.0, xinDeg: bool = False):
     # Validation
     if isLineplot == isHeatmap:
@@ -36,7 +36,7 @@ def plot_1d_rfmap(unitsSpikeCounts: np.ndarray, targetList, *, isNormalize: bool
             ax.plot(x_values, y, linewidth=1)
 
         ax.set_yticks(yticks_height)
-        ax.set_yticklabels(targetList)
+        ax.set_yticklabels(label_list)
 
     if isHeatmap:
         imshow_kwargs = dict(
@@ -50,7 +50,7 @@ def plot_1d_rfmap(unitsSpikeCounts: np.ndarray, targetList, *, isNormalize: bool
         im = ax.imshow(unitsSpikeCounts, **imshow_kwargs)
 
         ax.set_yticks(np.arange(n_units))
-        ax.set_yticklabels(targetList)
+        ax.set_yticklabels(label_list)
         fig.colorbar(im, ax=ax, label="Normalized spikes" if isNormalize else "Spikes")
 
     ax.set_xlabel(x_label)
