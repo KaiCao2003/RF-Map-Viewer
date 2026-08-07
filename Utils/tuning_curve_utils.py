@@ -7,10 +7,18 @@ import pynapple as nap
 from tqdm import tqdm
 
 
+HD_RAW_BIN_COUNT = 180
+RAYLEIGH_ALPHA = 0.05
+SHUFFLE_ALPHA = 0.01
 
-def get_exposure_timestamps(session_info: dict, camera_input_channel: int,
-                            camera_ttl_threshold: int | float, *,
-                            camera_ttl_active_high: bool = True) -> tuple[np.ndarray, float, dict]:
+
+def get_exposure_timestamps(
+    session_info: dict,
+    camera_input_channel: int,
+    camera_ttl_threshold: int | float,
+    *,
+    camera_ttl_active_high: bool = True,
+) -> tuple[np.ndarray, float, dict]:
     continuous_folder = (
         Path(session_info["base_path"])
         / session_info["record_nodes"]
@@ -93,7 +101,9 @@ def get_exposure_timestamps(session_info: dict, camera_input_channel: int,
     assert first_rise_index is not None and first_rise_index > 0, (
         "Motive TTL pulse starts at the ADC boundary."
     )
-    assert rise_time_parts and fall_time_parts, "No complete Motive TTL pulse was detected."
+    assert rise_time_parts and fall_time_parts, (
+        "No complete Motive TTL pulse was detected."
+    )
     rise_times = np.concatenate(rise_time_parts)
     fall_times = np.concatenate(fall_time_parts)
     assert rise_times.size == fall_times.size and np.all(rise_times < fall_times), (
@@ -105,7 +115,9 @@ def get_exposure_timestamps(session_info: dict, camera_input_channel: int,
     assert exposure_periods.size, "At least two Motive TTL pulses are required."
     median_period_s = float(np.median(exposure_periods))
     pulse_steps = np.rint(exposure_periods / median_period_s).astype(int)
-    assert np.all(pulse_steps == 1), "Internal Motive TTL pulse(s) are missing or duplicated."
+    assert np.all(pulse_steps == 1), (
+        "Internal Motive TTL pulse(s) are missing or duplicated."
+    )
 
     ttl_qc = {
         "ttl_pulse_count": int(len(exposure_timestamps)),
@@ -127,11 +139,14 @@ def mean_resultant_length(angles_deg: np.ndarray) -> float:
         return np.nan
 
     mean_vector = np.mean(np.exp(1j * np.deg2rad(angles_deg)))
-    return float(np.abs(mean_vector))
+    return float(np.clip(np.abs(mean_vector), 0.0, 1.0))
 
 
-def rayleigh_test(spike_counts: np.ndarray, occupancy_time_s: np.ndarray,
-                  angle_centers_deg: np.ndarray) -> tuple[float, float]:
+def rayleigh_test(
+    spike_counts: np.ndarray,
+    occupancy_time_s: np.ndarray,
+    angle_centers_deg: np.ndarray,
+) -> tuple[float, float]:
     spike_counts = np.asarray(spike_counts, dtype=float)
     occupancy_time_s = np.asarray(occupancy_time_s, dtype=float)
     angle_centers_deg = np.asarray(angle_centers_deg, dtype=float)
@@ -172,10 +187,22 @@ def _json_float(value: float) -> float | None:
     return float(value) if np.isfinite(value) else None
 
 
-def tuning_curve(base_dir, kilosort_dir, probe_name, session_info, interval_pairs, HD_tsd,
-                 adc_time_origin_s, num_of_bins_in_hd, num_shuffle, shuffle_seed, *,
-                 is_save: bool = False, save_path: str | Path | None = None,
-                 metadata: dict | None = None) -> dict:
+def tuning_curve(
+    base_dir,
+    kilosort_dir,
+    probe_name,
+    session_info,
+    interval_pairs,
+    HD_tsd,
+    adc_time_origin_s,
+    num_of_bins_in_hd,
+    num_shuffle,
+    shuffle_seed,
+    *,
+    is_save: bool = False,
+    save_path: str | Path | None = None,
+    metadata: dict | None = None,
+) -> dict:
     from Utils.kilosort_utils import (
         _compress_times_to_epoch_clock,
         _compute_shuffle_r_numba,
@@ -183,6 +210,11 @@ def tuning_curve(base_dir, kilosort_dir, probe_name, session_info, interval_pair
         _flatten_feature_segments,
         convert_time_list_to_nap_tsd,
     )
+
+    if num_of_bins_in_hd != HD_RAW_BIN_COUNT:
+        raise ValueError(
+            f"The GUI tuning-curve contract requires exactly {HD_RAW_BIN_COUNT} angle bins."
+        )
 
     base_dir = Path(base_dir)
     kilosort_dir = Path(kilosort_dir)
@@ -200,18 +232,22 @@ def tuning_curve(base_dir, kilosort_dir, probe_name, session_info, interval_pair
     )
 
     cluster_KSLabel = pd.read_csv(kilosort_dir / "cluster_KSLabel.tsv", sep="\t")
-    good_unit_ids = cluster_KSLabel.loc[
-        cluster_KSLabel["KSLabel"].astype(str).str.lower() == "good",
-        "cluster_id",
-    ].astype(int).to_numpy()
+    good_unit_ids = (
+        cluster_KSLabel.loc[
+            cluster_KSLabel["KSLabel"].astype(str).str.lower() == "good",
+            "cluster_id",
+        ]
+        .astype(int)
+        .to_numpy()
+    )
 
-    spike_samples = np.load(
-        kilosort_dir / "spike_times.npy", mmap_mode="r"
-    ).reshape(-1)
+    spike_samples = np.load(kilosort_dir / "spike_times.npy", mmap_mode="r").reshape(-1)
     spike_clusters = np.load(
         kilosort_dir / "spike_clusters.npy", mmap_mode="r"
     ).reshape(-1)
-    probe_continuous_timestamps = np.load(probe_continuous_timestamps_dir, mmap_mode="r")
+    probe_continuous_timestamps = np.load(
+        probe_continuous_timestamps_dir, mmap_mode="r"
+    )
     assert spike_samples.shape == spike_clusters.shape
 
     good_spike_mask = np.isin(spike_clusters, good_unit_ids)
@@ -223,10 +259,9 @@ def tuning_curve(base_dir, kilosort_dir, probe_name, session_info, interval_pair
         and good_spike_samples.max() < len(probe_continuous_timestamps)
     ), "Kilosort spike sample is outside probe timestamps."
 
-    good_spike_times = (
-        np.asarray(probe_continuous_timestamps[good_spike_samples], dtype=float)
-        - float(adc_time_origin_s)
-    )
+    good_spike_times = np.asarray(
+        probe_continuous_timestamps[good_spike_samples], dtype=float
+    ) - float(adc_time_origin_s)
     del good_spike_samples, probe_continuous_timestamps
     cluster_order = np.argsort(good_spike_clusters, kind="stable")
     sorted_clusters = good_spike_clusters[cluster_order]
@@ -239,7 +274,7 @@ def tuning_curve(base_dir, kilosort_dir, probe_name, session_info, interval_pair
     )
     spikes_dict = {
         int(cluster_id): nap.Ts(
-            t=sorted_spike_times[start:start + count],
+            t=sorted_spike_times[start : start + count],
             time_units="s",
         )
         for cluster_id, start, count in zip(cluster_ids, cluster_starts, cluster_counts)
@@ -256,18 +291,68 @@ def tuning_curve(base_dir, kilosort_dir, probe_name, session_info, interval_pair
         range=(0, 360),
         return_counts=True,
     )
-    angle_dim = [dim for dim in hd_spike_counts.dims if dim != "unit"][0]
-    unit_ids = hd_spike_counts.coords["unit"].values.astype(int)
+    angle_dims = [dim for dim in hd_spike_counts.dims if dim != "unit"]
+    if "unit" not in hd_spike_counts.dims or len(angle_dims) != 1:
+        raise ValueError(
+            "Head-direction tuning counts must have exactly unit and angle dimensions."
+        )
+    angle_dim = angle_dims[0]
+    hd_spike_counts = hd_spike_counts.transpose("unit", angle_dim)
+    raw_unit_ids = np.asarray(hd_spike_counts.coords["unit"].values, dtype=float)
+    if (
+        raw_unit_ids.ndim != 1
+        or not raw_unit_ids.size
+        or not np.all(np.isfinite(raw_unit_ids) & (raw_unit_ids >= 0))
+        or not np.allclose(raw_unit_ids, np.rint(raw_unit_ids))
+    ):
+        raise ValueError("Tuning-curve unit IDs must be non-negative integers.")
+    unit_ids = np.rint(raw_unit_ids).astype(np.int64)
+    if len(np.unique(unit_ids)) != len(unit_ids):
+        raise ValueError("Tuning-curve unit IDs must be unique.")
     angle_centers_deg = hd_spike_counts.coords[angle_dim].values.astype(float)
     angle_bin_edges_deg = np.asarray(hd_spike_counts.attrs["bin_edges"][0], dtype=float)
-    occupancy_samples = np.asarray(hd_spike_counts.attrs["occupancy"], dtype=float).reshape(-1)
+    expected_edges_deg = np.linspace(0.0, 360.0, HD_RAW_BIN_COUNT + 1)
+    if (
+        angle_bin_edges_deg.shape != expected_edges_deg.shape
+        or not np.all(np.isfinite(angle_bin_edges_deg))
+        or not np.allclose(angle_bin_edges_deg, expected_edges_deg, rtol=0.0, atol=1e-8)
+    ):
+        raise ValueError("Tuning-curve angle bins must span 0–360° in 180 equal bins.")
+    raw_occupancy_samples = np.asarray(
+        hd_spike_counts.attrs["occupancy"], dtype=float
+    ).reshape(-1)
     feature_fs_hz = float(hd_spike_counts.attrs["fs"])
-    assert occupancy_samples.size == num_of_bins_in_hd
-    assert np.all(np.isfinite(occupancy_samples) & (occupancy_samples >= 0))
-    assert np.allclose(occupancy_samples, np.rint(occupancy_samples))
-    assert np.isfinite(feature_fs_hz) and feature_fs_hz > 0
+    if (
+        raw_occupancy_samples.size != HD_RAW_BIN_COUNT
+        or not np.all(np.isfinite(raw_occupancy_samples) & (raw_occupancy_samples >= 0))
+        or not np.allclose(raw_occupancy_samples, np.rint(raw_occupancy_samples))
+    ):
+        raise ValueError(
+            "Tuning-curve occupancy samples must be 180 non-negative integers."
+        )
+    if not np.isfinite(feature_fs_hz) or feature_fs_hz <= 0:
+        raise ValueError(
+            "Tuning-curve feature sampling rate must be finite and positive."
+        )
+    occupancy_samples = np.rint(raw_occupancy_samples).astype(np.int64)
+    if not np.any(occupancy_samples > 0):
+        raise ValueError(
+            "Tuning-curve occupancy must contain at least one occupied bin."
+        )
     occupancy_time_s = occupancy_samples / feature_fs_hz
-    spike_counts = hd_spike_counts.values.astype(int)
+    raw_spike_counts = np.asarray(hd_spike_counts.values, dtype=float)
+    expected_counts_shape = (len(unit_ids), HD_RAW_BIN_COUNT)
+    if (
+        raw_spike_counts.shape != expected_counts_shape
+        or not np.all(np.isfinite(raw_spike_counts) & (raw_spike_counts >= 0))
+        or not np.allclose(raw_spike_counts, np.rint(raw_spike_counts))
+    ):
+        raise ValueError(
+            "Tuning-curve spike counts must be a unit-by-180 matrix of non-negative integers."
+        )
+    spike_counts = np.rint(raw_spike_counts).astype(np.int64)
+    if np.any(spike_counts[:, occupancy_samples == 0] != 0):
+        raise ValueError("Zero-occupancy angle bins must have zero spike counts.")
     firing_rates = np.full(spike_counts.shape, np.nan, dtype=float)
     np.divide(
         spike_counts,
@@ -281,10 +366,12 @@ def tuning_curve(base_dir, kilosort_dir, probe_name, session_info, interval_pair
     ep_lengths = ep_ends - ep_starts
     cum_lengths = np.concatenate([[0.0], np.cumsum(ep_lengths)])
     total_valid_len = float(cum_lengths[-1])
-    feature_times, feature_values, feature_segment_starts, feature_segment_ends = _flatten_feature_segments(
-        HD_tsd,
-        ep_starts,
-        ep_ends,
+    feature_times, feature_values, feature_segment_starts, feature_segment_ends = (
+        _flatten_feature_segments(
+            HD_tsd,
+            ep_starts,
+            ep_ends,
+        )
     )
     angles_rad = np.deg2rad(angle_centers_deg)
     cos_angles = np.cos(angles_rad)
@@ -294,7 +381,17 @@ def tuning_curve(base_dir, kilosort_dir, probe_name, session_info, interval_pair
     compute_shuffle_r = _compute_shuffle_r_numba or _compute_shuffle_r_numpy
     rng = np.random.default_rng(shuffle_seed)
 
-    units = []
+    firing_rate_hz = []
+    unit_data = {
+        "hd_class": [],
+        "rate_mvl": [],
+        "spike_angle_mrl": [],
+        "rayleigh_score": [],
+        "rayleigh_p": [],
+        "rayleigh_significant": [],
+        "shuffle_p": [],
+        "shuffle_significant": [],
+    }
     with tqdm(total=len(unit_ids), desc="Classifying HD cells", unit="unit") as pbar:
         for unit_index, unit_id in enumerate(unit_ids):
             unit_rates = firing_rates[unit_index]
@@ -302,9 +399,19 @@ def tuning_curve(base_dir, kilosort_dir, probe_name, session_info, interval_pair
             rate_sum = float(np.sum(unit_rates[valid_rates]))
             rate_mvl = np.nan
             if rate_sum > 0:
-                rate_mvl = float(np.abs(
-                    np.sum(unit_rates[valid_rates] * np.exp(1j * angles_rad[valid_rates]))
-                ) / rate_sum)
+                rate_mvl = float(
+                    np.clip(
+                        np.abs(
+                            np.sum(
+                                unit_rates[valid_rates]
+                                * np.exp(1j * angles_rad[valid_rates])
+                            )
+                        )
+                        / rate_sum,
+                        0.0,
+                        1.0,
+                    )
+                )
 
             unit_spikes = tsgroup[int(unit_id)].restrict(time_support)
             spike_angles = unit_spikes.value_from(HD_tsd).values
@@ -314,7 +421,9 @@ def tuning_curve(base_dir, kilosort_dir, probe_name, session_info, interval_pair
                 occupancy_time_s,
                 angle_centers_deg,
             )
-            rayleigh_significant = bool(rayleigh_p < 0.05) if np.isfinite(rayleigh_p) else None
+            rayleigh_significant = (
+                bool(rayleigh_p < RAYLEIGH_ALPHA) if np.isfinite(rayleigh_p) else None
+            )
 
             compressed_times = _compress_times_to_epoch_clock(
                 unit_spikes.index.to_numpy(),
@@ -346,36 +455,34 @@ def tuning_curve(base_dir, kilosort_dir, probe_name, session_info, interval_pair
                 )
             shuffle_p = np.nan
             if np.isfinite(rate_mvl) and finite_shuffle_R.size:
-                shuffle_p = (
-                    1 + np.count_nonzero(finite_shuffle_R >= rate_mvl)
-                ) / (len(finite_shuffle_R) + 1)
-            shuffle_significant = bool(shuffle_p <= 0.01) if np.isfinite(shuffle_p) else None
+                shuffle_p = (1 + np.count_nonzero(finite_shuffle_R >= rate_mvl)) / (
+                    len(finite_shuffle_R) + 1
+                )
+            shuffle_significant = (
+                bool(shuffle_p <= SHUFFLE_ALPHA) if np.isfinite(shuffle_p) else None
+            )
 
             hd_class = None
             if rayleigh_significant is not None and shuffle_significant is not None:
                 hd_class = (
-                    2 if rayleigh_significant and shuffle_significant
-                    else 1 if rayleigh_significant or shuffle_significant
+                    2
+                    if rayleigh_significant and shuffle_significant
+                    else 1
+                    if rayleigh_significant or shuffle_significant
                     else 0
                 )
 
-            unit_firing_rates = [
-                float(value) if np.isfinite(value) else None
-                for value in unit_rates
-            ]
-            units.append({
-                "unit_id": int(unit_id),
-                "spike_counts": spike_counts[unit_index].astype(int).tolist(),
-                "firing_rate_hz": unit_firing_rates,
-                "hd_class": hd_class,
-                "rate_mvl": _json_float(rate_mvl),
-                "spike_angle_mrl": _json_float(spike_angle_mrl),
-                "rayleigh_score": _json_float(rayleigh_score),
-                "rayleigh_p": _json_float(rayleigh_p),
-                "rayleigh_significant": rayleigh_significant,
-                "shuffle_p": _json_float(shuffle_p),
-                "shuffle_significant": shuffle_significant,
-            })
+            firing_rate_hz.append(
+                [float(value) if np.isfinite(value) else None for value in unit_rates]
+            )
+            unit_data["hd_class"].append(hd_class)
+            unit_data["rate_mvl"].append(_json_float(rate_mvl))
+            unit_data["spike_angle_mrl"].append(_json_float(spike_angle_mrl))
+            unit_data["rayleigh_score"].append(_json_float(rayleigh_score))
+            unit_data["rayleigh_p"].append(_json_float(rayleigh_p))
+            unit_data["rayleigh_significant"].append(rayleigh_significant)
+            unit_data["shuffle_p"].append(_json_float(shuffle_p))
+            unit_data["shuffle_significant"].append(shuffle_significant)
             pbar.update(1)
 
     output_metadata = {
@@ -398,45 +505,186 @@ def tuning_curve(base_dir, kilosort_dir, probe_name, session_info, interval_pair
             "class_1": "exactly one significant",
             "class_2": "rayleigh and shuffle significant",
             "class_null": "one or both significance tests unavailable",
-            "rayleigh_alpha": 0.05,
+            "rayleigh_alpha": RAYLEIGH_ALPHA,
             "rayleigh_test": (
                 "Poisson cos/sin score test with log occupancy-time offset; "
                 "chi-square with 2 degrees of freedom"
             ),
-            "shuffle_alpha": 0.01,
+            "shuffle_alpha": SHUFFLE_ALPHA,
             "num_shuffle": int(num_shuffle),
             "shuffle_seed": int(shuffle_seed),
         },
     }
     if metadata:
+        conflicting = sorted(output_metadata.keys() & metadata.keys())
+        if conflicting:
+            raise ValueError(
+                "metadata cannot override computed tuning-curve fields: "
+                + ", ".join(conflicting)
+            )
         output_metadata.update(metadata)
 
     tuning_curves = {
-        "schema_version": 2,
         "metadata": output_metadata,
         "angle_bin_edges_deg": angle_bin_edges_deg.tolist(),
         "occupancy_samples": occupancy_samples.astype(int).tolist(),
         "occupancy_time_s": occupancy_time_s.tolist(),
-        "units": units,
+        "unit_id": unit_ids.astype(int).tolist(),
+        "spike_counts": spike_counts.astype(int).tolist(),
+        "firing_rate_hz": firing_rate_hz,
+        "unit_data": unit_data,
     }
 
     if is_save:
         if save_path is None:
-            save_path = base_dir / "data" / "tuning_curves" / f"Probe{probe_name}" / "tuning_curves.json"
+            save_path = (
+                base_dir
+                / "data"
+                / "tuning_curves"
+                / f"Probe{probe_name}"
+                / "tuning_curves.json"
+            )
         else:
             save_path = Path(save_path)
 
         serialized_tuning_curves = json.dumps(tuning_curves, indent=2, allow_nan=False)
         saved_tuning_curves = json.loads(serialized_tuning_curves)
-        assert saved_tuning_curves["schema_version"] == 2
+        assert tuple(saved_tuning_curves) == (
+            "metadata",
+            "angle_bin_edges_deg",
+            "occupancy_samples",
+            "occupancy_time_s",
+            "unit_id",
+            "spike_counts",
+            "firing_rate_hz",
+            "unit_data",
+        )
         assert len(saved_tuning_curves["angle_bin_edges_deg"]) == num_of_bins_in_hd + 1
         assert len(saved_tuning_curves["occupancy_samples"]) == num_of_bins_in_hd
         assert len(saved_tuning_curves["occupancy_time_s"]) == num_of_bins_in_hd
-        assert len(saved_tuning_curves["units"]) == len(unit_ids)
-        assert all(len(unit["spike_counts"]) == num_of_bins_in_hd
-                   for unit in saved_tuning_curves["units"])
-        assert all(len(unit["firing_rate_hz"]) == num_of_bins_in_hd
-                   for unit in saved_tuning_curves["units"])
+        saved_unit_ids = saved_tuning_curves["unit_id"]
+        saved_counts = saved_tuning_curves["spike_counts"]
+        saved_rates = saved_tuning_curves["firing_rate_hz"]
+        saved_unit_data = saved_tuning_curves["unit_data"]
+        num_units = len(unit_ids)
+        assert len(saved_unit_ids) == len(saved_counts) == len(saved_rates) == num_units
+        assert saved_unit_ids
+        assert all(type(unit_id) is int and unit_id >= 0 for unit_id in saved_unit_ids)
+        assert len(set(saved_unit_ids)) == num_units
+        assert all(
+            type(value) is int and value >= 0
+            for value in saved_tuning_curves["occupancy_samples"]
+        )
+        assert all(
+            type(value) in (int, float) and np.isfinite(value) and value >= 0
+            for value in saved_tuning_curves["occupancy_time_s"]
+        )
+        assert any(value > 0 for value in saved_tuning_curves["occupancy_time_s"])
+        assert all(
+            (samples == 0) == (occupied_s == 0)
+            for samples, occupied_s in zip(
+                saved_tuning_curves["occupancy_samples"],
+                saved_tuning_curves["occupancy_time_s"],
+            )
+        )
+        assert np.allclose(
+            saved_tuning_curves["occupancy_samples"],
+            np.asarray(saved_tuning_curves["occupancy_time_s"]) * feature_fs_hz,
+        )
+        assert all(len(row) == num_of_bins_in_hd for row in saved_counts)
+        assert all(len(row) == num_of_bins_in_hd for row in saved_rates)
+        assert all(
+            type(count) is int and count >= 0 for row in saved_counts for count in row
+        )
+        for count_row, rate_row in zip(saved_counts, saved_rates):
+            for count, rate, occupied_s in zip(
+                count_row,
+                rate_row,
+                saved_tuning_curves["occupancy_time_s"],
+            ):
+                if occupied_s == 0:
+                    assert count == 0 and rate is None
+                else:
+                    assert type(rate) in (int, float) and np.isfinite(rate)
+                    assert np.isclose(rate, count / occupied_s)
+
+        expected_unit_data_keys = (
+            "hd_class",
+            "rate_mvl",
+            "spike_angle_mrl",
+            "rayleigh_score",
+            "rayleigh_p",
+            "rayleigh_significant",
+            "shuffle_p",
+            "shuffle_significant",
+        )
+        assert tuple(saved_unit_data) == expected_unit_data_keys
+        assert all(
+            len(saved_unit_data[key]) == num_units for key in expected_unit_data_keys
+        )
+        assert all(
+            value is None or (type(value) is int and value in {0, 1, 2})
+            for value in saved_unit_data["hd_class"]
+        )
+        for key in (
+            "rate_mvl",
+            "spike_angle_mrl",
+            "rayleigh_score",
+            "rayleigh_p",
+            "shuffle_p",
+        ):
+            assert all(
+                value is None or (type(value) in (int, float) and np.isfinite(value))
+                for value in saved_unit_data[key]
+            )
+        assert all(
+            value is None or 0 <= value <= 1
+            for key in ("rate_mvl", "spike_angle_mrl", "rayleigh_p", "shuffle_p")
+            for value in saved_unit_data[key]
+        )
+        assert all(
+            value is None or value >= 0 for value in saved_unit_data["rayleigh_score"]
+        )
+        assert all(
+            (score is None) == (p_value is None)
+            for score, p_value in zip(
+                saved_unit_data["rayleigh_score"],
+                saved_unit_data["rayleigh_p"],
+            )
+        )
+        for key in ("rayleigh_significant", "shuffle_significant"):
+            assert all(
+                value is None or type(value) is bool for value in saved_unit_data[key]
+            )
+        for (
+            hd_class,
+            rayleigh_p,
+            rayleigh_significant,
+            shuffle_p,
+            shuffle_significant,
+        ) in zip(
+            saved_unit_data["hd_class"],
+            saved_unit_data["rayleigh_p"],
+            saved_unit_data["rayleigh_significant"],
+            saved_unit_data["shuffle_p"],
+            saved_unit_data["shuffle_significant"],
+        ):
+            assert rayleigh_significant == (
+                None if rayleigh_p is None else rayleigh_p < RAYLEIGH_ALPHA
+            )
+            assert shuffle_significant == (
+                None if shuffle_p is None else shuffle_p <= SHUFFLE_ALPHA
+            )
+            expected_hd_class = (
+                None
+                if rayleigh_significant is None or shuffle_significant is None
+                else 2
+                if rayleigh_significant and shuffle_significant
+                else 1
+                if rayleigh_significant or shuffle_significant
+                else 0
+            )
+            assert hd_class == expected_hd_class
 
         save_path.parent.mkdir(parents=True, exist_ok=True)
         temporary_path = save_path.with_suffix(save_path.suffix + ".tmp")
@@ -445,5 +693,3 @@ def tuning_curve(base_dir, kilosort_dir, probe_name, session_info, interval_pair
         temporary_path.replace(save_path)
 
     return tuning_curves
-
-
