@@ -1,20 +1,38 @@
 #!/usr/bin/env python3
-"""Standalone native GUI viewer for RF mapping spike-count JSON files.
+"""Native Python/Tk viewer for RF mapping spike-count JSON files.
 
-The app intentionally uses only Python's standard library and Tk. It does not
-depend on notebook state, web servers, numpy, matplotlib, or pandas.
+The viewer shares the validated per-unit :class:`Utils.rfmap.RFMap` model used
+by notebook analysis. It does not depend on notebook state or a web server.
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
-import json
 import math
+import queue
 import sys
+import threading
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
+
+from Utils.figure_export import (
+    ExportPage,
+    ExportPlan,
+    FigureFormat,
+    PLOT_KIND_REGISTRY,
+    PlotKind,
+    PlotSpec,
+    export_figures,
+    render_live_preview,
+)
+from Utils.hd_tuning import (
+    HDTuningData,
+    discover_hd_tuning_path,
+    load_hd_tuning,
+)
+from Utils.rfmap import RFMap, RFMapList, load_rf_maps
 
 try:
     from tkinter import filedialog, messagebox, ttk
@@ -35,6 +53,7 @@ except ModuleNotFoundError:
 
 DEFAULT_JSON_DIR = Path("data")
 DEFAULT_JSON = DEFAULT_JSON_DIR / "unitsSpikeCounts_260701_1.json"
+APP_VERSION = "1.9.0"
 INNER_BLANK_ROWS = 4
 POLAR_PAD_ROWS = 1
 STARTUP_EVENT_WAIT_MS = 350
@@ -303,63 +322,71 @@ class ViewerSyncState:
 
 
 class RFMappingData:
-    """Validated in-memory representation of the JSON payload."""
+    """GUI adapter around the shared, validated per-unit RFMap model."""
 
     def __init__(self, path: Path):
         self.path = path
-        with path.open("r", encoding="utf-8") as f:
-            raw = json.load(f)
-
-        required = {
-            "unitsSpikeCounts",
-            "unitsSpikeCountsSize",
-            "unitPool",
-            "xPositions",
-            "yPositions",
-            "timeBinEdges",
-        }
-        missing = sorted(required.difference(raw))
-        if missing:
-            raise ValueError(f"Missing JSON keys: {', '.join(missing)}")
-
-        self.counts = raw["unitsSpikeCounts"]
-        self.size = tuple(int(v) for v in raw["unitsSpikeCountsSize"])
-        if len(self.size) != 4:
-            raise ValueError(f"unitsSpikeCountsSize must have 4 values, got {self.size!r}")
-
-        self.n_units, self.n_y, self.n_x, self.n_bins = self.size
-        self.unit_pool = [int(v) for v in raw["unitPool"]]
-        self.x_positions = [float(v) for v in raw["xPositions"]]
-        self.y_positions = [float(v) for v in raw["yPositions"]]
-        self.time_bin_edges = [float(v) for v in raw["timeBinEdges"]]
-        presentation_counts = raw.get("stimulusPresentationCounts")
-        if presentation_counts is not None:
-            # MATLAB jsonencode collapses singleton matrix dimensions.
-            if self.n_y == 1 and self.n_x == 1 and isinstance(presentation_counts, (int, float)):
-                presentation_counts = [[presentation_counts]]
-            elif (
-                self.n_y == 1
-                and isinstance(presentation_counts, list)
-                and len(presentation_counts) == self.n_x
-                and all(not isinstance(value, list) for value in presentation_counts)
-            ):
-                presentation_counts = [presentation_counts]
-            elif (
-                self.n_x == 1
-                and isinstance(presentation_counts, list)
-                and len(presentation_counts) == self.n_y
-                and all(not isinstance(value, list) for value in presentation_counts)
-            ):
-                presentation_counts = [[value] for value in presentation_counts]
-        self.presentation_counts = presentation_counts
+        self.rf_maps: RFMapList = load_rf_maps(path)
+        first = self.rf_maps[0]
+        self.n_units = len(self.rf_maps)
+        self.n_y = first.n_y
+        self.n_x = first.n_x
+        self.n_bins = first.n_time_bins
+        self.size = (self.n_units, self.n_y, self.n_x, self.n_bins)
+        self.counts = [rf_map.spike_counts for rf_map in self.rf_maps]
+        self.unit_pool = list(self.rf_maps.unit_ids)
+        self.x_positions = first.x_positions.tolist()
+        self.y_positions = first.y_positions.tolist()
+        self.time_bin_edges = first.time_bin_edges_s.tolist()
+        self.presentation_counts = (
+            first.presentation_counts.tolist()
+            if first.presentation_counts is not None
+            else None
+        )
         self._metrics_cache: dict[int, UnitMetrics] = {}
+        self._hd_tuning_lock = threading.Lock()
+        self._hd_tuning_checked = False
+        self._hd_tuning: HDTuningData | None = None
+        self._hd_tuning_error: str | None = None
 
-        self._validate()
-        if self.presentation_counts is not None:
-            self.presentation_counts = [
-                [float(value) for value in row]
-                for row in self.presentation_counts
-            ]
+    def rf_map(self, unit_idx: int) -> RFMap:
+        """Return the shared per-unit object for an original JSON unit index."""
+
+        return self.rf_maps.by_index(unit_idx)
+
+    def rf_map_by_unit_id(self, unit_id: int) -> RFMap:
+        """Return a per-unit object by its recorded cluster/unit ID."""
+
+        return self.rf_maps.by_unit_id(unit_id)
+
+    def hd_tuning(self) -> HDTuningData | None:
+        """Lazily discover and validate the companion HD tuning JSON."""
+
+        if self._hd_tuning_checked:
+            return self._hd_tuning
+        # Preview rendering runs on Tk's main thread while final export runs on
+        # a worker.  Publish the checked flag only after discovery/loading is
+        # complete so another caller can never observe a false "missing" state.
+        with self._hd_tuning_lock:
+            if self._hd_tuning_checked:
+                return self._hd_tuning
+            tuning: HDTuningData | None = None
+            error: str | None = None
+            tuning_path = discover_hd_tuning_path(self.path)
+            if tuning_path is not None:
+                try:
+                    tuning = load_hd_tuning(tuning_path)
+                except Exception as exc:
+                    error = str(exc)
+            self._hd_tuning = tuning
+            self._hd_tuning_error = error
+            self._hd_tuning_checked = True
+        return self._hd_tuning
+
+    @property
+    def hd_tuning_error(self) -> str | None:
+        self.hd_tuning()
+        return self._hd_tuning_error
 
     def _validate(self) -> None:
         if any(size <= 0 for size in self.size):
@@ -454,7 +481,7 @@ class RFMappingData:
         return list(range(self.n_y))
 
     def cluster_id(self, unit_idx: int) -> int:
-        return self.unit_pool[unit_idx]
+        return self.rf_map(unit_idx).unit_id
 
     def bin_label(self, bin_idx: int) -> str:
         start = self.time_bin_edges[bin_idx] * 1000.0
@@ -583,13 +610,11 @@ class RFMappingData:
         if mode == "Range sum":
             start = max(0, min(range_start, range_end))
             end = min(self.n_bins - 1, max(range_start, range_end))
-            return [
-                [
-                    float(sum(unit[y_idx][x_idx][start : end + 1]))
-                    for x_idx in range(self.n_x)
-                ]
-                for y_idx in range(self.n_y)
-            ]
+            summed = self.rf_map(unit_idx).sum_between_s(
+                self.time_bin_edges[start],
+                self.time_bin_edges[end + 1],
+            )
+            return summed.spike_counts[..., 0].astype(float).tolist()
         raise ValueError(f"Unknown RF mode: {mode}")
 
     def supports_value_mode(self, value_mode: str) -> bool:
@@ -1161,7 +1186,7 @@ class RFMViewer(tk.Toplevel):
         self._pair_last_local_state: ViewerSyncState | None = None
         self._startup_after: str | None = None
         self._redraw_after: str | None = None
-        self.title("RF Map Viewer")
+        self.title(f"RF Map Viewer {APP_VERSION}")
         self.withdraw()
         self._install_application_handlers()
 
@@ -1176,7 +1201,7 @@ class RFMViewer(tk.Toplevel):
 
     def _initialize_viewer(self, data: RFMappingData) -> None:
         self.data = data
-        self.title(f"{data.path.name} — RF Map Viewer")
+        self.title(f"{data.path.name} — RF Map Viewer {APP_VERSION}")
         self.geometry("1440x900")
         self.minsize(1120, 720)
 
@@ -1238,6 +1263,18 @@ class RFMViewer(tk.Toplevel):
         self._startup_after = None
         if self._quitting or self._viewer_ready:
             return
+        if not path.is_file():
+            initial_dir = path.parent if path.parent.is_dir() else Path.home()
+            selected = filedialog.askopenfilename(
+                parent=self,
+                title="Open RF mapping JSON",
+                initialdir=str(initial_dir),
+                filetypes=(("JSON files", "*.json"), ("All files", "*.*")),
+            )
+            if not selected:
+                self._quit_application()
+                return
+            path = Path(selected)
         try:
             data = RFMappingData(path)
         except Exception as exc:
@@ -1308,8 +1345,13 @@ class RFMViewer(tk.Toplevel):
             command=self._open_json,
         )
         file_menu.add_command(
-            label="Export Displayed…",
+            label="Export Figures…",
             accelerator="⌘E" if sys.platform == "darwin" else "Ctrl+E",
+            command=self._open_figure_exporter,
+        )
+        file_menu.add_command(
+            label="Export Displayed Data CSV…",
+            accelerator="⇧⌘E" if sys.platform == "darwin" else "Ctrl+Shift+E",
             command=self._export_current_matrix,
         )
         file_menu.add_separator()
@@ -1373,7 +1415,7 @@ class RFMViewer(tk.Toplevel):
 
     def _build_sidebar(self, parent: ttk.Frame) -> None:
         row = 0
-        ttk.Label(parent, text="RF Map Viewer", style="Title.TLabel").grid(row=row, column=0, sticky="w")
+        ttk.Label(parent, text=f"RF Map Viewer {APP_VERSION}", style="Title.TLabel").grid(row=row, column=0, sticky="w")
         row += 1
         self.data_label = ttk.Label(parent, text="", style="Muted.TLabel", wraplength=260, justify="left")
         self.data_label.grid(row=row, column=0, sticky="ew", pady=(6, 14))
@@ -1492,7 +1534,7 @@ class RFMViewer(tk.Toplevel):
         button_frame = ttk.Frame(parent, style="Panel.TFrame")
         button_frame.grid(row=row, column=0, sticky="ew", pady=(0, 12))
         button_frame.columnconfigure(0, weight=1)
-        ttk.Button(button_frame, text="Export displayed", command=self._export_current_matrix).grid(
+        ttk.Button(button_frame, text="Export figures…", command=self._open_figure_exporter).grid(
             row=0, column=0, sticky="ew"
         )
         row += 1
@@ -1651,10 +1693,12 @@ class RFMViewer(tk.Toplevel):
                 f"<KeyPress-{tab_index + 1}>",
                 lambda event, index=tab_index: self._run_navigation_shortcut(event, self._select_tab, index),
             )
-        self.bind("<Control-e>", lambda _event: self._export_current_matrix())
+        self.bind("<Control-e>", lambda _event: self._open_figure_exporter())
+        self.bind("<Control-Shift-E>", lambda _event: self._export_current_matrix())
         self.bind("<Control-w>", lambda _event: self._close_window())
         if sys.platform == "darwin":
-            self.bind("<Command-e>", lambda _event: self._export_current_matrix())
+            self.bind("<Command-e>", lambda _event: self._open_figure_exporter())
+            self.bind("<Command-Shift-E>", lambda _event: self._export_current_matrix())
             self.bind("<Command-w>", lambda _event: self._close_window())
         for key, canvas in self.canvases.items():
             canvas.bind("<Configure>", self._schedule_redraw)
@@ -1713,7 +1757,8 @@ class RFMViewer(tk.Toplevel):
             "Esc   Show Full Timeline Range\n"
             "[ / ]   Previous / next unit (legacy)\n"
             "Command-O   Open JSON in a new window\n"
-            "Command-E   Export displayed matrix\n"
+            "Command-E   Open figure exporter\n"
+            "Shift-Command-E   Export displayed data CSV\n"
             "Command-W   Close current window",
             parent=self,
         )
@@ -1780,6 +1825,12 @@ class RFMViewer(tk.Toplevel):
         return next((unit_id for unit_id in unit_ids if unit_id > requested), unit_ids[0])
 
     def _local_unit_index(self, unit_id: int) -> int | None:
+        lookup = getattr(self.data, "rf_map_by_unit_id", None)
+        if callable(lookup):
+            try:
+                return lookup(int(unit_id)).unit_index
+            except KeyError:
+                return None
         try:
             return self.data.unit_pool.index(int(unit_id))
         except ValueError:
@@ -4793,7 +4844,7 @@ class RFMViewer(tk.Toplevel):
         except Exception as exc:
             messagebox.showerror("Could not load JSON", str(exc))
             return
-        self.title(f"{self.data.path.name} — RF Map Viewer")
+        self.title(f"{self.data.path.name} — RF Map Viewer {APP_VERSION}")
         self.unit_idx.set(0)
         self._selected_unit_id = self.data.unit_pool[0]
         self._last_supported_unit_id = self.data.unit_pool[0]
@@ -4830,6 +4881,18 @@ class RFMViewer(tk.Toplevel):
         self._sync_unit_combo()
         self._update_all()
         self._pair_ready_viewer_set_changed(adopt_viewer=self)
+
+    def _open_figure_exporter(self) -> None:
+        existing = self.__dict__.get("_figure_export_window")
+        if existing is not None:
+            try:
+                if existing.winfo_exists():
+                    existing.lift()
+                    existing.focus_force()
+                    return
+            except tk.TclError:
+                pass
+        self._figure_export_window = FigureExportWindow(self)
 
     def _export_current_matrix(self) -> None:
         if self._selected_local_unit_index() is None:
@@ -4965,6 +5028,816 @@ class RFMViewer(tk.Toplevel):
         messagebox.showinfo("Export complete", f"Wrote {export_space} matrix to {path}")
 
 
+@dataclass(frozen=True)
+class FigureViewerSnapshot:
+    """Immutable viewer settings used by preview and final figure rendering."""
+
+    value_mode: str
+    rf_source_start: int
+    rf_source_end: int
+    time_groups: tuple[AxisGroup, ...]
+    x_groups: tuple[AxisGroup, ...]
+    y_groups: tuple[AxisGroup, ...]
+    smooth_radius: int
+    palette: str
+    polar_radius: str
+    timeline_polar: bool
+    selected_cell: CellRef | None
+    total_degrees: float
+    timeline_range_start: int = 0
+    timeline_range_end: int = -1
+    timeline_active_bin: int = 0
+
+    @classmethod
+    def capture(cls, viewer: RFMViewer) -> FigureViewerSnapshot:
+        source_start, source_end = viewer._source_bins_for_time_controls()
+        timeline_range_start, timeline_range_end = viewer._display_range_indices()
+        return cls(
+            value_mode=viewer.value_mode_var.get(),
+            rf_source_start=source_start,
+            rf_source_end=source_end,
+            time_groups=tuple(viewer._time_groups()),
+            x_groups=tuple(viewer._x_groups()),
+            y_groups=tuple(viewer._display_y_groups()),
+            smooth_radius=viewer._smooth_radius(),
+            palette=viewer.palette_var.get(),
+            polar_radius=viewer.polar_radius_var.get(),
+            timeline_polar=bool(viewer.polar_layout_var.get()),
+            selected_cell=viewer.selected_cell,
+            total_degrees=viewer.data.infer_total_deg(),
+            timeline_range_start=timeline_range_start,
+            timeline_range_end=timeline_range_end,
+            timeline_active_bin=max(
+                0,
+                min(len(viewer._time_groups()) - 1, int(viewer.bin_var.get())),
+            ),
+        )
+
+
+class GUIFigureDataProvider:
+    """Prepare every registered figure without mutating the live viewer."""
+
+    def __init__(self, data: RFMappingData, snapshot: FigureViewerSnapshot):
+        self.data = data
+        self.snapshot = snapshot
+
+    def __call__(self, unit_id: int, template: PlotSpec) -> PlotSpec:
+        try:
+            unit_idx = self.data.rf_map_by_unit_id(unit_id).unit_index
+        except KeyError:
+            return replace(
+                template,
+                data={"unavailable": f"Unit {unit_id} is unavailable in this RF dataset."},
+            )
+
+        kind = template.kind
+        options = dict(template.options)
+        options.setdefault("palette", self.snapshot.palette)
+        options.setdefault("total_degrees", self.snapshot.total_degrees)
+        if kind in {
+            PlotKind.RF_POLAR,
+            PlotKind.DELAY_POLAR,
+            PlotKind.RGB_POLAR,
+            PlotKind.TIMELINE_CURRENT,
+        }:
+            options.setdefault("inner_blank_rows", INNER_BLANK_ROWS)
+        if kind in {PlotKind.RF_CARTESIAN, PlotKind.RF_POLAR}:
+            payload = self._rf_matrix(unit_idx, polar=kind is PlotKind.RF_POLAR)
+        elif kind in {PlotKind.DELAY_CARTESIAN, PlotKind.DELAY_POLAR}:
+            options["palette"] = "delay"
+            options["vmin"] = self.data.time_bin_edges[0] * 1000.0
+            options["vmax"] = self.data.time_bin_edges[-1] * 1000.0
+            payload = self._delay_matrix(unit_idx, polar=kind is PlotKind.DELAY_POLAR)
+        elif kind in {PlotKind.RGB_CARTESIAN, PlotKind.RGB_POLAR}:
+            payload = self._rgb_matrix(unit_idx, polar=kind is PlotKind.RGB_POLAR)
+        elif kind is PlotKind.TIMELINE_CURRENT:
+            options["polar"] = self.snapshot.timeline_polar
+            payload = self._timeline_payload(unit_idx)
+        elif kind in {PlotKind.HD_LINE, PlotKind.HD_POLAR}:
+            payload = self._hd_payload(unit_id)
+        elif kind is PlotKind.PROBE_LAYOUT:
+            payload = {
+                "unavailable": (
+                    "Probe layout data is not loaded in the Python viewer for this "
+                    "dataset. The page is retained so the export recipe stays complete."
+                )
+            }
+        else:
+            payload = {"unavailable": f"Unsupported figure kind: {kind.value}"}
+        return replace(template, data=payload, options=options)
+
+    def _prepare(
+        self,
+        matrix: list[list[float | None]],
+        *,
+        polar: bool,
+    ) -> list[list[float | None]]:
+        prepared = reduce_matrix_xy(
+            matrix,
+            list(self.snapshot.y_groups),
+            list(self.snapshot.x_groups),
+        )
+        prepared = smooth_matrix(prepared, self.snapshot.smooth_radius)
+        if not polar:
+            return prepared
+        if self.snapshot.polar_radius == POLAR_RADIUS_MODES[0]:
+            ring_rows = sorted(
+                range(len(self.snapshot.y_groups)),
+                key=lambda index: self.snapshot.y_groups[index][0],
+            )
+        else:
+            ring_rows = list(range(len(prepared) - 1, -1, -1))
+        return [prepared[index] for index in ring_rows]
+
+    def _rf_matrix(self, unit_idx: int, *, polar: bool) -> list[list[float | None]]:
+        raw = self.data.response_matrix(
+            unit_idx,
+            self.snapshot.rf_source_start,
+            self.snapshot.rf_source_end,
+            self.snapshot.value_mode,
+        )
+        return self._prepare(raw, polar=polar)
+
+    def _delay_raw(self, unit_idx: int) -> list[list[float | None]]:
+        unit = self.data.rf_map(unit_idx).spike_counts
+        metrics = self.data.metrics(unit_idx)
+        result: list[list[float | None]] = []
+        for y_idx in range(self.data.n_y):
+            row: list[float | None] = []
+            for x_idx in range(self.data.n_x):
+                if metrics.total[y_idx][x_idx] <= 0:
+                    row.append(None)
+                    continue
+                hist = unit[y_idx, x_idx]
+                grouped = [
+                    float(hist[start : end + 1].sum())
+                    for start, end in self.snapshot.time_groups
+                ]
+                if not grouped or max(grouped) <= 0:
+                    row.append(None)
+                    continue
+                peak = max(range(len(grouped)), key=grouped.__getitem__)
+                start, end = self.snapshot.time_groups[peak]
+                row.append(
+                    (
+                        self.data.time_bin_edges[start]
+                        + self.data.time_bin_edges[end + 1]
+                    )
+                    * 500.0
+                )
+            result.append(row)
+        return result
+
+    def _delay_matrix(self, unit_idx: int, *, polar: bool) -> list[list[float | None]]:
+        return self._prepare(self._delay_raw(unit_idx), polar=polar)
+
+    def _rgb_matrix(self, unit_idx: int, *, polar: bool) -> list[list[tuple[int, int, int]]]:
+        response = self._prepare(
+            self.data.response_matrix(
+                unit_idx,
+                0,
+                self.data.n_bins - 1,
+                self.snapshot.value_mode,
+            ),
+            polar=polar,
+        )
+        delay = self._prepare(self._delay_raw(unit_idx), polar=polar)
+        entropy = self._prepare(self.data.metrics(unit_idx).entropy, polar=polar)
+        response_values = [
+            float(value)
+            for row in response
+            for value in row
+            if value is not None and math.isfinite(float(value))
+        ]
+        response_high = max(response_values, default=0.0)
+        max_response = max(response_high, 1.0)
+        delay_start = self.data.time_bin_edges[0] * 1000.0
+        delay_end = self.data.time_bin_edges[-1] * 1000.0
+        delay_span = max(delay_end - delay_start, 1.0)
+        rgb: list[list[tuple[int, int, int]]] = []
+        for y_idx, row in enumerate(response):
+            output_row: list[tuple[int, int, int]] = []
+            for x_idx, value in enumerate(row):
+                response_value = float(value) if value is not None else 0.0
+                delay_value = delay[y_idx][x_idx]
+                entropy_value = entropy[y_idx][x_idx]
+                if response_value <= 0:
+                    output_row.append((237, 240, 243))
+                else:
+                    output_row.append(
+                        (
+                            int(round(clamp(response_value / max_response) * 255)),
+                            int(
+                                round(
+                                    clamp(
+                                        (
+                                            (float(delay_value) if delay_value is not None else delay_start)
+                                            - delay_start
+                                        )
+                                        / delay_span
+                                    )
+                                    * 255
+                                )
+                            ),
+                            int(round(clamp(float(entropy_value or 0.0)) * 255)),
+                        )
+                    )
+            rgb.append(output_row)
+        return rgb
+
+    def _all_positions_timeline(self, unit_idx: int) -> list[float]:
+        if self.snapshot.value_mode == VALUE_MODE_COUNT:
+            totals = self.data.metrics(unit_idx).bin_totals
+            return [
+                float(sum(totals[start : end + 1]))
+                for start, end in self.snapshot.time_groups
+            ]
+        presentations = self.data.presentation_counts or []
+        presentation_total = sum(
+            float(count) for row in presentations for count in row if count > 0
+        )
+        if presentation_total <= 0:
+            return [0.0 for _group in self.snapshot.time_groups]
+        unit = self.data.rf_map(unit_idx).spike_counts
+        values: list[float] = []
+        for start, end in self.snapshot.time_groups:
+            value = float(unit[..., start : end + 1].sum()) / presentation_total
+            if self.snapshot.value_mode == VALUE_MODE_RATE:
+                value /= self.data.time_span_seconds(start, end)
+            values.append(value)
+        return values
+
+    def _selected_timeline(self, unit_idx: int) -> list[float] | None:
+        if self.snapshot.selected_cell is None:
+            return None
+        y_start, y_end, x_start, x_end = self.snapshot.selected_cell
+        result: list[float] = []
+        for start, end in self.snapshot.time_groups:
+            values = [
+                self.data.response_value(
+                    unit_idx,
+                    y_idx,
+                    x_idx,
+                    start,
+                    end,
+                    self.snapshot.value_mode,
+                )
+                for y_idx in range(y_start, y_end + 1)
+                for x_idx in range(x_start, x_end + 1)
+            ]
+            finite = [float(value) for value in values if value is not None]
+            result.append(sum(finite) / len(finite) if finite else 0.0)
+        return result
+
+    def _timeline_payload(self, unit_idx: int) -> dict[str, object]:
+        frames = [
+            self._prepare(
+                self.data.response_matrix(
+                    unit_idx,
+                    start,
+                    end,
+                    self.snapshot.value_mode,
+                ),
+                polar=self.snapshot.timeline_polar,
+            )
+            for start, end in self.snapshot.time_groups
+        ]
+        times = [
+            (
+                self.data.time_bin_edges[start]
+                + self.data.time_bin_edges[end + 1]
+            )
+            * 500.0
+            for start, end in self.snapshot.time_groups
+        ]
+        group_count = len(self.snapshot.time_groups)
+        selection_start = max(
+            0,
+            min(group_count - 1, int(self.snapshot.timeline_range_start)),
+        )
+        requested_end = self.snapshot.timeline_range_end
+        selection_end = (
+            group_count - 1
+            if requested_end < 0
+            else max(selection_start, min(group_count - 1, int(requested_end)))
+        )
+        return {
+            "times": times,
+            "totals": self._all_positions_timeline(unit_idx),
+            "selected": self._selected_timeline(unit_idx),
+            "frames": frames,
+            "selection_start_index": selection_start,
+            "selection_end_index": selection_end,
+            "active_index": max(
+                0,
+                min(group_count - 1, int(self.snapshot.timeline_active_bin)),
+            ),
+        }
+
+    def _hd_payload(self, unit_id: int) -> dict[str, object]:
+        tuning = self.data.hd_tuning()
+        if tuning is None:
+            detail = self.data.hd_tuning_error
+            return {
+                "unavailable": (
+                    f"HD tuning data could not be loaded: {detail}"
+                    if detail
+                    else "No companion HD tuning JSON was found for this RF dataset."
+                )
+            }
+        try:
+            curve = tuning.processed_curve(unit_id)
+        except KeyError:
+            return {"unavailable": f"HD tuning is unavailable for unit {unit_id}."}
+        return {
+            "angles_deg": curve.angles_deg.tolist(),
+            "rates": curve.rates_hz.tolist(),
+        }
+
+
+class FigureExportWindow(tk.Toplevel):
+    """Page-based, multi-unit figure composer with exact live preview."""
+
+    def __init__(self, viewer: RFMViewer):
+        super().__init__(viewer)
+        self.viewer = viewer
+        # The composer is a recipe for one immutable source session.  Never
+        # combine its captured provider with indices from a JSON subsequently
+        # selected in the still-interactive parent viewer.
+        self.data = viewer.data
+        self.unit_ids = tuple(int(unit_id) for unit_id in self.data.rf_maps.unit_ids)
+        selected_unit_id = int(viewer._selected_unit_id_value())
+        self.current_unit_id = (
+            selected_unit_id if selected_unit_id in self.unit_ids else self.unit_ids[0]
+        )
+        self.snapshot = FigureViewerSnapshot.capture(viewer)
+        self.data_provider = GUIFigureDataProvider(self.data, self.snapshot)
+        self.pages: list[dict[str, object]] = [
+            {"name": "Page 1", "plots": [self._current_plot_kind()]}
+        ]
+        self._preview_photo = None
+        self._preview_after: str | None = None
+        self._export_busy = False
+        self._export_queue: queue.SimpleQueue[tuple[str, object]] = queue.SimpleQueue()
+        self.title(f"Export Figures — RF Map Viewer {APP_VERSION}")
+        self.geometry("1380x840")
+        self.minsize(1050, 680)
+        self.transient(viewer)
+        self.protocol("WM_DELETE_WINDOW", self._close)
+        self._build()
+        self._populate_units()
+        self._refresh_pages(select=0)
+        self._refresh_current_plots()
+        self._schedule_preview()
+
+    def _current_plot_kind(self) -> PlotKind:
+        tab = self.viewer._active_tab_key()
+        polar = bool(self.viewer.polar_layout_var.get())
+        if tab == "rf":
+            return PlotKind.RF_POLAR if polar else PlotKind.RF_CARTESIAN
+        if tab == "delay":
+            if self.viewer.rgb_mode_var.get():
+                return PlotKind.RGB_POLAR if polar else PlotKind.RGB_CARTESIAN
+            return PlotKind.DELAY_POLAR if polar else PlotKind.DELAY_CARTESIAN
+        return PlotKind.TIMELINE_CURRENT
+
+    def _build(self) -> None:
+        self.columnconfigure(0, weight=0)
+        self.columnconfigure(1, weight=1)
+        self.columnconfigure(2, weight=0)
+        self.rowconfigure(1, weight=1)
+        ttk.Label(
+            self,
+            text="Export Figures",
+            font=("TkDefaultFont", 17, "bold"),
+        ).grid(row=0, column=0, columnspan=3, sticky="w", padx=16, pady=(14, 4))
+        ttk.Label(
+            self,
+            text=(
+                "Each selected unit receives every page below. Preview and final "
+                "files use the same renderer."
+            ),
+            foreground="#667085",
+        ).grid(row=0, column=1, columnspan=2, sticky="e", padx=16, pady=(14, 4))
+
+        left = ttk.Frame(self, padding=14)
+        left.grid(row=1, column=0, sticky="nsew")
+        center = ttk.Frame(self, padding=(6, 14))
+        center.grid(row=1, column=1, sticky="nsew")
+        right = ttk.Frame(self, padding=14)
+        right.grid(row=1, column=2, sticky="nsew")
+        center.columnconfigure(0, weight=1)
+        center.rowconfigure(1, weight=1)
+
+        ttk.Label(left, text="Figure type", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
+        self.format_var = tk.StringVar(value="PDF")
+        format_combo = ttk.Combobox(
+            left,
+            state="readonly",
+            values=("PDF", "PNG", "SVG"),
+            textvariable=self.format_var,
+            width=24,
+        )
+        format_combo.pack(fill="x", pady=(5, 12))
+        format_combo.bind("<<ComboboxSelected>>", lambda _event: self._on_format_changed())
+
+        ttk.Label(left, text="Units", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
+        self.unit_list = tk.Listbox(left, selectmode="extended", exportselection=False, width=30, height=13)
+        self.unit_list.pack(fill="both", expand=True, pady=(5, 5))
+        self.unit_list.bind("<<ListboxSelect>>", lambda _event: self._schedule_preview())
+        unit_buttons = ttk.Frame(left)
+        unit_buttons.pack(fill="x", pady=(0, 12))
+        ttk.Button(unit_buttons, text="Current", command=self._select_current_unit).pack(side="left")
+        ttk.Button(unit_buttons, text="All", command=self._select_all_units).pack(side="left", padx=5)
+        ttk.Button(unit_buttons, text="Clear", command=self._clear_units).pack(side="left")
+
+        ttk.Label(left, text="Pages per unit", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
+        self.page_list = tk.Listbox(left, exportselection=False, width=30, height=8)
+        self.page_list.pack(fill="both", expand=True, pady=(5, 5))
+        self.page_list.bind("<<ListboxSelect>>", lambda _event: self._on_page_selected())
+        page_buttons = ttk.Frame(left)
+        page_buttons.pack(fill="x")
+        ttk.Button(page_buttons, text="+ Page", command=self._add_page).pack(side="left")
+        ttk.Button(page_buttons, text="− Page", command=self._remove_page).pack(side="left", padx=5)
+        ttk.Button(
+            page_buttons,
+            text="↑",
+            width=3,
+            command=lambda: self._move_page(-1),
+        ).pack(side="left", padx=(0, 2))
+        ttk.Button(
+            page_buttons,
+            text="↓",
+            width=3,
+            command=lambda: self._move_page(1),
+        ).pack(side="left")
+
+        ttk.Label(center, text="Live preview", font=("TkDefaultFont", 11, "bold")).grid(row=0, column=0, sticky="w")
+        self.preview_label = ttk.Label(center, text="Preparing preview…", anchor="center", relief="solid")
+        self.preview_label.grid(row=1, column=0, sticky="nsew", pady=(6, 6))
+        self.preview_status = ttk.Label(center, text="", foreground="#667085")
+        self.preview_status.grid(row=2, column=0, sticky="w")
+
+        ttk.Label(right, text="Page name", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
+        self.page_name_var = tk.StringVar(value="Page 1")
+        page_name_entry = ttk.Entry(right, textvariable=self.page_name_var, width=34)
+        page_name_entry.pack(fill="x", pady=(5, 12))
+        page_name_entry.bind("<Return>", self._rename_page)
+        page_name_entry.bind("<FocusOut>", self._rename_page)
+
+        ttk.Label(right, text="Available views", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
+        self.available_kinds = [definition.kind for definition in PLOT_KIND_REGISTRY.values()]
+        self.available_list = tk.Listbox(right, exportselection=False, width=36, height=11)
+        for kind in self.available_kinds:
+            self.available_list.insert("end", PLOT_KIND_REGISTRY[kind.value].label)
+        self.available_list.selection_set(0)
+        self.available_list.pack(fill="both", expand=True, pady=(5, 5))
+        ttk.Button(right, text="Add view to page →", command=self._add_plot).pack(fill="x", pady=(0, 12))
+
+        ttk.Label(right, text="Views on current page", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
+        self.current_plot_list = tk.Listbox(right, exportselection=False, width=36, height=10)
+        self.current_plot_list.pack(fill="both", expand=True, pady=(5, 5))
+        plot_buttons = ttk.Frame(right)
+        plot_buttons.pack(fill="x")
+        ttk.Button(plot_buttons, text="Remove", command=self._remove_plot).pack(side="left")
+        ttk.Button(plot_buttons, text="↑", width=3, command=lambda: self._move_plot(-1)).pack(side="left", padx=(5, 2))
+        ttk.Button(plot_buttons, text="↓", width=3, command=lambda: self._move_plot(1)).pack(side="left")
+
+        footer = ttk.Frame(self, padding=(16, 8, 16, 14))
+        footer.grid(row=2, column=0, columnspan=3, sticky="ew")
+        footer.columnconfigure(1, weight=1)
+        ttk.Label(footer, text="Destination").grid(row=0, column=0, sticky="w")
+        self.destination_var = tk.StringVar(value="")
+        ttk.Entry(footer, textvariable=self.destination_var).grid(row=0, column=1, sticky="ew", padx=8)
+        ttk.Button(footer, text="Choose…", command=self._choose_destination).grid(row=0, column=2)
+        self.export_button = ttk.Button(footer, text="Export", command=self._start_export)
+        self.export_button.grid(row=0, column=3, padx=(12, 0))
+        ttk.Button(footer, text="Close", command=self._close).grid(row=0, column=4, padx=(6, 0))
+        self.export_status = ttk.Label(footer, text="", foreground="#475467")
+        self.export_status.grid(row=1, column=0, columnspan=5, sticky="w", pady=(7, 0))
+
+    def _populate_units(self) -> None:
+        self.unit_list.delete(0, "end")
+        for rf_map in self.data.rf_maps:
+            self.unit_list.insert("end", f"index {rf_map.unit_index:03d}  ·  unit {rf_map.unit_id}")
+        self._select_current_unit()
+
+    def _select_current_unit(self) -> None:
+        self.unit_list.selection_clear(0, "end")
+        try:
+            index = self.unit_ids.index(self.current_unit_id)
+        except ValueError:
+            index = None
+        if index is not None:
+            self.unit_list.selection_set(index)
+            self.unit_list.see(index)
+        self._schedule_preview()
+
+    def _select_all_units(self) -> None:
+        self.unit_list.selection_set(0, "end")
+        self._schedule_preview()
+
+    def _clear_units(self) -> None:
+        self.unit_list.selection_clear(0, "end")
+        self._schedule_preview()
+
+    def _selected_unit_ids(self) -> tuple[int, ...]:
+        return tuple(
+            self.unit_ids[index]
+            for index in self.unit_list.curselection()
+        )
+
+    def _selected_page_index(self) -> int:
+        selection = self.page_list.curselection()
+        return int(selection[0]) if selection else 0
+
+    def _refresh_pages(self, *, select: int | None = None) -> None:
+        current = self._selected_page_index() if select is None else select
+        self.page_list.delete(0, "end")
+        for index, page in enumerate(self.pages):
+            plots = page["plots"]
+            self.page_list.insert("end", f"{index + 1}. {page['name']}  ({len(plots)} views)")
+        current = max(0, min(len(self.pages) - 1, current))
+        self.page_list.selection_set(current)
+        self.page_list.see(current)
+        self.page_name_var.set(str(self.pages[current]["name"]))
+
+    def _on_page_selected(self) -> None:
+        index = self._selected_page_index()
+        self.page_name_var.set(str(self.pages[index]["name"]))
+        self._refresh_current_plots()
+        self._schedule_preview()
+
+    def _rename_page(self, _event=None) -> None:
+        index = self._selected_page_index()
+        name = self.page_name_var.get().strip()
+        if not name:
+            self.page_name_var.set(str(self.pages[index]["name"]))
+            return
+        self.pages[index]["name"] = name
+        self._refresh_pages(select=index)
+        self._schedule_preview()
+
+    def _add_page(self) -> None:
+        self.pages.append({"name": f"Page {len(self.pages) + 1}", "plots": []})
+        self._refresh_pages(select=len(self.pages) - 1)
+        self._refresh_current_plots()
+        self._schedule_preview()
+
+    def _remove_page(self) -> None:
+        if len(self.pages) <= 1:
+            messagebox.showinfo("Keep one page", "Each unit must have at least one page.", parent=self)
+            return
+        index = self._selected_page_index()
+        self.pages.pop(index)
+        self._refresh_pages(select=max(0, index - 1))
+        self._refresh_current_plots()
+        self._schedule_preview()
+
+    def _move_page(self, delta: int) -> None:
+        index = self._selected_page_index()
+        target = index + delta
+        if not 0 <= target < len(self.pages):
+            return
+        self.pages[index], self.pages[target] = self.pages[target], self.pages[index]
+        self._refresh_pages(select=target)
+        self._refresh_current_plots()
+        self._schedule_preview()
+
+    def _current_plot_kinds(self) -> list[PlotKind]:
+        return self.pages[self._selected_page_index()]["plots"]  # type: ignore[return-value]
+
+    def _refresh_current_plots(self, *, select: int | None = None) -> None:
+        plots = self._current_plot_kinds()
+        self.current_plot_list.delete(0, "end")
+        for kind in plots:
+            self.current_plot_list.insert("end", PLOT_KIND_REGISTRY[kind.value].label)
+        if plots and select is not None:
+            index = max(0, min(len(plots) - 1, select))
+            self.current_plot_list.selection_set(index)
+        self._refresh_pages(select=self._selected_page_index())
+
+    def _add_plot(self) -> None:
+        selection = self.available_list.curselection()
+        if not selection:
+            return
+        plots = self._current_plot_kinds()
+        plots.append(self.available_kinds[int(selection[0])])
+        self._refresh_current_plots(select=len(plots) - 1)
+        self._schedule_preview()
+
+    def _remove_plot(self) -> None:
+        selection = self.current_plot_list.curselection()
+        if not selection:
+            return
+        index = int(selection[0])
+        plots = self._current_plot_kinds()
+        plots.pop(index)
+        self._refresh_current_plots(select=max(0, index - 1))
+        self._schedule_preview()
+
+    def _move_plot(self, delta: int) -> None:
+        selection = self.current_plot_list.curselection()
+        if not selection:
+            return
+        index = int(selection[0])
+        target = index + delta
+        plots = self._current_plot_kinds()
+        if not 0 <= target < len(plots):
+            return
+        plots[index], plots[target] = plots[target], plots[index]
+        self._refresh_current_plots(select=target)
+        self._schedule_preview()
+
+    def _export_pages(self) -> tuple[ExportPage, ...]:
+        pages: list[ExportPage] = []
+        for index, page in enumerate(self.pages):
+            kinds: list[PlotKind] = page["plots"]  # type: ignore[assignment]
+            if not kinds:
+                raise ValueError(f"Page {index + 1} ({page['name']}) has no views.")
+            pages.append(
+                ExportPage(
+                    str(page["name"]),
+                    tuple(PlotSpec(kind) for kind in kinds),
+                )
+            )
+        return tuple(pages)
+
+    def _preview_plan(self) -> ExportPlan:
+        unit_ids = self._selected_unit_ids()
+        if not unit_ids:
+            unit_ids = (self.current_unit_id,)
+        return ExportPlan(
+            FigureFormat.PDF,
+            unit_ids,
+            self._export_pages(),
+            Path("/tmp/rfmap-live-preview.pdf"),
+        )
+
+    def _schedule_preview(self) -> None:
+        if self._preview_after is not None:
+            try:
+                self.after_cancel(self._preview_after)
+            except tk.TclError:
+                pass
+        self._preview_after = self.after(80, self._render_preview)
+
+    def _render_preview(self) -> None:
+        self._preview_after = None
+        try:
+            plan = self._preview_plan()
+            unit_id = plan.unit_ids[0]
+            page_index = self._selected_page_index()
+            image = render_live_preview(
+                plan,
+                unit_id,
+                page_index,
+                data_provider=self.data_provider,
+            )
+            available_width = max(480, self.preview_label.winfo_width() - 20)
+            available_height = max(360, self.preview_label.winfo_height() - 20)
+            image.thumbnail((available_width, available_height))
+            from PIL import ImageTk
+
+            self._preview_photo = ImageTk.PhotoImage(image)
+            self.preview_label.configure(image=self._preview_photo, text="")
+            self.preview_status.configure(
+                text=f"Preview: unit {unit_id}, page {page_index + 1} · exact final renderer"
+            )
+        except Exception as exc:
+            self._preview_photo = None
+            self.preview_label.configure(image="", text=f"Preview unavailable\n{exc}")
+            self.preview_status.configure(text="Fix the page or unit selection to continue.")
+
+    def _on_format_changed(self) -> None:
+        self.destination_var.set("")
+
+    def _default_base_name(self) -> str:
+        stem = self.data.path.stem
+        return f"{stem}_figures"
+
+    def _choose_destination(self) -> None:
+        figure_format = FigureFormat.coerce(self.format_var.get())
+        initial_dir = self.data.path.parent
+        if figure_format is FigureFormat.PDF:
+            path = filedialog.asksaveasfilename(
+                parent=self,
+                title="Export multi-page PDF",
+                initialdir=initial_dir,
+                initialfile=f"{self._default_base_name()}.pdf",
+                defaultextension=".pdf",
+                filetypes=(("PDF document", "*.pdf"),),
+            )
+            if path:
+                self.destination_var.set(path)
+            return
+        parent = filedialog.askdirectory(
+            parent=self,
+            title=f"Choose parent folder for {figure_format.value.upper()} pages",
+            initialdir=initial_dir,
+            mustexist=True,
+        )
+        if parent:
+            self.destination_var.set(str(Path(parent) / self._default_base_name()))
+
+    def _start_export(self) -> None:
+        if self._export_busy:
+            return
+        unit_ids = self._selected_unit_ids()
+        if not unit_ids:
+            messagebox.showerror("No units", "Select at least one unit to export.", parent=self)
+            return
+        destination_text = self.destination_var.get().strip()
+        if not destination_text:
+            self._choose_destination()
+            destination_text = self.destination_var.get().strip()
+            if not destination_text:
+                return
+        try:
+            figure_format = FigureFormat.coerce(self.format_var.get())
+            destination = Path(destination_text).expanduser()
+            plan = ExportPlan(figure_format, unit_ids, self._export_pages(), destination)
+        except Exception as exc:
+            messagebox.showerror("Invalid export", str(exc), parent=self)
+            return
+
+        overwrite = False
+        if destination.exists():
+            if figure_format is not FigureFormat.PDF:
+                messagebox.showerror(
+                    "Choose a new folder",
+                    "PNG/SVG export never replaces an existing directory. Choose a new output folder name.",
+                    parent=self,
+                )
+                return
+            overwrite = messagebox.askyesno(
+                "Replace PDF?",
+                f"{destination} already exists. Replace this file?",
+                parent=self,
+            )
+            if not overwrite:
+                return
+
+        self._export_busy = True
+        self.export_button.state(["disabled"])
+        page_count = len(plan.unit_ids) * len(plan.pages)
+        self.export_status.configure(text=f"Exporting {page_count} pages…")
+
+        def worker() -> None:
+            try:
+                result = export_figures(
+                    plan,
+                    data_provider=self.data_provider,
+                    overwrite=overwrite,
+                )
+            except Exception as exc:
+                self._export_queue.put(("error", str(exc)))
+            else:
+                self._export_queue.put(("result", result))
+
+        threading.Thread(target=worker, name="rfmap-figure-export", daemon=True).start()
+        self.after(50, self._poll_export)
+
+    def _poll_export(self) -> None:
+        try:
+            outcome, payload = self._export_queue.get_nowait()
+        except queue.Empty:
+            if self._export_busy:
+                self.after(50, self._poll_export)
+            return
+        if outcome == "error":
+            self._finish_export(error=str(payload))
+        else:
+            self._finish_export(result=payload)
+
+    def _finish_export(self, *, result=None, error: str | None = None) -> None:
+        self._export_busy = False
+        self.export_button.state(["!disabled"])
+        if error is not None:
+            self.export_status.configure(text="Export failed.")
+            messagebox.showerror("Export failed", error, parent=self)
+            return
+        self.export_status.configure(
+            text=f"Exported {result.page_count} pages to {result.destination}"
+        )
+        messagebox.showinfo(
+            "Export complete",
+            f"Exported {result.page_count} pages to\n{result.destination}",
+            parent=self,
+        )
+
+    def _close(self) -> None:
+        if self._export_busy:
+            messagebox.showinfo(
+                "Export is running",
+                "Wait for the export to finish before closing the composer.",
+                parent=self,
+            )
+            return
+        self.viewer.__dict__.pop("_figure_export_window", None)
+        self.destroy()
+
+
 def run_self_test(path: Path) -> None:
     data = RFMappingData(path)
     assert data.size == (data.n_units, data.n_y, data.n_x, data.n_bins)
@@ -5036,9 +5909,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
     if args.json_path is not None:
         path = Path(args.json_path).expanduser()
+        if not path.exists():
+            print(f"JSON file not found: {path}", file=sys.stderr)
+            return 2
     else:
         path = startup_json_path()
-    if not path.exists():
+    if args.self_test and not path.exists():
         print(f"JSON file not found: {path}", file=sys.stderr)
         return 2
     if args.self_test:

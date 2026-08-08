@@ -4,6 +4,7 @@ struct SidebarView: View {
     @Bindable var store: RFMappingStore
     @Bindable var pairingCoordinator: WindowPairingCoordinator
     let pairingWindowID: UUID
+    let openFigureExporter: () -> Void
 
     var body: some View {
         ScrollView {
@@ -36,7 +37,7 @@ struct SidebarView: View {
                 set: { pairingCoordinator.setPairingEnabled($0, sourceID: pairingWindowID) }
             ))
             .disabled(!pairingCoordinator.isPairingEnabled && !pairingCoordinator.eligibility.canEnable)
-            .help("Pair loaded windows whose ordered unit lists match exactly")
+            .help("Pair loaded windows by a shared sorted union of unit IDs")
 
             Text(pairingCoordinator.statusText())
                 .font(.caption)
@@ -98,18 +99,18 @@ struct SidebarView: View {
                     .help("Previous unit (← or [)")
 
                 Picker("Unit", selection: Binding(
-                    get: { store.unitIndex },
-                    set: {
-                        store.unitIndex = $0
-                        store.selectedCell = nil
-                        store.clearHover()
-                        store.ensureSelectedCell()
-                    }
+                    get: { store.selectedUnitID ?? store.navigationUnitIDs.first ?? 0 },
+                    set: { store.selectUnitID($0) }
                 )) {
                     if let data = store.data {
-                        ForEach(0..<data.nUnits, id: \.self) { index in
-                            Text("\(String(format: "%03d", index))  cluster \(data.clusterID(for: index))")
-                                .tag(index)
+                        ForEach(store.navigationUnitIDs, id: \.self) { unitID in
+                            if let index = data.unitIndex(forUnitID: unitID) {
+                                Text("\(String(format: "%03d", index))  cluster \(unitID)")
+                                    .tag(unitID)
+                            } else {
+                                Text("N/A  cluster \(unitID)")
+                                    .tag(unitID)
+                            }
                         }
                     }
                 }
@@ -215,11 +216,15 @@ struct SidebarView: View {
     }
 
     private var actionSection: some View {
-        HStack {
-            Button("Export displayed") { store.prepareExport() }
+        VStack(alignment: .leading, spacing: 7) {
+            Button("Export Figures…", action: openFigureExporter)
                 .disabled(!store.hasData)
-            Button("Full range") { store.clearTimelineSelection() }
-                .disabled(!store.hasTimeSelection)
+            HStack {
+                Button("Export displayed CSV") { store.prepareExport() }
+                    .disabled(!store.hasSelectedUnit)
+                Button("Full range") { store.clearTimelineSelection() }
+                    .disabled(!store.hasTimeSelection)
+            }
         }
     }
 

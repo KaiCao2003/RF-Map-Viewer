@@ -5,6 +5,7 @@ struct ContentView: View {
     @Bindable var store: RFMappingStore
     @Bindable var pairingCoordinator: WindowPairingCoordinator
     let pairingWindowID: UUID
+    let openFigureExporter: () -> Void
     let openJSONInNewWindow: (URL) -> Void
 
     var body: some View {
@@ -12,9 +13,10 @@ struct ContentView: View {
             SidebarView(
                 store: store,
                 pairingCoordinator: pairingCoordinator,
-                pairingWindowID: pairingWindowID
+                pairingWindowID: pairingWindowID,
+                openFigureExporter: openFigureExporter
             )
-                .frame(width: 318)
+            .frame(width: 318)
             Divider()
             mainContent
         }
@@ -112,7 +114,16 @@ struct ContentView: View {
                 Divider()
                 PlotControlBar(store: store)
                 Divider()
-                PlotTabsView(store: store)
+                if store.hasSelectedUnit {
+                    PlotTabsView(store: store)
+                } else {
+                    ContentUnavailableView {
+                        Label("Unit not available", systemImage: "waveform.slash")
+                    } description: {
+                        Text("Cluster \(store.selectedUnitID.map { String($0) } ?? "unknown") is part of the paired unit-ID union but is not present in this file. Use Previous/Next Unit to continue through the shared union.")
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
             }
         } else {
             ContentUnavailableView {
@@ -240,8 +251,8 @@ private struct PlotControlBar: View {
                         showTitle: false,
                         showUnit: false
                     )
-                    Button("Reset 0–20") { store.resetPlotRangeToDefault() }
-                        .help("Use 0–20 ms, clamped and snapped to the available source bins")
+                    Button("Reset 0–200") { store.resetPlotRangeToDefault() }
+                        .help("Use 0–200 ms, clamped and snapped to the available source bins")
                     Text("Timeline remains full and independent")
                         .font(.caption)
                         .foregroundStyle(.tertiary)

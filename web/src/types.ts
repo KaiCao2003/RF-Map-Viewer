@@ -1,0 +1,137 @@
+export type Matrix = Array<Array<number | null>>;
+export type AxisGroup = readonly [number, number];
+export type CellRef = readonly [number, number, number, number];
+
+export type ValueMode = "Spike count" | "Spikes / presentation" | "Mean firing rate (Hz)";
+export type Palette = "Gray" | "Viridis" | "Inferno";
+export type PolarRadius = "MATLAB row 1 inner" | "Display bottom inner";
+export type ViewTab = "rf" | "delay" | "timeline";
+
+export const VALUE_MODES: ValueMode[] = [
+  "Spike count",
+  "Spikes / presentation",
+  "Mean firing rate (Hz)",
+];
+export const PALETTES: Palette[] = ["Gray", "Viridis", "Inferno"];
+export const POLAR_RADIUS_MODES: PolarRadius[] = [
+  "MATLAB row 1 inner",
+  "Display bottom inner",
+];
+
+export interface DatasetMeta {
+  id: string;
+  name: string;
+  sourcePath: string;
+  shape: readonly [number, number, number, number];
+  unitPool: number[];
+  xPositions: number[];
+  yPositions: number[];
+  timeBinEdges: number[];
+  presentationCounts: number[][] | null;
+  capabilities: {
+    probe: boolean;
+    hd: boolean;
+    normalized: boolean;
+  };
+}
+
+export interface FsEntry {
+  name: string;
+  path: string;
+  type: "directory" | "file";
+  size: number | null;
+  mtime: number | null;
+}
+
+export interface FsPage {
+  root: string;
+  path: string;
+  entries: FsEntry[];
+  nextCursor: string | null;
+}
+
+export interface ProbeChannel {
+  channelId: number;
+  x: number;
+  y: number;
+  shank: number;
+}
+
+export interface ProbeUnit {
+  unitId: number;
+  x: number;
+  y: number;
+}
+
+export interface ProbeGeometry {
+  probe: string;
+  channels: ProbeChannel[];
+  units: ProbeUnit[];
+}
+
+export interface HdUnitArtifact {
+  unitId: number;
+  rates: Array<number | null>;
+  spikeCounts: number[];
+  hdClass: number | null;
+}
+
+export interface HdDatasetArtifact {
+  available: boolean;
+  sourcePath: string | null;
+  occupancyTimeS: number[] | null;
+  units: HdUnitArtifact[];
+  metadata: Record<string, unknown> | null;
+}
+
+export type HdPlotMode = "auto" | "polar" | "line";
+
+export interface HdViewSettings {
+  plotMode: HdPlotMode;
+  displayBins: number;
+  smoothing: boolean;
+  sigmaDeg: number;
+  compareScale: boolean;
+}
+
+export interface ViewState {
+  clusterId: number;
+  valueMode: ValueMode;
+  activeTimeCenterMs: number;
+  timelineStartMs: number;
+  timelineEndMs: number;
+  timelineAnchorMs: number | null;
+  rfStartMs: number;
+  rfEndMs: number;
+  timeResolutionMs: number;
+  xBins: number;
+  yBins: number;
+  smoothRadius: number;
+  flipY: boolean;
+  palette: Palette;
+  polarRadius: PolarRadius;
+  polarLayout: boolean;
+  rgbMode: boolean;
+  selectedCellYMidpoint: number | null;
+  selectedCellXMidpoint: number | null;
+  timelineScrollFraction: number;
+  selectedTab: ViewTab;
+}
+
+export interface UnitMetrics {
+  total: Matrix;
+  peak: Matrix;
+  delayMs: Matrix;
+  entropy: Matrix;
+  binTotals: number[];
+  totalSpikes: number;
+  bestY: number;
+  bestX: number;
+}
+
+export interface HoverInfo {
+  cell: CellRef;
+  displayBin?: number;
+  clientX: number;
+  clientY: number;
+}
