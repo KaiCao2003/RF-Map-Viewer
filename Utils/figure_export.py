@@ -5,11 +5,11 @@ Tk, HTTP, matplotlib, or application-state dependencies: callers describe page
 templates with :class:`PlotSpec`, provide the per-unit data at render time, and
 use the same renderer for live previews and final exports.
 
-PNG and PDF are written directly by Pillow.  Pillow has no SVG writer, so SVG
-exports use a documented, portable contract: the exact PNG produced by the
-renderer is embedded in an SVG ``<image>`` element.  The SVG therefore scales
-as an SVG document, while its plot content remains raster data.  This is what
-guarantees preview parity across all three formats.
+Pillow rasterizes every page.  PNG is written directly, PDF embeds one rendered
+page at a time, and SVG uses a documented, portable contract: the exact PNG
+produced by the renderer is embedded in an SVG ``<image>`` element.  The SVG
+therefore scales as an SVG document, while its plot content remains raster
+data.  This is what guarantees preview parity across all three formats.
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, TypeAlias
+from typing import Any, BinaryIO, TypeAlias
 
 from PIL import Image, ImageColor, ImageDraw, ImageFont
 
@@ -2008,14 +2008,19 @@ def _directory_publish_lock(
         0o600,
         dir_fd=parent.fd,
     )
+    acquired = False
     try:
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):
             raise FigureExportError(f"export publish lock is not a regular file: {lock_name}")
         fcntl.flock(descriptor, fcntl.LOCK_EX)
+        acquired = True
         yield
     finally:
-        fcntl.flock(descriptor, fcntl.LOCK_UN)
-        os.close(descriptor)
+        try:
+            if acquired:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
 
 
 def _write_publish_journal(
@@ -2465,6 +2470,94 @@ def _inspect_pdf_destination(
     return _EntryIdentity.from_stat(opened)
 
 
+def _verified_pdf_backup_link(
+    parent: _ParentDirectory,
+    destination_name: str,
+    backup_name: str,
+    *,
+    expected_identity: _EntryIdentity,
+    backup_stat: os.stat_result,
+) -> bool:
+    """Verify a hard-link backup when CIFS reports path-scoped inode numbers.
+
+    A ``nounix`` CIFS mount can return distinct synthetic ``st_ino`` values for
+    two paths to the same hard-linked file.  In that case an inode-only check
+    falsely reports that the stable destination changed.  Keep the normal
+    identity check as the fast path; this fallback pins both non-symlink paths
+    and requires matching type, device, mode, size, and contents.  The lab CIFS
+    client reports unstable ``st_nlink`` values for both path stats and open
+    file descriptors, so link counts are deliberately not used as evidence.
+    """
+
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    destination_fd: int | None = None
+    backup_fd: int | None = None
+    try:
+        # Capture both freshly created paths before opening them, then pin each
+        # observation to its own nofollow descriptor below.  Do not inspect
+        # ``st_nlink``: CIFS can report one or two nondeterministically.
+        destination_path_stat = _entry_lstat(parent, destination_name)
+        backup_path_stat = _entry_lstat(parent, backup_name)
+        if destination_path_stat is None or backup_path_stat is None:
+            return False
+        destination_path_identity = _EntryIdentity.from_stat(destination_path_stat)
+        backup_path_identity = _EntryIdentity.from_stat(backup_path_stat)
+        if not _same_identity(destination_path_stat, expected_identity):
+            return False
+        if not _same_identity(backup_path_stat, _EntryIdentity.from_stat(backup_stat)):
+            return False
+        destination_fd = os.open(destination_name, flags, dir_fd=parent.fd)
+        backup_fd = os.open(backup_name, flags, dir_fd=parent.fd)
+        destination_fd_stat = os.fstat(destination_fd)
+        backup_fd_stat = os.fstat(backup_fd)
+        if not _same_identity(destination_fd_stat, destination_path_identity):
+            return False
+        if not _same_identity(backup_fd_stat, backup_path_identity):
+            return False
+        observed = (
+            destination_path_stat,
+            destination_fd_stat,
+            backup_path_stat,
+            backup_fd_stat,
+        )
+        if any(not stat.S_ISREG(result.st_mode) for result in observed):
+            return False
+        if any(result.st_dev != destination_fd_stat.st_dev for result in observed):
+            return False
+        if any(result.st_mode != destination_fd_stat.st_mode for result in observed):
+            return False
+        if any(result.st_size != destination_fd_stat.st_size for result in observed):
+            return False
+        while True:
+            destination_chunk = os.read(destination_fd, 1024 * 1024)
+            backup_chunk = os.read(backup_fd, 1024 * 1024)
+            if destination_chunk != backup_chunk:
+                return False
+            if not destination_chunk:
+                refreshed_destination = _entry_lstat(parent, destination_name)
+                refreshed_backup = _entry_lstat(parent, backup_name)
+                return (
+                    refreshed_destination is not None
+                    and refreshed_backup is not None
+                    and _same_identity(
+                        refreshed_destination,
+                        destination_path_identity,
+                    )
+                    and _same_identity(refreshed_backup, backup_path_identity)
+                )
+    except OSError:
+        return False
+    finally:
+        if backup_fd is not None:
+            os.close(backup_fd)
+        if destination_fd is not None:
+            os.close(destination_fd)
+
+
 def _commit_file(
     parent: _ParentDirectory,
     staged_name: str,
@@ -2473,6 +2566,34 @@ def _commit_file(
     overwrite: bool,
     expected_identity: _EntryIdentity | None,
 ) -> None:
+    with _directory_publish_lock(parent, destination.name):
+        try:
+            _commit_file_locked(
+                parent,
+                staged_name,
+                destination,
+                overwrite=overwrite,
+                expected_identity=expected_identity,
+            )
+        finally:
+            try:
+                os.unlink(staged_name, dir_fd=parent.fd)
+            except FileNotFoundError:
+                pass
+            else:
+                _fsync_directory_fd(parent.fd)
+
+
+def _commit_file_locked(
+    parent: _ParentDirectory,
+    staged_name: str,
+    destination: Path,
+    *,
+    overwrite: bool,
+    expected_identity: _EntryIdentity | None,
+) -> None:
+    """Publish one staged PDF while its destination-name lock is held."""
+
     parent.verify()
     current = _entry_lstat(parent, destination.name)
     if expected_identity is None:
@@ -2519,10 +2640,27 @@ def _commit_file(
         follow_symlinks=False,
     )
     backup_stat = _entry_lstat(parent, backup_name)
-    if backup_stat is None or not _same_identity(backup_stat, expected_identity):
-        os.unlink(backup_name, dir_fd=parent.fd)
+    backup_verified = backup_stat is not None and (
+        _same_identity(backup_stat, expected_identity)
+        or _verified_pdf_backup_link(
+            parent,
+            destination.name,
+            backup_name,
+            expected_identity=expected_identity,
+            backup_stat=backup_stat,
+        )
+    )
+    if not backup_verified:
+        try:
+            os.unlink(backup_name, dir_fd=parent.fd)
+        except FileNotFoundError:
+            pass
         raise FigureExportError("PDF overwrite target changed during publication")
     try:
+        # The hard-link backup must be durable before replacing the only
+        # stable destination name.  A failure here is handled as a pre-mutation
+        # publish failure and removes both transaction entries.
+        _fsync_directory_fd(parent.fd)
         os.replace(
             staged_name,
             destination.name,
@@ -2532,17 +2670,104 @@ def _commit_file(
         _fsync_directory_fd(parent.fd)
         parent.verify()
     except BaseException:
+        try:
+            _rollback_pdf_file_publish(
+                parent,
+                staged_name,
+                destination.name,
+                backup_name,
+                expected_identity=expected_identity,
+            )
+        except BaseException as rollback_error:
+            raise FigureExportError(
+                "PDF publication failed and the original target could not be restored"
+            ) from rollback_error
+        raise
+    _finalize_pdf_file_publish(parent, destination.name, backup_name)
+
+
+def _rollback_pdf_file_publish(
+    parent: _ParentDirectory,
+    staged_name: str,
+    destination_name: str,
+    backup_name: str,
+    *,
+    expected_identity: _EntryIdentity,
+) -> None:
+    """Restore the pre-publish PDF state after a replace-phase failure."""
+
+    staged_still_exists = _entry_lstat(parent, staged_name) is not None
+    current = _entry_lstat(parent, destination_name)
+    if (
+        staged_still_exists
+        and current is not None
+        and _same_identity(current, expected_identity)
+    ):
+        # ``os.replace(staged, destination)`` failed before mutating either
+        # name.  Renaming two hard links to the same inode is a POSIX no-op, so
+        # explicitly remove the backup name instead of attempting a rollback.
+        try:
+            os.unlink(backup_name, dir_fd=parent.fd)
+        except FileNotFoundError:
+            pass
+    else:
         os.replace(
             backup_name,
-            destination.name,
+            destination_name,
             src_dir_fd=parent.fd,
             dst_dir_fd=parent.fd,
         )
-        _fsync_directory_fd(parent.fd)
-        raise
-    else:
+        # When destination already refers to the old inode, POSIX permits the
+        # hard-link rename above to be a no-op.  Remove the remaining backup
+        # name explicitly after confirming that it still exists.
+        if _entry_lstat(parent, backup_name) is not None:
+            os.unlink(backup_name, dir_fd=parent.fd)
+    _fsync_directory_fd(parent.fd)
+
+
+def _finalize_pdf_file_publish(
+    parent: _ParentDirectory,
+    destination_name: str,
+    backup_name: str,
+) -> None:
+    """Remove a PDF backup without reporting a committed export as failed.
+
+    If backup removal fails before changing the directory, the old PDF can
+    still be restored and the export fails closed.  Once the backup name is
+    gone, the new destination is the only recoverable state.  A cleanup fsync
+    failure must therefore not be surfaced as an export failure: the publish
+    itself was already fsynced and reporting failure would falsely imply that
+    the old destination remains visible.
+    """
+
+    try:
         os.unlink(backup_name, dir_fd=parent.fd)
+    except FileNotFoundError:
+        pass
+    except OSError as cleanup_error:
+        if _entry_lstat(parent, backup_name) is not None:
+            try:
+                os.replace(
+                    backup_name,
+                    destination_name,
+                    src_dir_fd=parent.fd,
+                    dst_dir_fd=parent.fd,
+                )
+                _fsync_directory_fd(parent.fd)
+            except BaseException as rollback_error:
+                raise FigureExportError(
+                    "PDF backup cleanup failed and the original target could not be restored"
+                ) from rollback_error
+            raise FigureExportError(
+                "PDF backup cleanup failed; publication was rolled back"
+            ) from cleanup_error
+        # The unlink completed before raising.  Treat the new PDF as committed.
+    try:
         _fsync_directory_fd(parent.fd)
+    except OSError:
+        # Publication and its first directory fsync already succeeded.  With
+        # no named backup left there is no safe state to roll back to.
+        pass
 
 
 def _commit_directory(
@@ -2632,6 +2857,222 @@ def _commit_directory(
         _fsync_directory_fd(parent.fd)
 
 
+def _pdf_utf16_literal(value: str) -> bytes:
+    """Return a PDF literal string containing UTF-16BE text with a BOM."""
+
+    escaped = bytearray()
+    for byte in b"\xfe\xff" + value.encode("utf-16-be"):
+        replacement = {
+            ord("\\"): b"\\\\",
+            ord("("): b"\\(",
+            ord(")"): b"\\)",
+            0x08: b"\\b",
+            0x09: b"\\t",
+            0x0A: b"\\n",
+            0x0C: b"\\f",
+            0x0D: b"\\r",
+        }.get(byte)
+        escaped.extend(replacement if replacement is not None else bytes((byte,)))
+    return b"(" + bytes(escaped) + b")"
+
+
+def _write_pdf_object(
+    stream: BinaryIO,
+    offsets: list[int],
+    object_number: int,
+    contents: bytes,
+) -> None:
+    offsets[object_number] = stream.tell()
+    stream.write(f"{object_number} 0 obj\n".encode("ascii"))
+    stream.write(contents)
+    if not contents.endswith(b"\n"):
+        stream.write(b"\n")
+    stream.write(b"endobj\n")
+
+
+def _jpeg_bytes(image: Image.Image) -> bytes:
+    output = io.BytesIO()
+    image.save(output, format="JPEG")
+    return output.getvalue()
+
+
+def write_streaming_pdf(
+    stream: BinaryIO,
+    page_count: int,
+    image_provider: Callable[[int], Image.Image],
+    *,
+    title: str,
+    resolution: float = 150.0,
+) -> None:
+    """Write a raster PDF while retaining only the current page image.
+
+    ``image_provider`` is called with each zero-based page index.  The writer
+    owns the returned image and closes it after its JPEG stream has been
+    written, including when encoding fails.  The page count must be known up
+    front so the single authoritative PDF page tree can be emitted before any
+    raster page is requested.
+
+    Pillow 10.x's incremental ``append=True`` PDF path corrupts the trailer
+    chain after four appends (``PdfFormatError: trailer loop found``).  The
+    project's supported Pillow range includes that release, so construct the
+    small PDF object graph directly and continue using Pillow's JPEG encoder
+    for each rendered RGB page.
+    """
+
+    if not math.isfinite(resolution) or resolution <= 0:
+        raise FigureExportValidationError("PDF resolution must be positive and finite")
+    if (
+        isinstance(page_count, bool)
+        or not isinstance(page_count, int)
+        or page_count <= 0
+    ):
+        raise FigureExportValidationError("PDF export requires at least one page")
+    if not callable(image_provider):
+        raise FigureExportValidationError("PDF image provider must be callable")
+    if not isinstance(title, str):
+        raise FigureExportValidationError("PDF title must be a string")
+
+    # 1: catalog, 2: pages tree, then page/content/image triples and an Info obj.
+    info_object = 3 + 3 * page_count
+    object_count = info_object
+    offsets = [0] * (object_count + 1)
+    page_objects = [3 + 3 * index for index in range(page_count)]
+
+    stream.write(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+    _write_pdf_object(
+        stream,
+        offsets,
+        1,
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+    )
+    kids = b" ".join(f"{number} 0 R".encode("ascii") for number in page_objects)
+    _write_pdf_object(
+        stream,
+        offsets,
+        2,
+        b"<< /Type /Pages /Count "
+        + str(page_count).encode("ascii")
+        + b" /Kids [ "
+        + kids
+        + b" ] >>",
+    )
+
+    for index in range(page_count):
+        page_object = page_objects[index]
+        contents_object = page_object + 1
+        image_object = page_object + 2
+        rendered = image_provider(index)
+        rgb_image: Image.Image | None = None
+        try:
+            rgb_image = rendered.convert("RGB")
+            width, height = rgb_image.size
+            jpeg = _jpeg_bytes(rgb_image)
+        finally:
+            if rgb_image is not None and rgb_image is not rendered:
+                rgb_image.close()
+            rendered.close()
+
+        width_points = width * 72.0 / resolution
+        height_points = height * 72.0 / resolution
+        width_text = f"{width_points:.6f}".rstrip("0").rstrip(".")
+        height_text = f"{height_points:.6f}".rstrip("0").rstrip(".")
+        media_box = f"0 0 {width_text} {height_text}".encode("ascii")
+        _write_pdf_object(
+            stream,
+            offsets,
+            page_object,
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [ "
+            + media_box
+            + b" ] /Resources << /ProcSet [ /PDF /ImageC ] "
+            + b"/XObject << /image "
+            + f"{image_object} 0 R".encode("ascii")
+            + b" >> >> /Contents "
+            + f"{contents_object} 0 R".encode("ascii")
+            + b" >>",
+        )
+        page_commands = (
+            f"q {width_text} 0 0 {height_text} 0 0 cm /image Do Q\n"
+        ).encode("ascii")
+        _write_pdf_object(
+            stream,
+            offsets,
+            contents_object,
+            b"<< /Length "
+            + str(len(page_commands)).encode("ascii")
+            + b" >>\nstream\n"
+            + page_commands
+            + b"endstream",
+        )
+        _write_pdf_object(
+            stream,
+            offsets,
+            image_object,
+            b"<< /Type /XObject /Subtype /Image /Width "
+            + str(width).encode("ascii")
+            + b" /Height "
+            + str(height).encode("ascii")
+            + b" /ColorSpace /DeviceRGB /BitsPerComponent 8 "
+            + b"/Filter /DCTDecode /Length "
+            + str(len(jpeg)).encode("ascii")
+            + b" >>\nstream\n"
+            + jpeg
+            + b"\nendstream",
+        )
+        del jpeg
+
+    _write_pdf_object(
+        stream,
+        offsets,
+        info_object,
+        b"<< /Title " + _pdf_utf16_literal(title) + b" >>",
+    )
+    xref_offset = stream.tell()
+    stream.write(f"xref\n0 {object_count + 1}\n".encode("ascii"))
+    stream.write(b"0000000000 65535 f \n")
+    for offset in offsets[1:]:
+        if not 0 < offset <= 9_999_999_999:
+            raise FigureExportError("PDF object offset exceeds the PDF 1.4 xref limit")
+        stream.write(f"{offset:010d} 00000 n \n".encode("ascii"))
+    stream.write(
+        b"trailer\n<< /Size "
+        + str(object_count + 1).encode("ascii")
+        + b" /Root 1 0 R /Info "
+        + f"{info_object} 0 R".encode("ascii")
+        + b" >>\nstartxref\n"
+        + str(xref_offset).encode("ascii")
+        + b"\n%%EOF\n"
+    )
+    stream.flush()
+
+
+def _write_pdf_document(
+    stream: BinaryIO,
+    generated_pages: Sequence[GeneratedPage],
+    *,
+    renderer: PillowFigureRenderer,
+    data_provider: PlotDataProvider | None,
+    title: str,
+    resolution: float = 150.0,
+) -> None:
+    """Render a shared export plan through :func:`write_streaming_pdf`."""
+
+    def image_provider(index: int) -> Image.Image:
+        generated = generated_pages[index]
+        return renderer.render_page(
+            generated.unit_id,
+            generated.page,
+            data_provider=data_provider,
+        )
+
+    write_streaming_pdf(
+        stream,
+        len(generated_pages),
+        image_provider,
+        title=title,
+        resolution=resolution,
+    )
+
+
 def export_figures(
     plan: ExportPlan,
     *,
@@ -2674,28 +3115,16 @@ def export_figures(
                 destination.name,
                 suffix=".pdf",
             )
-            page_count = 0
+            page_count = len(generated_pages)
             try:
-                for item in generated_pages:
-                    image = active_renderer.render_page(
-                        item.unit_id,
-                        item.page,
+                with os.fdopen(os.dup(staged_fd), "wb") as stream:
+                    _write_pdf_document(
+                        stream,
+                        generated_pages,
+                        renderer=active_renderer,
                         data_provider=data_provider,
-                    ).convert("RGB")
-                    try:
-                        # Reopening a duplicate descriptor lets Pillow append
-                        # one page at a time without retaining prior images.
-                        with os.fdopen(os.dup(staged_fd), "r+b") as stream:
-                            image.save(
-                                stream,
-                                format="PDF",
-                                append=page_count > 0,
-                                resolution=150.0,
-                                title=destination.stem,
-                            )
-                    finally:
-                        image.close()
-                    page_count += 1
+                        title=destination.stem,
+                    )
                 os.fsync(staged_fd)
                 _commit_file(
                     parent,

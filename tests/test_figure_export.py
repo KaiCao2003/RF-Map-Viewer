@@ -7,7 +7,9 @@ import json
 import os
 import re
 import shutil
+import threading
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -506,8 +508,7 @@ def test_pdf_export_contains_one_page_per_unit_template_pair(tmp_path: Path) -> 
     assert result.page_count == 6
     contents = destination.read_bytes()
     assert contents.startswith(b"%PDF-")
-    # Pillow appends pages through incremental PDF revisions to keep memory
-    # bounded.  The last page-tree revision is authoritative.
+    # The streaming writer emits one authoritative page tree.
     page_counts = re.findall(rb"/Type\s*/Pages\s*/Count\s+(\d+)", contents)
     assert page_counts and int(page_counts[-1]) == 6
     assert b"/Title (\xfe\xff" + "report".encode("utf-16-be") in contents
@@ -517,6 +518,451 @@ def test_pdf_export_contains_one_page_per_unit_template_pair(tmp_path: Path) -> 
         float(page.mediabox.width) > 0 and float(page.mediabox.height) > 0
         for page in reader.pages
     )
+
+
+def test_pdf_export_avoids_pillow_incremental_trailer_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pillow 10.2 raises ``trailer loop found`` after four PDF appends."""
+
+    original_save = Image.Image.save
+    append_attempts = 0
+
+    def reject_fourth_incremental_append(self, fp, format=None, **params):
+        nonlocal append_attempts
+        if str(format).upper() == "PDF" and params.get("append"):
+            append_attempts += 1
+            if append_attempts >= 4:
+                raise RuntimeError("trailer loop found")
+        return original_save(self, fp, format=format, **params)
+
+    monkeypatch.setattr(Image.Image, "save", reject_fourth_incremental_append)
+    destination = tmp_path / "six-pages.pdf"
+    plan = _plan(
+        destination,
+        figure_format=FigureFormat.PDF,
+        units=(1, 2, 3),
+        pages=(_page("RF"), _page("HD", PlotKind.HD_LINE)),
+    )
+
+    result = export_figures(
+        plan,
+        data_provider=_data_for,
+        renderer=PillowFigureRenderer((500, 400)),
+    )
+
+    assert append_attempts == 0
+    assert result.page_count == 6
+    assert len(PdfReader(destination).pages) == 6
+
+
+def test_concurrent_pdf_overwrite_allows_exactly_one_publication(
+    tmp_path: Path,
+) -> None:
+    destination = tmp_path / "concurrent.pdf"
+    plan = _plan(destination, figure_format=FigureFormat.PDF)
+    export_figures(
+        plan,
+        data_provider=_data_for,
+        renderer=PillowFigureRenderer((320, 240)),
+    )
+    render_barrier = threading.Barrier(2)
+
+    class BarrierRenderer(PillowFigureRenderer):
+        def __init__(self, color: tuple[int, int, int]):
+            super().__init__((320, 240))
+            self.color = color
+
+        def render_page(self, *args, **kwargs):
+            render_barrier.wait(timeout=10)
+            return Image.new("RGB", self.page_size, self.color)
+
+    def overwrite(color: tuple[int, int, int]):
+        try:
+            result = export_figures(
+                plan,
+                renderer=BarrierRenderer(color),
+                overwrite=True,
+            )
+        except figure_export_module.FigureExportError as exc:
+            return "conflict", str(exc)
+        return "success", result.page_count
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = list(
+            executor.map(overwrite, ((220, 30, 30), (30, 30, 220)))
+        )
+
+    assert [status for status, _detail in outcomes].count("success") == 1
+    assert [status for status, _detail in outcomes].count("conflict") == 1
+    conflict = next(detail for status, detail in outcomes if status == "conflict")
+    assert "changed while pages were rendering" in conflict
+    assert len(PdfReader(destination, strict=True).pages) == 1
+    assert not list(tmp_path.glob(".concurrent.pdf.backup-*"))
+    assert not list(tmp_path.glob(".concurrent.pdf.tmp-*"))
+
+
+def test_pdf_replace_failure_before_mutation_cleans_hardlink_backup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    destination = tmp_path / "replace-before.pdf"
+    plan = _plan(destination, figure_format=FigureFormat.PDF)
+    export_figures(
+        plan,
+        data_provider=_data_for,
+        renderer=PillowFigureRenderer((320, 240)),
+    )
+    original = destination.read_bytes()
+    original_replace = figure_export_module.os.replace
+    injected = False
+
+    def fail_staged_replace(source, target, *args, **kwargs):
+        nonlocal injected
+        if (
+            not injected
+            and str(source).startswith(f".{destination.name}.tmp-")
+            and target == destination.name
+        ):
+            injected = True
+            raise OSError(errno.EIO, "injected replace-before-mutation failure")
+        return original_replace(source, target, *args, **kwargs)
+
+    monkeypatch.setattr(figure_export_module.os, "replace", fail_staged_replace)
+    with pytest.raises(OSError, match="replace-before-mutation"):
+        export_figures(
+            plan,
+            data_provider=_shifted_provider(50.0),
+            renderer=PillowFigureRenderer((320, 240)),
+            overwrite=True,
+        )
+
+    assert injected
+    assert destination.read_bytes() == original
+    assert not list(tmp_path.glob(".replace-before.pdf.backup-*"))
+    assert not list(tmp_path.glob(".replace-before.pdf.tmp-*"))
+
+
+def test_pdf_backup_fsync_failure_never_replaces_destination(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    destination = tmp_path / "backup-fsync.pdf"
+    plan = _plan(destination, figure_format=FigureFormat.PDF)
+    export_figures(
+        plan,
+        data_provider=_data_for,
+        renderer=PillowFigureRenderer((320, 240)),
+    )
+    original = destination.read_bytes()
+    original_link = figure_export_module.os.link
+    original_replace = figure_export_module.os.replace
+    original_fsync = figure_export_module._fsync_directory_fd
+    backup_linked = False
+    injected = False
+    destructive_replace_called = False
+
+    def observe_link(source, target, *args, **kwargs):
+        nonlocal backup_linked
+        result = original_link(source, target, *args, **kwargs)
+        if str(target).startswith(f".{destination.name}.backup-"):
+            backup_linked = True
+        return result
+
+    def fail_backup_fsync(directory_fd):
+        nonlocal injected
+        if backup_linked and not injected:
+            injected = True
+            raise OSError(errno.EIO, "injected backup durability fsync failure")
+        return original_fsync(directory_fd)
+
+    def observe_replace(source, target, *args, **kwargs):
+        nonlocal destructive_replace_called
+        if str(source).startswith(f".{destination.name}.tmp-"):
+            destructive_replace_called = True
+        return original_replace(source, target, *args, **kwargs)
+
+    monkeypatch.setattr(figure_export_module.os, "link", observe_link)
+    monkeypatch.setattr(figure_export_module.os, "replace", observe_replace)
+    monkeypatch.setattr(
+        figure_export_module,
+        "_fsync_directory_fd",
+        fail_backup_fsync,
+    )
+    with pytest.raises(OSError, match="backup durability fsync"):
+        export_figures(
+            plan,
+            data_provider=_shifted_provider(50.0),
+            renderer=PillowFigureRenderer((320, 240)),
+            overwrite=True,
+        )
+
+    assert injected
+    assert not destructive_replace_called
+    assert destination.read_bytes() == original
+    assert not list(tmp_path.glob(".backup-fsync.pdf.backup-*"))
+    assert not list(tmp_path.glob(".backup-fsync.pdf.tmp-*"))
+
+
+def test_pdf_cifs_backup_verification_does_not_trust_link_counts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    destination_name = "destination.pdf"
+    backup_name = ".destination.pdf.backup-test.pdf"
+    destination = tmp_path / destination_name
+    backup = tmp_path / backup_name
+    destination.write_bytes(b"same verified PDF contents")
+    os.link(destination, backup)
+    original_lstat = figure_export_module._entry_lstat
+    original_fstat = figure_export_module.os.fstat
+    synthetic_inodes = {
+        destination_name: destination.stat().st_ino + 10_000,
+        backup_name: destination.stat().st_ino + 20_000,
+    }
+    fstat_call = 0
+    observed_fd_link_counts: list[int] = []
+    observed_path_link_counts: list[tuple[str, int]] = []
+
+    def path_scoped_lstat(parent, name: str):
+        result = original_lstat(parent, name)
+        if result is None or name not in synthetic_inodes:
+            return result
+        values = list(result)
+        values[1] = synthetic_inodes[name]
+        values[3] = 1
+        synthetic = os.stat_result(values)
+        observed_path_link_counts.append((name, synthetic.st_nlink))
+        return synthetic
+
+    def descriptor_scoped_fstat(descriptor: int):
+        nonlocal fstat_call
+        result = original_fstat(descriptor)
+        name = destination_name if fstat_call == 0 else backup_name
+        fstat_call += 1
+        values = list(result)
+        values[1] = synthetic_inodes[name]
+        values[3] = 1
+        synthetic = os.stat_result(values)
+        observed_fd_link_counts.append(synthetic.st_nlink)
+        return synthetic
+
+    with figure_export_module._open_parent_directory(tmp_path) as parent:
+        monkeypatch.setattr(figure_export_module, "_entry_lstat", path_scoped_lstat)
+        monkeypatch.setattr(
+            figure_export_module.os,
+            "fstat",
+            descriptor_scoped_fstat,
+        )
+        destination_stat = path_scoped_lstat(parent, destination_name)
+        backup_stat = path_scoped_lstat(parent, backup_name)
+        assert destination_stat is not None and backup_stat is not None
+        verified = figure_export_module._verified_pdf_backup_link(
+            parent,
+            destination_name,
+            backup_name,
+            expected_identity=figure_export_module._EntryIdentity.from_stat(
+                destination_stat
+            ),
+            backup_stat=backup_stat,
+        )
+
+    assert verified
+    assert observed_fd_link_counts == [1, 1]
+    assert observed_path_link_counts
+    assert all(link_count == 1 for _name, link_count in observed_path_link_counts)
+
+
+def test_pdf_replace_mutates_then_raises_restores_old_cifs_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    destination = tmp_path / "mutated-eio.pdf"
+    plan = _plan(destination, figure_format=FigureFormat.PDF)
+    export_figures(
+        plan,
+        data_provider=_data_for,
+        renderer=PillowFigureRenderer((320, 240)),
+    )
+    original = destination.read_bytes()
+    original_stat = destination.stat()
+    original_replace = figure_export_module.os.replace
+    original_lstat = figure_export_module._entry_lstat
+    mutated = False
+
+    def mutate_then_fail(source, target, *args, **kwargs):
+        nonlocal mutated
+        if (
+            not mutated
+            and str(source).startswith(f".{destination.name}.tmp-")
+            and target == destination.name
+        ):
+            original_replace(source, target, *args, **kwargs)
+            mutated = True
+            raise OSError(errno.EIO, "injected CIFS post-mutation EIO")
+        return original_replace(source, target, *args, **kwargs)
+
+    def cifs_path_scoped_destination_identity(parent, name: str):
+        result = original_lstat(parent, name)
+        if mutated and result is not None and name == destination.name:
+            values = list(result)
+            values[1] = original_stat.st_ino
+            values[2] = original_stat.st_dev
+            return os.stat_result(values)
+        return result
+
+    monkeypatch.setattr(figure_export_module.os, "replace", mutate_then_fail)
+    monkeypatch.setattr(
+        figure_export_module,
+        "_entry_lstat",
+        cifs_path_scoped_destination_identity,
+    )
+    with pytest.raises(OSError, match="post-mutation EIO"):
+        export_figures(
+            plan,
+            data_provider=_shifted_provider(50.0),
+            renderer=PillowFigureRenderer((320, 240)),
+            overwrite=True,
+        )
+
+    assert mutated
+    assert destination.read_bytes() == original
+    assert not list(tmp_path.glob(".mutated-eio.pdf.backup-*"))
+    assert not list(tmp_path.glob(".mutated-eio.pdf.tmp-*"))
+
+
+def test_pdf_backup_unlink_failure_before_mutation_rolls_back(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    destination = tmp_path / "unlink-before.pdf"
+    plan = _plan(destination, figure_format=FigureFormat.PDF)
+    export_figures(
+        plan,
+        data_provider=_data_for,
+        renderer=PillowFigureRenderer((320, 240)),
+    )
+    original = destination.read_bytes()
+    original_unlink = figure_export_module.os.unlink
+    injected = False
+
+    def fail_backup_unlink(path, *args, **kwargs):
+        nonlocal injected
+        if not injected and str(path).startswith(f".{destination.name}.backup-"):
+            injected = True
+            raise OSError(errno.EIO, "injected backup unlink failure")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(figure_export_module.os, "unlink", fail_backup_unlink)
+    with pytest.raises(
+        figure_export_module.FigureExportError,
+        match="cleanup failed; publication was rolled back",
+    ):
+        export_figures(
+            plan,
+            data_provider=_shifted_provider(50.0),
+            renderer=PillowFigureRenderer((320, 240)),
+            overwrite=True,
+        )
+
+    assert injected
+    assert destination.read_bytes() == original
+    assert not list(tmp_path.glob(".unlink-before.pdf.backup-*"))
+    assert not list(tmp_path.glob(".unlink-before.pdf.tmp-*"))
+
+
+@pytest.mark.parametrize("failure_point", ["unlink-after-mutation", "cleanup-fsync"])
+def test_pdf_post_commit_cleanup_failure_reports_success_without_residue(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_point: str,
+) -> None:
+    destination = tmp_path / f"post-commit-{failure_point}.pdf"
+    plan = _plan(destination, figure_format=FigureFormat.PDF)
+    export_figures(
+        plan,
+        data_provider=_data_for,
+        renderer=PillowFigureRenderer((320, 240)),
+    )
+    original = destination.read_bytes()
+    original_unlink = figure_export_module.os.unlink
+    original_fsync = figure_export_module._fsync_directory_fd
+    backup_removed = False
+    injected = False
+
+    class ReplacementRenderer(PillowFigureRenderer):
+        def render_page(self, *args, **kwargs):
+            return Image.new("RGB", self.page_size, (12, 34, 210))
+
+    def observe_backup_unlink(path, *args, **kwargs):
+        nonlocal backup_removed, injected
+        is_backup = str(path).startswith(f".{destination.name}.backup-")
+        result = original_unlink(path, *args, **kwargs)
+        if is_backup:
+            backup_removed = True
+            if failure_point == "unlink-after-mutation" and not injected:
+                injected = True
+                raise OSError(errno.EIO, "injected post-unlink failure")
+        return result
+
+    def fail_cleanup_fsync(directory_fd):
+        nonlocal injected
+        if failure_point == "cleanup-fsync" and backup_removed and not injected:
+            injected = True
+            raise OSError(errno.EIO, "injected cleanup fsync failure")
+        return original_fsync(directory_fd)
+
+    monkeypatch.setattr(figure_export_module.os, "unlink", observe_backup_unlink)
+    monkeypatch.setattr(
+        figure_export_module,
+        "_fsync_directory_fd",
+        fail_cleanup_fsync,
+    )
+    result = export_figures(
+        plan,
+        renderer=ReplacementRenderer((320, 240)),
+        overwrite=True,
+    )
+
+    assert injected
+    assert result.page_count == 1
+    assert destination.read_bytes() != original
+    assert len(PdfReader(destination, strict=True).pages) == 1
+    assert not list(tmp_path.glob(f".{destination.name}.backup-*"))
+    assert not list(tmp_path.glob(f".{destination.name}.tmp-*"))
+
+
+@pytest.mark.parametrize(
+    "failure_errno",
+    [errno.EIO, getattr(errno, "ENOTSUP", errno.EOPNOTSUPP)],
+)
+def test_publish_lock_acquire_failure_closes_fd_without_unlock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_errno: int,
+) -> None:
+    calls: list[int] = []
+    lock_fd: int | None = None
+
+    def fail_lock(descriptor: int, operation: int) -> None:
+        nonlocal lock_fd
+        calls.append(operation)
+        lock_fd = descriptor
+        raise OSError(failure_errno, "injected flock acquisition failure")
+
+    monkeypatch.setattr(figure_export_module.fcntl, "flock", fail_lock)
+    with figure_export_module._open_parent_directory(tmp_path) as parent:
+        with pytest.raises(OSError) as captured:
+            with figure_export_module._directory_publish_lock(parent, "report.pdf"):
+                raise AssertionError("lock body must not run")
+
+    assert captured.value.errno == failure_errno
+    assert calls == [figure_export_module.fcntl.LOCK_EX]
+    assert lock_fd is not None
+    with pytest.raises(OSError) as closed:
+        os.fstat(lock_fd)
+    assert closed.value.errno == errno.EBADF
 
 
 def test_svg_export_uses_valid_embedded_png_with_preview_parity(tmp_path: Path) -> None:

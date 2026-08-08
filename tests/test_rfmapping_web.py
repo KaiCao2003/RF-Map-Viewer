@@ -5,6 +5,7 @@ import errno
 import hashlib
 import io
 import json
+import os
 import re
 import shutil
 from concurrent.futures import ThreadPoolExecutor
@@ -15,8 +16,10 @@ from pathlib import Path
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
+from PIL import Image
 from pypdf import PdfReader
 
+from Utils import figure_export as shared_figure_export_module
 from deploy import validate_real_data as real_data_validation
 from rfmapping_web import datasets as datasets_module
 from rfmapping_web import figure_exports as figure_exports_module
@@ -1638,6 +1641,145 @@ def test_multi_page_pdf_has_one_page_per_unit_template_and_unit_major_order(
         for page in reader.pages
     )
     assert source.read_bytes() == source_before
+
+
+def test_six_page_web_pdf_uses_shared_streaming_writer_without_append(
+    app,
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pillow 10.2 corrupts its trailer on the fifth incremental append."""
+
+    (settings.figure_export_root / "session").mkdir()
+    source = write_json(settings.rf_root / "rf.json")
+    payload = _figure_export_payload(format="pdf", order="unit-major")
+    payload["pages"] = [
+        *payload["pages"],
+        {
+            "title": "Probe",
+            "plots": [{"type": "probe", "settings": {}}],
+        },
+    ]
+    payload["destination"]["baseName"] = "six-pages.pdf"
+
+    original_save = Image.Image.save
+    incremental_attempts = 0
+    jpeg_pages = 0
+
+    def reject_incremental_pdf(self, fp, format=None, **params):
+        nonlocal incremental_attempts, jpeg_pages
+        normalized = str(format).upper()
+        if normalized == "PDF" and params.get("append"):
+            incremental_attempts += 1
+            if incremental_attempts >= 4:
+                raise RuntimeError("trailer loop found")
+        if normalized == "JPEG":
+            jpeg_pages += 1
+        return original_save(self, fp, format=format, **params)
+
+    monkeypatch.setattr(Image.Image, "save", reject_incremental_pdf)
+    with authenticated_client(app) as client:
+        metadata = _open(client, source)
+        response = client.post(
+            f"/api/datasets/{metadata['id']}/figure-exports",
+            json=payload,
+        )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["pageCount"] == 6
+    assert len(body["manifest"]["pages"]) == 6
+    assert incremental_attempts == 0
+    assert jpeg_pages == 6
+    assert all(page["file"] == "six-pages.pdf" for page in body["manifest"]["pages"])
+    assert any(page["placeholders"] for page in body["manifest"]["pages"])
+    target = settings.figure_export_root / "session" / "six-pages.pdf"
+    assert len(PdfReader(target, strict=True).pages) == 6
+    assert not list(target.parent.glob(".six-pages.pdf.tmp-*"))
+
+
+def test_web_pdf_stable_overwrite_accepts_cifs_path_scoped_hardlink_inode(
+    app,
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CIFS may report a different inode for a second path to one hard link."""
+
+    parent = settings.figure_export_root / "session"
+    parent.mkdir()
+    source = write_json(settings.rf_root / "rf.json")
+    payload = _figure_export_payload(
+        format="pdf",
+        clusterIds=[11],
+        pages=_figure_pages("rf.cartesian"),
+    )
+    payload["destination"]["baseName"] = "stable.pdf"
+
+    with authenticated_client(app) as client:
+        metadata = _open(client, source)
+        endpoint = f"/api/datasets/{metadata['id']}/figure-exports"
+        first = client.post(endpoint, json=payload)
+        assert first.status_code == 200, first.text
+
+        original_lstat = shared_figure_export_module._entry_lstat
+        original_open = shared_figure_export_module.os.open
+        original_fstat = shared_figure_export_module.os.fstat
+        pending_fd_kind: dict[int, str] = {}
+        observed_fd_link_counts: list[tuple[str, int]] = []
+
+        def cifs_path_scoped_inode(parent_directory, name: str):
+            result = original_lstat(parent_directory, name)
+            if result is not None and (
+                name == "stable.pdf"
+                or name.startswith(".stable.pdf.backup-")
+            ):
+                values = list(result)
+                if name.startswith(".stable.pdf.backup-"):
+                    values[1] += 1
+                values[3] = 1
+                return os.stat_result(values)
+            return result
+
+        def cifs_open(path, flags, *args, **kwargs):
+            descriptor = original_open(path, flags, *args, **kwargs)
+            name = Path(os.fspath(path)).name
+            if name == "stable.pdf":
+                pending_fd_kind[descriptor] = "destination"
+            elif name.startswith(".stable.pdf.backup-"):
+                pending_fd_kind[descriptor] = "backup"
+            return descriptor
+
+        def cifs_fstat(descriptor: int):
+            result = original_fstat(descriptor)
+            kind = pending_fd_kind.pop(descriptor, None)
+            if kind is None:
+                return result
+            values = list(result)
+            if kind == "backup":
+                values[1] += 1
+            values[3] = 1
+            synthetic = os.stat_result(values)
+            observed_fd_link_counts.append((kind, synthetic.st_nlink))
+            return synthetic
+
+        monkeypatch.setattr(
+            shared_figure_export_module,
+            "_entry_lstat",
+            cifs_path_scoped_inode,
+        )
+        monkeypatch.setattr(shared_figure_export_module.os, "open", cifs_open)
+        monkeypatch.setattr(shared_figure_export_module.os, "fstat", cifs_fstat)
+        payload["destination"]["overwrite"] = True
+        replaced = client.post(endpoint, json=payload)
+
+    assert replaced.status_code == 200, replaced.text
+    assert replaced.json()["overwritten"] is True
+    target = parent / "stable.pdf"
+    assert len(PdfReader(target).pages) == 1
+    assert ("destination", 1) in observed_fd_link_counts
+    assert ("backup", 1) in observed_fd_link_counts
+    assert not list(parent.glob(".stable.pdf.backup-*"))
+    assert not list(parent.glob(".stable.pdf.tmp-*"))
 
 
 def test_web_pdf_overwrite_rejects_symlink_target(

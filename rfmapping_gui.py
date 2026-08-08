@@ -11,6 +11,7 @@ import argparse
 import csv
 import math
 import queue
+import re
 import sys
 import threading
 from dataclasses import dataclass, replace
@@ -31,6 +32,7 @@ from Utils.hd_tuning import (
     HDTuningData,
     discover_hd_tuning_path,
     load_hd_tuning,
+    probe_name_for_rf,
 )
 from Utils.rfmap import RFMap, RFMapList, load_rf_maps
 
@@ -88,6 +90,7 @@ PAIR_SYNC_ALL_FIELDS = frozenset(
         "selected_tab",
     }
 )
+_RECORDING_SESSION_RE = re.compile(r"^\d{6}_\d+$")
 
 
 def timeline_scroll_progress(first: float, last: float) -> float | None:
@@ -190,6 +193,247 @@ class UnitMetrics:
     total_spikes: float
     best_y: int
     best_x: int
+
+
+@dataclass(frozen=True, slots=True)
+class ProbeChannel:
+    """One physical probe channel loaded from a companion ``channels.csv``."""
+
+    channel_id: int
+    x_um: float
+    y_um: float
+    shank_id: int
+
+
+@dataclass(frozen=True, slots=True)
+class ProbeUnitPosition:
+    """One unit location loaded from the required companion ``positions.csv``."""
+
+    unit_id: int
+    x_um: float
+    y_um: float
+
+
+@dataclass(frozen=True, slots=True)
+class ProbeGeometry:
+    """Immutable probe geometry captured for a figure-composer session."""
+
+    probe_name: str
+    positions_path: Path
+    channels_path: Path | None
+    channels: tuple[ProbeChannel, ...]
+    units: tuple[ProbeUnitPosition, ...]
+
+
+def _finite_csv_float(value: str | None, label: str) -> float:
+    try:
+        parsed = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{label} must be numeric") from exc
+    if not math.isfinite(parsed):
+        raise ValueError(f"{label} must be finite")
+    return parsed
+
+
+def _csv_integer(value: str | None, label: str) -> int:
+    parsed = _finite_csv_float(value, label)
+    if not parsed.is_integer():
+        raise ValueError(f"{label} must be an integer")
+    return int(parsed)
+
+
+def _read_probe_csv(
+    path: Path,
+    required_columns: tuple[str, ...],
+) -> tuple[dict[str, int], list[dict[str, str]]]:
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        fieldnames = reader.fieldnames
+        if fieldnames is None:
+            raise ValueError(f"{path.name} is missing a header")
+        duplicate_columns = sorted(
+            {name for name in fieldnames if fieldnames.count(name) > 1}
+        )
+        if duplicate_columns:
+            raise ValueError(
+                f"{path.name} contains duplicate columns: {', '.join(duplicate_columns)}"
+            )
+        missing = [column for column in required_columns if column not in fieldnames]
+        if missing:
+            raise ValueError(
+                f"{path.name} is missing required columns: {', '.join(missing)}"
+            )
+        rows = list(reader)
+    return {name: index for index, name in enumerate(fieldnames)}, rows
+
+
+def discover_probe_geometry_paths(
+    rf_path: str | Path,
+) -> tuple[str, Path, Path | None] | None:
+    """Discover session probe geometry beside an RF mapping JSON.
+
+    The active pipeline stores unit positions below ``data/spike_position``
+    and physical channels below ``data/waveform``.  The two compact layouts
+    supported by older exports (``ProbeA/positions.csv`` and a directly
+    adjacent ``positions.csv``) remain discoverable as well.
+    """
+
+    source = Path(rf_path).expanduser()
+    probe_name = probe_name_for_rf(source)
+    if probe_name is None:
+        return None
+
+    parents = tuple(source.parents)
+    session = next(
+        (parent for parent in parents if _RECORDING_SESSION_RE.fullmatch(parent.name)),
+        None,
+    )
+    if session is not None:
+        # A normal recording is rooted at ``YYMMDD_index/data``.  Geometry is
+        # session-specific, so never continue into the date/animal/filesystem
+        # ancestors where an unrelated legacy positions.csv may exist.
+        boundary = next(
+            (
+                parent
+                for parent in parents
+                if parent.name == "data" and parent.parent == session
+            ),
+            session,
+        )
+        search_bases: list[Path] = []
+        for parent in parents:
+            search_bases.append(parent)
+            if parent == boundary:
+                break
+    elif data_boundary := next(
+        (parent for parent in parents if parent.name == "data"),
+        None,
+    ):
+        # Lightweight fixtures often preserve the ``data/rfmapping`` layout
+        # without a YYMMDD_index wrapper.  Their nearest data directory is a
+        # useful, bounded scientific scope as well.
+        boundary = data_boundary
+        search_bases = []
+        for parent in parents:
+            search_bases.append(parent)
+            if parent == boundary:
+                break
+    else:
+        # Fixtures and compact legacy exports may not carry a recording-session
+        # directory.  Keep their adjacent layouts working without an unbounded
+        # walk toward the filesystem root.
+        boundary = source.parent
+        search_bases = [source.parent]
+
+    try:
+        resolved_boundary = boundary.resolve()
+    except OSError:
+        resolved_boundary = boundary.absolute()
+
+    def in_scope_file(path: Path) -> Path | None:
+        if not path.is_file():
+            return None
+        try:
+            resolved = path.resolve()
+        except OSError:
+            return None
+        if resolved != resolved_boundary and resolved_boundary not in resolved.parents:
+            return None
+        return resolved
+
+    for base in search_bases:
+        candidates = (
+            (
+                base / "spike_position" / probe_name / "positions.csv",
+                base / "waveform" / probe_name / "channels.csv",
+            ),
+            (
+                base / probe_name / "positions.csv",
+                base / probe_name / "channels.csv",
+            ),
+            (base / "positions.csv", base / "channels.csv"),
+        )
+        for positions_path, channels_path in candidates:
+            resolved_positions = in_scope_file(positions_path)
+            if resolved_positions is None:
+                continue
+            return (
+                probe_name,
+                resolved_positions,
+                in_scope_file(channels_path),
+            )
+    return None
+
+
+def load_probe_geometry(
+    probe_name: str,
+    positions_path: Path,
+    channels_path: Path | None,
+) -> ProbeGeometry:
+    """Load validated unit positions and optional channel sites from CSV."""
+
+    _fields, position_rows = _read_probe_csv(
+        positions_path,
+        ("unit_index", "unit_id", "x_um", "y_um"),
+    )
+    units: list[ProbeUnitPosition] = []
+    seen_unit_ids: set[int] = set()
+    for row_number, row in enumerate(position_rows, start=2):
+        try:
+            _csv_integer(row.get("unit_index"), "unit_index")
+            unit_id = _csv_integer(row.get("unit_id"), "unit_id")
+            x_um = _finite_csv_float(row.get("x_um"), "unit x_um")
+            y_um = _finite_csv_float(row.get("y_um"), "unit y_um")
+        except ValueError as exc:
+            raise ValueError(
+                f"Invalid positions.csv value on row {row_number}: {exc}"
+            ) from exc
+        if unit_id in seen_unit_ids:
+            raise ValueError(f"Duplicate unit_id {unit_id} in positions.csv")
+        seen_unit_ids.add(unit_id)
+        units.append(ProbeUnitPosition(unit_id, x_um, y_um))
+
+    channels: list[ProbeChannel] = []
+    validated_channels_path = channels_path
+    if channels_path is not None:
+        try:
+            _fields, channel_rows = _read_probe_csv(
+                channels_path,
+                (
+                    "channel_index",
+                    "channel_id",
+                    "raw_channel_index",
+                    "x_um",
+                    "y_um",
+                    "shank_id",
+                ),
+            )
+            for row_number, row in enumerate(channel_rows, start=2):
+                try:
+                    _csv_integer(row.get("channel_index"), "channel_index")
+                    _csv_integer(row.get("raw_channel_index"), "raw_channel_index")
+                    channel_id = _csv_integer(row.get("channel_id"), "channel_id")
+                    x_um = _finite_csv_float(row.get("x_um"), "channel x_um")
+                    y_um = _finite_csv_float(row.get("y_um"), "channel y_um")
+                    shank_id = _csv_integer(row.get("shank_id"), "shank_id")
+                except ValueError as exc:
+                    raise ValueError(
+                        f"Invalid channels.csv value on row {row_number}: {exc}"
+                    ) from exc
+                channels.append(ProbeChannel(channel_id, x_um, y_um, shank_id))
+        except (OSError, ValueError):
+            # Unit positions are sufficient for a useful probe plot.  An
+            # optional stale/malformed channel file must not suppress them.
+            channels = []
+            validated_channels_path = None
+
+    return ProbeGeometry(
+        probe_name=probe_name,
+        positions_path=positions_path,
+        channels_path=validated_channels_path,
+        channels=tuple(channels),
+        units=tuple(units),
+    )
 
 
 @dataclass(frozen=True)
@@ -348,6 +592,10 @@ class RFMappingData:
         self._hd_tuning_checked = False
         self._hd_tuning: HDTuningData | None = None
         self._hd_tuning_error: str | None = None
+        self._probe_geometry_lock = threading.Lock()
+        self._probe_geometry_checked = False
+        self._probe_geometry: ProbeGeometry | None = None
+        self._probe_geometry_error: str | None = None
 
     def rf_map(self, unit_idx: int) -> RFMap:
         """Return the shared per-unit object for an original JSON unit index."""
@@ -387,6 +635,53 @@ class RFMappingData:
     def hd_tuning_error(self) -> str | None:
         self.hd_tuning()
         return self._hd_tuning_error
+
+    def probe_geometry(self) -> ProbeGeometry | None:
+        """Lazily discover and validate companion probe geometry CSV files."""
+
+        if self._probe_geometry_checked:
+            return self._probe_geometry
+        with self._probe_geometry_lock:
+            if self._probe_geometry_checked:
+                return self._probe_geometry
+            geometry: ProbeGeometry | None = None
+            error: str | None = None
+            discovered = discover_probe_geometry_paths(self.path)
+            if discovered is not None:
+                probe_name, positions_path, channels_path = discovered
+                try:
+                    geometry = load_probe_geometry(
+                        probe_name,
+                        positions_path,
+                        channels_path,
+                    )
+                    rf_unit_ids = set(self.unit_pool)
+                    matching_units = tuple(
+                        unit for unit in geometry.units if unit.unit_id in rf_unit_ids
+                    )
+                    if not matching_units:
+                        raise ValueError(
+                            "positions.csv contains no unit IDs from this RF "
+                            "dataset's unitPool"
+                        )
+                    # A positions.csv can contain a broader sorting result than
+                    # the selected RF export.  Never draw those unrelated units
+                    # as though they belonged to this RF payload.
+                    geometry = replace(geometry, units=matching_units)
+                except Exception as exc:
+                    geometry = None
+                    error = str(exc)
+            self._probe_geometry = geometry
+            self._probe_geometry_error = error
+            # Publish only after the immutable geometry/error state is ready;
+            # previews and final exports may request it from different threads.
+            self._probe_geometry_checked = True
+        return self._probe_geometry
+
+    @property
+    def probe_geometry_error(self) -> str | None:
+        self.probe_geometry()
+        return self._probe_geometry_error
 
     def _validate(self) -> None:
         if any(size <= 0 for size in self.size):
@@ -5080,6 +5375,11 @@ class GUIFigureDataProvider:
     def __init__(self, data: RFMappingData, snapshot: FigureViewerSnapshot):
         self.data = data
         self.snapshot = snapshot
+        # Capture companion geometry with the same source-session object used
+        # for every other plot.  A non-modal composer must not start reading a
+        # different CSV after the parent viewer switches JSON documents.
+        self.probe_geometry = data.probe_geometry()
+        self.probe_geometry_error = data.probe_geometry_error
 
     def __call__(self, unit_id: int, template: PlotSpec) -> PlotSpec:
         try:
@@ -5116,12 +5416,12 @@ class GUIFigureDataProvider:
         elif kind in {PlotKind.HD_LINE, PlotKind.HD_POLAR}:
             payload = self._hd_payload(unit_id)
         elif kind is PlotKind.PROBE_LAYOUT:
-            payload = {
-                "unavailable": (
-                    "Probe layout data is not loaded in the Python viewer for this "
-                    "dataset. The page is retained so the export recipe stays complete."
+            payload = self._probe_payload(unit_id)
+            if self.probe_geometry is not None:
+                template = replace(
+                    template,
+                    title=f"{self.probe_geometry.probe_name} layout",
                 )
-            }
         else:
             payload = {"unavailable": f"Unsupported figure kind: {kind.value}"}
         return replace(template, data=payload, options=options)
@@ -5353,6 +5653,46 @@ class GUIFigureDataProvider:
             "angles_deg": curve.angles_deg.tolist(),
             "rates": curve.rates_hz.tolist(),
         }
+
+    def _probe_payload(self, unit_id: int) -> dict[str, object]:
+        geometry = self.probe_geometry
+        if geometry is None:
+            detail = self.probe_geometry_error
+            return {
+                "unavailable": (
+                    f"Probe geometry could not be loaded: {detail}"
+                    if detail
+                    else "No companion positions.csv was found for this RF dataset."
+                )
+            }
+        if not any(unit.unit_id == unit_id for unit in geometry.units):
+            return {
+                "unavailable": (
+                    f"Probe position is unavailable for RF unit {unit_id}; "
+                    "the selected unit is absent from positions.csv."
+                )
+            }
+        points: list[dict[str, object]] = [
+            {
+                "x": channel.x_um,
+                "y": channel.y_um,
+                "label": "",
+                "color": "#94a3b8",
+            }
+            for channel in geometry.channels
+        ]
+        points.extend(
+            {
+                "x": unit.x_um,
+                "y": unit.y_um,
+                "label": str(unit.unit_id),
+                "color": "#dc2626" if unit.unit_id == unit_id else "#2563eb",
+            }
+            for unit in geometry.units
+        )
+        if not points:
+            return {"unavailable": "Probe geometry contains no channels or units."}
+        return {"points": points}
 
 
 class FigureExportWindow(tk.Toplevel):
