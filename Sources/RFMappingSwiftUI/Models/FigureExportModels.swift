@@ -114,6 +114,13 @@ enum FigureUnitSelectionMode: String, CaseIterable, Identifiable, Hashable, Send
     var label: String { rawValue.capitalized }
 }
 
+struct FigureUnitSelectionModifiers: OptionSet, Equatable, Sendable {
+    let rawValue: Int
+
+    static let command = FigureUnitSelectionModifiers(rawValue: 1 << 0)
+    static let shift = FigureUnitSelectionModifiers(rawValue: 1 << 1)
+}
+
 struct FigureUnitSelection: Equatable, Sendable {
     var mode: FigureUnitSelectionMode
     var customUnitIDs: Set<Int>

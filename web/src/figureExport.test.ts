@@ -6,6 +6,7 @@ import {
   composerValidationError,
   createFigureComposerState,
   currentFigureType,
+  figureUnitSelectionAfterGesture,
   figureComposerReducer,
   matchingUnitIds,
   snapshotPlotSettings,
@@ -83,6 +84,66 @@ describe("figure export plan reducer", () => {
     expect(draft.selectedUnitIds).toEqual([41, 7, 88, 3]);
     draft = figureComposerReducer(draft, { type: "toggle-unit", unitId: 88 });
     expect(buildFigureExportRequest(draft, 1).clusterIds).toEqual([41, 7, 3]);
+  });
+
+  it("supports Finder-style row, Command/Ctrl, checkbox, and Shift-range unit selection", () => {
+    const unitPool = [41, 7, 88, 3, 99];
+    const visible = [...unitPool];
+
+    expect(figureUnitSelectionAfterGesture(
+      unitPool, visible, [41, 7], 88, 41,
+      { additive: false, range: false, checkbox: false },
+    )).toEqual({ unitIds: [88], anchorUnitId: 88 });
+
+    expect(figureUnitSelectionAfterGesture(
+      unitPool, visible, [41, 88], 7, 41,
+      { additive: true, range: false, checkbox: false },
+    )).toEqual({ unitIds: [41, 7, 88], anchorUnitId: 7 });
+
+    expect(figureUnitSelectionAfterGesture(
+      unitPool, visible, [41, 7, 88], 7, 41,
+      { additive: true, range: false, checkbox: false },
+    )).toEqual({ unitIds: [41, 88], anchorUnitId: 7 });
+
+    expect(figureUnitSelectionAfterGesture(
+      unitPool, visible, [41], 88, 41,
+      { additive: false, range: false, checkbox: true },
+    )).toEqual({ unitIds: [41, 88], anchorUnitId: 88 });
+
+    expect(figureUnitSelectionAfterGesture(
+      unitPool, visible, [41], 3, 7,
+      { additive: false, range: true, checkbox: false },
+    )).toEqual({ unitIds: [7, 88, 3], anchorUnitId: 7 });
+
+    expect(figureUnitSelectionAfterGesture(
+      unitPool, visible, [41], 3, 7,
+      { additive: true, range: true, checkbox: false },
+    )).toEqual({ unitIds: [41, 7, 88, 3], anchorUnitId: 7 });
+
+    expect(figureUnitSelectionAfterGesture(
+      unitPool, [7, 3, 99], [88], 99, 7,
+      { additive: false, range: true, checkbox: false },
+    )).toEqual({ unitIds: [7, 3, 99], anchorUnitId: 7 });
+  });
+
+  it("keeps one shared page template for every selected unit", () => {
+    let draft = state();
+    draft = figureComposerReducer(draft, { type: "set-units", unitIds: [41, 88, 3] });
+    draft = figureComposerReducer(draft, {
+      type: "add-page",
+      page: {
+        id: "page-2",
+        title: "HD and Probe",
+        plots: [
+          { id: "plot-hd", type: "hd.polar", settings: {} },
+          { id: "plot-probe", type: "probe", settings: {} },
+        ],
+      },
+    });
+    const request = buildFigureExportRequest(draft, 1);
+    expect(request.clusterIds).toEqual([41, 88, 3]);
+    expect(request.pages).toHaveLength(2);
+    expect(request.pages[1].plots.map((plot) => plot.type)).toEqual(["hd.polar", "probe"]);
   });
 
   it("adds, renames, removes, and reorders page plots without allowing empty pages", () => {

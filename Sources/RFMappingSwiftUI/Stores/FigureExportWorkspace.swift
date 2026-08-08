@@ -50,6 +50,7 @@ final class FigureExportWorkspace {
     var outputScale: CGFloat = 2
     var selectedPageID: UUID?
     var previewUnitID: Int
+    private(set) var customSelectionAnchorIndex: Int?
     var companions = FigureExportCompanions()
     var hdTuningURL: URL?
     var isExporting = false
@@ -74,6 +75,7 @@ final class FigureExportWorkspace {
         pages = [firstPage]
         selectedPageID = firstPage.id
         previewUnitID = seed.currentUnitID
+        customSelectionAnchorIndex = seed.data.unitPool.firstIndex(of: seed.currentUnitID)
         discoverHDTuning()
         discoverProbeGeometry()
     }
@@ -126,15 +128,68 @@ final class FigureExportWorkspace {
 
     func setUnitSelectionMode(_ mode: FigureUnitSelectionMode) {
         unitSelection.mode = mode
+        if mode == .custom {
+            let anchorIsValid = customSelectionAnchorIndex.map {
+                seed.data.unitPool.indices.contains($0)
+            } ?? false
+            if !anchorIsValid {
+                customSelectionAnchorIndex = seed.data.unitPool.firstIndex {
+                    unitSelection.customUnitIDs.contains($0)
+                }
+            }
+        }
         normalizePreviewSelection()
     }
 
-    func toggleCustomUnit(_ unitID: Int) {
-        if unitSelection.customUnitIDs.contains(unitID) {
-            unitSelection.customUnitIDs.remove(unitID)
+    /// Finder-style unit-row selection. A plain click replaces the selection,
+    /// Command-click toggles one unit while preserving the rest, and
+    /// Shift-click selects the inclusive range from the last anchor. Holding
+    /// Command with Shift adds that range instead of replacing the selection.
+    func selectCustomUnit(
+        at index: Int,
+        modifiers: FigureUnitSelectionModifiers = []
+    ) {
+        guard unitSelection.mode == .custom,
+              seed.data.unitPool.indices.contains(index) else { return }
+        let unitID = seed.data.unitPool[index]
+        if modifiers.contains(.shift) {
+            let anchor = customSelectionAnchorIndex.flatMap {
+                seed.data.unitPool.indices.contains($0) ? $0 : nil
+            } ?? index
+            let bounds = min(anchor, index)...max(anchor, index)
+            let rangeIDs = Set(bounds.map { seed.data.unitPool[$0] })
+            if modifiers.contains(.command) {
+                unitSelection.customUnitIDs.formUnion(rangeIDs)
+            } else {
+                unitSelection.customUnitIDs = rangeIDs
+            }
+            customSelectionAnchorIndex = anchor
+        } else if modifiers.contains(.command) {
+            if unitSelection.customUnitIDs.contains(unitID) {
+                unitSelection.customUnitIDs.remove(unitID)
+            } else {
+                unitSelection.customUnitIDs.insert(unitID)
+            }
+            customSelectionAnchorIndex = index
         } else {
-            unitSelection.customUnitIDs.insert(unitID)
+            unitSelection.customUnitIDs = [unitID]
+            customSelectionAnchorIndex = index
         }
+        normalizePreviewSelection()
+    }
+
+    /// The visible checkbox is an explicit additive toggle, independent of
+    /// keyboard modifiers. It also becomes the anchor for the next range.
+    func setCustomUnitSelected(_ selected: Bool, at index: Int) {
+        guard unitSelection.mode == .custom,
+              seed.data.unitPool.indices.contains(index) else { return }
+        let unitID = seed.data.unitPool[index]
+        if selected {
+            unitSelection.customUnitIDs.insert(unitID)
+        } else {
+            unitSelection.customUnitIDs.remove(unitID)
+        }
+        customSelectionAnchorIndex = index
         normalizePreviewSelection()
     }
 

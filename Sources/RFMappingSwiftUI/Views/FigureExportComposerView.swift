@@ -159,18 +159,40 @@ struct FigureExportComposerView: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 3) {
                     ForEach(Array(workspace.seed.data.unitPool.enumerated()), id: \.offset) { index, unitID in
-                        Toggle(isOn: Binding(
-                            get: { selectedForDisplay(unitID) },
-                            set: { selected in
-                                let currentlySelected = workspace.unitSelection.customUnitIDs.contains(unitID)
-                                if workspace.unitSelection.mode == .custom,
-                                   selected != currentlySelected {
-                                    workspace.toggleCustomUnit(unitID)
+                        HStack(spacing: 5) {
+                            Toggle(isOn: Binding(
+                                get: { selectedForDisplay(unitID) },
+                                set: { selected in
+                                    workspace.setCustomUnitSelected(selected, at: index)
                                 }
+                            )) {
+                                EmptyView()
                             }
-                        )) {
-                            Text("index \(String(format: "%03d", index))  ·  unit ID \(unitID)")
-                                .font(.system(size: 11, design: .monospaced))
+                            .labelsHidden()
+                            .accessibilityLabel("Include index \(index), unit ID \(unitID)")
+
+                            Button {
+                                workspace.selectCustomUnit(
+                                    at: index,
+                                    modifiers: currentUnitSelectionModifiers()
+                                )
+                            } label: {
+                                Text("index \(String(format: "%03d", index))  ·  unit ID \(unitID)")
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .contentShape(Rectangle())
+                                    .padding(.vertical, 2)
+                                    .padding(.horizontal, 3)
+                                    .background(
+                                        workspace.unitSelection.customUnitIDs.contains(unitID)
+                                            ? Color.accentColor.opacity(0.18)
+                                            : Color.clear
+                                    )
+                                    .clipShape(RoundedRectangle(cornerRadius: 3))
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Select index \(index), unit ID \(unitID)")
+                            .help("Click to select one; Command-click toggles; Shift-click selects a range")
                         }
                         .disabled(workspace.unitSelection.mode != .custom)
                     }
@@ -181,6 +203,14 @@ struct FigureExportComposerView: View {
             .background(Color(nsColor: .controlBackgroundColor))
             .clipShape(RoundedRectangle(cornerRadius: 5))
         }
+    }
+
+    private func currentUnitSelectionModifiers() -> FigureUnitSelectionModifiers {
+        let flags = NSEvent.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        var result: FigureUnitSelectionModifiers = []
+        if flags.contains(.command) { result.insert(.command) }
+        if flags.contains(.shift) { result.insert(.shift) }
+        return result
     }
 
     private var pageSection: some View {
@@ -206,12 +236,13 @@ struct FigureExportComposerView: View {
                     Text("\(index + 1). \(page.name)").tag(Optional(page.id))
                 }
             }
-            if let pageIndex = workspace.selectedPageIndex {
+            if let selectedPageID = workspace.selectedPageID,
+               let selectedPage = workspace.pages.first(where: { $0.id == selectedPageID }) {
                 LabeledContent("Page name") {
-                    TextField("Page name", text: pageNameBinding(pageIndex))
+                    TextField("Page name", text: pageNameBinding(selectedPageID))
                 }
                 VStack(spacing: 5) {
-                    ForEach(Array(workspace.pages[pageIndex].plots.enumerated()), id: \.element.id) { index, placement in
+                    ForEach(Array(selectedPage.plots.enumerated()), id: \.element.id) { index, placement in
                         HStack {
                             Image(systemName: "chart.xyaxis.line")
                                 .foregroundStyle(.secondary)
@@ -226,7 +257,10 @@ struct FigureExportComposerView: View {
                                 Image(systemName: "arrow.down")
                             }
                             .buttonStyle(.plain)
-                            .disabled(index == workspace.pages[pageIndex].plots.count - 1)
+                            // Use the value snapshot captured by this render.
+                            // Indexing the live `workspace.pages` here can trap
+                            // while SwiftUI tears down a removed/reordered page.
+                            .disabled(index == selectedPage.plots.count - 1)
                             Button(role: .destructive) { workspace.removePlot(placement.id) } label: {
                                 Image(systemName: "trash")
                             }
@@ -361,11 +395,15 @@ struct FigureExportComposerView: View {
         }
     }
 
-    private func pageNameBinding(_ index: Int) -> Binding<String> {
+    private func pageNameBinding(_ pageID: UUID) -> Binding<String> {
         Binding(
-            get: { workspace.pages.indices.contains(index) ? workspace.pages[index].name : "" },
+            get: {
+                workspace.pages.first(where: { $0.id == pageID })?.name ?? ""
+            },
             set: { value in
-                guard workspace.pages.indices.contains(index) else { return }
+                guard let index = workspace.pages.firstIndex(where: { $0.id == pageID }) else {
+                    return
+                }
                 workspace.pages[index].name = value
             }
         )

@@ -18,6 +18,7 @@ import {
   composerValidationError,
   createFigureComposerState,
   currentFigureType,
+  figureUnitSelectionAfterGesture,
   figureComposerReducer,
   matchingUnitIds,
   orderedUnitSelection,
@@ -108,23 +109,47 @@ function UnitPicker({
   const probeOrdered = probeFilteredUnitIds == null
     ? null
     : orderedUnitSelection(draft.unitPool, probeFilteredUnitIds);
+  const selectionAnchor = useRef<number | null>(currentClusterId);
+  useEffect(() => {
+    if (selectionAnchor.current != null && draft.unitPool.includes(selectionAnchor.current)) return;
+    selectionAnchor.current = draft.selectedUnitIds[0] ?? currentClusterId;
+  }, [currentClusterId, draft.selectedUnitIds, draft.unitPool]);
+  const setUnits = (unitIds: ReadonlyArray<number>, anchorUnitId = unitIds[0] ?? null) => {
+    selectionAnchor.current = anchorUnitId;
+    dispatch({ type: "set-units", unitIds });
+  };
+  const selectUnit = (
+    clusterId: number,
+    gesture: { additive: boolean; range: boolean; checkbox: boolean },
+  ) => {
+    const result = figureUnitSelectionAfterGesture(
+      draft.unitPool,
+      visible,
+      draft.selectedUnitIds,
+      clusterId,
+      selectionAnchor.current,
+      gesture,
+    );
+    selectionAnchor.current = result.anchorUnitId;
+    dispatch({ type: "set-units", unitIds: result.unitIds });
+  };
   return (
     <aside className="figure-units-panel" aria-label="Units to export">
       <div className="figure-section-heading">
         <div><strong>Units</strong><span>{draft.selectedUnitIds.length} selected</span></div>
       </div>
       <div className="figure-unit-presets" role="group" aria-label="Unit selection presets">
-        <button type="button" onClick={() => dispatch({ type: "set-units", unitIds: [currentClusterId] })}>Current</button>
-        <button type="button" onClick={() => dispatch({ type: "set-units", unitIds: draft.unitPool })}>All</button>
+        <button type="button" onClick={() => setUnits([currentClusterId], currentClusterId)}>Current</button>
+        <button type="button" onClick={() => setUnits(draft.unitPool)}>All</button>
         <button
           type="button"
           disabled={probeOrdered == null || probeOrdered.length === 0}
           title={probeOrdered == null ? "Draw a Probe region first" : undefined}
-          onClick={() => dispatch({ type: "set-units", unitIds: probeOrdered ?? [] })}
+          onClick={() => setUnits(probeOrdered ?? [])}
         >
           Probe filtered{probeOrdered == null ? "" : ` (${probeOrdered.length})`}
         </button>
-        <button type="button" onClick={() => dispatch({ type: "set-units", unitIds: [] })}>Clear</button>
+        <button type="button" onClick={() => setUnits([])}>Clear</button>
       </div>
       <label className="figure-unit-search">
         <span>Search index or cluster ID</span>
@@ -139,39 +164,65 @@ function UnitPicker({
         <button
           type="button"
           disabled={!visible.length}
-          onClick={() => dispatch({
-            type: "set-units",
-            unitIds: [...draft.selectedUnitIds, ...visible],
-          })}
+          onClick={() => setUnits([...draft.selectedUnitIds, ...visible])}
         >Select matches</button>
         <button
           type="button"
           disabled={!visible.some((unitId) => selected.has(unitId))}
-          onClick={() => dispatch({
-            type: "set-units",
-            unitIds: draft.selectedUnitIds.filter((unitId) => !visible.includes(unitId)),
-          })}
+          onClick={() => setUnits(
+            draft.selectedUnitIds.filter((unitId) => !visible.includes(unitId)),
+          )}
         >Clear matches</button>
       </div>
-      <div className="figure-unit-list">
+      <div className="figure-unit-list" role="listbox" aria-label="Export units" aria-multiselectable="true">
         {visible.map((clusterId) => {
           const index = draft.unitPool.indexOf(clusterId);
           return (
-            <label key={clusterId} className="figure-unit-row">
+            <div
+              key={clusterId}
+              className={`figure-unit-row${selected.has(clusterId) ? " selected" : ""}`}
+              role="option"
+              aria-selected={selected.has(clusterId)}
+              tabIndex={0}
+              onClick={(event) => selectUnit(clusterId, {
+                additive: event.metaKey || event.ctrlKey,
+                range: event.shiftKey,
+                checkbox: false,
+              })}
+              onKeyDown={(event) => {
+                if (event.key !== "Enter" && event.key !== " ") return;
+                event.preventDefault();
+                selectUnit(clusterId, {
+                  additive: event.metaKey || event.ctrlKey,
+                  range: event.shiftKey,
+                  checkbox: false,
+                });
+              }}
+            >
               <input
                 type="checkbox"
                 checked={selected.has(clusterId)}
-                onChange={() => dispatch({ type: "toggle-unit", unitId: clusterId })}
+                readOnly
+                aria-label={`${String(index).padStart(3, "0")} cluster ${clusterId}`}
+                onKeyDown={(event) => event.stopPropagation()}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  selectUnit(clusterId, {
+                    additive: event.metaKey || event.ctrlKey,
+                    range: event.shiftKey,
+                    checkbox: true,
+                  });
+                }}
               />
               <span className="unit-index">{String(index).padStart(3, "0")}</span>
               <span>cluster {clusterId}</span>
               {clusterId === currentClusterId && <small>current</small>}
-            </label>
+            </div>
           );
         })}
         {!visible.length && <div className="figure-empty-list">No matching units</div>}
       </div>
-      <p className="figure-order-note">Cluster IDs are always sent in the original JSON unitPool order.</p>
+      <p className="figure-order-note">Click a row for one unit; Command/Ctrl-click toggles; Shift-click selects a range. Checkboxes toggle units. Export order always follows the original JSON unitPool.</p>
     </aside>
   );
 }

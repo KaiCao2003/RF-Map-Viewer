@@ -390,9 +390,15 @@ create_stage() {
 
 compile_swap_tool() {
   local clang_bin
+  local sdk_path
   clang_bin="$(/usr/bin/xcrun --find clang)"
+  sdk_path="$(/usr/bin/xcrun --sdk macosx --show-sdk-path 2>/dev/null)" \
+    || fail "Unable to locate the macOS SDK for the atomic swap helper"
+  [[ -d "$sdk_path" ]] \
+    || fail "Xcode returned a missing macOS SDK path: $sdk_path"
   SWAP_TOOL="$STAGE_ROOT/rename-swap"
   "$clang_bin" \
+    -isysroot "$sdk_path" \
     -Os \
     -Wall \
     -Wextra \

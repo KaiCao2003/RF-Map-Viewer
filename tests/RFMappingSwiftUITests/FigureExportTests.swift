@@ -1,5 +1,6 @@
 import CoreGraphics
 import Foundation
+import SwiftUI
 import XCTest
 @testable import RFMappingSwiftUI
 
@@ -265,9 +266,8 @@ final class FigureExportTests: XCTestCase {
                 XCTAssertNil(plot.probePayload)
             case .probe:
                 let payload = try XCTUnwrap(plot.probePayload)
-                XCTAssertEqual(payload.selectedUnitID, 22)
+                XCTAssertEqual(payload.unit.unitID, 22)
                 XCTAssertEqual(payload.channels.count, 2)
-                XCTAssertEqual(payload.units.map(\.unitID), [22, 11])
                 XCTAssertNil(plot.hdCurve)
             default:
                 XCTAssertNil(plot.hdCurve)
@@ -297,6 +297,28 @@ final class FigureExportTests: XCTestCase {
             descriptors[1].plots[0].placeholder?.contains("absent from positions.csv") == true
         )
         XCTAssertNil(descriptors[1].plots[0].probePayload)
+    }
+
+    func testMultiUnitProbePayloadContainsOnlyThatPagesUnitMarker() throws {
+        let data = try makeData(unitIDs: [22, 11])
+        let page = FigurePageTemplate(
+            name: "Probe",
+            plots: [FigurePlotPlacement(kind: .probe)]
+        )
+        var companions = FigureExportCompanions()
+        companions.probeGeometry = makeProbeGeometry(unitIDs: [22, 11])
+
+        let descriptors = FigureExportRenderer().descriptors(
+            configuration: configuration(unitIDs: [22, 11], pages: [page]),
+            data: data,
+            companions: companions
+        )
+
+        XCTAssertEqual(descriptors.count, 2)
+        XCTAssertEqual(descriptors[0].plots[0].probePayload?.unit.unitID, 22)
+        XCTAssertEqual(descriptors[1].plots[0].probePayload?.unit.unitID, 11)
+        XCTAssertEqual(descriptors[0].plots[0].probePayload?.channels.count, 2)
+        XCTAssertEqual(descriptors[1].plots[0].probePayload?.channels.count, 2)
     }
 
     func testHDCompanionRendersAvailableUnitAndMarksMissingUnit() throws {
@@ -425,6 +447,129 @@ final class FigureExportTests: XCTestCase {
         XCTAssertEqual(workspace.pages.count, 1)
         XCTAssertEqual(workspace.selectedPageID, retainedPageID)
         XCTAssertEqual(workspace.configuration.viewerSnapshot, originalSnapshot)
+    }
+
+    func testMountedComposerSurvivesRapidPageRemovalAndReordering() async throws {
+        let data = try makeData(unitIDs: [22, 11])
+        let workspace = FigureExportWorkspace(seed: FigureExportSeed(
+            data: data,
+            viewerSnapshot: snapshot(),
+            currentUnitID: 22
+        ))
+        let hosting = NSHostingView(rootView:
+            FigureExportComposerView(workspace: workspace)
+                .frame(width: 1_280, height: 860)
+        )
+        hosting.frame = CGRect(x: 0, y: 0, width: 1_280, height: 860)
+
+        func refreshMountedView() async {
+            await Task.yield()
+            hosting.layoutSubtreeIfNeeded()
+            _ = hosting.fittingSize
+        }
+
+        await refreshMountedView()
+        workspace.addPage()
+        workspace.addPlot(.hdLine)
+        await refreshMountedView()
+        workspace.removeSelectedPage()
+        await refreshMountedView()
+        workspace.addPage()
+        await refreshMountedView()
+        workspace.moveSelectedPage(-1)
+        await refreshMountedView()
+        workspace.moveSelectedPage(1)
+        await refreshMountedView()
+
+        XCTAssertEqual(workspace.pages.map(\.name), ["Page 1", "Page 2"])
+        XCTAssertEqual(workspace.selectedPageIndex, 1)
+    }
+
+    func testFinderStyleCustomUnitRowsUseAnchorModifiersAndSourceOrder() throws {
+        let data = try makeData(unitIDs: [22, 11, 90, 7, 55, 31])
+        let workspace = FigureExportWorkspace(seed: FigureExportSeed(
+            data: data,
+            viewerSnapshot: snapshot(),
+            currentUnitID: 22
+        ))
+
+        workspace.setUnitSelectionMode(.custom)
+        XCTAssertEqual(workspace.resolvedUnitIDs, [22])
+        XCTAssertEqual(workspace.customSelectionAnchorIndex, 0)
+
+        // A plain row click is a single selection.
+        workspace.selectCustomUnit(at: 3)
+        XCTAssertEqual(workspace.resolvedUnitIDs, [7])
+        XCTAssertEqual(workspace.customSelectionAnchorIndex, 3)
+
+        // Command-click preserves the old choice and toggles the clicked row.
+        workspace.selectCustomUnit(at: 1, modifiers: .command)
+        XCTAssertEqual(workspace.resolvedUnitIDs, [11, 7])
+        XCTAssertEqual(workspace.customSelectionAnchorIndex, 1)
+
+        // Shift-click replaces the selection with the inclusive anchor range.
+        workspace.selectCustomUnit(at: 4, modifiers: .shift)
+        XCTAssertEqual(workspace.resolvedUnitIDs, [11, 90, 7, 55])
+        XCTAssertEqual(workspace.customSelectionAnchorIndex, 1)
+
+        // Command-Shift adds a range while retaining selections elsewhere.
+        workspace.selectCustomUnit(at: 0)
+        workspace.selectCustomUnit(at: 5, modifiers: .command)
+        workspace.selectCustomUnit(at: 3, modifiers: [.command, .shift])
+        XCTAssertEqual(workspace.resolvedUnitIDs, [22, 7, 55, 31])
+
+        // The checkbox is an additive toggle and becomes the next range anchor.
+        workspace.setCustomUnitSelected(true, at: 1)
+        XCTAssertEqual(workspace.resolvedUnitIDs, [22, 11, 7, 55, 31])
+        XCTAssertEqual(workspace.customSelectionAnchorIndex, 1)
+        workspace.setCustomUnitSelected(false, at: 4)
+        XCTAssertEqual(workspace.resolvedUnitIDs, [22, 11, 7, 31])
+        XCTAssertEqual(workspace.customSelectionAnchorIndex, 4)
+
+        // Row gestures are inert outside Custom mode.
+        workspace.setUnitSelectionMode(.all)
+        workspace.selectCustomUnit(at: 2)
+        XCTAssertEqual(workspace.resolvedUnitIDs, data.unitPool)
+    }
+
+    func testEverySelectedUnitUsesTheSameOrderedPageTemplates() throws {
+        let data = try makeData(unitIDs: [22, 11, 90])
+        let pages = [
+            FigurePageTemplate(
+                name: "Spatial",
+                plots: [
+                    FigurePlotPlacement(kind: .rfCartesian),
+                    FigurePlotPlacement(kind: .delayPolar),
+                ]
+            ),
+            FigurePageTemplate(
+                name: "Companions",
+                plots: [
+                    FigurePlotPlacement(kind: .timelineCurrent),
+                    FigurePlotPlacement(kind: .hdLine),
+                    FigurePlotPlacement(kind: .probe),
+                ]
+            ),
+        ]
+        let descriptors = FigureExportRenderer().descriptors(
+            configuration: configuration(unitIDs: [22, 11, 90], pages: pages),
+            data: data,
+            companions: FigureExportCompanions()
+        )
+
+        XCTAssertEqual(descriptors.count, 6)
+        XCTAssertEqual(descriptors.map(\.unitID), [22, 22, 11, 11, 90, 90])
+        XCTAssertEqual(
+            descriptors.map { $0.plots.map(\.kind) },
+            [
+                [.rfCartesian, .delayPolar],
+                [.timelineCurrent, .hdLine, .probe],
+                [.rfCartesian, .delayPolar],
+                [.timelineCurrent, .hdLine, .probe],
+                [.rfCartesian, .delayPolar],
+                [.timelineCurrent, .hdLine, .probe],
+            ]
+        )
     }
 
     func testPDFPNGAndSVGActuallyRenderAllTenViewsWithoutPlaceholders() async throws {
