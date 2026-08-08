@@ -172,6 +172,7 @@ final class WindowRouter {
 
 struct RFMappingCommandActions {
     let openJSON: () -> Void
+    let exportFigures: () -> Void
     let exportDisplayed: () -> Void
     let previousUnit: () -> Void
     let nextUnit: () -> Void
@@ -209,6 +210,42 @@ struct RFMappingSwiftUIApp: App {
         .commands {
             RFMappingCommands()
         }
+
+        WindowGroup("Figure Export Composer", for: FigureExportRequest.self) { request in
+            FigureExportWindow(request: request.wrappedValue)
+        }
+        .defaultSize(width: 1280, height: 860)
+        .windowResizability(.contentMinSize)
+    }
+}
+
+@MainActor
+private struct FigureExportWindow: View {
+    private let request: FigureExportRequest?
+    @State private var workspace: FigureExportWorkspace?
+
+    init(request: FigureExportRequest?) {
+        self.request = request
+        let seed = request.flatMap { FigureExportWindowRegistry.shared.seed(for: $0) }
+        _workspace = State(initialValue: seed.map { FigureExportWorkspace(seed: $0) })
+    }
+
+    var body: some View {
+        Group {
+            if let workspace {
+                FigureExportComposerView(workspace: workspace)
+            } else {
+                ContentUnavailableView {
+                    Label("Figure export unavailable", systemImage: "doc.badge.ellipsis")
+                } description: {
+                    Text("Return to a loaded RF viewer and choose Export Figures again.")
+                }
+            }
+        }
+        .frame(minWidth: 1020, minHeight: 700)
+        .onDisappear {
+            if let request { FigureExportWindowRegistry.shared.release(request) }
+        }
     }
 }
 
@@ -239,6 +276,7 @@ private struct RFMappingWindow: View {
             store: store,
             pairingCoordinator: pairingCoordinator,
             pairingWindowID: pairingWindowID,
+            openFigureExporter: openFigureExporter,
             openJSONInNewWindow: { url in
                 if isInitialWindow, !store.hasData,
                    WindowRouter.shared.claimColdInitialWindow(for: url) {
@@ -293,6 +331,7 @@ private struct RFMappingWindow: View {
     private var commandActions: RFMappingCommandActions {
         RFMappingCommandActions(
             openJSON: { store.isImporting = true },
+            exportFigures: openFigureExporter,
             exportDisplayed: store.prepareExport,
             previousUnit: { store.stepUnit(-1) },
             nextUnit: { store.stepUnit(1) },
@@ -305,6 +344,14 @@ private struct RFMappingWindow: View {
             toggleFlipY: { store.flipY.toggle() },
             cyclePalette: store.cyclePalette
         )
+    }
+
+    private func openFigureExporter() {
+        guard let request = FigureExportWindowRegistry.shared.prepare(from: store) else {
+            store.errorMessage = "Load an RF dataset before opening Figure Export."
+            return
+        }
+        openWindow(value: request)
     }
 }
 
@@ -393,8 +440,11 @@ private struct RFMappingCommands: Commands {
         }
 
         CommandGroup(after: .saveItem) {
-            Button("Export Displayed…") { actions?.exportDisplayed() }
+            Button("Export Figures…") { actions?.exportFigures() }
                 .keyboardShortcut("e", modifiers: [.command])
+                .disabled(actions == nil)
+            Button("Export Displayed CSV…") { actions?.exportDisplayed() }
+                .keyboardShortcut("e", modifiers: [.command, .shift])
                 .disabled(actions == nil)
         }
 
@@ -576,7 +626,8 @@ private func showKeyboardShortcuts() {
     Esc   Show full time range
     [ / ]   Previous / next unit
     Command-O   Open JSON in a new window
-    Command-E   Export displayed matrix
+    Command-E   Open Figure Export Composer
+    Shift-Command-E   Export displayed CSV matrix
     Command-W   Close current window
     """
     alert.addButton(withTitle: "OK")

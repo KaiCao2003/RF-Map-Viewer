@@ -71,7 +71,9 @@ struct HeatmapView: View {
     }
 
     private var subtitle: String {
-        guard let data = store.data else { return "" }
-        return "Unit \(String(format: "%03d", store.unitIndex)) / cluster \(data.clusterID(for: store.unitIndex))"
+        guard store.hasSelectedUnit, let selectedUnitID = store.selectedUnitID else {
+            return "Unit N/A"
+        }
+        return "Unit \(String(format: "%03d", store.unitIndex)) / cluster \(selectedUnitID)"
     }
 }

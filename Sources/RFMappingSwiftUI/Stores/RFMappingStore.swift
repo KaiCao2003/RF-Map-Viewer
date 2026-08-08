@@ -130,13 +130,17 @@ final class RFMappingStore {
     var availableJSONURLs: [URL] = []
     var selectedJSONPath = ""
 
-    var unitIndex = 0
+    /// File-local original index. `-1` means the paired union currently points
+    /// at a unit ID that this file does not contain.
+    private(set) var unitIndex = 0
+    private(set) var selectedUnitID: Int?
+    private(set) var pairedUnitIDs: [Int]?
     var valueMode: ResponseValueMode = .spikeCount
     var binIndex = 0
     var rangeStartMS = 0.0
     var rangeEndMS = 1.0
     var plotRangeStartMS = 0.0
-    var plotRangeEndMS = 20.0
+    var plotRangeEndMS = 200.0
     var flipY = false
     var palette: RFPalette = .gray
     var polarRadiusMode: PolarRadiusMode = .displayBottomInner
@@ -165,11 +169,16 @@ final class RFMappingStore {
     var exportFilename = "rf_matrix.csv"
     var errorMessage: String?
 
-    init(initialURL: URL? = nil, initialData: RFMappingData? = nil, loadDefault: Bool = true) {
+    init(
+        initialURL: URL? = nil,
+        initialData: RFMappingData? = nil,
+        loadDefault: Bool = true,
+        discoverJSONChoices: Bool = true
+    ) {
         isAwaitingStartupDocument = initialURL == nil && initialData == nil && !loadDefault
-        refreshJSONChoices()
+        if discoverJSONChoices { refreshJSONChoices() }
         if let initialData {
-            adopt(initialData)
+            adopt(initialData, refreshChoices: discoverJSONChoices)
         } else if let url = initialURL {
             loadJSON(url)
         } else if loadDefault {
@@ -199,9 +208,23 @@ final class RFMappingStore {
 
     var hasData: Bool { data != nil }
 
+    var hasSelectedUnit: Bool {
+        guard let data, let selectedUnitID else { return false }
+        return data.unitIndex(forUnitID: selectedUnitID) == unitIndex && unitIndex >= 0
+    }
+
+    var selectedRFMap: RFMap? {
+        guard let data, let selectedUnitID else { return nil }
+        return try? data.rfMap(byUnitID: selectedUnitID)
+    }
+
+    var navigationUnitIDs: [Int] {
+        pairedUnitIDs ?? data?.unitPool ?? []
+    }
+
     var viewerSyncState: ViewerSyncState {
         ViewerSyncState(
-            unitIndex: unitIndex,
+            unitID: selectedUnitID ?? data?.unitPool.first ?? 0,
             valueMode: valueMode,
             activeTimeMS: timeGroupCenterMS(binIndex),
             rangeStartMS: rangeStartMS,
@@ -235,8 +258,12 @@ final class RFMappingStore {
     }
 
     var headerTitle: String {
-        guard let data else { return "RF Map Viewer" }
-        return "Unit \(String(format: "%03d", unitIndex)) / cluster \(data.clusterID(for: unitIndex))"
+        guard data != nil else { return "RF Map Viewer" }
+        guard hasSelectedUnit, let selectedUnitID else {
+            let missingID = selectedUnitID.map { String($0) } ?? "unknown"
+            return "Unit N/A / cluster \(missingID) is not present in this file"
+        }
+        return "Unit \(String(format: "%03d", unitIndex)) / cluster \(selectedUnitID)"
     }
 
     var windowTitle: String {
@@ -256,7 +283,9 @@ final class RFMappingStore {
     }
 
     var unitStatsText: String {
-        guard let data else { return "" }
+        guard let data, hasSelectedUnit else {
+            return selectedUnitID.map { "Cluster \($0): N/A in this file" } ?? ""
+        }
         let metrics = data.metrics(for: unitIndex)
         let delay = metrics.delayMS[metrics.bestY][metrics.bestX]
         let delayText = delay.map { String(format: "%.1f ms", $0) } ?? "n/a"
@@ -366,13 +395,14 @@ final class RFMappingStore {
         }
     }
 
-    private func adopt(_ loaded: RFMappingData) {
+    private func adopt(_ loaded: RFMappingData, refreshChoices: Bool = true) {
         isAwaitingStartupDocument = false
         errorMessage = nil
         clearDerivedCaches()
         data = loaded
         selectedJSONPath = loaded.url.path
         unitIndex = 0
+        selectedUnitID = loaded.unitPool.first
         binIndex = 0
         rangeStartMS = loaded.timeBinEdges[0] * 1000.0
         rangeEndMS = loaded.timeBinEdges[loaded.nBins] * 1000.0
@@ -387,13 +417,13 @@ final class RFMappingStore {
         resetPlotRangeToDefault()
         normalizeControls()
         ensureSelectedCell()
-        refreshJSONChoices()
+        if refreshChoices { refreshJSONChoices() }
         pairingDataDidChange?()
     }
 
     /// Applies paired-window state in one normalization pass. A target may use
-    /// a different time axis or spatial grid even though its ordered unit list
-    /// matches, so every index, range, and dimension is snapped locally.
+    /// a different time axis, spatial grid, or unit list, so every local index,
+    /// range, and dimension is resolved independently.
     func applyViewerSyncState(
         _ state: ViewerSyncState,
         fields: ViewerSyncFields = .all
@@ -401,7 +431,7 @@ final class RFMappingStore {
         guard let data else { return }
         let state = viewerSyncState.merging(state, fields: fields)
 
-        unitIndex = state.unitIndex
+        selectUnitID(state.unitID, resetInteraction: false)
         valueMode = data.supports(state.valueMode) ? state.valueMode : .spikeCount
         timeResolutionMS = finiteOr(state.timeResolutionMS, fallback: baseBinMS())
         xBins = state.xBins
@@ -425,7 +455,7 @@ final class RFMappingStore {
         normalizeControls()
         binIndex = nearestTimeGroupIndex(to: state.activeTimeMS)
         timelineRangeAnchor = state.timelineRangeAnchorMS.map(nearestTimeGroupIndex)
-        selectedCell = state.selectedCell.map(normalizedCell)
+        selectedCell = hasSelectedUnit ? state.selectedCell.map(normalizedCell) : nil
         timelineScrollFraction = max(
             0,
             min(1, finiteOr(state.timelineScrollFraction, fallback: 0))
@@ -501,11 +531,39 @@ final class RFMappingStore {
     }
 
     func stepUnit(_ delta: Int) {
-        guard let data, data.nUnits > 0 else { return }
-        unitIndex = (unitIndex + delta + data.nUnits) % data.nUnits
-        selectedCell = nil
-        clearHover()
-        ensureSelectedCell()
+        let unitIDs = navigationUnitIDs
+        guard !unitIDs.isEmpty else { return }
+        let current = selectedUnitID.flatMap { unitIDs.firstIndex(of: $0) } ?? 0
+        let target = (current + delta % unitIDs.count + unitIDs.count) % unitIDs.count
+        selectUnitID(unitIDs[target])
+    }
+
+    func selectUnit(atOriginalIndex unitIndex: Int) {
+        guard let data, data.unitPool.indices.contains(unitIndex) else { return }
+        selectUnitID(data.clusterID(for: unitIndex))
+    }
+
+    func selectUnitID(_ unitID: Int, resetInteraction: Bool = true) {
+        guard let data else { return }
+        let localIndex = data.unitIndex(forUnitID: unitID)
+        guard localIndex != nil || pairedUnitIDs?.contains(unitID) == true else { return }
+        selectedUnitID = unitID
+        unitIndex = localIndex ?? -1
+        clearDerivedCaches()
+        if resetInteraction {
+            selectedCell = nil
+            clearHover()
+            ensureSelectedCell()
+        }
+    }
+
+    /// Configures the sorted cross-window union used by previous/next. Passing
+    /// nil leaves pairing and restores a valid local selection if necessary.
+    func setPairedUnitIDs(_ unitIDs: [Int]?) {
+        pairedUnitIDs = unitIDs.map { Array(Set($0)).sorted() }
+        if pairedUnitIDs == nil, !hasSelectedUnit, let first = data?.unitPool.first {
+            selectUnitID(first)
+        }
     }
 
     func stepBin(_ delta: Int) {
@@ -531,7 +589,12 @@ final class RFMappingStore {
 
     func normalizeControls() {
         guard let data else { return }
-        unitIndex = max(0, min(data.nUnits - 1, unitIndex))
+        if let selectedUnitID {
+            unitIndex = data.unitIndex(forUnitID: selectedUnitID) ?? -1
+        } else {
+            selectedUnitID = data.unitPool.first
+            unitIndex = 0
+        }
         xBins = max(1, min(data.nX, xBins))
         yBins = max(1, min(data.nY, yBins))
         smoothRadius = max(0, min(3, smoothRadius))
@@ -574,12 +637,12 @@ final class RFMappingStore {
         let axisStart = timeAxisStartMS()
         let axisEnd = timeAxisEndMS()
         plotRangeStartMS = max(axisStart, min(axisEnd, 0.0))
-        plotRangeEndMS = max(axisStart, min(axisEnd, 20.0))
+        plotRangeEndMS = max(axisStart, min(axisEnd, 200.0))
         normalizePlotTimeRange()
     }
 
     func ensureSelectedCell() {
-        guard selectedCell == nil, let data else { return }
+        guard selectedCell == nil, let data, hasSelectedUnit else { return }
         let metrics = data.metrics(for: unitIndex)
         selectedCell = normalizedCell(CellRef(
             yStart: metrics.bestY,
@@ -904,7 +967,7 @@ final class RFMappingStore {
     }
 
     func currentMatrix() -> OptionalMatrix {
-        guard let data else { return [] }
+        guard let data, hasSelectedUnit else { return [] }
         let range = sourceBinsForPlotRange()
         let key = RawMatrixCacheKey(
             dataID: ObjectIdentifier(data),
@@ -916,18 +979,30 @@ final class RFMappingStore {
         if let currentMatrixCache, currentMatrixCache.key == key {
             return currentMatrixCache.value
         }
-        let matrix = (try? data.responseMatrix(
-            unitIndex: unitIndex,
-            start: range.start,
-            end: range.end,
-            valueMode: valueMode
-        )) ?? []
+        let matrix: OptionalMatrix
+        if valueMode == .spikeCount,
+           let selectedRFMap,
+           let summed = try? selectedRFMap.sumBetweenSeconds(
+               data.timeBinEdges[range.start],
+               data.timeBinEdges[range.end + 1]
+           ) {
+            matrix = summed.spikeCounts.map { row in
+                row.map { histogram in histogram.first }
+            }
+        } else {
+            matrix = (try? data.responseMatrix(
+                unitIndex: unitIndex,
+                start: range.start,
+                end: range.end,
+                valueMode: valueMode
+            )) ?? []
+        }
         currentMatrixCache = (key, matrix)
         return matrix
     }
 
     func delayMatrixForTimeGroups(floor: Double = 0.0) -> OptionalMatrix {
-        guard let data else { return [] }
+        guard let data, hasSelectedUnit else { return [] }
         let safeFloor = max(0.0, floor)
         let key = DelayCacheKey(
             dataID: ObjectIdentifier(data),
@@ -966,7 +1041,7 @@ final class RFMappingStore {
     }
 
     func currentHeatmapPlot() -> HeatmapPlot {
-        guard let data else { return emptyHeatmapPlot() }
+        guard let data, hasSelectedUnit else { return emptyHeatmapPlot() }
         let range = sourceBinsForPlotRange()
         let key = SpatialPlotCacheKey(
             kind: .current,
@@ -997,7 +1072,7 @@ final class RFMappingStore {
     }
 
     func delayHeatmapPlot(floor: Double) -> HeatmapPlot {
-        guard let data else { return emptyHeatmapPlot() }
+        guard let data, hasSelectedUnit else { return emptyHeatmapPlot() }
         let safeFloor = max(0.0, floor)
         let key = SpatialPlotCacheKey(
             kind: .delay,
@@ -1028,7 +1103,7 @@ final class RFMappingStore {
     }
 
     func cachedRGBPlot() -> RGBPlot {
-        guard let data else {
+        guard let data, hasSelectedUnit else {
             let empty = emptyHeatmapPlot()
             return RGBPlot(
                 total: [],
@@ -1103,7 +1178,7 @@ final class RFMappingStore {
     }
 
     func timelineMatrix(for displayBin: Int) -> OptionalMatrix {
-        guard let data else { return [] }
+        guard let data, hasSelectedUnit else { return [] }
         let source = sourceBinsForDisplayBin(displayBin)
         return (try? data.responseMatrix(
             unitIndex: unitIndex,
@@ -1114,7 +1189,7 @@ final class RFMappingStore {
     }
 
     func timelineSnapshot() -> TimelineMatrixSnapshot {
-        guard let data else {
+        guard let data, hasSelectedUnit else {
             return TimelineMatrixSnapshot(
                 timeGroups: [AxisGroup(start: 0, end: 0)],
                 matrices: [],
@@ -1176,7 +1251,7 @@ final class RFMappingStore {
     }
 
     private func allPositionsTimelineValues(groups: [AxisGroup]) -> [Double] {
-        guard let data else { return [] }
+        guard let data, hasSelectedUnit else { return [] }
         if valueMode == .spikeCount {
             let totals = data.metrics(for: unitIndex).binTotals
             return groups.map { compensatedSum(totals[$0.start...$0.end]) }
@@ -1244,10 +1319,10 @@ final class RFMappingStore {
     }
 
     func groupHist(_ cell: CellRef) -> [Double] {
-        guard let data else { return [] }
+        guard let data, hasSelectedUnit else { return [] }
         var hist = Array(repeating: 0.0, count: data.nBins)
         let pixelCount = max(1, (cell.yEnd - cell.yStart + 1) * (cell.xEnd - cell.xStart + 1))
-        let unit = data.counts[unitIndex]
+        guard let unit = selectedRFMap?.spikeCounts else { return [] }
         for yIndex in cell.yStart...cell.yEnd {
             for xIndex in cell.xStart...cell.xEnd {
                 for bin in 0..<data.nBins {
@@ -1259,7 +1334,7 @@ final class RFMappingStore {
     }
 
     func groupResponseValue(_ cell: CellRef, sourceStart: Int, sourceEnd: Int) -> Double? {
-        guard let data else { return nil }
+        guard let data, hasSelectedUnit else { return nil }
         var values: [Double] = []
         for yIndex in cell.yStart...cell.yEnd {
             for xIndex in cell.xStart...cell.xEnd {
@@ -1284,7 +1359,7 @@ final class RFMappingStore {
     }
 
     func groupResponseValues(_ cell: CellRef) -> [Double?] {
-        guard let data else { return [] }
+        guard let data, hasSelectedUnit else { return [] }
         let key = GroupResponseCacheKey(
             dataID: ObjectIdentifier(data),
             unitIndex: unitIndex,
@@ -1323,7 +1398,7 @@ final class RFMappingStore {
     }
 
     func cellMetricsText(_ cell: CellRef, displayBin: Int? = nil) -> String {
-        guard let data else { return "" }
+        guard let data, hasSelectedUnit else { return "" }
         let analysis = cellAnalysis(for: cell)
         let displayValues = analysis.displayValues
         guard !displayValues.isEmpty else { return "" }
@@ -1347,7 +1422,7 @@ final class RFMappingStore {
     }
 
     func tooltipText(_ cell: CellRef, displayBin: Int? = nil) -> String {
-        guard data != nil else { return "" }
+        guard data != nil, hasSelectedUnit else { return "" }
         let analysis = cellAnalysis(for: cell)
         let values = analysis.displayValues
         guard !values.isEmpty else { return "" }
@@ -1364,7 +1439,7 @@ final class RFMappingStore {
     }
 
     private func cellAnalysis(for cell: CellRef) -> CellAnalysis {
-        guard let data else {
+        guard let data, hasSelectedUnit else {
             return CellAnalysis(
                 displayValues: [],
                 countHist: [],
@@ -1471,14 +1546,14 @@ final class RFMappingStore {
     }
 
     func prepareExport() {
-        guard let data else { return }
+        guard let data, hasSelectedUnit else { return }
         exportDocument = CSVMatrixDocument(text: exportCSV())
         exportFilename = "unit_\(String(format: "%03d", unitIndex))_cluster_\(data.clusterID(for: unitIndex))_\(valueMode.filenameSlug)_displayed.csv"
         isExporting = true
     }
 
     func exportCSV() -> String {
-        guard let data else { return "" }
+        guard let data, hasSelectedUnit else { return "" }
         let plot = currentHeatmapPlot()
         let matrix = plot.matrix
         let xGroups = plot.xGroups

@@ -1,9 +1,25 @@
+import CryptoKit
 import Foundation
 
 private enum PresentationCountsPayload {
     case matrix([[Double]])
     case vector([Double])
     case scalar(Double)
+}
+
+private struct RFMappingArbitraryCodingKey: CodingKey {
+    let stringValue: String
+    let intValue: Int?
+
+    init?(stringValue: String) {
+        self.stringValue = stringValue
+        intValue = nil
+    }
+
+    init?(intValue: Int) {
+        stringValue = String(intValue)
+        self.intValue = intValue
+    }
 }
 
 private struct RFMappingPayload: Decodable {
@@ -14,6 +30,7 @@ private struct RFMappingPayload: Decodable {
     let yPositions: [Double]
     let timeBinEdges: [Double]
     let stimulusPresentationCounts: PresentationCountsPayload?
+    let metadata: [String: RFMapJSONValue]
 
     private enum CodingKeys: String, CodingKey {
         case unitsSpikeCounts
@@ -47,6 +64,19 @@ private struct RFMappingPayload: Decodable {
         } else {
             throw RFMappingError.invalidData("stimulusPresentationCounts must be a y-by-x numeric array.")
         }
+
+        let arbitraryContainer = try decoder.container(
+            keyedBy: RFMappingArbitraryCodingKey.self
+        )
+        var decodedMetadata: [String: RFMapJSONValue] = [:]
+        for key in arbitraryContainer.allKeys
+            where !RFMap.structuralJSONKeys.contains(key.stringValue) {
+            decodedMetadata[key.stringValue] = try arbitraryContainer.decode(
+                RFMapJSONValue.self,
+                forKey: key
+            )
+        }
+        metadata = decodedMetadata
     }
 }
 
@@ -79,6 +109,15 @@ final class RFMappingData: @unchecked Sendable {
     let yPositions: [Double]
     let timeBinEdges: [Double]
     let presentationCounts: [[Double]]?
+    /// Per-unit object model in the source `unitPool` order.
+    let rfMaps: RFMapList
+    /// All non-structural top-level JSON fields.
+    let metadata: [String: RFMapJSONValue]
+    /// SHA-256 and byte count of the exact JSON bytes decoded into this model.
+    /// Figure exports use these values instead of re-reading a path that may
+    /// have changed after the viewer loaded it.
+    let sourceSHA256: String
+    let sourceByteCount: Int
 
     private var metricsCache: [Int: UnitMetrics] = [:]
     private var prefixCaches: [UnitPrefixCache] = []
@@ -111,6 +150,10 @@ final class RFMappingData: @unchecked Sendable {
 
     init(data jsonData: Data, url: URL) throws {
         self.url = url.standardizedFileURL
+        sourceSHA256 = SHA256.hash(data: jsonData).map {
+            String(format: "%02x", $0)
+        }.joined()
+        sourceByteCount = jsonData.count
         let payload: RFMappingPayload
         do {
             payload = try JSONDecoder().decode(RFMappingPayload.self, from: jsonData)
@@ -135,16 +178,39 @@ final class RFMappingData: @unchecked Sendable {
         nY = size.1
         nX = size.2
         nBins = size.3
+        guard payload.unitsSpikeCounts.count == payload.unitPool.count else {
+            throw RFMappingError.invalidData(
+                "unitPool length does not match the decoded unit count."
+            )
+        }
+        let normalizedPresentationCounts = try Self.normalizePresentationCounts(
+            payload.stimulusPresentationCounts,
+            nY: nY,
+            nX: nX
+        )
+        let sourceMetadata = payload.metadata
+        let perUnitMaps = try payload.unitsSpikeCounts.enumerated().map { unitIndex, unitCounts in
+            try Task.checkCancellation()
+            return try RFMap(
+                unitIndex: unitIndex,
+                unitID: payload.unitPool[unitIndex],
+                spikeCounts: unitCounts,
+                xPositions: payload.xPositions,
+                yPositions: payload.yPositions,
+                timeBinEdgesSeconds: payload.timeBinEdges,
+                presentationCounts: normalizedPresentationCounts,
+                metadata: sourceMetadata,
+                sourceURL: url
+            )
+        }
         counts = payload.unitsSpikeCounts
         unitPool = payload.unitPool
         xPositions = payload.xPositions
         yPositions = payload.yPositions
         timeBinEdges = payload.timeBinEdges
-        presentationCounts = try Self.normalizePresentationCounts(
-            payload.stimulusPresentationCounts,
-            nY: nY,
-            nX: nX
-        )
+        presentationCounts = normalizedPresentationCounts
+        rfMaps = try RFMapList(perUnitMaps)
+        metadata = sourceMetadata
 
         try validate()
     }
@@ -163,6 +229,18 @@ final class RFMappingData: @unchecked Sendable {
 
     func clusterID(for unitIndex: Int) -> Int {
         unitPool[unitIndex]
+    }
+
+    func unitIndex(forUnitID unitID: Int) -> Int? {
+        rfMaps.originalIndex(forUnitID: unitID)
+    }
+
+    func rfMap(byOriginalIndex unitIndex: Int) throws -> RFMap {
+        try rfMaps.byOriginalIndex(unitIndex)
+    }
+
+    func rfMap(byUnitID unitID: Int) throws -> RFMap {
+        try rfMaps.byUnitID(unitID)
     }
 
     func binCenterMS(_ binIndex: Int) -> Double {
@@ -184,7 +262,7 @@ final class RFMappingData: @unchecked Sendable {
             return cached
         }
 
-        let unit = counts[unitIndex]
+        let unit = rfMaps[unitIndex].spikeCounts
         var total: [[Double]] = []
         var peak: [[Double]] = []
         var peakBin: [[Int?]] = []
@@ -288,7 +366,7 @@ final class RFMappingData: @unchecked Sendable {
         let high = max(0, min(nBins - 1, max(start, end)))
         let prefix = prefixValues(for: unitIndex)
         let stride = nBins + 1
-        let unit = counts[unitIndex]
+        let unit = rfMaps[unitIndex].spikeCounts
         return (0..<nY).map { yIndex in
             (0..<nX).map { xIndex in
                 let base = (yIndex * nX + xIndex) * stride
@@ -320,7 +398,7 @@ final class RFMappingData: @unchecked Sendable {
             base: base,
             low: low,
             high: high,
-            hist: counts[unitIndex][yIndex][xIndex]
+            hist: rfMaps[unitIndex].spikeCounts[yIndex][xIndex]
         )
     }
 
@@ -373,7 +451,7 @@ final class RFMappingData: @unchecked Sendable {
         let duration = timeSpanSeconds(start: low, end: high)
         let prefix = prefixValues(for: unitIndex)
         let stride = nBins + 1
-        let unit = counts[unitIndex]
+        let unit = rfMaps[unitIndex].spikeCounts
         return (0..<nY).map { yIndex in
             (0..<nX).map { xIndex -> Double? in
                 let base = (yIndex * nX + xIndex) * stride
@@ -426,7 +504,7 @@ final class RFMappingData: @unchecked Sendable {
         let maximumExactInteger = 9_007_199_254_740_992.0
         var prefixValues = ContiguousArray(repeating: 0.0, count: valueCount)
         var safeCells = ContiguousArray(repeating: true, count: nY * nX)
-        let unit = counts[unitIndex]
+        let unit = rfMaps[unitIndex].spikeCounts
         for yIndex in 0..<nY {
             for xIndex in 0..<nX {
                 let base = (yIndex * nX + xIndex) * stride
@@ -518,39 +596,9 @@ final class RFMappingData: @unchecked Sendable {
             }
         }
 
-        for unitIndex in 0..<nUnits {
-            try Task.checkCancellation()
-            guard counts[unitIndex].count == nY else {
-                throw RFMappingError.invalidData("Unit \(unitIndex) has wrong y dimension.")
-            }
-            for yIndex in 0..<nY {
-                guard counts[unitIndex][yIndex].count == nX else {
-                    throw RFMappingError.invalidData("Unit \(unitIndex), y \(yIndex) has wrong x dimension.")
-                }
-                for xIndex in 0..<nX {
-                    let hist = counts[unitIndex][yIndex][xIndex]
-                    guard hist.count == nBins else {
-                        throw RFMappingError.invalidData("Unit \(unitIndex), y \(yIndex), x \(xIndex) has wrong bin dimension.")
-                    }
-                    guard hist.allSatisfy({ $0.isFinite && $0 >= 0 }) else {
-                        throw RFMappingError.invalidData("Unit \(unitIndex), y \(yIndex), x \(xIndex) counts must be finite and non-negative.")
-                    }
-                }
-            }
-        }
-
-        if let presentationCounts {
-            for yIndex in 0..<nY {
-                for xIndex in 0..<nX where presentationCounts[yIndex][xIndex] == 0 {
-                    let hasCounts = (0..<nUnits).contains { unitIndex in
-                        counts[unitIndex][yIndex][xIndex].contains { $0 != 0 }
-                    }
-                    if hasCounts {
-                        throw RFMappingError.invalidData("stimulusPresentationCounts is zero where spike counts are nonzero (y \(yIndex), x \(xIndex)).")
-                    }
-                }
-            }
-        }
+        // Per-unit rectangularity, count values, and zero-presentation cells
+        // were validated once while constructing `rfMaps` above. Repeating
+        // those full-volume scans here would double load time for large files.
     }
 }
 

@@ -3,31 +3,36 @@ set -euo pipefail
 
 MODE="${1:-run}"
 APP_NAME="RF Map Viewer"
-EXECUTABLE_NAME="RFMappingSwiftUI"
-BUNDLE_ID="org.local.rfmapping.viewer.swift"
+EXECUTABLE_NAME="$APP_NAME"
+BUNDLE_ID="org.local.rfmapping.viewer"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DIST_DIR="$ROOT_DIR/dist"
+DIST_DIR="$ROOT_DIR/dist/python"
 APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
 APP_BINARY="$APP_BUNDLE/Contents/MacOS/$EXECUTABLE_NAME"
-BUILD_SCRIPT="$ROOT_DIR/script/build_macos_app.sh"
+BUILD_SCRIPT="$ROOT_DIR/script/build_python_macos_app.sh"
 
 case "$MODE" in
-  run|--bundle|bundle|--debug|debug|--logs|logs|--telemetry|telemetry|--verify|verify)
+  run|--bundle|bundle|--debug|debug|--logs|logs|--verify|verify)
     ;;
   *)
-    echo "usage: $0 [run|--bundle|--debug|--logs|--telemetry|--verify]" >&2
+    echo "usage: $0 [run|--bundle|--debug|--logs|--verify]" >&2
     exit 2
     ;;
 esac
 
 case "$MODE" in
-  run|--debug|debug|--logs|logs|--telemetry|telemetry|--verify|verify)
+  run|--debug|debug|--logs|logs|--verify|verify)
     pkill -x "$EXECUTABLE_NAME" >/dev/null 2>&1 || true
     ;;
 esac
 
 "$BUILD_SCRIPT"
+
+[[ -x "$APP_BINARY" ]] || {
+  echo "error: built application executable is missing: $APP_BINARY" >&2
+  exit 1
+}
 
 open_app() {
   /usr/bin/open "$APP_BUNDLE"
@@ -44,15 +49,13 @@ case "$MODE" in
     ;;
   --logs|logs)
     open_app
-    /usr/bin/log stream --info --style compact --predicate "process == \"$EXECUTABLE_NAME\""
-    ;;
-  --telemetry|telemetry)
-    open_app
-    /usr/bin/log stream --info --style compact --predicate "subsystem == \"$BUNDLE_ID\""
+    /usr/bin/log stream --info --style compact --predicate "process == '$EXECUTABLE_NAME'"
     ;;
   --verify|verify)
     open_app
     sleep 1
-    pgrep -x "$EXECUTABLE_NAME" >/dev/null
+    pgrep -f "$APP_BINARY" >/dev/null
+    codesign --verify --deep --strict "$APP_BUNDLE"
+    /usr/bin/mdls -name kMDItemVersion "$APP_BUNDLE"
     ;;
 esac

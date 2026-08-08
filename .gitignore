@@ -5,6 +5,8 @@ __pycache__/
 .build/
 dist/*.app/
 dist/*/
+dist/*.zip
+dist/*.exe
 DerivedData/
 web/node_modules/
 web/dist/
