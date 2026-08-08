@@ -1,16 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP_NAME="RF Map Viewer"
-BUNDLE_ID="org.local.rfmapping.viewer"
-APP_VERSION="1.9.0"
-APP_BUILD="10900"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=python_macos_release.env
+source "$SCRIPT_DIR/python_macos_release.env"
+
+APP_NAME="$RF_MAPPING_APP_NAME"
+BUNDLE_ID="$RF_MAPPING_BUNDLE_ID"
+APP_VERSION="$RF_MAPPING_APP_VERSION"
+APP_BUILD="$RF_MAPPING_APP_BUILD"
+APP_ARCHITECTURE="$RF_MAPPING_APP_ARCHITECTURE"
 PYINSTALLER_VERSION="6.21.0"
 NUMPY_VERSION="2.4.6"
 PILLOW_VERSION="12.3.0"
 SCIPY_VERSION="1.18.0"
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-/Library/Frameworks/Python.framework/Versions/3.14/bin/python3}"
 BUILD_VENV="${RF_MAPPING_BUILD_VENV:-$HOME/Library/Caches/rfmapping-pyinstaller-3.14}"
 WORK_DIR="${RF_MAPPING_BUILD_WORK:-$HOME/Library/Caches/rfmapping-pyinstaller-work}"
@@ -50,6 +55,66 @@ require_safe_removal_target() {
   esac
 }
 
+canonical_scoped_build_cache_path() {
+  local label="$1"
+  local target="${2%/}"
+  local parent
+  local name
+
+  [[ -n "$target" && "$target" == /* ]] \
+    || fail "$label must be an absolute path: $2"
+  [[ "$target" != *"/../"* && "$target" != */.. && "$target" != *"/./"* && "$target" != */. ]] \
+    || fail "$label may not contain dot traversal components: $target"
+  name="$(basename "$target")"
+  [[ "$name" == rfmapping-* ]] \
+    || fail "$label basename must start with 'rfmapping-': $target"
+  parent="$(dirname "$target")"
+  [[ -d "$parent" ]] || fail "$label parent directory does not exist: $parent"
+  parent="$(cd -P "$parent" && pwd)"
+  target="$parent/$name"
+  [[ "$parent" != "/" && "$parent" != "$HOME" && "$parent" != "$ROOT_DIR" && "$parent" != "$DIST_DIR" ]] \
+    || fail "Refusing broad $label parent: $parent"
+  case "$target/" in
+    "$ROOT_DIR/"*|"$DIST_DIR/"*)
+      fail "$label may not be inside the source or distribution tree: $target"
+      ;;
+  esac
+  [[ ! -L "$target" ]] || fail "$label may not be a symlink: $target"
+  printf '%s\n' "$target"
+}
+
+validate_distribution_tree() {
+  local root_physical
+  local dist_parent="$ROOT_DIR/dist"
+  local dist_parent_physical
+  local dist_physical
+
+  root_physical="$(cd -P "$ROOT_DIR" && pwd)"
+  [[ ! -L "$dist_parent" ]] \
+    || fail "Distribution parent may not be a symlink: $dist_parent"
+  if [[ -e "$dist_parent" ]]; then
+    [[ -d "$dist_parent" ]] \
+      || fail "Distribution parent is not a directory: $dist_parent"
+  else
+    mkdir "$dist_parent"
+  fi
+  dist_parent_physical="$(cd -P "$dist_parent" && pwd)"
+  [[ "$dist_parent_physical" == "$root_physical/dist" ]] \
+    || fail "Distribution parent escapes the physical source tree: $dist_parent_physical"
+
+  [[ ! -L "$DIST_DIR" ]] \
+    || fail "Distribution directory may not be a symlink: $DIST_DIR"
+  if [[ -e "$DIST_DIR" ]]; then
+    [[ -d "$DIST_DIR" ]] \
+      || fail "Distribution path is not a directory: $DIST_DIR"
+  else
+    mkdir "$DIST_DIR"
+  fi
+  dist_physical="$(cd -P "$DIST_DIR" && pwd)"
+  [[ "$dist_physical" == "$root_physical/dist/python" ]] \
+    || fail "Distribution directory escapes the physical source tree: $dist_physical"
+}
+
 verify_plist_value() {
   local key="$1"
   local expected="$2"
@@ -69,14 +134,29 @@ verify_arm64_macho_files() {
     [[ "$description" == *"Mach-O"* ]] || continue
     architectures="$(lipo -archs "$candidate" 2>/dev/null)" \
       || fail "Unable to inspect architectures: $candidate"
-    [[ "$architectures" == "arm64" ]] \
-      || fail "Mach-O file is not arm64-only: $candidate ($architectures)"
+    [[ "$architectures" == "$APP_ARCHITECTURE" ]] \
+      || fail "Mach-O file is not $APP_ARCHITECTURE-only: $candidate ($architectures)"
   done < <(find "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Frameworks" -type f -print0)
 }
+
+# Keep path-safety helpers sourceable by the Linux fixture audit without
+# invoking any macOS build tools.
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+  return 0
+fi
 
 require_file "$ROOT_DIR/rfmapping_gui.py"
 require_file "$ICON_MASTER"
 [[ -x "$PLIST_BUDDY" ]] || fail "PlistBuddy not found: $PLIST_BUDDY"
+validate_distribution_tree
+BUILD_VENV="$(canonical_scoped_build_cache_path "Build virtual environment" "$BUILD_VENV")"
+WORK_DIR="$(canonical_scoped_build_cache_path "Build work directory" "$WORK_DIR")"
+case "$BUILD_VENV/" in
+  "$WORK_DIR/"*) fail "Build virtual environment may not be inside the work directory" ;;
+esac
+case "$WORK_DIR/" in
+  "$BUILD_VENV/"*) fail "Build work directory may not be inside the virtual environment" ;;
+esac
 
 if [[ ! -x "$PYTHON_BIN" ]]; then
   fail "Python not found: $PYTHON_BIN"
@@ -96,6 +176,9 @@ fi
 
 require_safe_removal_target "$APP_BUNDLE"
 require_safe_removal_target "$WORK_DIR"
+# Recheck immediately before destructive cleanup. In particular, never follow a
+# dist or dist/python symlink even if it appeared after initial validation.
+validate_distribution_tree
 rm -rf "$APP_BUNDLE" "$WORK_DIR"
 rm -f "$ARCHIVE_PATH"
 mkdir -p "$DIST_DIR" "$WORK_DIR"
@@ -129,7 +212,7 @@ fi
   --clean \
   --windowed \
   --onedir \
-  --target-architecture arm64 \
+  --target-architecture "$APP_ARCHITECTURE" \
   --name "$APP_NAME" \
   --osx-bundle-identifier "$BUNDLE_ID" \
   --icon "$ICON_ICNS" \
@@ -198,5 +281,5 @@ require_nonempty_file "$ARCHIVE_PATH"
 unzip -tq "$ARCHIVE_PATH" >/dev/null \
   || fail "Archive integrity check failed: $ARCHIVE_PATH"
 
-echo "Built Python 1.9 Apple-silicon app: $APP_BUNDLE"
+echo "Built Python $APP_VERSION Apple-silicon app: $APP_BUNDLE"
 echo "Created archive: $ARCHIVE_PATH"

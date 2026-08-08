@@ -110,6 +110,20 @@ describe("RF display math", () => {
     expect(timeGroupForMs(meta, destination, 100)).toBe(1);
   });
 
+  it("keeps noisy floating-point shared edges half-open", () => {
+    const noisyMeta: DatasetMeta = {
+      ...meta,
+      shape: [1, 1, 1, 4],
+      xPositions: [0],
+      yPositions: [0],
+      timeBinEdges: [-0.01, 0, 0.01, 0.019999999999999997, 0.03],
+      presentationCounts: [[1]],
+    };
+    const destination = timeGroups(noisyMeta, 10);
+    expect(destination).toEqual([[0, 0], [1, 1], [2, 2], [3, 3]]);
+    expect(timeGroupRangeForMs(noisyMeta, destination, 0, 20)).toEqual([1, 2]);
+  });
+
   it("normalizes count values by presentations and duration", () => {
     expect(responseMatrix(counts, meta, 2, 3, "Spike count")[0]).toEqual([5, 0, 2]);
     expect(responseMatrix(counts, meta, 2, 3, "Spikes / presentation")[0]).toEqual([2.5, 0, 1]);

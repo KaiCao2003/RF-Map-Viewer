@@ -5,6 +5,7 @@ import errno
 import hashlib
 import io
 import json
+import math
 import os
 import re
 import shutil
@@ -12,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -693,6 +695,105 @@ def test_probe_positions_only_and_invalid_channels_fall_back_to_units(
         )
 
 
+def test_probe_discovery_never_falls_back_past_current_session_data(
+    app, settings: Settings
+) -> None:
+    date_root = settings.rf_root / "Kai" / "260616"
+    data_root = date_root / "260616_3" / "data"
+    source = write_json(
+        data_root / "rfmapping" / "good" / "window" / "ProbeA" / "rf.json"
+    )
+    unrelated = date_root / "positions.csv"
+    unrelated.write_text(
+        "unit_index,unit_id,x_um,y_um\n0,11,10,20\n1,22,30,40\n",
+        encoding="utf-8",
+    )
+
+    with authenticated_client(app) as client:
+        metadata = _open(client, source)
+        assert metadata["capabilities"]["probe"] is False
+        assert client.get(f"/api/datasets/{metadata['id']}/probe").status_code == 404
+
+
+def test_probe_geometry_filters_rf_units_and_missing_selected_unit_is_placeholder(
+    app, settings: Settings
+) -> None:
+    data_root = settings.rf_root / "Kai" / "260617" / "260617_1" / "data"
+    source = write_json(
+        data_root / "rfmapping" / "good" / "window" / "ProbeA" / "rf.json"
+    )
+    positions = data_root / "spike_position" / "ProbeA" / "positions.csv"
+    positions.parent.mkdir(parents=True)
+    positions.write_text(
+        "unit_index,unit_id,x_um,y_um\n0,11,10,20\n1,999,30,40\n",
+        encoding="utf-8",
+    )
+    pages = _figure_pages("probe")
+
+    with authenticated_client(app) as client:
+        metadata = _open(client, source)
+        geometry = client.get(f"/api/datasets/{metadata['id']}/probe")
+        assert geometry.status_code == 200, geometry.text
+        assert [unit["unitId"] for unit in geometry.json()["units"]] == [11]
+
+        endpoint = f"/api/datasets/{metadata['id']}/figure-exports/preview"
+        available = client.post(
+            endpoint,
+            json={
+                "specVersion": 1,
+                "clusterId": 11,
+                "pageIndex": 0,
+                "pages": pages,
+            },
+        )
+        assert available.status_code == 200, available.text
+        assert "x-rf-placeholder-count" not in available.headers
+
+        missing = client.post(
+            endpoint,
+            json={
+                "specVersion": 1,
+                "clusterId": 22,
+                "pageIndex": 0,
+                "pages": pages,
+            },
+        )
+        assert missing.status_code == 200, missing.text
+        assert missing.headers["x-rf-placeholder-count"] == "1"
+
+
+def test_probe_geometry_with_no_rf_unit_overlap_fails_closed(
+    app, settings: Settings
+) -> None:
+    data_root = settings.rf_root / "Kai" / "260618" / "260618_1" / "data"
+    source = write_json(
+        data_root / "rfmapping" / "good" / "window" / "ProbeA" / "rf.json"
+    )
+    positions = data_root / "spike_position" / "ProbeA" / "positions.csv"
+    positions.parent.mkdir(parents=True)
+    positions.write_text(
+        "unit_index,unit_id,x_um,y_um\n0,999,10,20\n",
+        encoding="utf-8",
+    )
+
+    with authenticated_client(app) as client:
+        metadata = _open(client, source)
+        geometry = client.get(f"/api/datasets/{metadata['id']}/probe")
+        assert geometry.status_code == 422
+        assert "no unit IDs" in geometry.json()["detail"]
+        preview = client.post(
+            f"/api/datasets/{metadata['id']}/figure-exports/preview",
+            json={
+                "specVersion": 1,
+                "clusterId": 11,
+                "pageIndex": 0,
+                "pages": _figure_pages("probe"),
+            },
+        )
+        assert preview.status_code == 200, preview.text
+        assert preview.headers["x-rf-placeholder-count"] == "1"
+
+
 def test_ad_hoc_hd_csv_or_png_does_not_claim_tuning_capability(
     app, settings: Settings
 ) -> None:
@@ -1265,6 +1366,333 @@ def test_figure_export_registry_covers_every_view_and_all_types_render(
         assert response.headers["x-rf-render-sha256"] == hashlib.sha256(
             response.content
         ).hexdigest()
+
+
+def test_figure_response_preparation_matches_live_pooled_observations() -> None:
+    counts = np.asarray(
+        [
+            [[4, 6], [0, 0], [499, 500], [3, 5]],
+            [[2, 4], [1, 3], [5, 7], [444, 444]],
+        ],
+        dtype=np.float64,
+    )
+    metadata = {
+        "shape": [1, 2, 4, 2],
+        "timeBinEdges": [0.0, 0.1, 0.3],
+        "presentationCounts": [[1, 9, 0, 2], [3, 1, 4, 0]],
+    }
+    base_settings = {
+        "rfStartMs": 0.0,
+        "rfEndMs": 300.0,
+        "xBins": 2,
+        "yBins": 1,
+        "smoothRadius": 0,
+        "flipY": False,
+    }
+    expected_by_mode = {
+        "Spike count": [[5.0, 10.0]],
+        "Spikes / presentation": [[10.0 / 7.0, 10.0 / 3.0]],
+        "Mean firing rate (Hz)": [[100.0 / 21.0, 100.0 / 9.0]],
+    }
+    for value_mode, expected in expected_by_mode.items():
+        matrix, x_groups, y_groups, bounds = figure_exports_module._prepared_response(
+            counts,
+            metadata,
+            {**base_settings, "valueMode": value_mode},
+        )
+        np.testing.assert_allclose(matrix, expected)
+        assert x_groups == [(0, 1), (2, 3)]
+        assert y_groups == [(0, 1)]
+        assert bounds == (0.0, 300.0)
+
+    smoothed, _x, _y, _bounds = figure_exports_module._prepared_response(
+        np.asarray([[[100.0], [9.0]]]),
+        {
+            "shape": [1, 1, 2, 1],
+            "timeBinEdges": [0.0, 0.1],
+            "presentationCounts": [[100, 1]],
+        },
+        {
+            "rfStartMs": 0.0,
+            "rfEndMs": 100.0,
+            "valueMode": "Mean firing rate (Hz)",
+            "xBins": 2,
+            "yBins": 1,
+            "smoothRadius": 1,
+            "flipY": False,
+        },
+    )
+    np.testing.assert_allclose(
+        smoothed,
+        [[10.398009950248756, 11.568627450980392]],
+    )
+
+
+def _temporal_parity_fixture() -> tuple[np.ndarray, dict[str, object]]:
+    counts = np.full((4, 4, 3), 100.0, dtype=np.float64)
+    presentations = np.zeros((4, 4), dtype=np.int64)
+    for y, x, exposure, histogram in (
+        (0, 0, 9, [9, 0, 0]),
+        (0, 2, 1, [0, 5, 0]),
+        (1, 3, 5, [0, 7, 0]),
+        (2, 2, 2, [1, 2, 3]),
+        (3, 3, 7, [5, 4, 3]),
+    ):
+        presentations[y, x] = exposure
+        counts[y, x, :] = histogram
+    metadata: dict[str, object] = {
+        "shape": [1, 4, 4, 3],
+        "timeBinEdges": [0.0, 0.01, 0.02, 0.03],
+        "presentationCounts": presentations.tolist(),
+        "xPositions": [0.0, 1.0, 2.0, 3.0],
+        "yPositions": [0.0, 1.0, 2.0, 3.0],
+    }
+    return counts, metadata
+
+
+def test_figure_temporal_preparation_matches_live_slice_first_smoothing() -> None:
+    counts, metadata = _temporal_parity_fixture()
+    delays, entropy, response, x_groups, y_groups = (
+        figure_exports_module._prepared_temporal(
+            counts,
+            metadata,
+            {
+                "timeResolutionMs": 10.0,
+                "valueMode": "Spikes / presentation",
+                "xBins": 2,
+                "yBins": 2,
+                "smoothRadius": 1,
+                "flipY": False,
+                "responseFloor": 0.0,
+            },
+        )
+    )
+
+    assert x_groups == [(0, 1), (2, 3)]
+    assert y_groups == [(0, 1), (2, 3)]
+    np.testing.assert_allclose(delays, [[5.0, 15.0], [5.0, 15.0]])
+
+    smoothed_histograms = (
+        ([13.0, 5.0, 1.0], [8.0, 10.0, 2.0]),
+        ([8.0, 4.0, 2.0], [7.0, 8.0, 4.0]),
+    )
+
+    def normalized_entropy(histogram: tuple[float, ...] | list[float]) -> float:
+        values = np.asarray(histogram, dtype=np.float64)
+        probabilities = values[values > 0] / values.sum()
+        return -float(np.sum(probabilities * np.log(probabilities))) / math.log(3)
+
+    expected_entropy = [
+        [normalized_entropy(histogram) for histogram in row]
+        for row in smoothed_histograms
+    ]
+    np.testing.assert_allclose(entropy, expected_entropy)
+    np.testing.assert_allclose(
+        response,
+        [[26.0 / 19.0, 17.0 / 10.0], [np.nan, 35.0 / 19.0]],
+        equal_nan=True,
+    )
+
+
+@pytest.mark.parametrize(
+    ("value_mode", "expected"),
+    (
+        ("Spike count", [3.0, 4.0, 0.0]),
+        ("Spikes / presentation", [0.6, 0.8, 0.0]),
+        ("Mean firing rate (Hz)", [60.0, 80.0, 0.0]),
+    ),
+)
+def test_timeline_selected_curve_matches_live_group_response_modes(
+    value_mode: str,
+    expected: list[float],
+) -> None:
+    counts, parity_metadata = _temporal_parity_fixture()
+    settings_snapshot = figure_exports_module._normalized_settings(
+        "timeline.current",
+        {
+            "timeResolutionMs": 10.0,
+            "valueMode": value_mode,
+            "xBins": 2,
+            "yBins": 2,
+            "smoothRadius": 1,
+            "spatialProjection": {
+                "yStart": 0,
+                "yEnd": 1,
+                "xStart": 0,
+                "xEnd": 3,
+            },
+        },
+        parity_metadata,
+    )
+    record = SimpleNamespace(cache=SimpleNamespace(metadata=parity_metadata))
+    renderer = figure_exports_module.FigurePageRenderer(
+        record,
+        tuning=None,
+        probe=None,
+    )
+
+    payload, _title = renderer._timeline_data(counts, settings_snapshot)
+
+    np.testing.assert_allclose(payload["selected"], expected)
+
+
+def test_probe_points_emit_channels_then_units_with_selected_unit_last(
+    app, settings: Settings
+) -> None:
+    source = write_json(settings.rf_root / "probe-order.json")
+    store = app.state.services.datasets
+    with authenticated_client(app) as client:
+        opened = _open(client, source)
+    record = store.get(opened["id"])
+    _unit_index, counts = store.unit_array(record, 11)
+    renderer = figure_exports_module.FigurePageRenderer(
+        record,
+        tuning=None,
+        probe={
+            "probe": "ProbeA",
+            "channels": [
+                {"x": 10.0, "y": 20.0},
+                {"x": 10.0, "y": 20.0},
+            ],
+            "units": [
+                {"unitId": 11, "x": 10.0, "y": 20.0},
+                {"unitId": 22, "x": 10.0, "y": 20.0},
+            ],
+        },
+    )
+    placeholders: list[str] = []
+
+    plot = renderer._shared_spec(
+        11,
+        counts,
+        figure_exports_module.FigurePlot("probe", {}),
+        placeholders,
+    )
+
+    assert placeholders == []
+    assert plot.data["points"] == [
+        {"x": 10.0, "y": 20.0, "label": "", "color": "#94a3b8"},
+        {"x": 10.0, "y": 20.0, "label": "", "color": "#94a3b8"},
+        {"x": 10.0, "y": 20.0, "label": "22", "color": "#2563eb"},
+        {"x": 10.0, "y": 20.0, "label": "11", "color": "#dc2626"},
+    ]
+
+
+def test_timeline_figure_payload_preserves_selection_and_active_group(
+    app, settings: Settings
+) -> None:
+    source = write_json(settings.rf_root / "rf.json")
+    store = app.state.services.datasets
+    with authenticated_client(app) as client:
+        metadata = _open(client, source)
+    record = store.get(metadata["id"])
+    _unit_index, counts = store.unit_array(record, 11)
+    settings_snapshot = figure_exports_module._normalized_settings(
+        "timeline.current",
+        {
+            "timelineStartMs": 0,
+            "timelineEndMs": 100,
+            "activeTimeCenterMs": 150,
+            "timeResolutionMs": 100,
+        },
+        record.cache.metadata,
+    )
+    renderer = figure_exports_module.FigurePageRenderer(
+        record,
+        tuning=None,
+        probe=None,
+    )
+
+    payload, title = renderer._timeline_data(counts, settings_snapshot)
+
+    assert payload["selection_start_index"] == 1
+    assert payload["selection_end_index"] == 1
+    assert payload["active_index"] == 2
+    assert payload["times"] == [-50.0, 50.0, 150.0]
+    assert title.startswith("Timeline 0–100 ms")
+
+
+def test_timeline_group_range_keeps_noisy_shared_edges_half_open() -> None:
+    metadata = {
+        "timeBinEdges": np.linspace(-0.1, 0.4, 501).tolist(),
+        "shape": [1, 1, 1, 500],
+    }
+    groups = figure_exports_module._time_groups(metadata, 10.0)
+
+    assert len(groups) == 50
+    assert groups[29] == (290, 299)
+    assert metadata["timeBinEdges"][300] == pytest.approx(0.2)
+    assert figure_exports_module._time_group_range_for_ms(
+        metadata,
+        groups,
+        0.0,
+        200.0,
+    ) == (10, 29)
+
+
+def test_timeline_current_preview_and_final_are_byte_identical(
+    app, settings: Settings
+) -> None:
+    (settings.figure_export_root / "session").mkdir()
+    source = write_json(settings.rf_root / "rf.json")
+    pages = [
+        {
+            "title": "Frozen timeline",
+            "plots": [
+                {
+                    "type": "timeline.current",
+                    "settings": {
+                        "timelineStartMs": 0,
+                        "timelineEndMs": 100,
+                        "activeTimeCenterMs": 150,
+                        "timeResolutionMs": 100,
+                        "spatialProjection": {
+                            "yStart": 0,
+                            "yEnd": 0,
+                            "xStart": 1,
+                            "xEnd": 1,
+                        },
+                    },
+                }
+            ],
+        }
+    ]
+    with authenticated_client(app) as client:
+        metadata = _open(client, source)
+        preview = client.post(
+            f"/api/datasets/{metadata['id']}/figure-exports/preview",
+            json={
+                "specVersion": 1,
+                "clusterId": 11,
+                "pageIndex": 0,
+                "pages": pages,
+            },
+        )
+        assert preview.status_code == 200, preview.text
+        exported = client.post(
+            f"/api/datasets/{metadata['id']}/figure-exports",
+            json={
+                "specVersion": 1,
+                "clusterIds": [11],
+                "order": "unit-major",
+                "format": "png",
+                "pages": pages,
+                "destination": {
+                    "directory": "session",
+                    "baseName": "frozen-timeline",
+                    "overwrite": False,
+                },
+            },
+        )
+        assert exported.status_code == 200, exported.text
+
+    body = exported.json()
+    target = settings.figure_export_root / "session" / "frozen-timeline"
+    page_path = target / body["manifest"]["pages"][0]["file"]
+    assert page_path.read_bytes() == preview.content
+    assert body["manifest"]["pages"][0]["sha256"] == preview.headers[
+        "x-rf-render-sha256"
+    ]
 
 
 def test_figure_preview_and_final_use_explicit_current_companion_paths(

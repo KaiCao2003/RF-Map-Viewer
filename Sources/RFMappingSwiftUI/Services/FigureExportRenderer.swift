@@ -8,10 +8,15 @@ import SwiftUI
 struct FigureExportCompanions: Sendable {
     var hdTuning: HDTuningData?
     var hdError: String?
-    /// The Swift viewer has no loaded probe model yet. This remains false
-    /// until a real probe payload and renderer are introduced.
-    var probeAvailable = false
-    var probeUnavailableReason = "Probe data are not loaded in the Swift viewer."
+    var probeGeometry: ProbeGeometry?
+    var probeError: String?
+
+    var probeUnavailableReason: String {
+        if let probeError {
+            return "Probe geometry could not be loaded: \(probeError)"
+        }
+        return "No companion positions.csv was found for this RF dataset."
+    }
 }
 
 struct FigurePlotRenderDescriptor: Identifiable, Equatable, Sendable {
@@ -19,6 +24,21 @@ struct FigurePlotRenderDescriptor: Identifiable, Equatable, Sendable {
     let kind: FigureExportPlotKind
     let placeholder: String?
     let hdCurve: ProcessedHDCurve?
+    let probePayload: ProbePlotPayload?
+
+    init(
+        id: UUID,
+        kind: FigureExportPlotKind,
+        placeholder: String? = nil,
+        hdCurve: ProcessedHDCurve? = nil,
+        probePayload: ProbePlotPayload? = nil
+    ) {
+        self.id = id
+        self.kind = kind
+        self.placeholder = placeholder
+        self.hdCurve = hdCurve
+        self.probePayload = probePayload
+    }
 }
 
 struct FigurePageRenderDescriptor: Identifiable, Equatable, Sendable {
@@ -217,7 +237,8 @@ struct FigureExportRenderer {
                 id: placement.id,
                 kind: placement.kind,
                 placeholder: "RF mapping unit \(unitID) is unavailable in this dataset.",
-                hdCurve: nil
+                hdCurve: nil,
+                probePayload: nil
             )
         }
         if placement.kind.requiresHDTuning {
@@ -228,7 +249,8 @@ struct FigureExportRenderer {
                     id: placement.id,
                     kind: placement.kind,
                     placeholder: "HD tuning unavailable: \(reason)",
-                    hdCurve: nil
+                    hdCurve: nil,
+                    probePayload: nil
                 )
             }
             do {
@@ -236,26 +258,49 @@ struct FigureExportRenderer {
                     id: placement.id,
                     kind: placement.kind,
                     placeholder: nil,
-                    hdCurve: try hdTuning.processedCurve(unitID: unitID)
+                    hdCurve: try hdTuning.processedCurve(unitID: unitID),
+                    probePayload: nil
                 )
             } catch {
                 return .init(
                     id: placement.id,
                     kind: placement.kind,
                     placeholder: "HD tuning unavailable for unit ID \(unitID): \(error.localizedDescription)",
-                    hdCurve: nil
+                    hdCurve: nil,
+                    probePayload: nil
                 )
             }
         }
-        if placement.kind.requiresProbe, !companions.probeAvailable {
+        if placement.kind.requiresProbe {
+            guard let geometry = companions.probeGeometry else {
+                return .init(
+                    id: placement.id,
+                    kind: placement.kind,
+                    placeholder: companions.probeUnavailableReason
+                )
+            }
+            guard geometry.units.contains(where: { $0.unitID == unitID }) else {
+                return .init(
+                    id: placement.id,
+                    kind: placement.kind,
+                    placeholder: "Probe position is unavailable for RF unit \(unitID); "
+                        + "the selected unit is absent from positions.csv."
+                )
+            }
             return .init(
                 id: placement.id,
                 kind: placement.kind,
-                placeholder: companions.probeUnavailableReason,
-                hdCurve: nil
+                probePayload: ProbePlotPayload(
+                    probeName: geometry.probeName,
+                    positionsURL: geometry.positionsURL,
+                    channelsURL: geometry.channelsURL,
+                    channels: geometry.channels,
+                    units: geometry.units,
+                    selectedUnitID: unitID
+                )
             )
         }
-        return .init(id: placement.id, kind: placement.kind, placeholder: nil, hdCurve: nil)
+        return .init(id: placement.id, kind: placement.kind)
     }
 
     private func stablePageID(unitID: Int, pageID: UUID) -> UUID {
@@ -988,11 +1033,13 @@ private struct FigureExportPlotView: View {
                 FigureExportPlaceholderView(title: plot.kind.label, message: placeholder)
             } else if let curve = plot.hdCurve {
                 HDCurveExportView(
-                title: plot.kind.label,
-                curve: curve,
-                polar: plot.kind == .hdPolar,
+                    title: plot.kind.label,
+                    curve: curve,
+                    polar: plot.kind == .hdPolar,
                     unitID: descriptor.unitID
                 )
+            } else if let probePayload = plot.probePayload {
+                ProbeGeometryExportView(payload: probePayload)
             } else {
                 ExistingRFExportPlotView(
                     data: data,
@@ -1050,11 +1097,16 @@ private struct ExistingRFExportPlotView: View {
         case .rgbCartesian, .rgbPolar:
             RGBMapView(store: store)
         case .timelineCurrent:
-            TimelineView(store: store)
-        case .hdLine, .hdPolar, .probe:
+            TimelineExportView(store: store)
+        case .hdLine, .hdPolar:
             FigureExportPlaceholderView(
                 title: kind.label,
-                message: "No renderer payload was provided."
+                message: "HD renderer payload was not resolved."
+            )
+        case .probe:
+            FigureExportPlaceholderView(
+                title: kind.label,
+                message: "Probe renderer payload was not resolved."
             )
         }
     }
@@ -1174,6 +1226,206 @@ private struct HDCurveExportView: View {
                     y: center.y + (radius + 15) * CGFloat(sin(angle))
                 ),
                 anchor: .center
+            )
+        }
+    }
+}
+
+private struct ProbeGeometryExportView: View {
+    let payload: ProbePlotPayload
+
+    var body: some View {
+        Canvas { context, size in
+            var context = context
+            drawTitle(
+                context: &context,
+                title: "\(payload.probeName) layout",
+                subtitle: "Unit ID \(payload.selectedUnitID); "
+                    + "\(payload.channels.count) channels; \(payload.units.count) RF units"
+            )
+            drawGeometry(context: &context, size: size)
+        }
+        .background(Color(nsColor: .textBackgroundColor))
+    }
+
+    private func drawGeometry(context: inout GraphicsContext, size: CGSize) {
+        let plotRect = CGRect(
+            x: 54,
+            y: 68,
+            width: max(10, size.width - 86),
+            height: max(10, size.height - 112)
+        )
+        let allX = payload.channels.map(\.xMicrometers)
+            + payload.units.map(\.xMicrometers)
+        let allY = payload.channels.map(\.yMicrometers)
+            + payload.units.map(\.yMicrometers)
+        guard let rawXLow = allX.min(), let rawXHigh = allX.max(),
+              let rawYLow = allY.min(), let rawYHigh = allY.max() else { return }
+        let xRange = paddedRange(low: rawXLow, high: rawXHigh)
+        let yRange = paddedRange(low: rawYLow, high: rawYHigh)
+
+        context.stroke(
+            Path(plotRect),
+            with: .color(.secondary.opacity(0.55)),
+            lineWidth: 1
+        )
+        drawAxisLabels(
+            context: &context,
+            plotRect: plotRect,
+            xRange: xRange,
+            yRange: yRange
+        )
+
+        for channel in payload.channels {
+            let point = displayPoint(
+                x: channel.xMicrometers,
+                y: channel.yMicrometers,
+                plotRect: plotRect,
+                xRange: xRange,
+                yRange: yRange
+            )
+            context.fill(
+                Path(ellipseIn: CGRect(
+                    x: point.x - 2.25,
+                    y: point.y - 2.25,
+                    width: 4.5,
+                    height: 4.5
+                )),
+                with: .color(Color(red: 0.58, green: 0.64, blue: 0.72))
+            )
+        }
+
+        // Draw the selected unit last so coincident coordinates cannot hide
+        // its red marker beneath another RF unit.
+        let orderedUnits = payload.units.filter { $0.unitID != payload.selectedUnitID }
+            + payload.units.filter { $0.unitID == payload.selectedUnitID }
+        for unit in orderedUnits {
+            let selected = unit.unitID == payload.selectedUnitID
+            let point = displayPoint(
+                x: unit.xMicrometers,
+                y: unit.yMicrometers,
+                plotRect: plotRect,
+                xRange: xRange,
+                yRange: yRange
+            )
+            let radius: CGFloat = selected ? 6 : 4.5
+            let circle = Path(ellipseIn: CGRect(
+                x: point.x - radius,
+                y: point.y - radius,
+                width: radius * 2,
+                height: radius * 2
+            ))
+            context.fill(
+                circle,
+                with: .color(selected
+                    ? Color(red: 0.86, green: 0.15, blue: 0.15)
+                    : Color(red: 0.15, green: 0.39, blue: 0.72))
+            )
+            context.stroke(circle, with: .color(.white), lineWidth: 1)
+            context.draw(
+                Text("\(unit.unitID)")
+                    .font(.system(size: selected ? 10 : 8, weight: selected ? .bold : .regular))
+                    .foregroundStyle(.primary),
+                at: CGPoint(x: point.x + radius + 3, y: point.y),
+                anchor: .leading
+            )
+        }
+
+        drawLegend(context: &context, plotRect: plotRect)
+    }
+
+    private func paddedRange(low: Double, high: Double) -> ClosedRange<Double> {
+        let span = high - low
+        let padding = span > 1e-12 ? span * 0.06 : max(abs(low) * 0.06, 1)
+        return (low - padding)...(high + padding)
+    }
+
+    private func displayPoint(
+        x: Double,
+        y: Double,
+        plotRect: CGRect,
+        xRange: ClosedRange<Double>,
+        yRange: ClosedRange<Double>
+    ) -> CGPoint {
+        let xFraction = (x - xRange.lowerBound)
+            / max(xRange.upperBound - xRange.lowerBound, 1e-12)
+        let yFraction = (y - yRange.lowerBound)
+            / max(yRange.upperBound - yRange.lowerBound, 1e-12)
+        return CGPoint(
+            x: plotRect.minX + plotRect.width * CGFloat(xFraction),
+            y: plotRect.maxY - plotRect.height * CGFloat(yFraction)
+        )
+    }
+
+    private func drawAxisLabels(
+        context: inout GraphicsContext,
+        plotRect: CGRect,
+        xRange: ClosedRange<Double>,
+        yRange: ClosedRange<Double>
+    ) {
+        for fraction in [0.0, 0.5, 1.0] {
+            let x = plotRect.minX + plotRect.width * CGFloat(fraction)
+            let value = xRange.lowerBound
+                + (xRange.upperBound - xRange.lowerBound) * fraction
+            context.draw(
+                Text(String(format: "%.1f", value))
+                    .font(.system(size: 8))
+                    .foregroundStyle(.secondary),
+                at: CGPoint(x: x, y: plotRect.maxY + 13),
+                anchor: .center
+            )
+            let y = plotRect.maxY - plotRect.height * CGFloat(fraction)
+            let yValue = yRange.lowerBound
+                + (yRange.upperBound - yRange.lowerBound) * fraction
+            context.draw(
+                Text(String(format: "%.1f", yValue))
+                    .font(.system(size: 8))
+                    .foregroundStyle(.secondary),
+                at: CGPoint(x: plotRect.minX - 6, y: y),
+                anchor: .trailing
+            )
+        }
+        context.draw(
+            Text("x (µm)").font(.system(size: 9)).foregroundStyle(.secondary),
+            at: CGPoint(x: plotRect.midX, y: plotRect.maxY + 29),
+            anchor: .center
+        )
+        context.drawLayer { layer in
+            layer.translateBy(x: plotRect.minX - 37, y: plotRect.midY)
+            layer.rotate(by: .degrees(-90))
+            layer.draw(
+                Text("y (µm)").font(.system(size: 9)).foregroundStyle(.secondary),
+                at: .zero,
+                anchor: .center
+            )
+        }
+    }
+
+    private func drawLegend(context: inout GraphicsContext, plotRect: CGRect) {
+        let origin = CGPoint(x: plotRect.maxX - 124, y: plotRect.minY + 10)
+        let entries: [(String, Color, CGFloat)] = [
+            ("channel", Color(red: 0.58, green: 0.64, blue: 0.72), 2.5),
+            ("RF unit", Color(red: 0.15, green: 0.39, blue: 0.72), 4),
+            ("selected", Color(red: 0.86, green: 0.15, blue: 0.15), 5),
+        ]
+        let box = CGRect(x: origin.x - 8, y: origin.y - 8, width: 128, height: 55)
+        context.fill(Path(box), with: .color(.white.opacity(0.84)))
+        context.stroke(Path(box), with: .color(.secondary.opacity(0.35)), lineWidth: 1)
+        for (index, entry) in entries.enumerated() {
+            let y = origin.y + CGFloat(index) * 16
+            context.fill(
+                Path(ellipseIn: CGRect(
+                    x: origin.x - entry.2,
+                    y: y - entry.2,
+                    width: entry.2 * 2,
+                    height: entry.2 * 2
+                )),
+                with: .color(entry.1)
+            )
+            context.draw(
+                Text(entry.0).font(.system(size: 8)).foregroundStyle(.primary),
+                at: CGPoint(x: origin.x + 10, y: y),
+                anchor: .leading
             )
         }
     }

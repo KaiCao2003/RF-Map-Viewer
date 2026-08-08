@@ -75,6 +75,7 @@ final class FigureExportWorkspace {
         selectedPageID = firstPage.id
         previewUnitID = seed.currentUnitID
         discoverHDTuning()
+        discoverProbeGeometry()
     }
 
     var resolvedUnitIDs: [Int] {
@@ -158,13 +159,10 @@ final class FigureExportWorkspace {
     }
 
     func removeSelectedPage() {
+        guard pages.count > 1 else { return }
         guard let index = selectedPageIndex else { return }
         pages.remove(at: index)
-        if pages.isEmpty {
-            selectedPageID = nil
-        } else {
-            selectedPageID = pages[min(index, pages.count - 1)].id
-        }
+        selectedPageID = pages[min(index, pages.count - 1)].id
     }
 
     func moveSelectedPage(_ offset: Int) {
@@ -268,6 +266,23 @@ final class FigureExportWorkspace {
             companions.hdError = nil
         } catch {
             companions.hdError = error.localizedDescription
+        }
+    }
+
+    private func discoverProbeGeometry() {
+        guard let paths = ProbeGeometryDiscovery.discover(forRFURL: seed.data.url) else {
+            companions.probeError = nil
+            return
+        }
+        do {
+            companions.probeGeometry = try ProbeGeometryDiscovery.load(
+                paths,
+                rfUnitIDs: seed.data.unitPool
+            )
+            companions.probeError = nil
+        } catch {
+            companions.probeGeometry = nil
+            companions.probeError = error.localizedDescription
         }
     }
 

@@ -51,7 +51,6 @@ from .exports import (
     VALUE_MODE_RATE,
     VALUE_MODES,
     _axis_groups,
-    _response_matrix,
     _smooth_matrix,
     _snap_time_range,
 )
@@ -161,6 +160,9 @@ _TIMELINE_SETTINGS = {
     ),
     "timelineEndMs": _setting(
         "number", None, description="Current timeline selection end."
+    ),
+    "activeTimeCenterMs": _setting(
+        "number", None, description="Center of the currently active timeline group."
     ),
     "timeResolutionMs": _TEMPORAL_SETTINGS["timeResolutionMs"],
     "valueMode": _SPATIAL_SETTINGS["valueMode"],
@@ -482,12 +484,202 @@ def _time_groups(metadata: Mapping[str, Any], resolution_ms: float) -> list[tupl
     edges = np.asarray(metadata["timeBinEdges"], dtype=np.float64) * 1000.0
     widths = np.diff(edges)
     base = float(np.min(widths[widths > 1e-12])) if np.any(widths > 1e-12) else 1.0
-    group_size = max(1, int(round(resolution_ms / base)))
     n_bins = int(metadata["shape"][3])
-    return [
-        (start, min(n_bins - 1, start + group_size - 1))
-        for start in range(0, n_bins, group_size)
+    total = max(float(edges[-1] - edges[0]), base)
+    requested = min(max(float(resolution_ms), base), total)
+    # Python's round, like JavaScript's explicit helper in web/src/math.ts,
+    # uses ties-to-even. Keep this grouping byte-for-byte aligned with the
+    # interactive timeline, including irregular source edges.
+    group_size = min(n_bins, max(1, int(round(requested / base))))
+    target_duration = group_size * base
+    groups: list[tuple[int, int]] = []
+    start = 0
+    while start < n_bins:
+        target_edge = edges[start] + target_duration
+        upper = start + 1
+        while upper < n_bins and edges[upper] < target_edge:
+            upper += 1
+        lower = max(start + 1, upper - 1)
+        end_exclusive = (
+            lower
+            if abs(edges[lower] - target_edge) <= abs(edges[upper] - target_edge)
+            else upper
+        )
+        groups.append((start, end_exclusive - 1))
+        start = end_exclusive
+    return groups
+
+
+def _time_group_for_ms(
+    metadata: Mapping[str, Any], groups: Sequence[tuple[int, int]], milliseconds: float
+) -> int:
+    edges_ms = np.asarray(metadata["timeBinEdges"], dtype=np.float64) * 1000.0
+    for index, (start, end) in enumerate(groups):
+        group_start = float(edges_ms[start])
+        group_end = float(edges_ms[end + 1])
+        if group_start <= milliseconds and (
+            milliseconds < group_end
+            or (index == len(groups) - 1 and milliseconds <= group_end)
+        ):
+            return index
+    return min(
+        range(len(groups)),
+        key=lambda index: abs(
+            (
+                float(edges_ms[groups[index][0]])
+                + float(edges_ms[groups[index][1] + 1])
+            )
+            / 2.0
+            - milliseconds
+        ),
+    )
+
+
+def _time_group_range_for_ms(
+    metadata: Mapping[str, Any],
+    groups: Sequence[tuple[int, int]],
+    requested_start_ms: float,
+    requested_end_ms: float,
+) -> tuple[int, int]:
+    start_ms, end_ms = sorted((requested_start_ms, requested_end_ms))
+    boundary_tolerance_ms = 1e-9
+    if abs(start_ms - end_ms) < boundary_tolerance_ms:
+        index = _time_group_for_ms(metadata, groups, start_ms)
+        return index, index
+    edges_ms = np.asarray(metadata["timeBinEdges"], dtype=np.float64) * 1000.0
+    overlapping = [
+        index
+        for index, (start, end) in enumerate(groups)
+        if float(edges_ms[end + 1]) > start_ms + boundary_tolerance_ms
+        and float(edges_ms[start]) < end_ms - boundary_tolerance_ms
     ]
+    if overlapping:
+        return overlapping[0], overlapping[-1]
+    return (
+        _time_group_for_ms(metadata, groups, start_ms),
+        _time_group_for_ms(metadata, groups, end_ms),
+    )
+
+
+def _spatial_group_observations(
+    counts: np.ndarray,
+    metadata: Mapping[str, Any],
+    y_group: tuple[int, int],
+    x_group: tuple[int, int],
+    start: int,
+    end: int,
+) -> tuple[float, float | None, int]:
+    """Mirror web/src/math.ts spatialGroupObservations for one display cell."""
+
+    _n_units, n_y, n_x, n_bins = metadata["shape"]
+    y_start = max(0, min(n_y - 1, min(y_group)))
+    y_end = max(0, min(n_y - 1, max(y_group)))
+    x_start = max(0, min(n_x - 1, min(x_group)))
+    x_end = max(0, min(n_x - 1, max(x_group)))
+    range_start = max(0, min(n_bins - 1, min(start, end)))
+    range_end = max(0, min(n_bins - 1, max(start, end)))
+    block = np.asarray(
+        counts[y_start : y_end + 1, x_start : x_end + 1, :],
+        dtype=np.float64,
+    )
+    presentations = metadata["presentationCounts"]
+    if presentations is None:
+        source_pixel_count = int(block.shape[0] * block.shape[1])
+        count = float(block[..., range_start : range_end + 1].sum())
+        return count, None, source_pixel_count
+
+    exposure = np.asarray(presentations, dtype=np.float64)[
+        y_start : y_end + 1, x_start : x_end + 1
+    ]
+    valid = exposure > 0
+    source_pixel_count = int(np.count_nonzero(valid))
+    valid_histograms = block[valid]
+    count = (
+        float(valid_histograms[:, range_start : range_end + 1].sum())
+        if source_pixel_count
+        else 0.0
+    )
+    return count, float(exposure[valid].sum()), source_pixel_count
+
+
+def _spatial_group_histogram(
+    counts: np.ndarray,
+    metadata: Mapping[str, Any],
+    y_group: tuple[int, int],
+    x_group: tuple[int, int],
+) -> tuple[np.ndarray, int]:
+    """Mirror the frontend histogram and exposed-source-pixel helpers."""
+
+    _n_units, n_y, n_x, _n_bins = metadata["shape"]
+    y_start = max(0, min(n_y - 1, min(y_group)))
+    y_end = max(0, min(n_y - 1, max(y_group)))
+    x_start = max(0, min(n_x - 1, min(x_group)))
+    x_end = max(0, min(n_x - 1, max(x_group)))
+    block = np.asarray(
+        counts[y_start : y_end + 1, x_start : x_end + 1, :],
+        dtype=np.float64,
+    )
+    presentations = metadata["presentationCounts"]
+    if presentations is None:
+        return block.sum(axis=(0, 1)), int(block.shape[0] * block.shape[1])
+
+    exposure = np.asarray(presentations, dtype=np.float64)[
+        y_start : y_end + 1, x_start : x_end + 1
+    ]
+    valid = exposure > 0
+    source_pixel_count = int(np.count_nonzero(valid))
+    if not source_pixel_count:
+        return np.zeros(block.shape[2], dtype=np.float64), 0
+    return block[valid].sum(axis=0), source_pixel_count
+
+
+def _smooth_preserving_missing(
+    matrix: list[list[float | None]], radius: int
+) -> list[list[float | None]]:
+    """Apply the shared kernel while retaining frontend null-center behavior."""
+
+    current = [row[:] for row in matrix]
+    for _pass in range(max(0, int(radius))):
+        smoothed = _smooth_matrix(current, 1)
+        for y_index, row in enumerate(current):
+            for x_index, center in enumerate(row):
+                if center is None or not math.isfinite(float(center)):
+                    smoothed[y_index][x_index] = None
+        current = smoothed
+    return current
+
+
+def _group_response_value(
+    counts: np.ndarray,
+    metadata: Mapping[str, Any],
+    cell: tuple[int, int, int, int],
+    source_range: tuple[int, int],
+    value_mode: str,
+) -> float | None:
+    """Mirror web/src/math.ts groupResponseValue."""
+
+    count, presentations, source_pixel_count = _spatial_group_observations(
+        counts,
+        metadata,
+        (cell[0], cell[1]),
+        (cell[2], cell[3]),
+        source_range[0],
+        source_range[1],
+    )
+    if value_mode == VALUE_MODE_COUNT:
+        return count / source_pixel_count if source_pixel_count > 0 else None
+    if presentations is None or presentations <= 0:
+        return None
+    normalized = count / presentations
+    if value_mode == VALUE_MODE_PER_PRESENTATION:
+        return normalized
+    n_bins = int(metadata["shape"][3])
+    lower = max(0, min(n_bins - 1, min(source_range)))
+    upper = max(0, min(n_bins - 1, max(source_range)))
+    duration = float(metadata["timeBinEdges"][upper + 1]) - float(
+        metadata["timeBinEdges"][lower]
+    )
+    return normalized / duration if duration > 0 else None
 
 
 def _prepared_response(
@@ -497,24 +689,94 @@ def _prepared_response(
     requested_start = edges_ms[0] if settings["rfStartMs"] is None else settings["rfStartMs"]
     requested_end = edges_ms[-1] if settings["rfEndMs"] is None else settings["rfEndMs"]
     start, end = _snap_time_range(edges_ms, requested_start, requested_end)
-    raw = _response_matrix(counts, dict(metadata), start, end, settings["valueMode"])
     x_groups = _axis_groups(metadata["shape"][2], settings["xBins"])
     y_groups = _axis_groups(metadata["shape"][1], settings["yBins"])
     if settings["flipY"]:
         y_groups.reverse()
-    matrix: list[list[float | None]] = []
-    for y_start, y_end in y_groups:
-        row: list[float | None] = []
-        for x_start, x_end in x_groups:
-            values = [
-                raw[y][x]
-                for y in range(y_start, y_end + 1)
-                for x in range(x_start, x_end + 1)
-                if raw[y][x] is not None
+    observations = [
+        [
+            _spatial_group_observations(
+                counts, metadata, y_group, x_group, start, end
+            )
+            for x_group in x_groups
+        ]
+        for y_group in y_groups
+    ]
+    valid = [
+        [
+            source_pixel_count > 0
+            for _count, _presentations, source_pixel_count in row
+        ]
+        for row in observations
+    ]
+    if settings["valueMode"] == VALUE_MODE_COUNT:
+        matrix = [
+            [
+                count / source_pixel_count if source_pixel_count > 0 else None
+                for count, _presentations, source_pixel_count in row
             ]
-            row.append(float(np.mean(values)) if values else None)
-        matrix.append(row)
-    matrix = _smooth_matrix(matrix, settings["smoothRadius"])
+            for row in observations
+        ]
+        if settings["smoothRadius"] > 0:
+            matrix = _smooth_preserving_missing(matrix, settings["smoothRadius"])
+            matrix = [
+                [
+                    value if valid[y_index][x_index] else None
+                    for x_index, value in enumerate(row)
+                ]
+                for y_index, row in enumerate(matrix)
+            ]
+    else:
+        pooled_counts: list[list[float | None]] = [
+            [
+                count if source_pixel_count > 0 else None
+                for count, _presentations, source_pixel_count in row
+            ]
+            for row in observations
+        ]
+        pooled_presentations: list[list[float | None]] = [
+            [
+                (presentations if presentations is not None else 0.0)
+                if source_pixel_count > 0
+                else None
+                for _count, presentations, source_pixel_count in row
+            ]
+            for row in observations
+        ]
+        if settings["smoothRadius"] > 0:
+            pooled_counts = _smooth_preserving_missing(
+                pooled_counts, settings["smoothRadius"]
+            )
+            pooled_presentations = _smooth_preserving_missing(
+                pooled_presentations, settings["smoothRadius"]
+            )
+        duration = float(metadata["timeBinEdges"][end + 1]) - float(
+            metadata["timeBinEdges"][start]
+        )
+        matrix = []
+        for y_index, count_row in enumerate(pooled_counts):
+            row: list[float | None] = []
+            for x_index, count in enumerate(count_row):
+                exposure = pooled_presentations[y_index][x_index]
+                if (
+                    not valid[y_index][x_index]
+                    or count is None
+                    or exposure is None
+                    or exposure <= 0
+                ):
+                    row.append(None)
+                    continue
+                normalized = count / exposure
+                row.append(
+                    normalized / duration
+                    if settings["valueMode"] == VALUE_MODE_RATE and duration > 0
+                    else (
+                        normalized
+                        if settings["valueMode"] == VALUE_MODE_PER_PRESENTATION
+                        else None
+                    )
+                )
+            matrix.append(row)
     return (
         np.asarray(
             [[np.nan if value is None else float(value) for value in row] for row in matrix],
@@ -535,23 +797,37 @@ def _prepared_temporal(
     if settings["flipY"]:
         y_groups.reverse()
     edges_ms = np.asarray(metadata["timeBinEdges"], dtype=np.float64) * 1000.0
-    presentations = metadata["presentationCounts"]
+    n_bins = int(metadata["shape"][3])
+    histograms = np.zeros((len(y_groups), len(x_groups), n_bins), dtype=np.float64)
+    for display_y, y_group in enumerate(y_groups):
+        for display_x, x_group in enumerate(x_groups):
+            histogram, source_pixel_count = _spatial_group_histogram(
+                counts, metadata, y_group, x_group
+            )
+            histograms[display_y, display_x, :] = histogram / max(
+                1, source_pixel_count
+            )
+    if settings["smoothRadius"] > 0:
+        output = np.zeros_like(histograms)
+        for bin_index in range(n_bins):
+            temporal_slice = histograms[:, :, bin_index].tolist()
+            smoothed = _smooth_matrix(temporal_slice, settings["smoothRadius"])
+            output[:, :, bin_index] = np.asarray(smoothed, dtype=np.float64)
+        histograms = output
+
     delays = np.full((len(y_groups), len(x_groups)), np.nan)
     entropy = np.zeros_like(delays)
-    response = np.full_like(delays, np.nan)
-    for display_y, (y_start, y_end) in enumerate(y_groups):
-        for display_x, (x_start, x_end) in enumerate(x_groups):
-            block = np.asarray(
-                counts[y_start : y_end + 1, x_start : x_end + 1, :],
-                dtype=np.float64,
-            )
-            source_pixels = block.shape[0] * block.shape[1]
-            histogram = block.sum(axis=(0, 1)) / max(1, source_pixels)
+    safe_floor = max(0.0, float(settings["responseFloor"]))
+    for display_y in range(len(y_groups)):
+        for display_x in range(len(x_groups)):
+            histogram = histograms[display_y, display_x, :]
             total = float(histogram.sum())
-            if total > settings["responseFloor"]:
+            if total > safe_floor:
                 rates = [
                     float(histogram[start : end + 1].sum())
-                    / max((edges_ms[end + 1] - edges_ms[start]) / 1000.0, np.finfo(float).eps)
+                    / ((edges_ms[end + 1] - edges_ms[start]) / 1000.0)
+                    if edges_ms[end + 1] > edges_ms[start]
+                    else 0.0
                     for start, end in groups
                 ]
                 peak_index = int(np.argmax(rates))
@@ -560,33 +836,24 @@ def _prepared_temporal(
             if total > 0:
                 positive = histogram[histogram > 0] / total
                 value = -float(np.sum(positive * np.log(positive)))
-                entropy[display_y, display_x] = value / math.log(len(histogram)) if len(histogram) > 1 else 0.0
-            if settings["valueMode"] == VALUE_MODE_COUNT:
-                response[display_y, display_x] = total
-            elif presentations is not None:
-                exposure = float(
-                    np.asarray(presentations, dtype=np.float64)[
-                        y_start : y_end + 1, x_start : x_end + 1
-                    ].sum()
+                entropy[display_y, display_x] = (
+                    value / math.log(len(histogram))
+                    if len(histogram) > 1
+                    else 0.0
                 )
-                if exposure > 0:
-                    normalized = float(block.sum()) / exposure
-                    if settings["valueMode"] == VALUE_MODE_RATE:
-                        duration = (edges_ms[-1] - edges_ms[0]) / 1000.0
-                        normalized /= max(duration, np.finfo(float).eps)
-                    response[display_y, display_x] = normalized
-    if settings["smoothRadius"]:
-        def smooth(array: np.ndarray) -> np.ndarray:
-            values = _smooth_matrix(
-                [[None if not np.isfinite(item) else float(item) for item in row] for row in array],
-                settings["smoothRadius"],
-            )
-            return np.asarray(
-                [[np.nan if item is None else item for item in row] for row in values],
-                dtype=np.float64,
-            )
 
-        delays, entropy, response = smooth(delays), smooth(entropy), smooth(response)
+    response_settings = {
+        "rfStartMs": float(edges_ms[0]),
+        "rfEndMs": float(edges_ms[-1]),
+        "valueMode": settings["valueMode"],
+        "xBins": settings["xBins"],
+        "yBins": settings["yBins"],
+        "smoothRadius": settings["smoothRadius"],
+        "flipY": settings["flipY"],
+    }
+    response, _response_x, _response_y, _response_bounds = _prepared_response(
+        counts, metadata, response_settings
+    )
     return delays, entropy, response, x_groups, y_groups
 
 
@@ -697,56 +964,70 @@ class FigurePageRenderer:
         edges_ms = np.asarray(self.metadata["timeBinEdges"], dtype=np.float64) * 1000.0
         start_ms = edges_ms[0] if settings["timelineStartMs"] is None else settings["timelineStartMs"]
         end_ms = edges_ms[-1] if settings["timelineEndMs"] is None else settings["timelineEndMs"]
-        low, high = sorted((start_ms, end_ms))
+        selection_start, selection_end = _time_group_range_for_ms(
+            self.metadata,
+            groups,
+            float(start_ms),
+            float(end_ms),
+        )
+        low = float(edges_ms[groups[selection_start][0]])
+        high = float(edges_ms[groups[selection_end][1] + 1])
+        active_index = (
+            None
+            if settings["activeTimeCenterMs"] is None
+            else _time_group_for_ms(
+                self.metadata,
+                groups,
+                float(settings["activeTimeCenterMs"]),
+            )
+        )
         projection = settings["spatialProjection"]
         if projection is None:
-            block = counts
+            selected_cell = (
+                0,
+                int(self.metadata["shape"][1]) - 1,
+                0,
+                int(self.metadata["shape"][2]) - 1,
+            )
             label = "all spatial bins"
         else:
-            block = counts[
-                projection["yStart"] : projection["yEnd"] + 1,
-                projection["xStart"] : projection["xEnd"] + 1,
-                :,
-            ]
+            selected_cell = (
+                projection["yStart"],
+                projection["yEnd"],
+                projection["xStart"],
+                projection["xEnd"],
+            )
             label = (
                 f"y {projection['yStart']}–{projection['yEnd']}, "
                 f"x {projection['xStart']}–{projection['xEnd']}"
             )
-        histogram = np.asarray(block, dtype=np.float64).sum(axis=(0, 1))
         centers: list[float] = []
         totals: list[float] = []
         selected: list[float] = []
         spatial_frames: list[list[list[float]]] = []
         presentations = self.metadata["presentationCounts"]
         all_exposure: float | None = None
-        projection_exposure: float | None = None
         if presentations is not None:
             exposure_array = np.asarray(presentations, dtype=np.float64)
             all_exposure = float(exposure_array[exposure_array > 0].sum())
-            if projection is not None:
-                exposure_array = exposure_array[
-                    projection["yStart"] : projection["yEnd"] + 1,
-                    projection["xStart"] : projection["xEnd"] + 1,
-                ]
-            projection_exposure = float(exposure_array.sum())
         for start, end in groups:
             center = (edges_ms[start] + edges_ms[end + 1]) / 2.0
             duration = max((edges_ms[end + 1] - edges_ms[start]) / 1000.0, np.finfo(float).eps)
-            selected_value = float(histogram[start : end + 1].sum())
+            selected_value = _group_response_value(
+                counts,
+                self.metadata,
+                selected_cell,
+                (start, end),
+                settings["valueMode"],
+            )
             total_value = float(np.asarray(counts[..., start : end + 1]).sum())
             if settings["valueMode"] != VALUE_MODE_COUNT:
-                selected_value = (
-                    selected_value / projection_exposure
-                    if projection_exposure is not None and projection_exposure > 0
-                    else 0.0
-                )
                 total_value = (
                     total_value / all_exposure
                     if all_exposure is not None and all_exposure > 0
                     else 0.0
                 )
             if settings["valueMode"] == VALUE_MODE_RATE:
-                selected_value /= duration
                 total_value /= duration
             frame_settings = {
                 "rfStartMs": edges_ms[start],
@@ -764,17 +1045,19 @@ class FigurePageRenderer:
             )
             centers.append(center)
             totals.append(total_value)
-            selected.append(selected_value)
+            selected.append(0.0 if selected_value is None else selected_value)
             spatial_frames.append(frame.tolist())
-        return (
-            {
-                "times": centers,
-                "totals": totals,
-                "selected": selected,
-                "frames": spatial_frames,
-            },
-            f"Timeline {low:g}–{high:g} ms — {label}",
-        )
+        payload: dict[str, Any] = {
+            "times": centers,
+            "totals": totals,
+            "selected": selected,
+            "frames": spatial_frames,
+            "selection_start_index": selection_start,
+            "selection_end_index": selection_end,
+        }
+        if active_index is not None:
+            payload["active_index"] = active_index
+        return payload, f"Timeline {low:g}–{high:g} ms — {label}"
 
     def _shared_spec(
         self,
@@ -867,6 +1150,13 @@ class FigurePageRenderer:
             if self.probe is None:
                 reason = self.probe_error or "Probe geometry is unavailable for this dataset."
                 return self._unavailable(plot, reason, placeholders)
+            probe_units = self.probe.get("units", [])
+            if not any(unit.get("unitId") == cluster_id for unit in probe_units):
+                return self._unavailable(
+                    plot,
+                    f"Probe geometry has no position for cluster {cluster_id}.",
+                    placeholders,
+                )
             points: list[dict[str, Any]] = []
             for channel in self.probe.get("channels", []):
                 points.append(
@@ -877,15 +1167,28 @@ class FigurePageRenderer:
                         "color": "#94a3b8",
                     }
                 )
-            for unit in self.probe.get("units", []):
+            for unit in probe_units:
+                if unit["unitId"] == cluster_id:
+                    continue
                 points.append(
                     {
                         "x": unit["x"],
                         "y": unit["y"],
                         "label": str(unit["unitId"]),
-                        "color": "#dc2626" if unit["unitId"] == cluster_id else "#2563eb",
+                        "color": "#2563eb",
                     }
                 )
+            selected_unit = next(
+                unit for unit in probe_units if unit["unitId"] == cluster_id
+            )
+            points.append(
+                {
+                    "x": selected_unit["x"],
+                    "y": selected_unit["y"],
+                    "label": str(selected_unit["unitId"]),
+                    "color": "#dc2626",
+                }
+            )
             if not points:
                 return self._unavailable(
                     plot, "Probe geometry contains no channels or units.", placeholders

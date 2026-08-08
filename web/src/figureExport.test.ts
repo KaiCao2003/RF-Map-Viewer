@@ -151,6 +151,7 @@ describe("figure export plan reducer", () => {
     expect(snapshotPlotSettings("timeline.current", context)).toMatchObject({
       timelineStartMs: -50,
       timelineEndMs: 250,
+      activeTimeCenterMs: 25,
       timeResolutionMs: 10,
       polarLayout: false,
       spatialProjection: { yStart: 1, yEnd: 2, xStart: 3, xEnd: 4 },

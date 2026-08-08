@@ -344,7 +344,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
         if probe_companions.has_probe:
             try:
-                probe = load_probe_geometry(probe_companions)
+                probe = load_probe_geometry(
+                    probe_companions,
+                    record.cache.metadata["unitPool"],
+                )
             except (OSError, ValueError) as exc:
                 probe_error = f"Probe geometry could not be loaded: {exc}"
         return tuning, probe, tuning_error, probe_error
@@ -480,7 +483,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 companions = companion_for_positions(
                     companions, positions, record.scope_root
                 )
-            geometry = load_probe_geometry(companions)
+            geometry = load_probe_geometry(
+                companions,
+                record.cache.metadata["unitPool"],
+            )
         except (PathAccessError, FileNotFoundError) as exc:
             raise _http_from_path_error(exc) from exc
         except (OSError, ValueError) as exc:
