@@ -55,6 +55,30 @@ def _write_fixture(tmp_path: Path) -> Path:
     return path
 
 
+def _write_probe_fixture(tmp_path: Path) -> tuple[Path, Path]:
+    data_root = tmp_path / "260630_3" / "data"
+    rf_parent = data_root / "rfmapping" / "good" / "-100_400_1ms" / "ProbeA"
+    rf_parent.mkdir(parents=True)
+    rf_path = _write_fixture(rf_parent)
+    positions_path = data_root / "spike_position" / "ProbeA" / "positions.csv"
+    positions_path.parent.mkdir(parents=True)
+    positions_path.write_text(
+        "unit_index,unit_id,x_um,y_um\n"
+        "0,17,7.5,120.0\n"
+        "1,42,15.0,240.0\n",
+        encoding="utf-8",
+    )
+    channels_path = data_root / "waveform" / "ProbeA" / "channels.csv"
+    channels_path.parent.mkdir(parents=True)
+    channels_path.write_text(
+        "channel_index,channel_id,raw_channel_index,x_um,y_um,shank_id\n"
+        "0,10,0,0.0,0.0,0\n"
+        "1,11,1,20.0,20.0,0\n",
+        encoding="utf-8",
+    )
+    return rf_path, positions_path
+
+
 def _snapshot(*, timeline_polar: bool = False) -> FigureViewerSnapshot:
     return FigureViewerSnapshot(
         value_mode=VALUE_MODE_COUNT,
@@ -143,6 +167,163 @@ def test_gui_provider_returns_explicit_placeholder_for_missing_unit(
 
     assert result.data == {
         "unavailable": "Unit 999 is unavailable in this RF dataset."
+    }
+
+
+def test_gui_provider_renders_discovered_probe_geometry_from_frozen_session(
+    tmp_path: Path,
+) -> None:
+    rf_path, positions_path = _write_probe_fixture(tmp_path)
+    data = RFMappingData(rf_path)
+    provider = GUIFigureDataProvider(data, _snapshot())
+
+    # Companion files are captured when the non-modal composer provider is
+    # created; later changes on disk cannot alter its preview/export recipe.
+    positions_path.write_text(
+        "unit_index,unit_id,x_um,y_um\n0,999,999.0,999.0\n",
+        encoding="utf-8",
+    )
+    result = provider(42, PlotSpec(PlotKind.PROBE_LAYOUT))
+
+    assert result.title == "ProbeA layout"
+    assert result.data == {
+        "points": [
+            {"x": 0.0, "y": 0.0, "label": "", "color": "#94a3b8"},
+            {"x": 20.0, "y": 20.0, "label": "", "color": "#94a3b8"},
+            {"x": 7.5, "y": 120.0, "label": "17", "color": "#2563eb"},
+            {"x": 15.0, "y": 240.0, "label": "42", "color": "#dc2626"},
+        ]
+    }
+
+    page = ExportPage("Probe", (PlotSpec(PlotKind.PROBE_LAYOUT),))
+    plan = ExportPlan(
+        FigureFormat.PDF,
+        (42,),
+        (page,),
+        tmp_path / "unused-probe-preview.pdf",
+    )
+    image = render_live_preview(plan, 42, 0, data_provider=provider)
+    assert image.getbbox() is not None
+    assert not (tmp_path / "unused-probe-preview.pdf").exists()
+
+
+def test_probe_discovery_stops_at_recording_data_boundary(
+    tmp_path: Path,
+) -> None:
+    date_root = tmp_path / "260630"
+    rf_parent = (
+        date_root
+        / "260630_3"
+        / "data"
+        / "rfmapping"
+        / "good"
+        / "-100_400_1ms"
+        / "ProbeA"
+    )
+    rf_parent.mkdir(parents=True)
+    rf_path = _write_fixture(rf_parent)
+
+    # This is a plausible legacy file belonging to another recording below
+    # the same date directory.  An upward filesystem walk used to bind it to
+    # the 260630_3 RF payload.
+    unrelated = date_root / "positions.csv"
+    unrelated.write_text(
+        "unit_index,unit_id,x_um,y_um\n0,17,999.0,999.0\n",
+        encoding="utf-8",
+    )
+
+    assert rfmapping_gui.discover_probe_geometry_paths(rf_path) is None
+    data = RFMappingData(rf_path)
+    assert data.probe_geometry() is None
+    assert data.probe_geometry_error is None
+
+
+def test_probe_discovery_keeps_adjacent_legacy_layout(
+    tmp_path: Path,
+) -> None:
+    rf_parent = tmp_path / "legacy-export" / "ProbeA"
+    rf_parent.mkdir(parents=True)
+    rf_path = _write_fixture(rf_parent)
+    positions_path = rf_parent / "positions.csv"
+    positions_path.write_text(
+        "unit_index,unit_id,x_um,y_um\n0,17,7.5,120.0\n",
+        encoding="utf-8",
+    )
+
+    discovered = rfmapping_gui.discover_probe_geometry_paths(rf_path)
+
+    assert discovered == ("ProbeA", positions_path.resolve(), None)
+    geometry = RFMappingData(rf_path).probe_geometry()
+    assert geometry is not None
+    assert tuple(unit.unit_id for unit in geometry.units) == (17,)
+
+
+def test_probe_discovery_keeps_bounded_data_layout_without_session_name(
+    tmp_path: Path,
+) -> None:
+    data_root = tmp_path / "fixture" / "data"
+    rf_parent = data_root / "rfmapping" / "good" / "ProbeA"
+    rf_parent.mkdir(parents=True)
+    rf_path = _write_fixture(rf_parent)
+    positions_path = data_root / "spike_position" / "ProbeA" / "positions.csv"
+    positions_path.parent.mkdir(parents=True)
+    positions_path.write_text(
+        "unit_index,unit_id,x_um,y_um\n0,17,7.5,120.0\n",
+        encoding="utf-8",
+    )
+
+    discovered = rfmapping_gui.discover_probe_geometry_paths(rf_path)
+
+    assert discovered == ("ProbeA", positions_path.resolve(), None)
+    geometry = RFMappingData(rf_path).probe_geometry()
+    assert geometry is not None
+    assert tuple(unit.unit_id for unit in geometry.units) == (17,)
+
+
+def test_probe_geometry_rejects_positions_without_rf_unit_overlap(
+    tmp_path: Path,
+) -> None:
+    rf_path, positions_path = _write_probe_fixture(tmp_path)
+    positions_path.write_text(
+        "unit_index,unit_id,x_um,y_um\n0,999,7.5,120.0\n",
+        encoding="utf-8",
+    )
+
+    data = RFMappingData(rf_path)
+
+    assert data.probe_geometry() is None
+    assert data.probe_geometry_error is not None
+    assert "no unit IDs" in data.probe_geometry_error
+    payload = GUIFigureDataProvider(data, _snapshot())(
+        42,
+        PlotSpec(PlotKind.PROBE_LAYOUT),
+    ).data
+    assert "unavailable" in payload
+    assert "no unit IDs" in payload["unavailable"]
+
+
+def test_probe_payload_filters_non_rf_units_and_requires_selected_unit(
+    tmp_path: Path,
+) -> None:
+    rf_path, positions_path = _write_probe_fixture(tmp_path)
+    positions_path.write_text(
+        "unit_index,unit_id,x_um,y_um\n"
+        "0,17,7.5,120.0\n"
+        "1,999,999.0,999.0\n",
+        encoding="utf-8",
+    )
+    provider = GUIFigureDataProvider(RFMappingData(rf_path), _snapshot())
+
+    available = provider(17, PlotSpec(PlotKind.PROBE_LAYOUT)).data
+    labels = [point["label"] for point in available["points"] if point["label"]]
+    assert labels == ["17"]
+
+    missing = provider(42, PlotSpec(PlotKind.PROBE_LAYOUT)).data
+    assert missing == {
+        "unavailable": (
+            "Probe position is unavailable for RF unit 42; "
+            "the selected unit is absent from positions.csv."
+        )
     }
 
 

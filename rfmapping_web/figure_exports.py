@@ -40,6 +40,7 @@ from Utils.figure_export import (
     _recover_directory_publish_locked as _shared_recover_directory_publish_locked,
     _remove_directory_at as _shared_remove_directory_at,
     _same_identity as _shared_same_identity,
+    write_streaming_pdf,
 )
 
 from .companions import TuningCurveData
@@ -1543,8 +1544,10 @@ class FigureExportService:
             )
             manifest_entries: list[dict[str, Any]] = []
             try:
-                for job in jobs:
+                def image_provider(page_index: int) -> Image.Image:
+                    job = jobs[page_index]
                     unit_index, counts = unit_loader(job.cluster_id)
+                    image: Image.Image | None = None
                     try:
                         image, placeholders = renderer.build_image(
                             job.cluster_id,
@@ -1552,27 +1555,30 @@ class FigureExportService:
                             counts,
                             job.page,
                         )
+                        manifest_entries.append(
+                            self._manifest_entry(
+                                job,
+                                unit_index,
+                                filename=target.name,
+                                rendered=None,
+                                placeholders=placeholders,
+                            )
+                        )
+                        return image
+                    except BaseException:
+                        if image is not None:
+                            image.close()
+                        raise
                     finally:
                         del counts
-                    try:
-                        with os.fdopen(os.dup(staged_fd), "r+b") as stream:
-                            image.save(
-                                stream,
-                                format="PDF",
-                                append=job.output_index > 0,
-                                resolution=150.0,
-                                title=target.stem,
-                            )
-                    finally:
-                        image.close()
-                    manifest_entries.append(
-                        self._manifest_entry(
-                            job,
-                            unit_index,
-                            filename=target.name,
-                            rendered=None,
-                            placeholders=placeholders,
-                        )
+
+                with os.fdopen(os.dup(staged_fd), "wb") as stream:
+                    write_streaming_pdf(
+                        stream,
+                        len(jobs),
+                        image_provider,
+                        title=target.stem,
+                        resolution=150.0,
                     )
                 os.fsync(staged_fd)
                 validate_source()
