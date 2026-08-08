@@ -87,6 +87,8 @@ assert_file_contains "$BUILD_SCRIPT" '[[ ! -L "$DIST_DIR" ]]'
 assert_file_contains "$BUILD_SCRIPT" '[[ "$dist_physical" == "$root_physical/dist/python" ]]'
 assert_file_contains "$BUILD_SCRIPT" '# Recheck immediately before destructive cleanup.'
 assert_file_contains "$INSTALLER" '[[ "$TARGET_PARENT" != "/" ]]'
+assert_file_contains "$INSTALLER" 'xcrun --sdk macosx --show-sdk-path'
+assert_file_contains "$INSTALLER" '-isysroot "$sdk_path"'
 pass_test "build, run, and install scripts share canonical release metadata"
 
 assert_file_contains "$INSTALLER" 'ACTION="preflight"'

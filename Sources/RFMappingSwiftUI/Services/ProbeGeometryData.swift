@@ -29,8 +29,10 @@ struct ProbePlotPayload: Equatable, Sendable {
     let positionsURL: URL
     let channelsURL: URL?
     let channels: [ProbeChannel]
-    let units: [ProbeUnitPosition]
-    let selectedUnitID: Int
+    /// Exactly the unit represented by this exported page. Other RF units are
+    /// intentionally absent so a multi-unit export cannot leak their markers
+    /// into the current unit's Probe plot.
+    let unit: ProbeUnitPosition
 }
 
 struct ProbeGeometryPaths: Equatable, Sendable {
@@ -335,7 +337,12 @@ private struct ProbeCSVTable {
         var record: [String] = []
         var field = ""
         var inQuotes = false
-        var index = text.startIndex
+        // Iterate Unicode scalars rather than extended grapheme clusters.
+        // Swift treats CRLF as one `Character`, so Character iteration would
+        // miss both the `\r` and `\n` cases below and fold the next CSV row
+        // into the current field.
+        let scalars = text.unicodeScalars
+        var index = scalars.startIndex
 
         func finishField() {
             record.append(field)
@@ -347,19 +354,19 @@ private struct ProbeCSVTable {
             record.removeAll(keepingCapacity: true)
         }
 
-        while index < text.endIndex {
-            let character = text[index]
-            let next = text.index(after: index)
+        while index < scalars.endIndex {
+            let character = scalars[index]
+            let next = scalars.index(after: index)
             if inQuotes {
                 if character == "\"" {
-                    if next < text.endIndex, text[next] == "\"" {
+                    if next < scalars.endIndex, scalars[next] == "\"" {
                         field.append("\"")
-                        index = text.index(after: next)
+                        index = scalars.index(after: next)
                         continue
                     }
                     inQuotes = false
                 } else {
-                    field.append(character)
+                    field.unicodeScalars.append(character)
                 }
             } else {
                 switch character {
@@ -371,12 +378,12 @@ private struct ProbeCSVTable {
                     finishRecord()
                 case "\r":
                     finishRecord()
-                    if next < text.endIndex, text[next] == "\n" {
-                        index = text.index(after: next)
+                    if next < scalars.endIndex, scalars[next] == "\n" {
+                        index = scalars.index(after: next)
                         continue
                     }
                 default:
-                    field.append(character)
+                    field.unicodeScalars.append(character)
                 }
             }
             index = next

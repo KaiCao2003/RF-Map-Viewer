@@ -24,6 +24,8 @@ from rfmapping_gui import (
     VALUE_MODE_COUNT,
     FigureExportWindow,
     FigureViewerSnapshot,
+    composer_unit_checkbox_hit,
+    composer_unit_selection_after_click,
 )
 
 
@@ -190,7 +192,6 @@ def test_gui_provider_renders_discovered_probe_geometry_from_frozen_session(
         "points": [
             {"x": 0.0, "y": 0.0, "label": "", "color": "#94a3b8"},
             {"x": 20.0, "y": 20.0, "label": "", "color": "#94a3b8"},
-            {"x": 7.5, "y": 120.0, "label": "17", "color": "#2563eb"},
             {"x": 15.0, "y": 240.0, "label": "42", "color": "#dc2626"},
         ]
     }
@@ -205,6 +206,27 @@ def test_gui_provider_renders_discovered_probe_geometry_from_frozen_session(
     image = render_live_preview(plan, 42, 0, data_provider=provider)
     assert image.getbbox() is not None
     assert not (tmp_path / "unused-probe-preview.pdf").exists()
+
+
+def test_multi_unit_probe_pages_each_contain_only_their_current_unit_marker(
+    tmp_path: Path,
+) -> None:
+    rf_path, _positions_path = _write_probe_fixture(tmp_path)
+    provider = GUIFigureDataProvider(RFMappingData(rf_path), _snapshot())
+
+    page_markers: dict[int, list[dict[str, object]]] = {}
+    for unit_id in (17, 42):
+        payload = provider(unit_id, PlotSpec(PlotKind.PROBE_LAYOUT)).data
+        page_markers[unit_id] = [
+            point
+            for point in payload["points"]
+            if point["label"]
+        ]
+
+    assert page_markers == {
+        17: [{"x": 7.5, "y": 120.0, "label": "17", "color": "#dc2626"}],
+        42: [{"x": 15.0, "y": 240.0, "label": "42", "color": "#dc2626"}],
+    }
 
 
 def test_probe_discovery_stops_at_recording_data_boundary(
@@ -331,11 +353,10 @@ def test_figure_composer_unit_ids_and_name_stay_bound_to_frozen_session(
     tmp_path: Path,
 ) -> None:
     frozen_data = RFMappingData(_write_fixture(tmp_path))
-    selection = SimpleNamespace(curselection=lambda: (1,))
     composer = SimpleNamespace(
         data=frozen_data,
         unit_ids=(17, 42),
-        unit_list=selection,
+        _selected_unit_indices={1},
         # A parent viewer can move to another JSON while the non-modal composer
         # remains open; these live IDs must never leak into the frozen recipe.
         viewer=SimpleNamespace(data=SimpleNamespace(rf_maps=[SimpleNamespace(unit_id=999)])),
@@ -346,6 +367,112 @@ def test_figure_composer_unit_ids_and_name_stay_bound_to_frozen_session(
 
     assert selected == (42,)
     assert basename == "unitsSpikeCounts_fixture_figures"
+
+
+def test_figure_composer_unit_clicks_match_finder_selection_semantics() -> None:
+    selected, anchor = composer_unit_selection_after_click((), 2, None, 7)
+    assert selected == (2,)
+    assert anchor == 2
+
+    selected, anchor = composer_unit_selection_after_click(
+        selected,
+        5,
+        anchor,
+        7,
+        command=True,
+    )
+    assert selected == (2, 5)
+    assert anchor == 5
+
+    selected, anchor = composer_unit_selection_after_click(
+        selected,
+        2,
+        anchor,
+        7,
+        command=True,
+    )
+    assert selected == (5,)
+    assert anchor == 2
+
+    selected, anchor = composer_unit_selection_after_click(selected, 1, anchor, 7)
+    assert selected == (1,)
+    assert anchor == 1
+
+    selected, anchor = composer_unit_selection_after_click(
+        selected,
+        4,
+        anchor,
+        7,
+        shift=True,
+    )
+    assert selected == (1, 2, 3, 4)
+    assert anchor == 1
+
+    selected, anchor = composer_unit_selection_after_click(
+        selected,
+        6,
+        anchor,
+        7,
+        command=True,
+        shift=True,
+    )
+    assert selected == (1, 2, 3, 4, 5, 6)
+    assert anchor == 1
+
+
+def test_figure_composer_checkbox_hitbox_toggles_without_replacing_selection() -> None:
+    assert composer_unit_checkbox_hit(8, 8, 24) is True
+    assert composer_unit_checkbox_hit(31, 8, 24) is True
+    assert composer_unit_checkbox_hit(32, 8, 24) is False
+    assert composer_unit_checkbox_hit(80, 8, 24) is False
+
+    selected, anchor = composer_unit_selection_after_click((), 2, None, 7)
+    assert selected == (2,)
+
+    # A no-modifier click inside the checkbox hitbox is routed as an additive
+    # toggle by FigureExportWindow._on_unit_list_click.
+    checkbox_toggle = composer_unit_checkbox_hit(12, 8, 24)
+    selected, anchor = composer_unit_selection_after_click(
+        selected,
+        5,
+        anchor,
+        7,
+        command=checkbox_toggle,
+    )
+    assert selected == (2, 5)
+    assert anchor == 5
+
+    selected, anchor = composer_unit_selection_after_click(
+        selected,
+        2,
+        anchor,
+        7,
+        command=checkbox_toggle,
+    )
+    assert selected == (5,)
+    assert anchor == 2
+
+    # The same physical click in the row text area remains an ordinary
+    # replace-selection click.
+    row_toggle = composer_unit_checkbox_hit(80, 8, 24)
+    selected, anchor = composer_unit_selection_after_click(
+        selected,
+        1,
+        anchor,
+        7,
+        command=row_toggle,
+    )
+    assert selected == (1,)
+    assert anchor == 1
+
+
+def test_figure_composer_selected_units_always_follow_json_unit_pool_order() -> None:
+    composer = SimpleNamespace(
+        unit_ids=(90, 4, 77, 2),
+        _selected_unit_indices={3, 0, 2},
+    )
+
+    assert FigureExportWindow._selected_unit_ids(composer) == (90, 77, 2)
 
 
 def test_figure_composer_reorders_page_templates() -> None:

@@ -88,6 +88,10 @@ describe("FigureExportComposer", () => {
     expect(html).toContain("Figure Export Composer");
     expect(html).toContain("Unit selection presets");
     expect(html).toContain("Probe filtered (2)");
+    expect(html).toContain('role="listbox"');
+    expect(html).toContain('aria-multiselectable="true"');
+    expect(html).toContain('aria-label="000 cluster 41"');
+    expect(html).toContain("Command/Ctrl-click toggles; Shift-click selects a range");
     expect(html).toContain("Page templates");
     expect(html).toContain('aria-label="Move Page 1 earlier"');
     expect(html).toContain('aria-label="Move Page 1 later"');

@@ -1536,7 +1536,7 @@ def test_timeline_selected_curve_matches_live_group_response_modes(
     np.testing.assert_allclose(payload["selected"], expected)
 
 
-def test_probe_points_emit_channels_then_units_with_selected_unit_last(
+def test_probe_points_emit_channels_and_only_the_current_export_unit(
     app, settings: Settings
 ) -> None:
     source = write_json(settings.rf_root / "probe-order.json")
@@ -1544,7 +1544,6 @@ def test_probe_points_emit_channels_then_units_with_selected_unit_last(
     with authenticated_client(app) as client:
         opened = _open(client, source)
     record = store.get(opened["id"])
-    _unit_index, counts = store.unit_array(record, 11)
     renderer = figure_exports_module.FigurePageRenderer(
         record,
         tuning=None,
@@ -1560,22 +1559,30 @@ def test_probe_points_emit_channels_then_units_with_selected_unit_last(
             ],
         },
     )
-    placeholders: list[str] = []
-
-    plot = renderer._shared_spec(
-        11,
-        counts,
-        figure_exports_module.FigurePlot("probe", {}),
-        placeholders,
-    )
-
-    assert placeholders == []
-    assert plot.data["points"] == [
+    expected_channels = [
         {"x": 10.0, "y": 20.0, "label": "", "color": "#94a3b8"},
         {"x": 10.0, "y": 20.0, "label": "", "color": "#94a3b8"},
-        {"x": 10.0, "y": 20.0, "label": "22", "color": "#2563eb"},
-        {"x": 10.0, "y": 20.0, "label": "11", "color": "#dc2626"},
     ]
+    for cluster_id in (11, 22):
+        _unit_index, counts = store.unit_array(record, cluster_id)
+        placeholders: list[str] = []
+        plot = renderer._shared_spec(
+            cluster_id,
+            counts,
+            figure_exports_module.FigurePlot("probe", {}),
+            placeholders,
+        )
+
+        assert placeholders == []
+        assert plot.data["points"] == [
+            *expected_channels,
+            {
+                "x": 10.0,
+                "y": 20.0,
+                "label": str(cluster_id),
+                "color": "#dc2626",
+            },
+        ]
 
 
 def test_timeline_figure_payload_preserves_selection_and_active_group(

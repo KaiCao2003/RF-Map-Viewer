@@ -279,7 +279,7 @@ struct FigureExportRenderer {
                     placeholder: companions.probeUnavailableReason
                 )
             }
-            guard geometry.units.contains(where: { $0.unitID == unitID }) else {
+            guard let unit = geometry.units.first(where: { $0.unitID == unitID }) else {
                 return .init(
                     id: placement.id,
                     kind: placement.kind,
@@ -295,8 +295,7 @@ struct FigureExportRenderer {
                     positionsURL: geometry.positionsURL,
                     channelsURL: geometry.channelsURL,
                     channels: geometry.channels,
-                    units: geometry.units,
-                    selectedUnitID: unitID
+                    unit: unit
                 )
             )
         }
@@ -1240,8 +1239,8 @@ private struct ProbeGeometryExportView: View {
             drawTitle(
                 context: &context,
                 title: "\(payload.probeName) layout",
-                subtitle: "Unit ID \(payload.selectedUnitID); "
-                    + "\(payload.channels.count) channels; \(payload.units.count) RF units"
+                subtitle: "Unit ID \(payload.unit.unitID); "
+                    + "\(payload.channels.count) channels; current unit only"
             )
             drawGeometry(context: &context, size: size)
         }
@@ -1256,9 +1255,9 @@ private struct ProbeGeometryExportView: View {
             height: max(10, size.height - 112)
         )
         let allX = payload.channels.map(\.xMicrometers)
-            + payload.units.map(\.xMicrometers)
+            + [payload.unit.xMicrometers]
         let allY = payload.channels.map(\.yMicrometers)
-            + payload.units.map(\.yMicrometers)
+            + [payload.unit.yMicrometers]
         guard let rawXLow = allX.min(), let rawXHigh = allX.max(),
               let rawYLow = allY.min(), let rawYHigh = allY.max() else { return }
         let xRange = paddedRange(low: rawXLow, high: rawXHigh)
@@ -1295,41 +1294,34 @@ private struct ProbeGeometryExportView: View {
             )
         }
 
-        // Draw the selected unit last so coincident coordinates cannot hide
-        // its red marker beneath another RF unit.
-        let orderedUnits = payload.units.filter { $0.unitID != payload.selectedUnitID }
-            + payload.units.filter { $0.unitID == payload.selectedUnitID }
-        for unit in orderedUnits {
-            let selected = unit.unitID == payload.selectedUnitID
-            let point = displayPoint(
-                x: unit.xMicrometers,
-                y: unit.yMicrometers,
-                plotRect: plotRect,
-                xRange: xRange,
-                yRange: yRange
-            )
-            let radius: CGFloat = selected ? 6 : 4.5
-            let circle = Path(ellipseIn: CGRect(
-                x: point.x - radius,
-                y: point.y - radius,
-                width: radius * 2,
-                height: radius * 2
-            ))
-            context.fill(
-                circle,
-                with: .color(selected
-                    ? Color(red: 0.86, green: 0.15, blue: 0.15)
-                    : Color(red: 0.15, green: 0.39, blue: 0.72))
-            )
-            context.stroke(circle, with: .color(.white), lineWidth: 1)
-            context.draw(
-                Text("\(unit.unitID)")
-                    .font(.system(size: selected ? 10 : 8, weight: selected ? .bold : .regular))
-                    .foregroundStyle(.primary),
-                at: CGPoint(x: point.x + radius + 3, y: point.y),
-                anchor: .leading
-            )
-        }
+        // Channels remain as spatial context; only this page's unit is drawn.
+        let unit = payload.unit
+        let point = displayPoint(
+            x: unit.xMicrometers,
+            y: unit.yMicrometers,
+            plotRect: plotRect,
+            xRange: xRange,
+            yRange: yRange
+        )
+        let radius: CGFloat = 6
+        let circle = Path(ellipseIn: CGRect(
+            x: point.x - radius,
+            y: point.y - radius,
+            width: radius * 2,
+            height: radius * 2
+        ))
+        context.fill(
+            circle,
+            with: .color(Color(red: 0.86, green: 0.15, blue: 0.15))
+        )
+        context.stroke(circle, with: .color(.white), lineWidth: 1)
+        context.draw(
+            Text("\(unit.unitID)")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundStyle(.primary),
+            at: CGPoint(x: point.x + radius + 3, y: point.y),
+            anchor: .leading
+        )
 
         drawLegend(context: &context, plotRect: plotRect)
     }
@@ -1405,10 +1397,9 @@ private struct ProbeGeometryExportView: View {
         let origin = CGPoint(x: plotRect.maxX - 124, y: plotRect.minY + 10)
         let entries: [(String, Color, CGFloat)] = [
             ("channel", Color(red: 0.58, green: 0.64, blue: 0.72), 2.5),
-            ("RF unit", Color(red: 0.15, green: 0.39, blue: 0.72), 4),
-            ("selected", Color(red: 0.86, green: 0.15, blue: 0.15), 5),
+            ("current unit", Color(red: 0.86, green: 0.15, blue: 0.15), 5),
         ]
-        let box = CGRect(x: origin.x - 8, y: origin.y - 8, width: 128, height: 55)
+        let box = CGRect(x: origin.x - 8, y: origin.y - 8, width: 128, height: 39)
         context.fill(Path(box), with: .color(.white.opacity(0.84)))
         context.stroke(Path(box), with: .color(.secondary.opacity(0.35)), lineWidth: 1)
         for (index, entry) in entries.enumerated() {

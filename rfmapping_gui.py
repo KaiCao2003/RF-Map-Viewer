@@ -16,7 +16,7 @@ import sys
 import threading
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterable
 
 from Utils.figure_export import (
     ExportPage,
@@ -91,6 +91,70 @@ PAIR_SYNC_ALL_FIELDS = frozenset(
     }
 )
 _RECORDING_SESSION_RE = re.compile(r"^\d{6}_\d+$")
+
+
+def composer_unit_selection_after_click(
+    selected_indices: Iterable[int],
+    clicked_index: int,
+    anchor_index: int | None,
+    unit_count: int,
+    *,
+    command: bool = False,
+    shift: bool = False,
+) -> tuple[tuple[int, ...], int]:
+    """Apply Finder-style row selection and return sorted source indices.
+
+    A plain click replaces the selection, Command-click toggles one row while
+    retaining the others, and Shift-click replaces the selection with the
+    inclusive range from the stable anchor. Command-Shift-click adds that range.
+    Sorting by source index is intentional: downstream exports must always
+    follow the JSON ``unitPool`` order, never the order in which rows were
+    clicked.
+    """
+
+    if unit_count < 0:
+        raise ValueError("unit_count must be non-negative")
+    if not 0 <= clicked_index < unit_count:
+        raise IndexError(f"unit index {clicked_index} is outside 0..{unit_count - 1}")
+
+    selected = {
+        int(index)
+        for index in selected_indices
+        if 0 <= int(index) < unit_count
+    }
+    valid_anchor = (
+        int(anchor_index)
+        if anchor_index is not None and 0 <= int(anchor_index) < unit_count
+        else None
+    )
+
+    if shift:
+        anchor = clicked_index if valid_anchor is None else valid_anchor
+        first, last = sorted((anchor, clicked_index))
+        clicked_range = set(range(first, last + 1))
+        selected = selected | clicked_range if command else clicked_range
+        return tuple(sorted(selected)), anchor
+
+    if command:
+        if clicked_index in selected:
+            selected.remove(clicked_index)
+        else:
+            selected.add(clicked_index)
+        return tuple(sorted(selected)), clicked_index
+
+    return (clicked_index,), clicked_index
+
+
+def composer_unit_checkbox_hit(
+    event_x: int,
+    row_text_x: int,
+    checkbox_hit_width: int,
+) -> bool:
+    """Return whether a row click landed in its leading checkbox column."""
+
+    if checkbox_hit_width <= 0:
+        raise ValueError("checkbox_hit_width must be positive")
+    return row_text_x <= event_x < row_text_x + checkbox_hit_width
 
 
 def timeline_scroll_progress(first: float, last: float) -> float | None:
@@ -5665,7 +5729,11 @@ class GUIFigureDataProvider:
                     else "No companion positions.csv was found for this RF dataset."
                 )
             }
-        if not any(unit.unit_id == unit_id for unit in geometry.units):
+        selected_unit = next(
+            (unit for unit in geometry.units if unit.unit_id == unit_id),
+            None,
+        )
+        if selected_unit is None:
             return {
                 "unavailable": (
                     f"Probe position is unavailable for RF unit {unit_id}; "
@@ -5681,14 +5749,16 @@ class GUIFigureDataProvider:
             }
             for channel in geometry.channels
         ]
-        points.extend(
+        # A Probe plot belongs to one output page and therefore one unit. Keep
+        # physical channels as spatial context, but never leak markers for the
+        # other selected/exported units onto this page.
+        points.append(
             {
-                "x": unit.x_um,
-                "y": unit.y_um,
-                "label": str(unit.unit_id),
-                "color": "#dc2626" if unit.unit_id == unit_id else "#2563eb",
+                "x": selected_unit.x_um,
+                "y": selected_unit.y_um,
+                "label": str(selected_unit.unit_id),
+                "color": "#dc2626",
             }
-            for unit in geometry.units
         )
         if not points:
             return {"unavailable": "Probe geometry contains no channels or units."}
@@ -5706,6 +5776,9 @@ class FigureExportWindow(tk.Toplevel):
         # selected in the still-interactive parent viewer.
         self.data = viewer.data
         self.unit_ids = tuple(int(unit_id) for unit_id in self.data.rf_maps.unit_ids)
+        self._selected_unit_indices: set[int] = set()
+        self._unit_selection_anchor: int | None = None
+        self._unit_selection_focus: int | None = None
         selected_unit_id = int(viewer._selected_unit_id_value())
         self.current_unit_id = (
             selected_unit_id if selected_unit_id in self.unit_ids else self.unit_ids[0]
@@ -5781,17 +5854,70 @@ class FigureExportWindow(tk.Toplevel):
         format_combo.pack(fill="x", pady=(5, 12))
         format_combo.bind("<<ComboboxSelected>>", lambda _event: self._on_format_changed())
 
-        ttk.Label(left, text="Units", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
+        ttk.Label(
+            left,
+            text="Units  (click · Shift-click · ⌘-click)",
+            font=("TkDefaultFont", 11, "bold"),
+        ).pack(anchor="w")
         self.unit_list = tk.Listbox(left, selectmode="extended", exportselection=False, width=30, height=13)
         self.unit_list.pack(fill="both", expand=True, pady=(5, 5))
-        self.unit_list.bind("<<ListboxSelect>>", lambda _event: self._schedule_preview())
+        try:
+            checkbox_width = int(
+                self.tk.call(
+                    "font",
+                    "measure",
+                    self.unit_list.cget("font"),
+                    "☑  ",
+                )
+            )
+        except (tk.TclError, TypeError, ValueError):
+            checkbox_width = 24
+        self._unit_checkbox_hit_width = max(24, checkbox_width)
+        self.unit_list.bind(
+            "<Button-1>",
+            lambda event: self._on_unit_list_click(event),
+        )
+        self.unit_list.bind(
+            "<Shift-Button-1>",
+            lambda event: self._on_unit_list_click(event, shift=True),
+        )
+        if self.tk.call("tk", "windowingsystem") == "aqua":
+            self.unit_list.bind(
+                "<Command-Button-1>",
+                lambda event: self._on_unit_list_click(event, command=True),
+            )
+            self.unit_list.bind(
+                "<Command-Shift-Button-1>",
+                lambda event: self._on_unit_list_click(
+                    event,
+                    command=True,
+                    shift=True,
+                ),
+            )
+        else:
+            self.unit_list.bind(
+                "<Control-Button-1>",
+                lambda event: self._on_unit_list_click(event, command=True),
+            )
+            self.unit_list.bind(
+                "<Control-Shift-Button-1>",
+                lambda event: self._on_unit_list_click(
+                    event,
+                    command=True,
+                    shift=True,
+                ),
+            )
         unit_buttons = ttk.Frame(left)
         unit_buttons.pack(fill="x", pady=(0, 12))
         ttk.Button(unit_buttons, text="Current", command=self._select_current_unit).pack(side="left")
         ttk.Button(unit_buttons, text="All", command=self._select_all_units).pack(side="left", padx=5)
         ttk.Button(unit_buttons, text="Clear", command=self._clear_units).pack(side="left")
 
-        ttk.Label(left, text="Pages per unit", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
+        ttk.Label(
+            left,
+            text="Pages per selected unit  (shared template)",
+            font=("TkDefaultFont", 11, "bold"),
+        ).pack(anchor="w")
         self.page_list = tk.Listbox(left, exportselection=False, width=30, height=8)
         self.page_list.pack(fill="both", expand=True, pady=(5, 5))
         self.page_list.bind("<<ListboxSelect>>", lambda _event: self._on_page_selected())
@@ -5857,34 +5983,110 @@ class FigureExportWindow(tk.Toplevel):
         self.export_status.grid(row=1, column=0, columnspan=5, sticky="w", pady=(7, 0))
 
     def _populate_units(self) -> None:
-        self.unit_list.delete(0, "end")
-        for rf_map in self.data.rf_maps:
-            self.unit_list.insert("end", f"index {rf_map.unit_index:03d}  ·  unit {rf_map.unit_id}")
         self._select_current_unit()
 
-    def _select_current_unit(self) -> None:
+    def _refresh_unit_rows(self, *, see_focus: bool = False) -> None:
+        yview = self.unit_list.yview()
+        self.unit_list.delete(0, "end")
+        for index, rf_map in enumerate(self.data.rf_maps):
+            checkbox = "☑" if index in self._selected_unit_indices else "☐"
+            self.unit_list.insert(
+                "end",
+                f"{checkbox}  index {rf_map.unit_index:03d}  ·  unit {rf_map.unit_id}",
+            )
         self.unit_list.selection_clear(0, "end")
+        for index in sorted(self._selected_unit_indices):
+            self.unit_list.selection_set(index)
+        if self._unit_selection_focus is not None:
+            self.unit_list.activate(self._unit_selection_focus)
+            if see_focus:
+                self.unit_list.see(self._unit_selection_focus)
+            elif yview:
+                self.unit_list.yview_moveto(yview[0])
+
+    def _unit_index_at_event(self, event) -> int | None:
+        if not self.unit_ids:
+            return None
+        index = int(self.unit_list.nearest(event.y))
+        bounds = self.unit_list.bbox(index)
+        if bounds is None:
+            return None
+        _x, y, _width, height = bounds
+        if not y <= int(event.y) < y + height:
+            return None
+        return index
+
+    def _on_unit_list_click(
+        self,
+        event,
+        *,
+        command: bool = False,
+        shift: bool = False,
+    ) -> str:
+        index = self._unit_index_at_event(event)
+        if index is None:
+            return "break"
+        bounds = self.unit_list.bbox(index)
+        checkbox_click = bool(
+            bounds is not None
+            and composer_unit_checkbox_hit(
+                int(event.x),
+                int(bounds[0]),
+                self._unit_checkbox_hit_width,
+            )
+        )
+        selected, anchor = composer_unit_selection_after_click(
+            self._selected_unit_indices,
+            index,
+            self._unit_selection_anchor,
+            len(self.unit_ids),
+            # Clicking the checkbox itself is an additive toggle even without
+            # a modifier. Shift retains its range meaning; Command retains its
+            # explicit toggle/add-range meaning anywhere on the row.
+            command=command or (checkbox_click and not shift),
+            shift=shift,
+        )
+        self._selected_unit_indices = set(selected)
+        self._unit_selection_anchor = anchor
+        self._unit_selection_focus = index
+        self._refresh_unit_rows()
+        self._schedule_preview()
+        return "break"
+
+    def _select_current_unit(self) -> None:
         try:
             index = self.unit_ids.index(self.current_unit_id)
         except ValueError:
             index = None
-        if index is not None:
-            self.unit_list.selection_set(index)
-            self.unit_list.see(index)
+        self._selected_unit_indices = set() if index is None else {index}
+        self._unit_selection_anchor = index
+        self._unit_selection_focus = index
+        self._refresh_unit_rows(see_focus=True)
         self._schedule_preview()
 
     def _select_all_units(self) -> None:
-        self.unit_list.selection_set(0, "end")
+        self._selected_unit_indices = set(range(len(self.unit_ids)))
+        try:
+            focus = self.unit_ids.index(self.current_unit_id)
+        except ValueError:
+            focus = 0 if self.unit_ids else None
+        self._unit_selection_anchor = focus
+        self._unit_selection_focus = focus
+        self._refresh_unit_rows(see_focus=True)
         self._schedule_preview()
 
     def _clear_units(self) -> None:
-        self.unit_list.selection_clear(0, "end")
+        self._selected_unit_indices.clear()
+        self._unit_selection_anchor = None
+        self._unit_selection_focus = None
+        self._refresh_unit_rows()
         self._schedule_preview()
 
     def _selected_unit_ids(self) -> tuple[int, ...]:
         return tuple(
-            self.unit_ids[index]
-            for index in self.unit_list.curselection()
+            unit_id
+            for index, unit_id in enumerate(self.unit_ids)
+            if index in self._selected_unit_indices
         )
 
     def _selected_page_index(self) -> int:

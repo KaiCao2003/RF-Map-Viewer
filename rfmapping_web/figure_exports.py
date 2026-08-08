@@ -1167,17 +1167,6 @@ class FigurePageRenderer:
                         "color": "#94a3b8",
                     }
                 )
-            for unit in probe_units:
-                if unit["unitId"] == cluster_id:
-                    continue
-                points.append(
-                    {
-                        "x": unit["x"],
-                        "y": unit["y"],
-                        "label": str(unit["unitId"]),
-                        "color": "#2563eb",
-                    }
-                )
             selected_unit = next(
                 unit for unit in probe_units if unit["unitId"] == cluster_id
             )

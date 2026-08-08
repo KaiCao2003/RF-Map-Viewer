@@ -206,6 +206,66 @@ export function matchingUnitIds(
   });
 }
 
+export interface FigureUnitSelectionGesture {
+  additive: boolean;
+  range: boolean;
+  checkbox: boolean;
+}
+
+export interface FigureUnitSelectionResult {
+  unitIds: number[];
+  anchorUnitId: number | null;
+}
+
+/**
+ * Apply Finder-style selection semantics while preserving the source unitPool
+ * order used by preview and export payloads.
+ */
+export function figureUnitSelectionAfterGesture(
+  unitPool: ReadonlyArray<number>,
+  visibleUnitIds: ReadonlyArray<number>,
+  selectedUnitIds: ReadonlyArray<number>,
+  clickedUnitId: number,
+  anchorUnitId: number | null,
+  gesture: FigureUnitSelectionGesture,
+): FigureUnitSelectionResult {
+  if (!unitPool.includes(clickedUnitId) || !visibleUnitIds.includes(clickedUnitId)) {
+    return {
+      unitIds: orderedUnitSelection(unitPool, selectedUnitIds),
+      anchorUnitId,
+    };
+  }
+
+  if (gesture.range) {
+    const clickedIndex = visibleUnitIds.indexOf(clickedUnitId);
+    const anchorIndex = anchorUnitId == null ? -1 : visibleUnitIds.indexOf(anchorUnitId);
+    if (anchorIndex >= 0) {
+      const low = Math.min(anchorIndex, clickedIndex);
+      const high = Math.max(anchorIndex, clickedIndex);
+      const range = visibleUnitIds.slice(low, high + 1);
+      return {
+        unitIds: orderedUnitSelection(
+          unitPool,
+          gesture.additive ? [...selectedUnitIds, ...range] : range,
+        ),
+        anchorUnitId,
+      };
+    }
+  }
+
+  if (gesture.additive || gesture.checkbox) {
+    const selected = new Set(selectedUnitIds);
+    if (selected.has(clickedUnitId)) selected.delete(clickedUnitId);
+    else selected.add(clickedUnitId);
+    return {
+      unitIds: orderedUnitSelection(unitPool, selected),
+      anchorUnitId: clickedUnitId,
+    };
+  }
+
+  return { unitIds: [clickedUnitId], anchorUnitId: clickedUnitId };
+}
+
 export function currentFigureType(view: ViewState): FigureTypeId {
   if (view.selectedTab === "timeline") return "timeline.current";
   if (view.selectedTab === "rf") return view.polarLayout ? "rf.polar" : "rf.cartesian";

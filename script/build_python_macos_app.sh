@@ -202,25 +202,31 @@ sips -z 512 512 "$ICON_MASTER" --out "$ICONSET_DIR/icon_512x512.png" >/dev/null
 cp "$ICON_MASTER" "$ICONSET_DIR/icon_512x512@2x.png"
 iconutil -c icns "$ICONSET_DIR" -o "$ICON_ICNS"
 
-PYINSTALLER_DATA_ARGS=()
-if [[ -d "$DATA_SOURCE" ]]; then
-  PYINSTALLER_DATA_ARGS+=(--add-data "$DATA_SOURCE:data")
-fi
+run_pyinstaller() {
+  "$BUILD_VENV/bin/pyinstaller" \
+    --noconfirm \
+    --clean \
+    --windowed \
+    --onedir \
+    --target-architecture "$APP_ARCHITECTURE" \
+    --name "$APP_NAME" \
+    --osx-bundle-identifier "$BUNDLE_ID" \
+    --icon "$ICON_ICNS" \
+    --distpath "$DIST_DIR" \
+    --workpath "$WORK_DIR/build" \
+    --specpath "$WORK_DIR" \
+    "$@" \
+    "$ROOT_DIR/rfmapping_gui.py"
+}
 
-"$BUILD_VENV/bin/pyinstaller" \
-  --noconfirm \
-  --clean \
-  --windowed \
-  --onedir \
-  --target-architecture "$APP_ARCHITECTURE" \
-  --name "$APP_NAME" \
-  --osx-bundle-identifier "$BUNDLE_ID" \
-  --icon "$ICON_ICNS" \
-  --distpath "$DIST_DIR" \
-  --workpath "$WORK_DIR/build" \
-  --specpath "$WORK_DIR" \
-  "${PYINSTALLER_DATA_ARGS[@]}" \
-  "$ROOT_DIR/rfmapping_gui.py"
+# macOS still ships Bash 3.2, where expanding an empty array under `set -u`
+# raises an "unbound variable" error. Pass the optional data argument through
+# positional parameters so the no-data release path remains valid.
+if [[ -d "$DATA_SOURCE" ]]; then
+  run_pyinstaller --add-data "$DATA_SOURCE:data"
+else
+  run_pyinstaller
+fi
 
 "$PLIST_BUDDY" -c "Set :CFBundleDisplayName $APP_NAME" "$INFO_PLIST"
 "$PLIST_BUDDY" -c "Set :CFBundleShortVersionString $APP_VERSION" "$INFO_PLIST"
