@@ -2,11 +2,15 @@
 set -euo pipefail
 
 MODE="${1:-run}"
-APP_NAME="RF Map Viewer"
-EXECUTABLE_NAME="$APP_NAME"
-BUNDLE_ID="org.local.rfmapping.viewer"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=python_macos_release.env
+source "$SCRIPT_DIR/python_macos_release.env"
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+APP_NAME="$RF_MAPPING_APP_NAME"
+EXECUTABLE_NAME="$RF_MAPPING_EXECUTABLE_NAME"
+BUNDLE_ID="$RF_MAPPING_BUNDLE_ID"
+
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 DIST_DIR="$ROOT_DIR/dist/python"
 APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
 APP_BINARY="$APP_BUNDLE/Contents/MacOS/$EXECUTABLE_NAME"

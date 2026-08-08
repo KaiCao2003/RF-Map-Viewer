@@ -186,12 +186,49 @@ def _geometry_path_pairs(
 def _discover_probe_paths(
     source: Path, root: Path, probe_name: str
 ) -> tuple[Path | None, Path | None]:
-    for base in _ancestors(source, root):
+    parents = tuple(source.parents)
+    session = next(
+        (
+            parent
+            for parent in parents
+            if SESSION_RE.fullmatch(parent.name) and is_within(parent, root)
+        ),
+        None,
+    )
+    if session is not None:
+        boundary = next(
+            (
+                parent
+                for parent in parents
+                if parent.name == "data" and parent.parent == session
+            ),
+            session,
+        )
+    else:
+        boundary = next(
+            (
+                parent
+                for parent in parents
+                if parent.name == "data" and is_within(parent, root)
+            ),
+            source.parent,
+        )
+    bases: list[Path] = []
+    for parent in parents:
+        bases.append(parent)
+        if parent == boundary:
+            break
+    # Probe geometry is session-specific. Resolve candidates against this
+    # bounded scientific scope, never merely against the much broader RF root.
+    for base in bases:
         for positions, channels in _geometry_path_pairs(base, probe_name):
-            positions_resolved = _safe_file(positions, root)
+            positions_resolved = _safe_file(positions, boundary)
             if positions_resolved is None:
                 continue
-            return positions_resolved, _safe_file(channels, root) if channels else None
+            return (
+                positions_resolved,
+                _safe_file(channels, boundary) if channels else None,
+            )
     return None, None
 
 
@@ -363,7 +400,10 @@ def _load_probe_channels(path: Path) -> list[dict[str, int | float]]:
     return channels
 
 
-def load_probe_geometry(companions: CompanionSet) -> dict[str, Any] | None:
+def load_probe_geometry(
+    companions: CompanionSet,
+    unit_pool: Sequence[int] | None = None,
+) -> dict[str, Any] | None:
     if not companions.has_probe or companions.probe is None:
         return None
     assert companions.positions_path is not None
@@ -389,6 +429,14 @@ def load_probe_geometry(companions: CompanionSet) -> dict[str, Any] | None:
             raise ValueError(f"Duplicate unit_id {unit_id} in positions.csv")
         seen_unit_ids.add(unit_id)
         units.append({"unitId": unit_id, "x": x, "y": y})
+
+    if unit_pool is not None:
+        allowed = set(unit_pool)
+        units = [unit for unit in units if unit["unitId"] in allowed]
+        if not units:
+            raise ValueError(
+                "positions.csv contains no unit IDs from this RF dataset's unitPool"
+            )
 
     channels: list[dict[str, int | float]] = []
     if companions.channels_path is not None:

@@ -30,6 +30,29 @@ struct TimelineView: View {
     }
 }
 
+/// Deterministic, interaction-free timeline used by live figure preview and
+/// final export. Unlike the viewer's scrollable timeline, this lays out every
+/// current time-resolution frame inside the allotted figure slot.
+struct TimelineExportView: View {
+    let store: RFMappingStore
+
+    var body: some View {
+        GeometryReader { proxy in
+            let layout = makeTimelineExportLayout(
+                store: store,
+                width: proxy.size.width,
+                height: proxy.size.height
+            )
+            Canvas { context, size in
+                var context = context
+                drawTimelineBase(context: &context, size: size, layout: layout)
+                drawTimelineSelection(context: &context, size: size, layout: layout)
+            }
+            .background(Color(nsColor: .textBackgroundColor))
+        }
+    }
+}
+
 private enum TimelineHit {
     case bin(Int)
     case cell(Int, CellRef)
@@ -269,7 +292,12 @@ private struct TimelineInteractionLayer: View {
     }
 }
 
-private func makeTimelineLayout(store: RFMappingStore, width: CGFloat, height: CGFloat) -> TimelineLayout {
+private func makeTimelineLayout(
+    store: RFMappingStore,
+    width: CGFloat,
+    height: CGFloat,
+    fittingAllFrames: Bool = false
+) -> TimelineLayout {
     let snapshot = store.timelineSnapshot()
     let timeGroups = snapshot.timeGroups
     let displayBins = max(1, timeGroups.count)
@@ -296,15 +324,32 @@ private func makeTimelineLayout(store: RFMappingStore, width: CGFloat, height: C
     let timeGroupLabels = visibleBins.map(store.timeGroupLabel)
     let timeGroupEndBoundsMS = visibleBins.map { store.timeGroupBoundsMS($0).1 }
 
-    let chartRect = CGRect(x: 64, y: 78, width: max(320, width - 140), height: 62)
-    let miniTop = chartRect.maxY + 54
+    let chartRect: CGRect
+    let miniTop: CGFloat
+    if fittingAllFrames {
+        let horizontalMargin = max(22, min(64, width * 0.10))
+        let chartY = max(48, min(78, height * 0.28))
+        let chartHeight = max(14, min(62, height * 0.18))
+        chartRect = CGRect(
+            x: horizontalMargin,
+            y: chartY,
+            width: max(10, width - horizontalMargin * 2),
+            height: chartHeight
+        )
+        miniTop = chartRect.maxY + max(8, min(30, height * 0.08))
+    } else {
+        chartRect = CGRect(x: 64, y: 78, width: max(320, width - 140), height: 62)
+        miniTop = chartRect.maxY + 54
+    }
     let miniSpec = timelineMiniSpec(
         width: width,
         height: height,
         visibleCount: visibleBins.count,
         xCount: xGroups.count,
         yCount: yGroups.count,
-        spatialFormat: store.spatialPlotFormat
+        spatialFormat: store.spatialPlotFormat,
+        miniTop: miniTop,
+        fittingAllFrames: fittingAllFrames
     )
     let totalDegrees = store.data?.inferTotalDeg() ?? 360.0
     let polarRingRows = store.polarRadiusMode == .matlabRowOneInner
@@ -335,15 +380,13 @@ private func makeTimelineLayout(store: RFMappingStore, width: CGFloat, height: C
     }
 
     let rows = Int(ceil(Double(max(1, visibleBins.count)) / Double(max(1, miniSpec.cols))))
-    let contentHeight = max(
-        height,
-        miniTop
-            + CGFloat(max(0, rows - 1)) * miniSpec.rowStep
-            + miniSpec.gridHeight
-            + miniSpec.labelGap
-            + miniSpec.labelHeight
-            + 12
-    )
+    let requiredContentHeight = miniTop
+        + CGFloat(max(0, rows - 1)) * miniSpec.rowStep
+        + miniSpec.gridHeight
+        + miniSpec.labelGap
+        + miniSpec.labelHeight
+        + (fittingAllFrames ? 2 : 12)
+    let contentHeight = fittingAllFrames ? height : max(height, requiredContentHeight)
     let renderState = TimelineRenderState(
         valueMode: store.valueMode,
         palette: store.palette,
@@ -397,6 +440,21 @@ private func makeTimelineLayout(store: RFMappingStore, width: CGFloat, height: C
     )
 }
 
+/// Internal for `@testable` verification that every frame remains inside the
+/// finite export page rather than depending on an NSScrollView viewport.
+func makeTimelineExportLayout(
+    store: RFMappingStore,
+    width: CGFloat,
+    height: CGFloat
+) -> TimelineLayout {
+    makeTimelineLayout(
+        store: store,
+        width: width,
+        height: height,
+        fittingAllFrames: true
+    )
+}
+
 private struct TimelineMiniSpec {
     let left: CGFloat
     let cols: Int
@@ -416,18 +474,89 @@ private func timelineMiniSpec(
     visibleCount: Int,
     xCount: Int,
     yCount: Int,
-    spatialFormat: SpatialPlotFormat
+    spatialFormat: SpatialPlotFormat,
+    miniTop: CGFloat,
+    fittingAllFrames: Bool
 ) -> TimelineMiniSpec {
     let count = max(1, visibleCount)
     let xCount = max(1, xCount)
     let yCount = max(1, yCount)
     let gapX = max(1.0, min(3.0, width * 0.002))
-    let labelGap: CGFloat = 4
-    let labelHeight: CGFloat = 12
-    let rowGap = max(10.0, min(16.0, height * 0.014))
-    let left: CGFloat = 44
-    let rightPadding: CGFloat = 44
-    let availableWidth = max(120, width - left - rightPadding)
+    let labelGap: CGFloat = fittingAllFrames ? 1 : 4
+    let labelHeight: CGFloat = fittingAllFrames ? 8 : 12
+    let rowGap = fittingAllFrames
+        ? max(1.0, min(4.0, height * 0.006))
+        : max(10.0, min(16.0, height * 0.014))
+    let left: CGFloat = fittingAllFrames ? max(8, min(44, width * 0.12)) : 44
+    let rightPadding: CGFloat = left
+    let availableWidth = fittingAllFrames
+        ? max(4, width - left - rightPadding)
+        : max(120, width - left - rightPadding)
+    if fittingAllFrames {
+        let availableHeight = max(4, height - miniTop - 2)
+        var bestColumns = 1
+        var bestRows = count
+        var bestCell: CGFloat = 0
+        var bestSlotWidth: CGFloat = availableWidth
+        var bestGridWidth: CGFloat = 1
+        var bestGridHeight: CGFloat = 1
+
+        for candidateColumns in 1...count {
+            let candidateRows = Int(ceil(Double(count) / Double(candidateColumns)))
+            let slotWidth = max(
+                1,
+                (availableWidth - CGFloat(candidateColumns - 1) * gapX)
+                    / CGFloat(candidateColumns)
+            )
+            let rowHeight = max(
+                1,
+                (availableHeight - CGFloat(candidateRows - 1) * rowGap)
+                    / CGFloat(candidateRows)
+            )
+            let usableHeight = max(0.25, rowHeight - labelGap - labelHeight)
+            let cell: CGFloat
+            let gridWidth: CGFloat
+            let gridHeight: CGFloat
+            if spatialFormat == .polar {
+                let diameter = max(0.25, min(slotWidth, usableHeight))
+                cell = diameter / CGFloat(max(xCount, yCount))
+                gridWidth = diameter
+                gridHeight = diameter
+            } else {
+                cell = max(
+                    0.001,
+                    min(slotWidth / CGFloat(xCount), usableHeight / CGFloat(yCount))
+                )
+                gridWidth = cell * CGFloat(xCount)
+                gridHeight = cell * CGFloat(yCount)
+            }
+            if cell > bestCell {
+                bestColumns = candidateColumns
+                bestRows = candidateRows
+                bestCell = cell
+                bestSlotWidth = slotWidth
+                bestGridWidth = gridWidth
+                bestGridHeight = gridHeight
+            }
+        }
+        let rowStep = max(
+            bestGridHeight + labelGap + labelHeight,
+            (availableHeight - CGFloat(bestRows - 1) * rowGap) / CGFloat(bestRows)
+                + rowGap
+        )
+        return TimelineMiniSpec(
+            left: left,
+            cols: bestColumns,
+            gapX: gapX,
+            slotWidth: bestSlotWidth,
+            cell: bestCell,
+            gridWidth: bestGridWidth,
+            gridHeight: bestGridHeight,
+            labelGap: labelGap,
+            labelHeight: labelHeight,
+            rowStep: rowStep
+        )
+    }
     let baseGridHeight = min(78.0, max(44.0, height * 0.12))
     let densityScale = min(1.0, max(0.35, sqrt(50.0 / Double(count))))
     let targetGridHeight = max(18.0, baseGridHeight * CGFloat(densityScale))

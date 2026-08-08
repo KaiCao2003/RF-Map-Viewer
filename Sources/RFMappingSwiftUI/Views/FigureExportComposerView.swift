@@ -192,7 +192,7 @@ struct FigureExportComposerView: View {
                     .help("Add page")
                 Button(action: workspace.removeSelectedPage) { Image(systemName: "minus") }
                     .help("Remove selected page")
-                    .disabled(workspace.selectedPageIndex == nil)
+                    .disabled(workspace.selectedPageIndex == nil || workspace.pages.count <= 1)
                 Button { workspace.moveSelectedPage(-1) } label: { Image(systemName: "arrow.up") }
                     .help("Move page earlier")
                     .disabled((workspace.selectedPageIndex ?? 0) <= 0)
@@ -267,9 +267,25 @@ struct FigureExportComposerView: View {
                 Spacer()
                 Button("Choose HD JSON…", action: chooseHDTuning)
             }
-            Label(workspace.companions.probeUnavailableReason, systemImage: "info.circle")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 2) {
+                if let geometry = workspace.companions.probeGeometry {
+                    Label("\(geometry.probeName) geometry ready", systemImage: "checkmark.circle.fill")
+                        .font(.callout.weight(.semibold))
+                        .foregroundStyle(.green)
+                    Text(geometry.positionsURL.path)
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(3)
+                        .textSelection(.enabled)
+                    Text("\(geometry.channels.count) channels · \(geometry.units.count) RF units")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Label(workspace.companions.probeUnavailableReason, systemImage: "info.circle")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
         }
     }
 

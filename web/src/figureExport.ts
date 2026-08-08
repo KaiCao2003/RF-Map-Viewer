@@ -260,6 +260,7 @@ export function snapshotPlotSettings(
     return {
       timelineStartMs: context.view.timelineStartMs,
       timelineEndMs: context.view.timelineEndMs,
+      activeTimeCenterMs: context.view.activeTimeCenterMs,
       timeResolutionMs: context.view.timeResolutionMs,
       valueMode: context.view.valueMode,
       xBins: context.view.xBins,

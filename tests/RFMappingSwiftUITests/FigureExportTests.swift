@@ -23,7 +23,10 @@ final class FigureExportTests: XCTestCase {
         )
     }
 
-    private func snapshot(unitID: Int = 22) -> ViewerSyncState {
+    private func snapshot(
+        unitID: Int = 22,
+        timeResolutionMS: Double = 100
+    ) -> ViewerSyncState {
         ViewerSyncState(
             unitID: unitID,
             valueMode: .spikeCount,
@@ -32,7 +35,7 @@ final class FigureExportTests: XCTestCase {
             rangeEndMS: 100,
             plotRangeStartMS: 0,
             plotRangeEndMS: 200,
-            timeResolutionMS: 100,
+            timeResolutionMS: timeResolutionMS,
             xBins: 1,
             yBins: 1,
             smoothRadius: 0,
@@ -46,6 +49,22 @@ final class FigureExportTests: XCTestCase {
             selectedCell: nil,
             timelineRangeAnchorMS: nil,
             timelineScrollFraction: 0
+        )
+    }
+
+    private func makeDenseTimelineData(binCount: Int = 80) throws -> RFMappingData {
+        let histogram = (0..<binCount).map { Double(($0 % 7) + 1) }
+        let payload: [String: Any] = [
+            "unitsSpikeCounts": [[[histogram]]],
+            "unitsSpikeCountsSize": [1, 1, 1, binCount],
+            "unitPool": [22],
+            "xPositions": [0.0],
+            "yPositions": [0.0],
+            "timeBinEdges": (0...binCount).map { Double($0) / 1_000 },
+        ]
+        return try RFMappingData(
+            data: JSONSerialization.data(withJSONObject: payload),
+            url: URL(fileURLWithPath: "/tmp/260101_1/ProbeA-dense-rf.json")
         )
     }
 
@@ -74,6 +93,25 @@ final class FigureExportTests: XCTestCase {
         return try HDTuningData(
             data: JSONSerialization.data(withJSONObject: payload),
             sourceURL: URL(fileURLWithPath: "/tmp/tuning_curves.json")
+        )
+    }
+
+    private func makeProbeGeometry(unitIDs: [Int] = [22, 11]) -> ProbeGeometry {
+        ProbeGeometry(
+            probeName: "ProbeA",
+            positionsURL: URL(fileURLWithPath: "/tmp/260101_1/data/spike_position/ProbeA/positions.csv"),
+            channelsURL: URL(fileURLWithPath: "/tmp/260101_1/data/waveform/ProbeA/channels.csv"),
+            channels: [
+                ProbeChannel(channelID: 10, xMicrometers: 0, yMicrometers: 0, shankID: 0),
+                ProbeChannel(channelID: 11, xMicrometers: 20, yMicrometers: 20, shankID: 0),
+            ],
+            units: unitIDs.enumerated().map { index, unitID in
+                ProbeUnitPosition(
+                    unitID: unitID,
+                    xMicrometers: Double(index) * 7.5 + 5,
+                    yMicrometers: Double(index) * 120 + 100
+                )
+            }
         )
     }
 
@@ -198,8 +236,67 @@ final class FigureExportTests: XCTestCase {
 
         XCTAssertTrue(descriptor.plots[0].placeholder?.contains("fixture missing") == true)
         XCTAssertTrue(descriptor.plots[1].placeholder?.contains("fixture missing") == true)
-        XCTAssertTrue(descriptor.plots[2].placeholder?.contains("not loaded") == true)
+        XCTAssertTrue(descriptor.plots[2].placeholder?.contains("positions.csv") == true)
         XCTAssertNil(descriptor.plots[3].placeholder)
+    }
+
+    func testAvailableCompanionsResolveAllTenKindsToRealRendererPayloads() throws {
+        let data = try makeData()
+        let page = FigurePageTemplate(
+            name: "Every view",
+            plots: FigureExportPlotKind.allCases.map { FigurePlotPlacement(kind: $0) }
+        )
+        var companions = FigureExportCompanions()
+        companions.hdTuning = try makeHDTuningData(unitID: 22)
+        companions.probeGeometry = makeProbeGeometry()
+
+        let descriptor = try XCTUnwrap(FigureExportRenderer().descriptors(
+            configuration: configuration(unitIDs: [22], pages: [page]),
+            data: data,
+            companions: companions
+        ).first)
+
+        XCTAssertEqual(descriptor.plots.map(\.kind), FigureExportPlotKind.allCases)
+        XCTAssertTrue(descriptor.plots.allSatisfy { $0.placeholder == nil })
+        for plot in descriptor.plots {
+            switch plot.kind {
+            case .hdLine, .hdPolar:
+                XCTAssertNotNil(plot.hdCurve)
+                XCTAssertNil(plot.probePayload)
+            case .probe:
+                let payload = try XCTUnwrap(plot.probePayload)
+                XCTAssertEqual(payload.selectedUnitID, 22)
+                XCTAssertEqual(payload.channels.count, 2)
+                XCTAssertEqual(payload.units.map(\.unitID), [22, 11])
+                XCTAssertNil(plot.hdCurve)
+            default:
+                XCTAssertNil(plot.hdCurve)
+                XCTAssertNil(plot.probePayload)
+            }
+        }
+    }
+
+    func testProbePayloadRequiresSelectedUnitPosition() throws {
+        let data = try makeData()
+        let page = FigurePageTemplate(
+            name: "Probe",
+            plots: [FigurePlotPlacement(kind: .probe)]
+        )
+        var companions = FigureExportCompanions()
+        companions.probeGeometry = makeProbeGeometry(unitIDs: [22])
+
+        let descriptors = FigureExportRenderer().descriptors(
+            configuration: configuration(unitIDs: [22, 11], pages: [page]),
+            data: data,
+            companions: companions
+        )
+
+        XCTAssertNil(descriptors[0].plots[0].placeholder)
+        XCTAssertNotNil(descriptors[0].plots[0].probePayload)
+        XCTAssertTrue(
+            descriptors[1].plots[0].placeholder?.contains("absent from positions.csv") == true
+        )
+        XCTAssertNil(descriptors[1].plots[0].probePayload)
     }
 
     func testHDCompanionRendersAvailableUnitAndMarksMissingUnit() throws {
@@ -323,7 +420,134 @@ final class FigureExportTests: XCTestCase {
         XCTAssertFalse(workspace.pages[1].plots.contains { $0.id == placement.id })
         workspace.removeSelectedPage()
         XCTAssertEqual(workspace.pages.count, 1)
+        let retainedPageID = workspace.pages[0].id
+        workspace.removeSelectedPage()
+        XCTAssertEqual(workspace.pages.count, 1)
+        XCTAssertEqual(workspace.selectedPageID, retainedPageID)
         XCTAssertEqual(workspace.configuration.viewerSnapshot, originalSnapshot)
+    }
+
+    func testPDFPNGAndSVGActuallyRenderAllTenViewsWithoutPlaceholders() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let data = try makeData(unitIDs: [22])
+        let page = FigurePageTemplate(
+            name: "All ten views",
+            plots: FigureExportPlotKind.allCases.map { FigurePlotPlacement(kind: $0) }
+        )
+        var companions = FigureExportCompanions()
+        companions.hdTuning = try makeHDTuningData(unitID: 22)
+        companions.probeGeometry = makeProbeGeometry(unitIDs: [22])
+
+        for format in [FigureExportFormat.pdf, .png, .svg] {
+            var value = configuration(unitIDs: [22], pages: [page])
+            value.format = format
+            value.pageSize = .widescreen
+            value.destinationDirectory = root
+            value.baseName = "all-ten-\(format.rawValue)"
+            value.outputScale = 1
+
+            let result = try await FigureExportRenderer().export(
+                configuration: value,
+                data: data,
+                companions: companions
+            )
+            XCTAssertEqual(result.pageCount, 1)
+            if format == .pdf {
+                XCTAssertGreaterThan(try Data(contentsOf: result.outputURL).count, 1_000)
+                let document = try XCTUnwrap(CGPDFDocument(result.outputURL as CFURL))
+                XCTAssertEqual(document.numberOfPages, 1)
+                continue
+            }
+            let manifestURL = result.outputURL.appendingPathComponent("manifest.json")
+            let manifest = try XCTUnwrap(
+                JSONSerialization.jsonObject(with: Data(contentsOf: manifestURL))
+                    as? [String: Any]
+            )
+            let pages = try XCTUnwrap(manifest["pages"] as? [[String: Any]])
+            XCTAssertEqual(pages.count, 1)
+            XCTAssertEqual(
+                pages[0]["plots"] as? [String],
+                FigureExportPlotKind.allCases.map(\.rawValue)
+            )
+            XCTAssertEqual(pages[0]["placeholders"] as? [String], [])
+            let filename = try XCTUnwrap(pages[0]["filename"] as? String)
+            let pageData = try Data(contentsOf: result.outputURL.appendingPathComponent(filename))
+            XCTAssertGreaterThan(pageData.count, 1_000)
+            if format == .svg {
+                let svg = try XCTUnwrap(String(data: pageData, encoding: .utf8))
+                XCTAssertTrue(svg.contains("<svg"))
+                XCTAssertTrue(svg.contains("data:image/png;base64,"))
+                XCTAssertEqual(manifest["rasterEmbeddedInSVG"] as? Bool, true)
+            }
+        }
+    }
+
+    func testTimelineExportLayoutAndPNGContainEveryCurrentResolutionFrameWithoutScrollViewport() async throws {
+        let data = try makeDenseTimelineData(binCount: 80)
+        let store = RFMappingStore(
+            initialData: data,
+            loadDefault: false,
+            discoverJSONChoices: false
+        )
+        store.applyViewerSyncState(snapshot(unitID: 22, timeResolutionMS: 1))
+        store.selectUnitID(22, resetInteraction: false)
+        let size = CGSize(width: 480, height: 260)
+
+        let layout = makeTimelineExportLayout(
+            store: store,
+            width: size.width,
+            height: size.height
+        )
+
+        XCTAssertEqual(store.timeGroupCount(), 80)
+        XCTAssertEqual(layout.displayBins, 80)
+        XCTAssertEqual(layout.miniLayouts.count, 80)
+        XCTAssertEqual(layout.miniMatrices.count, 80)
+        XCTAssertEqual(layout.contentHeight, size.height, accuracy: 0.001)
+        let maximumFrameBottom = layout.miniLayouts.map {
+            $0.y0 + $0.gridHeight + layout.labelGap + layout.labelHeight
+        }.max() ?? 0
+        XCTAssertLessThanOrEqual(maximumFrameBottom, size.height + 0.001)
+
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let page = FigurePageTemplate(
+            name: "Full timeline",
+            plots: [FigurePlotPlacement(kind: .timelineCurrent)]
+        )
+        var value = FigureExportConfiguration(
+            format: .png,
+            pageSize: .widescreen,
+            baseName: "full-timeline",
+            destinationDirectory: root,
+            selectedUnitIDs: [22],
+            pages: [page],
+            viewerSnapshot: snapshot(unitID: 22, timeResolutionMS: 1),
+            outputScale: 1
+        )
+        value.overwriteExisting = false
+        let result = try await FigureExportRenderer().export(
+            configuration: value,
+            data: data,
+            companions: FigureExportCompanions()
+        )
+        let manifest = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(
+                contentsOf: result.outputURL.appendingPathComponent("manifest.json")
+            )) as? [String: Any]
+        )
+        let exportedPages = try XCTUnwrap(manifest["pages"] as? [[String: Any]])
+        XCTAssertEqual(exportedPages.first?["placeholders"] as? [String], [])
+        let filename = try XCTUnwrap(exportedPages.first?["filename"] as? String)
+        XCTAssertGreaterThan(
+            try Data(contentsOf: result.outputURL.appendingPathComponent(filename)).count,
+            1_000
+        )
     }
 
     func testAtomicCommitNeverClobbersWithoutOverwrite() throws {

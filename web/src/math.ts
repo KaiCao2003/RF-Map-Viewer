@@ -204,17 +204,21 @@ export function timeGroupRangeForMs(
   requestedStartMs: number,
   requestedEndMs: number,
 ): AxisGroup {
+  const boundaryToleranceMs = 1e-9;
   let startMs = requestedStartMs;
   let endMs = requestedEndMs;
   if (startMs > endMs) [startMs, endMs] = [endMs, startMs];
-  if (Math.abs(startMs - endMs) < 1e-9) {
+  if (Math.abs(startMs - endMs) < boundaryToleranceMs) {
     const index = timeGroupForMs(meta, groups, startMs);
     return [index, index];
   }
   const overlapping: number[] = [];
   groups.forEach((group, index) => {
     const [groupStart, groupEnd] = timeBounds(meta, group);
-    if (groupEnd > startMs && groupStart < endMs) overlapping.push(index);
+    if (
+      groupEnd > startMs + boundaryToleranceMs
+      && groupStart < endMs - boundaryToleranceMs
+    ) overlapping.push(index);
   });
   if (overlapping.length) return [overlapping[0], overlapping.at(-1)!];
   return [timeGroupForMs(meta, groups, startMs), timeGroupForMs(meta, groups, endMs)];
