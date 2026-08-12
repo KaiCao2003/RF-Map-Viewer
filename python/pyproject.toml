@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rfmapping-viewer-python"
+version = "1.9.0"
+description = "Native Python/Tk viewer for RF mapping JSON files"
+requires-python = ">=3.11"
+dependencies = [
+  "numpy>=2,<3",
+  "Pillow>=10,<13",
+]
+
+[project.optional-dependencies]
+test = [
+  "pypdf>=5,<7",
+  "pytest>=8,<10",
+]
+
+[project.scripts]
+rfmapping-viewer = "rfmapping_gui:main"
+
+[tool.setuptools]
+py-modules = ["rfmapping_gui"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["rfmapping_viewer*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
