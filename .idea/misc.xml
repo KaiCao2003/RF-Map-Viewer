@@ -1,7 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<project version="4">
-  <component name="Black">
-    <option name="sdkName" value="SSH (sftp://kai@10.103.68.176:22/home/kai/.virtualenvs/rfmapping/bin/python)" />
-  </component>
-  <component name="ProjectRootManager" version="2" project-jdk-name="SSH (sftp://kai@10.103.68.176:22/home/kai/.virtualenvs/rfmapping/bin/python)" project-jdk-type="Python SDK" />
-</project>

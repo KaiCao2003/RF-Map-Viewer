@@ -1,0 +1,4 @@
+numpy>=2,<3
+Pillow>=10,<13
+pypdf>=5,<7
+pytest>=8,<10
