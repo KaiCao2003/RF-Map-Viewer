@@ -128,6 +128,32 @@ class RFMappingRateTests(unittest.TestCase):
             self.load(payload)
 
 
+class UnitFilterSettingsTests(unittest.TestCase):
+    def test_defaults_are_enabled_at_one_bin_and_round_trip(self) -> None:
+        defaults = gui.ViewerSettings()
+
+        self.assertTrue(defaults.rf_filter_units_with_zero_bins)
+        self.assertEqual(defaults.rf_zero_bin_threshold, 1)
+        restored = gui.ViewerSettings.from_mapping(defaults.to_mapping())
+        self.assertEqual(restored, defaults)
+
+    def test_invalid_persisted_filter_fields_fall_back_independently(self) -> None:
+        defaults = gui.ViewerSettings()
+        restored = gui.ViewerSettings.from_mapping(
+            {
+                "schema_version": gui.SETTINGS_SCHEMA_VERSION,
+                "rf_filter_units_with_zero_bins": "yes",
+                "rf_zero_bin_threshold": 0,
+            }
+        )
+
+        self.assertEqual(
+            restored.rf_filter_units_with_zero_bins,
+            defaults.rf_filter_units_with_zero_bins,
+        )
+        self.assertEqual(restored.rf_zero_bin_threshold, 1)
+
+
 class RasterTests(unittest.TestCase):
     def test_matrix_ppm_nearest_neighbor_colors(self) -> None:
         ppm = gui.matrix_ppm_data(

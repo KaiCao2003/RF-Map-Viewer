@@ -1131,7 +1131,9 @@ def _draw_unavailable(
         )
 
 
-def _point_payload(data: Any) -> list[tuple[float, float, str, str]]:
+def _point_payload(
+    data: Any, *, allow_empty: bool = False
+) -> list[tuple[float, float, str, str]]:
     source = _mapping_value(data, "points", "sites", "values")
     if source is None:
         source = data
@@ -1153,7 +1155,7 @@ def _point_payload(data: Any) -> list[tuple[float, float, str, str]]:
             label = str(fields[2]) if len(fields) > 2 else ""
             color = str(fields[3]) if len(fields) > 3 else "#2563eb"
         points.append((x, y, label, color))
-    if not points:
+    if not points and not allow_empty:
         raise FigureExportValidationError("probe points must not be empty")
     return points
 
@@ -1163,11 +1165,14 @@ def _draw_probe_layout(
     box: tuple[int, int, int, int],
     spec: PlotSpec,
 ) -> None:
-    points = _point_payload(spec.data)
+    missing_position = _mapping_value(
+        spec.data, "missingPosition", "missing_position"
+    ) is True
+    points = _point_payload(spec.data, allow_empty=missing_position)
     left, top, right, bottom = box
     padding = max(12, round(min(right - left, bottom - top) * 0.08))
-    x_values = [point[0] for point in points]
-    y_values = [point[1] for point in points]
+    x_values = [point[0] for point in points] or [-1.0, 1.0]
+    y_values = [point[1] for point in points] or [0.0, 1.0]
     x_low, x_high = min(x_values), max(x_values)
     y_low, y_high = min(y_values), max(y_values)
     label_font = _font(max(10, round((bottom - top) * 0.035)))
@@ -1194,6 +1199,19 @@ def _draw_probe_layout(
                 font=label_font,
                 anchor="lm",
             )
+    if missing_position:
+        annotation_font = _font(
+            max(18, round((bottom - top) * 0.09)), bold=True
+        )
+        draw.text(
+            ((left + right) / 2.0, (top + bottom) / 2.0),
+            "NaN",
+            fill="#b42318",
+            font=annotation_font,
+            stroke_width=3,
+            stroke_fill="#ffffff",
+            anchor="mm",
+        )
 
 
 class PillowFigureRenderer:

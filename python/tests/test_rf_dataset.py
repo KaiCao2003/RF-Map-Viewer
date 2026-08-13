@@ -47,6 +47,27 @@ def test_load_lookup_and_half_open_sum(tmp_path: Path) -> None:
     assert not maps[0].spike_counts.flags.writeable
 
 
+def test_zero_spike_bin_count_uses_native_grid_and_half_open_window(
+    tmp_path: Path,
+) -> None:
+    maps = load_rf_maps(
+        _write_dataset(
+            tmp_path,
+            unitsSpikeCounts=[
+                [[[0, 5], [3, 0]]],
+                [[[0, 0], [0, 8]]],
+            ],
+            timeBinEdges=[-0.1, 0.0, 0.2],
+        )
+    )
+
+    first = maps.by_unit_id(41)
+    assert first.zero_spike_spatial_bin_count(-0.1, 0.0) == 1
+    assert first.zero_spike_spatial_bin_count(0.0, 0.2) == 1
+    assert first.zero_spike_spatial_bin_count(-0.1, 0.2) == 0
+    assert maps.by_unit_id(7).zero_spike_spatial_bin_count(-0.1, 0.2) == 1
+
+
 def test_rejects_shape_and_unit_id_errors(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="shape"):
         load_rf_maps(

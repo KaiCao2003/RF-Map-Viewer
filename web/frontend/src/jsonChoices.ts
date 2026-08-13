@@ -1,4 +1,5 @@
 import type { FsEntry } from "./types";
+import { acceptsRemoteFile } from "./fileFormats";
 
 export interface JsonChoice {
   path: string;
@@ -27,7 +28,7 @@ export function mergeJsonChoices(
 ): JsonChoice[] {
   return sortJsonChoices([
     ...discovered
-      .filter((entry) => entry.type === "file" && /\.json$/i.test(entry.name))
+      .filter((entry) => entry.type === "file" && acceptsRemoteFile(entry.name, "rf-json"))
       .map((entry) => ({ path: entry.path, mtime: entry.mtime })),
     { path: currentPath, mtime: null },
     ...recentPaths.map((path) => ({ path, mtime: null })),

@@ -20,6 +20,12 @@ exporter manifest, exact directory contents, and every page checksum; it uses a
 kernel atomic exchange where available or a journaled, crash-recoverable CIFS
 fallback. It never changes a source RF/HD/Probe artifact.
 
+Source browsing and attachment support the current `.rfmap`, `.tc`, and
+`.probe` aliases as well as legacy RF/HD `.json` and probe-position `.csv`
+files. When both companion names exist in the same discovery location,
+`tuning_curves.tc` and `positions.probe` take precedence over their legacy
+counterparts.
+
 ## Verified host assumptions
 
 - Host: Ubuntu 24.04 on `hhw9l84`; Nginx 1.24 and systemd 255 are active.
@@ -46,16 +52,19 @@ systemctl --user enable rfmapping-web.service
 
 `install.sh` creates persistent `releases/`, `cache/`, `exports/`, `tmp/`, and
 `shared/` directories. It creates `shared/rfmapping-web.env` only when absent;
-on upgrade it appends missing `RFMAPPING_OUTPUT_ROOT` and
-`RFMAPPING_FIGURE_EXPORT_ROOT` defaults without replacing operator settings.
+on upgrade it migrates a recognized, unmodified legacy network allowlist and
+appends missing `RFMAPPING_OUTPUT_ROOT` and `RFMAPPING_FIGURE_EXPORT_ROOT`
+defaults. Custom allowlists and other operator settings are preserved.
 It also installs and reloads the user service definition without enabling or
 starting it. The first release is activated atomically and health-checked
 without sudo.
 
-The default `RFMAPPING_ALLOWED_NETWORKS` value permits loopback plus
-`165.124.111.0/24`, `10.103.68.0/24`, and `172.28.0.0/16`; all other forwarded
-clients receive 403. The service binds only `127.0.0.1:3005`, so clients enter
-through Nginx rather than a public application port.
+The default `RFMAPPING_ALLOWED_NETWORKS` value permits loopback, non-routable
+IPv6 link-local clients (`fe80::/10`, used when macOS resolves the server's
+`.local` name), plus `165.124.111.0/24`, `10.103.68.0/24`, and
+`172.28.0.0/16`; all other forwarded clients receive 403. The service binds
+only `127.0.0.1:3005`, so clients enter through Nginx rather than a public
+application port.
 The user service reads the dedicated mode-600
 `~/.config/lab-access-gate/pi-first-name.env`, which contains only
 `MOUSELINE_LOGIN_ANSWER` and the non-secret `MOUSELINE_AUTH_GENERATION` value.
@@ -90,8 +99,9 @@ sudo nginx -t
 sudo systemctl reload nginx
 ```
 
-The Nginx snippet permits loopback plus `165.124.111.0/24`, `10.103.68.0/24`,
-and `172.28.0.0/16` and rejects other clients. The Web app accepts small JSON
+The Nginx snippet permits loopback, non-routable IPv6 link-local clients
+(`fe80::/10`), plus `165.124.111.0/24`, `10.103.68.0/24`, and
+`172.28.0.0/16`, and rejects other clients. The Web app accepts small JSON
 control requests, so this location needs no large-request proxy tuning.
 
 ## Release and rollback

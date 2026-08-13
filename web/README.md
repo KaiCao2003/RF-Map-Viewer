@@ -4,6 +4,18 @@ The Web implementation contains a FastAPI backend in `backend/` and a
 React/Vite frontend in `frontend/`. The backend owns its figure renderer and
 does not import the analysis repository or the Python/Tk implementation.
 
+## Input files
+
+The viewer opens RF mapping JSON payloads saved as `.rfmap` and continues to
+open legacy `.json` files. HD tuning-curve JSON can be attached as `.tc` or as
+the legacy `tuning_curves.json`; automatic discovery prefers
+`tuning_curves.tc`. Spike-position CSV can be attached as `.probe` or as the
+legacy `positions.csv`; automatic discovery prefers `positions.probe`.
+RF maps are primary documents; use the HD and Probe companion choosers after an
+RF map is open.
+These are filename aliases only: the payload schemas are unchanged, and input
+files remain read-only.
+
 ## Install, test, and run
 
 ```sh

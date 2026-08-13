@@ -98,7 +98,8 @@ def _presentation_matrix(value: Any, n_y: int, n_x: int) -> NDArray[np.float64]:
 
     if len(rows) != n_y or any(len(row) != n_x for row in rows):
         raise ValueError(
-            "stimulusPresentationCounts dimensions do not match "
+            "stimulusPresentationCounts x dimension or row count is invalid; "
+            "dimensions do not match "
             "unitsSpikeCountsSize"
         )
 
@@ -205,6 +206,37 @@ class RFMap:
             metadata=self.metadata,
             source_path=self.source_path,
         )
+
+    def zero_spike_spatial_bin_count(
+        self,
+        earlier_s: float,
+        later_s: float,
+    ) -> int:
+        """Count unavailable or zero-spike bins in a summed RF window.
+
+        The count is deliberately evaluated on the native ``(y, x)`` grid,
+        before display rebinning or smoothing.  It therefore stays a stable
+        data-quality property of this RF map for the requested half-open time
+        window.  A source bin with zero presentations is unavailable and is
+        counted even though the validated data contract also requires its
+        spike count to be zero.
+        """
+
+        earlier = _number(earlier_s, "earlier_s")
+        later = _number(later_s, "later_s")
+        if later < earlier:
+            raise ValueError("later_s must be greater than or equal to earlier_s")
+        start = self._edge_index(earlier, "earlier_s")
+        stop = self._edge_index(later, "later_s")
+        if stop < start:
+            raise ValueError("later_s must resolve at or after earlier_s")
+        counts = self.spike_counts[..., start:stop].sum(axis=-1)
+        unavailable = (
+            self.presentation_counts <= 0
+            if self.presentation_counts is not None
+            else np.zeros(counts.shape, dtype=bool)
+        )
+        return int(np.count_nonzero((counts == 0) | unavailable))
 
 
 class RFMapList(Sequence[RFMap]):
@@ -318,7 +350,9 @@ def load_rf_maps(path: str | Path) -> RFMapList:
     n_units, n_y, n_x, n_time_bins = shape
 
     if not _counts_are_numeric(raw["unitsSpikeCounts"]):
-        raise ValueError("unitsSpikeCounts values must be JSON numbers, not bool")
+        raise ValueError(
+            "unitsSpikeCounts value is not numeric; values must be JSON numbers, not bool"
+        )
     try:
         spike_counts = np.asarray(raw["unitsSpikeCounts"])
     except (TypeError, ValueError, OverflowError) as exc:

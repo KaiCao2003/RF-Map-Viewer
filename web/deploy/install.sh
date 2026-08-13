@@ -9,8 +9,9 @@ usage() {
     cat <<'EOF'
 Usage: deploy/install.sh [--install-deps] [--nginx-file]
 
-Initialize the persistent hhw9l84 deployment layout. Existing environment
-configuration is never overwritten.
+Initialize the persistent hhw9l84 deployment layout. Operator-customized
+environment settings are preserved; recognized legacy stock defaults may be
+migrated to their current secure values.
 
   --install-deps  Install requirements.txt into ~/.virtualenvs/rfmapping.
   --nginx-file    Install only the Nginx location snippet. This requires cached
@@ -64,6 +65,13 @@ acquire_deploy_lock
 ENV_TARGET="${RFMAPPING_DEPLOY_ROOT}/shared/rfmapping-web.env"
 if [[ -e "${ENV_TARGET}" ]]; then
     deploy_note "Preserved existing environment file: ${ENV_TARGET}"
+    legacy_allowed_networks='RFMAPPING_ALLOWED_NETWORKS=127.0.0.0/8,::1/128,165.124.111.0/24,10.103.68.0/24,172.28.0.0/16'
+    link_local_allowed_networks='RFMAPPING_ALLOWED_NETWORKS=127.0.0.0/8,::1/128,fe80::/10,165.124.111.0/24,10.103.68.0/24,172.28.0.0/16'
+    if grep -Fxq "${legacy_allowed_networks}" "${ENV_TARGET}"; then
+        sed -i -e "s|^${legacy_allowed_networks}$|${link_local_allowed_networks}|" \
+            "${ENV_TARGET}"
+        deploy_note "Allowed non-routable IPv6 link-local clients in the existing environment file."
+    fi
     if grep -q '^RFMAPPING_UPLOAD_' "${ENV_TARGET}"; then
         sed -i -E \
             -e '/^# Cache and uploads live on hhw9l84/d' \

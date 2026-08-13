@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { canvasFont } from "../canvasFont";
-import { probeUnitsInRegion } from "../probeSelection";
+import { hasProbePosition, probeUnitsInRegion } from "../probeSelection";
 import type { ProbeGeometry } from "../types";
 
 export interface ProbeSelection {
@@ -75,6 +75,12 @@ export default function ProbeLayout({
     () => geometry.units.filter((unit) => availableSet.has(unit.unitId)),
     [availableSet, geometry.units],
   );
+  const positionedUnits = useMemo(() => units.filter(hasProbePosition), [units]);
+  const currentUnit = useMemo(
+    () => units.find((unit) => unit.unitId === currentClusterId) ?? null,
+    [currentClusterId, units],
+  );
+  const currentPositionMissing = currentUnit != null && !hasProbePosition(currentUnit);
 
   useEffect(() => {
     const node = container.current;
@@ -108,8 +114,8 @@ export default function ProbeLayout({
     const context = node.getContext("2d")!;
     context.setTransform(ratio, 0, 0, ratio, 0, 0);
     context.clearRect(0, 0, width, height);
-    const allX = [...geometry.channels.map((item) => item.x), ...units.map((item) => item.x)];
-    const allY = [...geometry.channels.map((item) => item.y), ...units.map((item) => item.y)];
+    const allX = [...geometry.channels.map((item) => item.x), ...positionedUnits.map((item) => item.x)];
+    const allY = [...geometry.channels.map((item) => item.y), ...positionedUnits.map((item) => item.y)];
     const [xMin, xMax] = paddedRange(allX, [-100, 100]);
     const [yMin, yMax] = paddedRange(allY, [0, 4000]);
     const left = width < 320 ? 36 : 44;
@@ -127,7 +133,7 @@ export default function ProbeLayout({
     context.fillText(`${geometry.probe} layout`, 8, 18);
     context.fillStyle = "#667085";
     context.font = canvasFont(10.5);
-    context.fillText(`${geometry.channels.length} channels · ${units.length}/${availableUnitIds.length} RF units positioned`, 8, 36);
+    context.fillText(`${geometry.channels.length} channels · ${positionedUnits.length}/${availableUnitIds.length} RF units positioned`, 8, 36);
     context.fillStyle = "#fbfcfd";
     context.fillRect(next.left, next.top, next.width, next.height);
     context.strokeStyle = "#d0d5dd";
@@ -160,7 +166,7 @@ export default function ProbeLayout({
       context.lineWidth = 1.5;
       context.strokeRect(left, top, right - left, bottom - top);
     }
-    units.forEach((unit) => {
+    positionedUnits.forEach((unit) => {
       const [x, y] = toCanvas(next, unit.x, unit.y);
       const isCurrent = unit.unitId === currentClusterId;
       const isHover = unit.unitId === hoverUnit;
@@ -183,7 +189,7 @@ export default function ProbeLayout({
     context.rotate(-Math.PI / 2);
     context.fillText("depth / y (µm)", 0, 0);
     context.restore();
-  }, [availableUnitIds.length, currentClusterId, draft, geometry, height, hoverUnit, selection, shankColors, units, width]);
+  }, [availableUnitIds.length, currentClusterId, draft, geometry, height, hoverUnit, positionedUnits, selection, shankColors, width]);
 
   const pointerCoordinates = (event: React.PointerEvent<HTMLCanvasElement>) => {
     const bounds = event.currentTarget.getBoundingClientRect();
@@ -194,7 +200,7 @@ export default function ProbeLayout({
     if (!transform.current) return null;
     let nearest: number | null = null;
     let distance = 11;
-    units.forEach((unit) => {
+    positionedUnits.forEach((unit) => {
       const [x, y] = toCanvas(transform.current!, unit.x, unit.y);
       const candidate = Math.hypot(x - screenX, y - screenY);
       if (candidate < distance) {
@@ -258,6 +264,12 @@ export default function ProbeLayout({
           if (next) onSelection(next, probeUnitsInRegion(geometry, next, availableUnitIds));
         }}
       />
+      {currentPositionMissing && (
+        <div className="probe-position-missing" role="status" aria-label={`Cluster ${currentClusterId} probe position is NaN`}>
+          <span>Cluster {currentClusterId} position</span>
+          <strong>NaN</strong>
+        </div>
+      )}
       <div className="probe-toolbar">
         <span>
           {selection

@@ -4,12 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rfmapping-viewer-python"
-version = "1.9.0"
-description = "Native Python/Tk viewer for RF mapping JSON files"
+version = "1.9.2"
+description = "Full native Python/Tk viewer for RF mapping files"
 requires-python = ">=3.11"
 dependencies = [
   "numpy>=2,<3",
   "Pillow>=10,<13",
+  "tkinterdnd2==0.6.2",
 ]
 
 [project.optional-dependencies]

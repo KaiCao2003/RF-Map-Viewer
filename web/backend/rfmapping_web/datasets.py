@@ -22,6 +22,7 @@ except ImportError:  # pragma: no cover - production installs the CFFI backend.
     from ijson.backends import python as IJSON_BACKEND
 
 from .companions import CompanionSet, discover_companions
+from .paths import has_supported_rf_suffix
 
 
 class DatasetValidationError(ValueError):
@@ -462,8 +463,10 @@ class DatasetStore:
         public_source_path: str,
         scope_root: Path,
     ) -> DatasetRecord:
-        if source.suffix.casefold() != ".json" or source.name.startswith("._"):
-            raise DatasetValidationError("RF dataset must be a non-AppleDouble JSON file")
+        if not has_supported_rf_suffix(source) or source.name.startswith("._"):
+            raise DatasetValidationError(
+                "RF dataset must be a non-AppleDouble .rfmap or .json file"
+            )
         cache = self.cache.get_or_build(source)
         dataset_id = uuid.uuid4().hex
         record = DatasetRecord(

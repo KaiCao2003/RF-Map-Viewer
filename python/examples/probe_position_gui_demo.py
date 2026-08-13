@@ -642,7 +642,7 @@ class DemoApp(tk.Tk):
     def _build_menu(self) -> None:
         menu = tk.Menu(self)
         file_menu = tk.Menu(menu, tearoff=False)
-        file_menu.add_command(label="Open RF mapping JSON…", accelerator="⌘O", command=self.open_json)
+        file_menu.add_command(label="Open RF mapping file…", accelerator="⌘O", command=self.open_json)
         file_menu.add_separator()
         file_menu.add_command(label="Close Window", accelerator="⌘W", command=self.destroy)
         menu.add_cascade(label="File", menu=file_menu)
@@ -679,7 +679,7 @@ class DemoApp(tk.Tk):
 
     def open_json(self) -> None:
         initial = Path(__file__).resolve().parent / "data"
-        path_text = filedialog.askopenfilename(parent=self, title="Open RF mapping JSON in new window", initialdir=str(initial if initial.exists() else Path.cwd()), filetypes=(("RF mapping JSON", "*.json"), ("All files", "*")))
+        path_text = filedialog.askopenfilename(parent=self, title="Open RF mapping file in new window", initialdir=str(initial if initial.exists() else Path.cwd()), filetypes=(("RF mapping files", "*.rfmap *.json"), ("All files", "*")))
         if not path_text:
             return
         path = Path(path_text)
@@ -689,7 +689,7 @@ class DemoApp(tk.Tk):
             pool = raw.get("unitPool", [])
             json_units = {int(value) for value in pool} if pool else None
         except (OSError, ValueError, TypeError) as exc:
-            messagebox.showerror("Could not open JSON", str(exc), parent=self)
+            messagebox.showerror("Could not open RF map", str(exc), parent=self)
             return
         window = tk.Toplevel(self)
         window.title(f"RF Mapping Explorer — {path.name}")
@@ -722,4 +722,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

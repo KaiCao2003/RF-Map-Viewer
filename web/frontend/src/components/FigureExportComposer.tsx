@@ -222,7 +222,7 @@ function UnitPicker({
         })}
         {!visible.length && <div className="figure-empty-list">No matching units</div>}
       </div>
-      <p className="figure-order-note">Click a row for one unit; Command/Ctrl-click toggles; Shift-click selects a range. Checkboxes toggle units. Export order always follows the original JSON unitPool.</p>
+      <p className="figure-order-note">Click a row for one unit; Command/Ctrl-click toggles; Shift-click selects a range. Checkboxes toggle units. Export order always follows the original RF unitPool.</p>
     </aside>
   );
 }

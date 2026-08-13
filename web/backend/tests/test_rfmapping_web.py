@@ -27,7 +27,7 @@ from rfmapping_web import datasets as datasets_module
 from rfmapping_web import figure_exports as figure_exports_module
 from rfmapping_web.app import create_app
 from rfmapping_web.companions import load_tuning_curve
-from rfmapping_web.config import Settings
+from rfmapping_web.config import DEFAULT_ALLOWED_NETWORKS, Settings
 from rfmapping_web.datasets import DatasetValidationError
 from rfmapping_web.exports import CSV_HEADERS
 
@@ -274,6 +274,12 @@ def test_network_filter_precedes_login_and_health_is_loopback_only(app) -> None:
         login = allowed_remote.get("/login")
         assert login.status_code == 200
 
+    # Browsers resolving fsmhhw9l84.local through mDNS may prefer IPv6. These
+    # non-routable link-local clients must behave like the allowed IPv4 LANs.
+    with TestClient(app, client=("fe80::ca0:bb18:1016:bcd4", 50000)) as link_local:
+        assert link_local.get("/api/health").status_code == 401
+        assert link_local.get("/login").status_code == 200
+
     with TestClient(app, client=("127.0.0.1", 50000)) as proxied_loopback:
         response = proxied_loopback.get(
             "/api/health",
@@ -284,6 +290,34 @@ def test_network_filter_precedes_login_and_health_is_loopback_only(app) -> None:
     with TestClient(app, client=("192.0.2.10", 50000)) as blocked:
         assert blocked.get("/login").status_code == 403
         assert blocked.get("/api/health").status_code == 403
+
+    with TestClient(app, client=("2001:db8::10", 50000)) as blocked_ipv6:
+        assert blocked_ipv6.get("/login").status_code == 403
+        assert blocked_ipv6.get("/api/health").status_code == 403
+
+
+def test_deployment_network_defaults_include_ipv6_link_local() -> None:
+    project_root = next(
+        parent
+        for parent in Path(__file__).resolve().parents
+        if (parent / "deploy" / "nginx-rfmapping-location.conf").is_file()
+    )
+    env_example = (project_root / "deploy" / "rfmapping-web.env.example").read_text(
+        encoding="utf-8"
+    )
+    env_allowlist = next(
+        line.split("=", 1)[1]
+        for line in env_example.splitlines()
+        if line.startswith("RFMAPPING_ALLOWED_NETWORKS=")
+    )
+    assert tuple(env_allowlist.split(",")) == DEFAULT_ALLOWED_NETWORKS
+
+    nginx = (project_root / "deploy" / "nginx-rfmapping-location.conf").read_text(
+        encoding="utf-8"
+    )
+    assert nginx.count("allow fe80::/10;") == 2
+    assert nginx.count("deny all;") == 2
+    assert "allow ::/0;" not in nginx
 
 
 def test_health_and_lazy_browse_are_root_confined(
@@ -352,6 +386,22 @@ def test_health_and_lazy_browse_are_root_confined(
         ]
         assert second.json()["nextCursor"] is None
 
+        write_json(settings.rf_root / "alias.rfmap")
+        write_json(settings.rf_root / "session.tc", tuning_payload((11,)))
+        (settings.rf_root / "units.probe").write_text(
+            "unit_index,unit_id,x_um,y_um\n0,11,3,4\n", encoding="utf-8"
+        )
+        rf_files = client.get(
+            "/api/fs/list",
+            params={"path": str(settings.rf_root), "kind": "rf-json"},
+        )
+        assert rf_files.status_code == 200
+        assert [
+            item["name"]
+            for item in rf_files.json()["entries"]
+            if item["type"] == "file"
+        ] == ["A.json", "alias.rfmap", "z.json"]
+
         tuning_files = client.get(
             "/api/fs/list",
             params={"path": str(settings.rf_root), "kind": "tuning-json"},
@@ -361,7 +411,7 @@ def test_health_and_lazy_browse_are_root_confined(
             item["name"]
             for item in tuning_files.json()["entries"]
             if item["type"] == "file"
-        ] == ["tuning_curves.json"]
+        ] == ["session.tc", "tuning_curves.json"]
         position_files = client.get(
             "/api/fs/list",
             params={"path": str(settings.rf_root), "kind": "positions-csv"},
@@ -371,7 +421,7 @@ def test_health_and_lazy_browse_are_root_confined(
             item["name"]
             for item in position_files.json()["entries"]
             if item["type"] == "file"
-        ] == ["positions.csv"]
+        ] == ["positions.csv", "units.probe"]
         assert all(
             item["name"] != "channels.csv" for item in position_files.json()["entries"]
         )
@@ -541,6 +591,93 @@ def test_open_metadata_binary_probe_and_hd(app, settings: Settings) -> None:
     assert cache_files[0].stat().st_size == 2 * 2 * 2 * 3 * 8
 
 
+def test_current_extensions_open_and_win_companion_discovery(
+    app, settings: Settings
+) -> None:
+    session_root = settings.rf_root / "Kai" / "260630" / "260630_3"
+    data_root = session_root / "data"
+    source = write_json(
+        data_root / "rfmapping" / "good" / "window" / "ProbeA" / "rf.rfmap"
+    )
+    positions_root = data_root / "spike_position" / "ProbeA"
+    positions_root.mkdir(parents=True)
+    (positions_root / "positions.probe").write_text(
+        "unit_index,unit_id,x_um,y_um\n0,11,101,201\n1,22,102,202\n",
+        encoding="utf-8",
+    )
+    (positions_root / "positions.csv").write_text(
+        "unit_index,unit_id,x_um,y_um\n0,11,1,2\n1,22,3,4\n",
+        encoding="utf-8",
+    )
+    tuning_root = (
+        settings.rf_root
+        / "Kai"
+        / "260630"
+        / "260630_1"
+        / "data"
+        / "tuning_curves"
+        / "ProbeA"
+    )
+    current_tuning = tuning_payload((11, 22))
+    current_tuning["metadata"]["session"] = "current-tc"  # type: ignore[index]
+    write_json(tuning_root / "tuning_curves.tc", current_tuning)
+    legacy_tuning = tuning_payload((11, 22))
+    legacy_tuning["metadata"]["session"] = "legacy-json"  # type: ignore[index]
+    write_json(tuning_root / "tuning_curves.json", legacy_tuning)
+
+    with authenticated_client(app) as client:
+        metadata = _open(client, source)
+        assert metadata["name"] == "rf.rfmap"
+        assert metadata["capabilities"] == {
+            "probe": True,
+            "hd": True,
+            "normalized": True,
+        }
+        probe = client.get(f"/api/datasets/{metadata['id']}/probe")
+        assert probe.status_code == 200, probe.text
+        assert probe.json()["units"][0] == {"unitId": 11, "x": 101.0, "y": 201.0}
+        tuning = client.get(f"/api/datasets/{metadata['id']}/hd")
+        assert tuning.status_code == 200, tuning.text
+        assert tuning.json()["sourcePath"].endswith("/tuning_curves.tc")
+        assert tuning.json()["metadata"]["session"] == "current-tc"
+
+
+def test_input_suffix_validation_accepts_aliases_and_rejects_other_files(
+    app, settings: Settings
+) -> None:
+    source = write_json(settings.rf_root / "manual" / "ProbeA" / "rf.rfmap")
+    invalid_rf = write_json(settings.rf_root / "manual" / "ProbeA" / "rf.txt")
+    tuning = write_json(settings.rf_root / "manual" / "curves.tc", tuning_payload((11,)))
+    invalid_tuning = write_json(
+        settings.rf_root / "manual" / "curves.txt", tuning_payload((11,))
+    )
+    probe = settings.rf_root / "manual" / "locations.probe"
+    probe.write_text(
+        "unit_index,unit_id,x_um,y_um\n0,11,1,2\n", encoding="utf-8"
+    )
+    invalid_probe = settings.rf_root / "manual" / "locations.txt"
+    invalid_probe.write_text(probe.read_text(encoding="utf-8"), encoding="utf-8")
+
+    with authenticated_client(app) as client:
+        metadata = _open(client, source)
+        dataset_id = metadata["id"]
+        assert client.post(
+            "/api/datasets/open", json={"path": str(invalid_rf)}
+        ).status_code == 422
+        assert client.get(
+            f"/api/datasets/{dataset_id}/hd", params={"path": str(tuning)}
+        ).status_code == 200
+        assert client.get(
+            f"/api/datasets/{dataset_id}/hd", params={"path": str(invalid_tuning)}
+        ).status_code == 422
+        assert client.get(
+            f"/api/datasets/{dataset_id}/probe", params={"path": str(probe)}
+        ).status_code == 200
+        assert client.get(
+            f"/api/datasets/{dataset_id}/probe", params={"path": str(invalid_probe)}
+        ).status_code == 422
+
+
 def test_hd_discovery_uses_first_numeric_session_for_same_date(
     app, settings: Settings
 ) -> None:
@@ -693,6 +830,91 @@ def test_probe_positions_only_and_invalid_channels_fall_back_to_units(
             ).status_code
             == 400
         )
+
+
+def test_probe_geometry_preserves_explicitly_unpositioned_units(
+    app, settings: Settings
+) -> None:
+    data_root = settings.rf_root / "Kai" / "260619" / "260619_1" / "data"
+    source = write_json(
+        data_root / "rfmapping" / "good" / "window" / "ProbeA" / "rf.json"
+    )
+    positions = data_root / "spike_position" / "ProbeA" / "positions.csv"
+    positions.parent.mkdir(parents=True)
+    positions.write_text(
+        "unit_index,unit_id,x_um,y_um\n"
+        "0,11,10,20\n"
+        "1,22,nan,nan\n"
+        "2,999,30,40\n",
+        encoding="utf-8",
+    )
+    channels = data_root / "waveform" / "ProbeA" / "channels.csv"
+    channels.parent.mkdir(parents=True)
+    channels.write_text(
+        "channel_index,channel_id,raw_channel_index,x_um,y_um,shank_id\n"
+        "0,0,0,5,15,0\n",
+        encoding="utf-8",
+    )
+
+    with authenticated_client(app) as client:
+        metadata = _open(client, source)
+        assert metadata["capabilities"]["probe"] is True
+        geometry = client.get(f"/api/datasets/{metadata['id']}/probe")
+        assert geometry.status_code == 200, geometry.text
+        assert geometry.json()["units"] == [
+            {"unitId": 11, "x": 10.0, "y": 20.0},
+            {"unitId": 22, "x": None, "y": None},
+        ]
+        assert [channel["channelId"] for channel in geometry.json()["channels"]] == [0]
+
+
+@pytest.mark.parametrize(
+    ("x_value", "y_value"),
+    (("nan", "20"), ("10", "nan"), ("inf", "inf"), ("bad", "bad")),
+)
+def test_probe_geometry_rejects_malformed_coordinate_pairs(
+    app, settings: Settings, x_value: str, y_value: str
+) -> None:
+    data_root = settings.rf_root / "Kai" / "260620" / "260620_1" / "data"
+    source = write_json(
+        data_root / "rfmapping" / "good" / "window" / "ProbeA" / "rf.json"
+    )
+    positions = data_root / "spike_position" / "ProbeA" / "positions.csv"
+    positions.parent.mkdir(parents=True)
+    positions.write_text(
+        "unit_index,unit_id,x_um,y_um\n"
+        f"0,11,{x_value},{y_value}\n",
+        encoding="utf-8",
+    )
+
+    with authenticated_client(app) as client:
+        metadata = _open(client, source)
+        geometry = client.get(f"/api/datasets/{metadata['id']}/probe")
+        assert geometry.status_code == 422
+        assert "positions.csv value on row 2" in geometry.json()["detail"]
+
+
+def test_probe_geometry_still_rejects_duplicate_unpositioned_unit_ids(
+    app, settings: Settings
+) -> None:
+    data_root = settings.rf_root / "Kai" / "260621" / "260621_1" / "data"
+    source = write_json(
+        data_root / "rfmapping" / "good" / "window" / "ProbeA" / "rf.json"
+    )
+    positions = data_root / "spike_position" / "ProbeA" / "positions.csv"
+    positions.parent.mkdir(parents=True)
+    positions.write_text(
+        "unit_index,unit_id,x_um,y_um\n"
+        "0,11,nan,nan\n"
+        "1,11,10,20\n",
+        encoding="utf-8",
+    )
+
+    with authenticated_client(app) as client:
+        metadata = _open(client, source)
+        geometry = client.get(f"/api/datasets/{metadata['id']}/probe")
+        assert geometry.status_code == 422
+        assert geometry.json()["detail"] == "Duplicate unit_id 11 in positions.csv"
 
 
 def test_probe_discovery_never_falls_back_past_current_session_data(
@@ -1585,6 +1807,42 @@ def test_probe_points_emit_channels_and_only_the_current_export_unit(
         ]
 
 
+def test_probe_export_keeps_channel_background_and_labels_nan_position(
+    app, settings: Settings
+) -> None:
+    source = write_json(settings.rf_root / "probe-nan.json")
+    store = app.state.services.datasets
+    with authenticated_client(app) as client:
+        opened = _open(client, source)
+    record = store.get(opened["id"])
+    renderer = figure_exports_module.FigurePageRenderer(
+        record,
+        tuning=None,
+        probe={
+            "probe": "ProbeA",
+            "channels": [{"x": 10.0, "y": 20.0}],
+            "units": [{"unitId": 11, "x": None, "y": None}],
+        },
+    )
+    _unit_index, counts = store.unit_array(record, 11)
+    placeholders: list[str] = []
+
+    plot = renderer._shared_spec(
+        11,
+        counts,
+        figure_exports_module.FigurePlot("probe", {}),
+        placeholders,
+    )
+
+    assert placeholders == []
+    assert plot.data == {
+        "points": [
+            {"x": 10.0, "y": 20.0, "label": "", "color": "#94a3b8"}
+        ],
+        "missingPosition": True,
+    }
+
+
 def test_timeline_figure_payload_preserves_selection_and_active_group(
     app, settings: Settings
 ) -> None:
@@ -1709,9 +1967,9 @@ def test_figure_preview_and_final_use_explicit_current_companion_paths(
     source = write_json(settings.rf_root / "rf.json")
     attached = settings.rf_root / "attached"
     tuning_path = write_json(
-        attached / "tuning_curves.json", tuning_payload((11, 22))
+        attached / "tuning_curves.tc", tuning_payload((11, 22))
     )
-    positions_path = attached / "positions.csv"
+    positions_path = attached / "positions.probe"
     positions_path.write_text(
         "unit_index,unit_id,x_um,y_um\n0,11,10,20\n1,22,30,40\n",
         encoding="utf-8",

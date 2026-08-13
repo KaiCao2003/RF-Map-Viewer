@@ -23,7 +23,7 @@ APP_BINARY="$APP_MACOS/$EXECUTABLE_NAME"
 INFO_PLIST="$APP_CONTENTS/Info.plist"
 ARCHIVE_PATH="$DIST_DIR/RF_Map_Viewer-macos-arm64.zip"
 DATA_SOURCE="$ROOT_DIR/data"
-DATA_JSON_COUNT=0
+DATA_RF_COUNT=0
 ICON_MASTER="${RF_MAPPING_ICON_SOURCE:-$ROOT_DIR/assets/rf-mapping-viewer-icon-1024.png}"
 PREBUILT_ICON_ICNS="${RF_MAPPING_ICON_ICNS:-}"
 WORK_DIR="${RF_MAPPING_SWIFT_BUILD_WORK:-$HOME/Library/Caches/rfmapping-swift-arm64}"
@@ -90,7 +90,10 @@ build_architecture() {
 require_file "$ROOT_DIR/Package.swift"
 require_file "$ICON_MASTER"
 if [[ -d "$DATA_SOURCE" ]]; then
-  DATA_JSON_COUNT="$(find "$DATA_SOURCE" -type f -name '*.json' | wc -l | tr -d '[:space:]')"
+  DATA_RF_COUNT="$(
+    find "$DATA_SOURCE" -type f \( -iname '*.rfmap' -o -iname '*.json' \) \
+      | wc -l | tr -d '[:space:]'
+  )"
 fi
 [[ -x "$SWIFT_BIN" ]] || fail "Swift compiler not executable: $SWIFT_BIN"
 [[ -d "$MACOS_SDK" ]] || fail "macOS SDK not found: $MACOS_SDK"
@@ -131,7 +134,7 @@ else
 fi
 cp "$ICON_ICNS" "$APP_RESOURCES/RFMappingViewer.icns"
 
-if [[ "$DATA_JSON_COUNT" -gt 0 ]]; then
+if [[ "$DATA_RF_COUNT" -gt 0 ]]; then
   mkdir -p "$APP_RESOURCES/data"
   /usr/bin/rsync -a --exclude='.DS_Store' --exclude='._*' "$DATA_SOURCE/" "$APP_RESOURCES/data/"
 fi
@@ -150,18 +153,74 @@ cat >"$INFO_PLIST" <<PLIST
     <dict>
       <key>CFBundleTypeExtensions</key>
       <array>
+        <string>rfmap</string>
         <string>json</string>
       </array>
       <key>CFBundleTypeName</key>
-      <string>RF Mapping JSON</string>
+      <string>RF Mapping Data</string>
       <key>CFBundleTypeRole</key>
       <string>Viewer</string>
       <key>LSHandlerRank</key>
       <string>Alternate</string>
       <key>LSItemContentTypes</key>
       <array>
+        <string>org.local.rfmapping.rfmap</string>
         <string>public.json</string>
       </array>
+    </dict>
+  </array>
+  <key>UTExportedTypeDeclarations</key>
+  <array>
+    <dict>
+      <key>UTTypeConformsTo</key>
+      <array>
+        <string>public.json</string>
+      </array>
+      <key>UTTypeDescription</key>
+      <string>RF Mapping Data</string>
+      <key>UTTypeIdentifier</key>
+      <string>org.local.rfmapping.rfmap</string>
+      <key>UTTypeTagSpecification</key>
+      <dict>
+        <key>public.filename-extension</key>
+        <array>
+          <string>rfmap</string>
+        </array>
+      </dict>
+    </dict>
+    <dict>
+      <key>UTTypeConformsTo</key>
+      <array>
+        <string>public.json</string>
+      </array>
+      <key>UTTypeDescription</key>
+      <string>RF Tuning Curve</string>
+      <key>UTTypeIdentifier</key>
+      <string>org.local.rfmapping.tc</string>
+      <key>UTTypeTagSpecification</key>
+      <dict>
+        <key>public.filename-extension</key>
+        <array>
+          <string>tc</string>
+        </array>
+      </dict>
+    </dict>
+    <dict>
+      <key>UTTypeConformsTo</key>
+      <array>
+        <string>public.comma-separated-values-text</string>
+      </array>
+      <key>UTTypeDescription</key>
+      <string>RF Probe Positions</string>
+      <key>UTTypeIdentifier</key>
+      <string>org.local.rfmapping.probe</string>
+      <key>UTTypeTagSpecification</key>
+      <dict>
+        <key>public.filename-extension</key>
+        <array>
+          <string>probe</string>
+        </array>
+      </dict>
     </dict>
   </array>
   <key>CFBundleExecutable</key>
@@ -202,15 +261,26 @@ verify_plist_value LSMinimumSystemVersion "$MIN_SYSTEM_VERSION"
 verify_plist_value LSMultipleInstancesProhibited true
 verify_plist_value CFBundleDocumentTypes:0:CFBundleTypeRole Viewer
 verify_plist_value CFBundleDocumentTypes:0:LSHandlerRank Alternate
-verify_plist_value CFBundleDocumentTypes:0:LSItemContentTypes:0 public.json
-verify_plist_value CFBundleDocumentTypes:0:CFBundleTypeExtensions:0 json
+verify_plist_value CFBundleDocumentTypes:0:LSItemContentTypes:0 org.local.rfmapping.rfmap
+verify_plist_value CFBundleDocumentTypes:0:LSItemContentTypes:1 public.json
+verify_plist_value CFBundleDocumentTypes:0:CFBundleTypeExtensions:0 rfmap
+verify_plist_value CFBundleDocumentTypes:0:CFBundleTypeExtensions:1 json
+verify_plist_value UTExportedTypeDeclarations:0:UTTypeIdentifier org.local.rfmapping.rfmap
+verify_plist_value UTExportedTypeDeclarations:0:UTTypeTagSpecification:public.filename-extension:0 rfmap
+verify_plist_value UTExportedTypeDeclarations:1:UTTypeIdentifier org.local.rfmapping.tc
+verify_plist_value UTExportedTypeDeclarations:1:UTTypeTagSpecification:public.filename-extension:0 tc
+verify_plist_value UTExportedTypeDeclarations:2:UTTypeIdentifier org.local.rfmapping.probe
+verify_plist_value UTExportedTypeDeclarations:2:UTTypeTagSpecification:public.filename-extension:0 probe
 
 require_nonempty_file "$APP_BINARY"
 require_nonempty_file "$APP_RESOURCES/RFMappingViewer.icns"
-if [[ "$DATA_JSON_COUNT" -gt 0 ]]; then
+if [[ "$DATA_RF_COUNT" -gt 0 ]]; then
   [[ -d "$APP_RESOURCES/data" ]] || fail "Bundled data directory is missing"
-  BUNDLED_JSON_COUNT="$(find "$APP_RESOURCES/data" -type f -name '*.json' | wc -l | tr -d '[:space:]')"
-  [[ "$BUNDLED_JSON_COUNT" == "$DATA_JSON_COUNT" ]] || fail "Bundled JSON resource count does not match source"
+  BUNDLED_RF_COUNT="$(
+    find "$APP_RESOURCES/data" -type f \( -iname '*.rfmap' -o -iname '*.json' \) \
+      | wc -l | tr -d '[:space:]'
+  )"
+  [[ "$BUNDLED_RF_COUNT" == "$DATA_RF_COUNT" ]] || fail "Bundled RF mapping resource count does not match source"
   diff -qr -x '.DS_Store' -x '._*' "$DATA_SOURCE" "$APP_RESOURCES/data" >/dev/null \
     || fail "Bundled data does not match $DATA_SOURCE"
 fi

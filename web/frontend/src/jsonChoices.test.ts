@@ -8,16 +8,19 @@ import {
 import type { FsEntry } from "./types";
 
 describe("Current JSON choices", () => {
-  it("filters JSON files, deduplicates fallbacks, and sorts by mtime descending", () => {
+  it("filters RF files, deduplicates fallbacks, and sorts by mtime descending", () => {
     const discovered: FsEntry[] = [
       { name: "old.json", path: "/mnt/senzailab/session/old.json", type: "file", size: 1, mtime: 100 },
       { name: "notes.txt", path: "/mnt/senzailab/session/notes.txt", type: "file", size: 1, mtime: 500 },
       { name: "new.JSON", path: "/mnt/senzailab/session/new.JSON", type: "file", size: 1, mtime: 300 },
+      { name: "current.rfmap", path: "/mnt/senzailab/session/current.rfmap", type: "file", size: 1, mtime: 400 },
+      { name: "tuning_curves.json", path: "/mnt/senzailab/session/tuning_curves.json", type: "file", size: 1, mtime: 600 },
     ];
     expect(mergeJsonChoices(discovered, "/mnt/senzailab/session/old.json", [
       "/mnt/senzailab/recent.json",
       "/mnt/senzailab/session/new.JSON",
     ])).toEqual([
+      { path: "/mnt/senzailab/session/current.rfmap", mtime: 400 },
       { path: "/mnt/senzailab/session/new.JSON", mtime: 300 },
       { path: "/mnt/senzailab/session/old.json", mtime: 100 },
       { path: "/mnt/senzailab/recent.json", mtime: null },

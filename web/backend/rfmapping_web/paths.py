@@ -13,6 +13,21 @@ class PathAccessError(ValueError):
 
 
 FILE_KINDS = {"rf-json", "tuning-json", "positions-csv"}
+RF_MAPPING_SUFFIXES = frozenset({".rfmap", ".json"})
+TUNING_CURVE_SUFFIXES = frozenset({".tc", ".json"})
+PROBE_POSITION_SUFFIXES = frozenset({".probe", ".csv"})
+
+
+def has_supported_rf_suffix(path: str | Path) -> bool:
+    return Path(path).suffix.casefold() in RF_MAPPING_SUFFIXES
+
+
+def has_supported_tuning_suffix(path: str | Path) -> bool:
+    return Path(path).suffix.casefold() in TUNING_CURVE_SUFFIXES
+
+
+def has_supported_probe_suffix(path: str | Path) -> bool:
+    return Path(path).suffix.casefold() in PROBE_POSITION_SUFFIXES
 
 
 def canonical_root(root: Path) -> Path:
@@ -99,11 +114,11 @@ def _decode_cursor(cursor: str | None) -> tuple[int, str, str] | None:
 def _matches_file_kind(name: str, kind: str) -> bool:
     folded = name.casefold()
     if kind == "rf-json":
-        return folded.endswith(".json") and folded != "tuning_curves.json"
+        return has_supported_rf_suffix(name) and folded != "tuning_curves.json"
     if kind == "tuning-json":
-        return folded == "tuning_curves.json"
+        return folded.endswith(".tc") or folded == "tuning_curves.json"
     if kind == "positions-csv":
-        return folded == "positions.csv"
+        return folded.endswith(".probe") or folded == "positions.csv"
     raise PathAccessError(f"Unsupported file kind: {kind}")
 
 

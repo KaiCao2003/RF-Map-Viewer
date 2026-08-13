@@ -5,6 +5,7 @@ import type {
   HdUnitArtifact,
   ProbeGeometry,
 } from "./types";
+import type { RemoteFileKind } from "./fileFormats";
 import {
   FIGURE_TYPE_IDS,
   isFigureTypeId,
@@ -96,6 +97,30 @@ function finiteNumber(value: unknown, fallback = 0): number {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function requiredFiniteNumber(value: unknown, label: string): number {
+  if (value == null || typeof value === "boolean" || (typeof value === "string" && value.trim() === "")) {
+    throw new ApiError(`${label} must be finite.`);
+  }
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) throw new ApiError(`${label} must be finite.`);
+  return parsed;
+}
+
+type ProbeUnitPosition = { x: number; y: number } | { x: null; y: null };
+
+function probeUnitPosition(item: UnknownRecord): ProbeUnitPosition {
+  const xRaw = first(item, "x");
+  const yRaw = first(item, "y", "depth");
+  if (xRaw === null && yRaw === null) return { x: null, y: null };
+  if (xRaw == null || yRaw == null) {
+    throw new ApiError("Probe unit x and y must both be finite or both be null.");
+  }
+  return {
+    x: requiredFiniteNumber(xRaw, "Probe unit x"),
+    y: requiredFiniteNumber(yRaw, "Probe unit y"),
+  };
+}
+
 async function errorMessage(response: Response): Promise<string> {
   try {
     const payload = await response.clone().json();
@@ -174,7 +199,7 @@ export async function listRemoteFiles(
   path = "/mnt/senzailab",
   cursor?: string,
   signal?: AbortSignal,
-  kind: "rf-json" | "tuning-json" | "positions-csv" = "rf-json",
+  kind: RemoteFileKind = "rf-json",
 ): Promise<FsPage> {
   const url = new URL("fs/list", apiBase);
   url.searchParams.set("path", path);
@@ -356,6 +381,7 @@ export async function getProbeGeometry(
   const payload = record(await response.json());
   const channels = Array.isArray(payload.channels) ? payload.channels : [];
   const units = Array.isArray(payload.units) ? payload.units : [];
+  const seenUnitIds = new Set<number>();
   return {
     probe: String(first(payload, "probe", "probeName", "probe_name") ?? "Probe"),
     channels: channels.map((raw) => {
@@ -369,10 +395,17 @@ export async function getProbeGeometry(
     }),
     units: units.map((raw) => {
       const item = record(raw);
+      const position = probeUnitPosition(item);
+      const unitId = requiredFiniteNumber(
+        first(item, "unitId", "unit_id", "clusterId", "cluster_id"),
+        "Probe unit ID",
+      );
+      if (!Number.isInteger(unitId)) throw new ApiError("Probe unit ID must be an integer.");
+      if (seenUnitIds.has(unitId)) throw new ApiError(`Duplicate Probe unit ID ${unitId}.`);
+      seenUnitIds.add(unitId);
       return {
-        unitId: finiteNumber(first(item, "unitId", "unit_id", "clusterId", "cluster_id")),
-        x: finiteNumber(first(item, "x")),
-        y: finiteNumber(first(item, "y", "depth")),
+        unitId,
+        ...position,
       };
     }),
   };

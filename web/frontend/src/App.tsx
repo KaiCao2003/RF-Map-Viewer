@@ -141,8 +141,8 @@ function SourceChooser({
   error,
   initialPath,
   kind = "rf-json",
-  title = "Open RF mapping JSON",
-  busyLabel = "Opening JSON…",
+  title = "Open RF mapping file (.rfmap or .json)",
+  busyLabel = "Opening RF mapping file…",
   onClose,
   onRemote,
 }: {
@@ -267,7 +267,7 @@ export default function App() {
       commitDataset(next);
       window.history.replaceState(null, "", urlForJsonSource(window.location.href, next.sourcePath));
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Could not open JSON.");
+      setError(caught instanceof Error ? caught.message : "Could not open RF mapping file.");
     } finally {
       setSourceBusy(false);
     }
@@ -698,9 +698,9 @@ export default function App() {
 
           <hr />
           <section className="sidebar-block">
-            <h2>Current JSON</h2>
+            <h2>Current RF map</h2>
             <div className="current-json-row">
-              <select value={meta.sourcePath} title={meta.sourcePath} onChange={(event) => void openRemote(event.target.value)} aria-label="Current JSON">
+              <select value={meta.sourcePath} title={meta.sourcePath} onChange={(event) => void openRemote(event.target.value)} aria-label="Current RF map">
                 {(jsonChoices.length ? jsonChoices : mergeJsonChoices([], meta.sourcePath, recentPaths)).map((choice) => (
                   <option key={choice.path} value={choice.path}>{jsonChoiceLabel(choice, parentDirectory(meta.sourcePath))}</option>
                 ))}
@@ -713,7 +713,7 @@ export default function App() {
           <section className="sidebar-block probe-sidebar-block">
             <div className="probe-sidebar-heading">
               <h2>Probe Layout</h2>
-              <button type="button" onClick={() => setProbeChooserOpen(true)}>Choose positions.csv…</button>
+              <button type="button" onClick={() => setProbeChooserOpen(true)}>Choose .probe / positions.csv…</button>
             </div>
             {probe ? (
               <ProbeLayout
@@ -738,7 +738,7 @@ export default function App() {
               <div className="probe-unavailable">
                 {probeBusy || (meta.capabilities.probe && !probeError)
                   ? <><span className="spinner small" /> Loading probe geometry…</>
-                  : <><strong>Probe layout unavailable</strong><span>{probeError || "Choose the matching remote positions.csv."}</span><button type="button" onClick={() => setProbeChooserOpen(true)}>Choose positions.csv…</button></>}
+                  : <><strong>Probe layout unavailable</strong><span>{probeError || "Choose the matching remote .probe or positions.csv file."}</span><button type="button" onClick={() => setProbeChooserOpen(true)}>Choose .probe / positions.csv…</button></>}
               </div>
             )}
             {probePositionsPath && <p className="companion-path" title={probePositionsPath}>{probePositionsPath}</p>}
@@ -913,7 +913,7 @@ export default function App() {
         <SourceChooser
           overlay
           kind="positions-csv"
-          title="Attach Probe positions.csv"
+          title="Attach Probe .probe or positions.csv"
           busyLabel="Loading Probe positions…"
           busy={probeBusy}
           error={probeError}
@@ -926,7 +926,7 @@ export default function App() {
         <SourceChooser
           overlay
           kind="tuning-json"
-          title="Attach HD tuning_curves.json"
+          title="Attach HD .tc or tuning_curves.json"
           busyLabel="Loading HD tuning data…"
           busy={hdLoading}
           error={hdError}
@@ -973,7 +973,7 @@ export default function App() {
         <div className="modal-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) setHelpOpen(false); }}>
           <div className="info-dialog" role="dialog" aria-modal="true" aria-label="Keyboard Shortcuts">
             <header><strong>Keyboard Shortcuts</strong><button type="button" aria-label="Close" onClick={() => setHelpOpen(false)}>×</button></header>
-            <pre>← / → or [ / ]   Previous / next unit{"\n"}↑ / ↓   Previous / next timeline bin{"\n"}Shift+, / Shift+.   Time resolution −/+ 1 ms{"\n"}1–3   Switch RF / Delay-RGB / Timeline{"\n"}F   Invert Y{"\n"}P   Cycle palette{"\n"}Esc   Clear Probe region; otherwise show full Timeline{"\n"}Command-O   Open JSON in this viewer{"\n"}Command-E   Open Figure Export Composer</pre>
+            <pre>← / → or [ / ]   Previous / next unit{"\n"}↑ / ↓   Previous / next timeline bin{"\n"}Shift+, / Shift+.   Time resolution −/+ 1 ms{"\n"}1–3   Switch RF / Delay-RGB / Timeline{"\n"}F   Invert Y{"\n"}P   Cycle palette{"\n"}Esc   Clear Probe region; otherwise show full Timeline{"\n"}Command-O   Open an RF mapping file in this viewer{"\n"}Command-E   Open Figure Export Composer</pre>
             <footer><button type="button" onClick={() => setHelpOpen(false)}>OK</button></footer>
           </div>
         </div>

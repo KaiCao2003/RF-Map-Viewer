@@ -458,6 +458,28 @@ def test_unavailable_capabilities_render_an_explicit_placeholder(plot: PlotSpec)
     assert colors is not None and len(colors) > 3
 
 
+def test_probe_layout_renders_nan_annotation_without_a_unit_point() -> None:
+    page = ExportPage(
+        "Missing unit position",
+        [
+            PlotSpec(
+                PlotKind.PROBE_LAYOUT,
+                {
+                    "points": [
+                        {"x": 0.0, "y": 0.0, "label": "", "color": "#94a3b8"}
+                    ],
+                    "missingPosition": True,
+                },
+            )
+        ],
+    )
+
+    image = PillowFigureRenderer((500, 400)).render_page(2, page)
+
+    colors = image.getcolors(maxcolors=500_000)
+    assert colors is not None and (180, 35, 24) in {color for _count, color in colors}
+
+
 def test_png_export_is_multiunit_multipage_and_matches_live_preview(
     tmp_path: Path,
 ) -> None:

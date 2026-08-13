@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listRemoteFiles } from "../api";
+import { acceptsRemoteFile, hasArtifactExtension, type RemoteFileKind } from "../fileFormats";
 import type { FsEntry } from "../types";
 
 interface RemoteBrowserProps {
   busy?: boolean;
   initialPath?: string;
-  kind?: "rf-json" | "tuning-json" | "positions-csv";
+  kind?: RemoteFileKind;
   title?: string;
   onOpen: (path: string) => void;
 }
@@ -35,18 +36,11 @@ function modifiedLabel(seconds: number | null): string {
   );
 }
 
-function acceptedBasename(path: string, kind: NonNullable<RemoteBrowserProps["kind"]>): boolean {
-  const basename = path.replace(/\/+$/, "").split("/").at(-1)?.toLocaleLowerCase() ?? "";
-  if (kind === "positions-csv") return basename === "positions.csv";
-  if (kind === "tuning-json") return basename === "tuning_curves.json";
-  return basename.endsWith(".json") && basename !== "tuning_curves.json";
-}
-
 export default function RemoteBrowser({
   busy = false,
   initialPath = "/mnt/senzailab",
   kind = "rf-json",
-  title = "Remote RF JSON browser",
+  title = "Remote RF mapping browser",
   onOpen,
 }: RemoteBrowserProps) {
   const [root, setRoot] = useState("/mnt/senzailab");
@@ -132,13 +126,13 @@ export default function RemoteBrowser({
           event.preventDefault();
           const target = pathDraft.trim();
           if (!target) return;
-          if (acceptedBasename(target, kind)) onOpen(target);
-          else if (/\.(?:json|csv)$/i.test(target)) {
+          if (acceptsRemoteFile(target, kind)) onOpen(target);
+          else if (hasArtifactExtension(target)) {
             setError(kind === "positions-csv"
-              ? "Choose a file named positions.csv."
+              ? "Choose a .probe file or positions.csv."
               : kind === "tuning-json"
-                ? "Choose a file named tuning_curves.json."
-                : "Choose an RF mapping JSON file.");
+                ? "Choose a .tc file or tuning_curves.json."
+                : "Choose an RF mapping .rfmap or .json file.");
           } else void load(target);
         }}
       >
@@ -172,11 +166,11 @@ export default function RemoteBrowser({
             disabled={busy}
             onClick={() => entry.type === "directory"
               ? void load(entry.path)
-              : acceptedBasename(entry.path, kind) && onOpen(entry.path)}
-            onDoubleClick={() => entry.type === "file" && acceptedBasename(entry.path, kind) && onOpen(entry.path)}
+              : acceptsRemoteFile(entry.path, kind) && onOpen(entry.path)}
+            onDoubleClick={() => entry.type === "file" && acceptsRemoteFile(entry.path, kind) && onOpen(entry.path)}
           >
             <span className={`file-icon ${entry.type}`} aria-hidden="true">
-              {entry.type === "directory" ? "▰" : kind === "positions-csv" ? "CSV" : kind === "tuning-json" ? "HD" : "JSON"}
+              {entry.type === "directory" ? "▰" : kind === "positions-csv" ? "PROBE" : kind === "tuning-json" ? "TC" : "RF"}
             </span>
             <span className="file-name">{entry.name}</span>
             <span className="file-meta">{entry.type === "file" ? humanSize(entry.size) : "Folder"}</span>

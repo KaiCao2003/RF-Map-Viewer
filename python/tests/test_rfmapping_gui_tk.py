@@ -1,6 +1,7 @@
 import csv
 import json
 import tempfile
+import threading
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -10,7 +11,38 @@ from unittest import mock
 import rfmapping_gui as gui
 
 
-@unittest.skipUnless(gui.TK_AVAILABLE, "Tk is not available in this Python")
+def _tk_runtime_error() -> str | None:
+    if not gui.TK_AVAILABLE:
+        return "this Python was built without tkinter"
+    root = None
+    try:
+        root = gui.tk.Tk()
+        root.withdraw()
+        root.update_idletasks()
+    except gui.tk.TclError as exc:
+        return f"Tk could not create a root window: {exc}"
+    finally:
+        if root is not None:
+            try:
+                root.destroy()
+            except gui.tk.TclError:
+                pass
+    return None
+
+
+TK_RUNTIME_ERROR = _tk_runtime_error()
+
+
+class TkRuntimeAvailabilityTests(unittest.TestCase):
+    def test_tk_runtime_is_available_for_integration_tests(self) -> None:
+        if TK_RUNTIME_ERROR is not None:
+            self.fail(
+                f"Tk integration tests are mandatory, but {TK_RUNTIME_ERROR}. "
+                "Use a Python build with Tk; on headless Linux, run pytest under xvfb-run."
+            )
+
+
+@unittest.skipIf(TK_RUNTIME_ERROR is not None, TK_RUNTIME_ERROR or "Tk unavailable")
 class TkViewerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.directory = tempfile.TemporaryDirectory()
@@ -46,6 +78,132 @@ class TkViewerTests(unittest.TestCase):
         )
         self.assertEqual(float(self.app.range_start_ms_var.get()), 0.0)
         self.assertEqual(float(self.app.range_end_ms_var.get()), 30.0)
+
+    def test_zero_spike_unit_filter_settings_validate_current_spatial_max(self) -> None:
+        settings_value = replace(
+            gui.ViewerSettings(),
+            rf_filter_units_with_zero_bins=True,
+            rf_zero_bin_threshold=1,
+        )
+        self.app.settings = settings_value
+        self.app._app_root._rfm_settings = settings_value
+        self.app._show_settings()
+        settings = self.app._app_root._rfm_settings_window
+        self.assertIsInstance(settings, gui.SettingsWindow)
+        assert isinstance(settings, gui.SettingsWindow)
+        self.addCleanup(settings._close)
+
+        self.assertTrue(settings.rf_filter_units_with_zero_bins_var.get())
+        self.assertEqual(settings.rf_zero_bin_threshold_var.get(), "1")
+        self.assertTrue(settings.rf_zero_bin_threshold_entry.instate(["!disabled"]))
+
+        settings.rf_filter_units_with_zero_bins_var.set(False)
+        settings._sync_dependent_controls()
+        self.assertTrue(settings.rf_zero_bin_threshold_entry.instate(["disabled"]))
+
+        settings.rf_filter_units_with_zero_bins_var.set(True)
+        settings.rf_zero_bin_threshold_var.set("+2")
+        self.assertEqual(settings._validated_settings().rf_zero_bin_threshold, 2)
+
+        settings.rf_zero_bin_threshold_var.set("7")
+        with self.assertRaisesRegex(gui.SettingsValidationError, r"max is 6"):
+            settings._validated_settings()
+        settings.rf_zero_bin_threshold_var.set("0")
+        with self.assertRaisesRegex(gui.SettingsValidationError, "positive integer"):
+            settings._validated_settings()
+
+    def test_zero_spike_filter_tracks_rf_window_and_can_restore_all_units(self) -> None:
+        payload = {
+            "unitsSpikeCounts": [
+                [[[1, 0], [1, 0], [1, 0]]],
+                [[[0, 1], [0, 1], [0, 1]]],
+            ],
+            "unitsSpikeCountsSize": [2, 1, 3, 2],
+            "unitPool": [10, 20],
+            "xPositions": [-1, 0, 1],
+            "yPositions": [0],
+            "timeBinEdges": [0.0, 0.1, 0.2],
+            "stimulusPresentationCounts": [[1, 1, 1]],
+        }
+        path = Path(self.directory.name) / "unit-filter.json"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        settings_value = replace(
+            gui.ViewerSettings(),
+            rf_sum_start_ms=0.0,
+            rf_sum_end_ms=200.0,
+            rf_filter_units_with_zero_bins=True,
+            rf_zero_bin_threshold=1,
+        )
+        self.app._app_root._rfm_settings = settings_value
+        self.app._load_json_path(path)
+
+        self.assertEqual(self.app._unit_navigation_ids(), [10, 20])
+        self.app._set_selected_unit_id(10)
+        self.app.range_start_ms_var.set("100")
+        self.app.range_end_ms_var.set("200")
+        self.app._on_range_changed()
+        self.assertEqual(self.app._unit_navigation_ids(), [20])
+        self.assertEqual(self.app._selected_unit_id_value(), 20)
+
+        composer = gui.FigureExportWindow(self.app)
+        self.addCleanup(composer._close)
+        self.assertEqual(composer.unit_ids, (20,))
+        self.assertEqual(composer.unit_list.size(), 1)
+        self.assertIn("unit 20", composer.unit_list.get(0))
+
+        filter_off = replace(
+            self.app.settings,
+            rf_filter_units_with_zero_bins=False,
+        )
+        self.assertTrue(
+            self.app._apply_viewer_settings(
+                filter_off,
+                persist=False,
+                broadcast=False,
+            )
+        )
+        self.assertEqual(self.app._unit_navigation_ids(), [10, 20])
+
+    def test_all_filtered_is_nonfatal_and_blocks_empty_figure_composer(self) -> None:
+        payload = {
+            "unitsSpikeCounts": [[[[0], [0]]], [[[0], [0]]]],
+            "unitsSpikeCountsSize": [2, 1, 2, 1],
+            "unitPool": [10, 20],
+            "xPositions": [-1, 1],
+            "yPositions": [0],
+            "timeBinEdges": [0.0, 0.1],
+            "stimulusPresentationCounts": [[1, 1]],
+        }
+        path = Path(self.directory.name) / "all-filtered.json"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        settings_value = replace(
+            gui.ViewerSettings(),
+            rf_sum_start_ms=0.0,
+            rf_sum_end_ms=100.0,
+            rf_filter_units_with_zero_bins=True,
+            rf_zero_bin_threshold=1,
+        )
+        self.app._app_root._rfm_settings = settings_value
+        self.app._load_json_path(path)
+
+        self.assertEqual(self.app._unit_navigation_ids(), [])
+        self.assertEqual(self.app.unit_idx.get(), -1)
+        self.assertEqual(self.app._unit_combo_unit_ids, [])
+        self.assertIn("No units pass", self.app.status_label.cget("text"))
+        with mock.patch.object(gui.messagebox, "showinfo") as showinfo:
+            self.app._open_figure_exporter()
+        showinfo.assert_called_once()
+        self.assertIsNone(self.app.__dict__.get("_figure_export_window"))
+
+        self.assertTrue(
+            self.app._apply_viewer_settings(
+                replace(settings_value, rf_filter_units_with_zero_bins=False),
+                persist=False,
+                broadcast=False,
+            )
+        )
+        self.assertEqual(self.app._unit_navigation_ids(), [10, 20])
+        self.assertGreaterEqual(self.app.unit_idx.get(), 0)
 
     def test_global_polar_toggle_applies_to_spatial_tabs(self) -> None:
         self.app.polar_layout_var.set(True)
@@ -133,12 +291,126 @@ class TkViewerTests(unittest.TestCase):
             self.app._on_canvas_motion("rf", event)
         self.assertEqual(calls, 1)
 
-    def test_destroy_cancels_pending_resize_callback(self) -> None:
-        self.app._schedule_redraw()
-        self.assertIsNotNone(self.app._redraw_after)
-        self.app.destroy()
-        self.assertIsNone(self.app._redraw_after)
+    def test_destroy_cancels_pending_resize_and_focus_callbacks(self) -> None:
+        second = self.app._open_json_window(self.app.data.path)
+        self.assertIsNotNone(second)
+        assert second is not None
+        self.addCleanup(second.destroy)
+
+        callback_errors: list[tuple[object, object, object]] = []
+        root = self.app._app_root
+        root.report_callback_exception = lambda *exc: callback_errors.append(exc)
+        child = self.app
+        child._schedule_redraw()
+        child._focus_after = child.after_idle(child._focus_rf_canvas)
+        self.assertIsNotNone(child._redraw_after)
+        self.assertIsNotNone(child._focus_after)
+
+        child.destroy()
+        self.assertIsNone(child._redraw_after)
+        self.assertIsNone(child._focus_after)
         self.app = None
+        root.update_idletasks()
+        root.update()
+
+        self.assertTrue(second.winfo_exists())
+        self.assertEqual(callback_errors, [])
+
+    def test_figure_composer_constructs_and_finishes_background_preview(self) -> None:
+        composer = gui.FigureExportWindow(self.app)
+        self.addCleanup(lambda: composer.winfo_exists() and composer.destroy())
+        deadline = __import__("time").monotonic() + 5.0
+        while __import__("time").monotonic() < deadline:
+            self.app.update()
+            status = str(composer.preview_status.cget("text"))
+            if "provenance verified" in status or "disabled" in status:
+                break
+        self.assertNotIn("AttributeError", str(composer.preview_label.cget("text")))
+        self.assertIn("provenance verified", str(composer.preview_status.cget("text")))
+
+    def test_preview_daemon_worker_cooperatively_cancels_on_close(self) -> None:
+        started = threading.Event()
+        cancellation_observed = threading.Event()
+        root = self.app._app_root
+        jobs_before = gui._active_export_jobs(root)
+
+        def freeze_until_cancelled(_unit_ids, _raw_pages, cancelled):
+            started.set()
+            deadline = __import__("time").monotonic() + 2.0
+            while not cancelled():
+                if __import__("time").monotonic() >= deadline:
+                    raise AssertionError("preview cancellation was not delivered")
+                __import__("time").sleep(0.005)
+            cancellation_observed.set()
+            raise RuntimeError("Preview superseded by a newer recipe")
+
+        with mock.patch.object(
+            gui,
+            "_export_executor",
+            side_effect=AssertionError("preview must not use the final-export executor"),
+        ):
+            composer = gui.FigureExportWindow(self.app)
+            if composer._preview_after is not None:
+                composer.after_cancel(composer._preview_after)
+                composer._preview_after = None
+            composer._freeze_context = freeze_until_cancelled
+            composer._start_preview(composer._preview_generation)
+            self.assertTrue(started.wait(timeout=1.0))
+            preview_future = composer._preview_future
+            self.assertIsNotNone(preview_future)
+            self.assertEqual(gui._active_export_jobs(root), jobs_before)
+
+            composer.destroy()
+            self.assertFalse(composer.winfo_exists())
+            self.assertTrue(cancellation_observed.wait(timeout=1.0))
+            assert preview_future is not None
+            with self.assertRaisesRegex(RuntimeError, "superseded"):
+                preview_future.result(timeout=1.0)
+
+        root.update_idletasks()
+        root.update()
+
+    def test_registered_export_blocks_close_and_quit_until_result_is_consumed(self) -> None:
+        second = self.app._open_json_window(self.app.data.path)
+        self.assertIsNotNone(second)
+        assert second is not None
+        self.addCleanup(second.destroy)
+        root = self.app._app_root
+        release = threading.Event()
+        self.addCleanup(release.set)
+        future = gui._export_executor(root).submit(release.wait, 2.0)
+        gui._register_export_job(root, self.app, future)
+        self.addCleanup(gui._unregister_export_job, root, future)
+
+        with mock.patch.object(gui.messagebox, "showinfo") as showinfo:
+            self.app._close_window()
+            self.app._quit_application()
+            self.assertTrue(self.app.winfo_exists())
+            self.assertTrue(root.winfo_exists())
+
+            release.set()
+            self.assertTrue(future.result(timeout=1.0))
+            # Completion alone is insufficient: Tk has not consumed/reported the result.
+            self.app._close_window()
+            self.app._quit_application()
+            self.assertTrue(self.app.winfo_exists())
+            self.assertTrue(root.winfo_exists())
+            self.assertEqual(showinfo.call_count, 4)
+
+            gui._unregister_export_job(root, future)
+            child = self.app
+            child._close_window()
+            self.assertFalse(child.winfo_exists())
+            self.app = None
+
+            self.assertTrue(second.winfo_exists())
+            second._quit_application()
+
+        try:
+            root_exists = bool(root.winfo_exists())
+        except gui.tk.TclError:
+            root_exists = False
+        self.assertFalse(root_exists)
 
     def test_document_windows_keep_independent_state(self) -> None:
         second = self.app._open_json_window(self.app.data.path)
@@ -151,89 +423,112 @@ class TkViewerTests(unittest.TestCase):
         self.assertEqual(self.app.unit_idx.get(), 0)
         self.assertEqual(second.unit_idx.get(), 1)
 
-    def test_discovered_json_menu_always_opens_a_new_window(self) -> None:
-        labels = [
-            self.app._discovered_json_menu.entrycget(index, "label")
-            for index in range(self.app._discovered_json_menu.index("end") + 1)
-        ]
-        selected_index = next(index for index, label in enumerate(labels) if "viewer.json" in label)
-        with mock.patch.object(self.app, "_open_json_window") as opener:
-            self.app._discovered_json_menu.invoke(selected_index)
+    def test_file_open_always_opens_a_new_window(self) -> None:
+        selected_path = self.app.data.path.resolve()
+        with (
+            mock.patch.object(
+                gui.filedialog,
+                "askopenfilename",
+                return_value=str(selected_path),
+            ),
+            mock.patch.object(self.app, "_open_json_window") as opener,
+        ):
+            self.app._open_json()
         opener.assert_called_once_with(self.app.data.path.resolve())
 
-    def test_display_controls_are_main_area_and_collapsible(self) -> None:
-        self.assertEqual(self.app.display_controls_frame.winfo_manager(), "")
-        self.assertFalse(self.app.display_expanded_var.get())
-        self.assertIs(self.app.range_start_spin.master, self.app.range_controls_frame)
-        self.assertIs(self.app.range_end_spin.master, self.app.range_controls_frame)
-        self.assertIs(self.app.reset_plot_range_button.master, self.app.range_controls_frame)
-        self.assertIs(self.app.display_toggle_button.master, self.app.range_controls_frame)
-        self.assertEqual(int(self.app.reset_plot_range_button.grid_info()["column"]), 4)
-        self.assertEqual(int(self.app.display_toggle_button.grid_info()["column"]), 5)
+    def test_display_controls_are_collapsible_in_main_toolbar(self) -> None:
+        display_frame = self.app.x_bins_spin.master
+        main_panel = self.app.nametowidget(self.app.notebook.winfo_parent())
+
+        self.assertEqual(display_frame.winfo_manager(), "")
+        self.assertIs(self.app.y_bins_spin.master, display_frame)
+        self.assertIs(self.app.smooth_spin.master, display_frame)
+        self.assertIs(display_frame.master.master, main_panel)
         self.app._toggle_display_controls()
-        self.app.update_idletasks()
-        self.assertEqual(self.app.display_controls_frame.winfo_manager(), "grid")
-        self.assertTrue(self.app.display_expanded_var.get())
-        self.assertEqual(int(self.app.display_controls_frame.grid_info()["row"]), 2)
-        self.assertIs(self.app.display_controls_frame.master.master, self.app.nametowidget(self.app.notebook.winfo_parent()))
-        self.app._toggle_display_controls()
-        self.assertEqual(self.app.display_controls_frame.winfo_manager(), "")
+        self.assertEqual(display_frame.winfo_manager(), "grid")
+        self.assertEqual(int(display_frame.grid_info()["row"]), 1)
 
     def test_sidebar_has_no_horizontal_separators(self) -> None:
+        sidebar = self.app.sidebar_frame
         separator_children = [
             child
-            for child in self.app.sidebar_frame.winfo_children()
+            for child in sidebar.winfo_children()
             if child.winfo_class() == "TSeparator"
         ]
         self.assertEqual(separator_children, [])
 
-    def test_spatial_region_filters_navigation_and_handles_no_matches(self) -> None:
-        positions_path = Path(self.directory.name) / "positions.csv"
-        self.app.probe_geometry = gui.ProbeGeometry(
-            probe_name="ProbeA",
-            positions_path=positions_path,
-            channels_path=None,
-            units=(
-                gui.ProbeUnitPosition(0, 7, 0.0, 0.0),
-                gui.ProbeUnitPosition(1, 8, 300.0, 300.0),
-            ),
-            channels=(),
+    def test_pairing_status_reports_matching_unit_lists(self) -> None:
+        second = self.app._open_json_window(self.app.data.path)
+        self.assertIsNotNone(second)
+        assert second is not None
+        self.addCleanup(second.destroy)
+
+        self.assertIn("matching unit lists", self.app.pair_status_label.cget("text"))
+        self.assertIn("matching unit lists", second.pair_status_label.cget("text"))
+
+    def test_paired_filter_settings_reconcile_one_shared_visible_unit(self) -> None:
+        payload = {
+            "unitsSpikeCounts": [[[[1], [1]]], [[[0], [1]]]],
+            "unitsSpikeCountsSize": [2, 1, 2, 1],
+            "unitPool": [7, 8],
+            "xPositions": [-1, 1],
+            "yPositions": [0],
+            "timeBinEdges": [0.0, 0.1],
+            "stimulusPresentationCounts": [[1, 1]],
+        }
+        path = Path(self.directory.name) / "paired-filter.json"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        filter_off = replace(
+            gui.ViewerSettings(),
+            rf_sum_start_ms=0.0,
+            rf_sum_end_ms=100.0,
+            rf_filter_units_with_zero_bins=False,
         )
+        self.app._app_root._rfm_settings = filter_off
+        self.app._load_json_path(path)
+        second = self.app._open_json_window(path)
+        self.assertIsNotNone(second)
+        assert second is not None
+        self.addCleanup(second.destroy)
+
+        self.app.pair_windows_var.set(True)
+        self.app._on_pair_windows_toggled()
         self.app._set_selected_unit_id(8)
+        self.app._publish_pairing_state_if_changed()
+        self.assertEqual(second._selected_unit_id_value(), 8)
 
-        self.app._apply_spatial_region(gui.SpatialRegion.from_corners(-10, -10, 10, 10))
-        self.assertEqual(self.app._unit_combo_unit_ids, [7])
-        self.assertEqual(self.app._selected_unit_id_value(), 7)
-
-        self.app._apply_spatial_region(gui.SpatialRegion.from_corners(100, 100, 110, 110))
-        self.assertEqual(self.app._unit_combo_unit_ids, [])
-        self.assertEqual(self.app.unit_idx.get(), -1)
-        self.assertIn("No units match", self.app.status_label.cget("text"))
-
-        self.app._handle_escape()
-        self.assertIsNone(self.app.spatial_region)
-        self.assertEqual(self.app._unit_combo_unit_ids, [7, 8])
-
-    def test_paired_unit_outside_local_region_clears_spatial_filter(self) -> None:
-        self.app.probe_geometry = gui.ProbeGeometry(
-            probe_name="ProbeA",
-            positions_path=Path(self.directory.name) / "positions.csv",
-            channels_path=None,
-            units=(
-                gui.ProbeUnitPosition(0, 7, 0.0, 0.0),
-                gui.ProbeUnitPosition(1, 8, 300.0, 300.0),
-            ),
-            channels=(),
+        filter_on = replace(
+            filter_off,
+            rf_filter_units_with_zero_bins=True,
+            rf_zero_bin_threshold=1,
         )
-        self.app._apply_spatial_region(gui.SpatialRegion.from_corners(-10, -10, 10, 10))
-        self.assertEqual(self.app._unit_combo_unit_ids, [7])
+        self.assertTrue(
+            self.app._apply_viewer_settings(
+                filter_on,
+                persist=False,
+                broadcast=True,
+            )
+        )
 
-        incoming = replace(self.app._capture_pairing_state(), unit_id=8)
-        self.app._apply_pairing_state(incoming, frozenset({"unit"}))
+        self.assertEqual(self.app._unit_navigation_ids(), [7])
+        self.assertEqual(second._unit_navigation_ids(), [7])
+        self.assertEqual(self.app._selected_unit_id_value(), 7)
+        self.assertEqual(second._selected_unit_id_value(), 7)
+        self.assertEqual(self.app._app_root._rfm_pairing_state.unit_id, 7)
 
-        self.assertIsNone(self.app.spatial_region)
-        self.assertEqual(self.app._selected_unit_id_value(), 8)
-        self.assertEqual(self.app._unit_combo_unit_ids, [7, 8])
+    def test_pairing_status_warns_when_unit_lists_differ(self) -> None:
+        payload = json.loads(self.app.data.path.read_text(encoding="utf-8"))
+        payload["unitPool"] = [7, 9]
+        different_path = Path(self.directory.name) / "different-units.json"
+        different_path.write_text(json.dumps(payload), encoding="utf-8")
+
+        second = self.app._open_json_window(different_path)
+        self.assertIsNotNone(second)
+        assert second is not None
+        self.addCleanup(second.destroy)
+
+        self.assertIn("Unit lists differ", self.app.pair_status_label.cget("text"))
+        self.assertIn("Unit lists differ", second.pair_status_label.cget("text"))
 
     def test_pairing_navigates_union_and_shows_na_for_missing_units(self) -> None:
         def write_units(name: str, unit_ids: list[int]) -> Path:
@@ -376,4 +671,3 @@ class TkViewerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

@@ -11,7 +11,9 @@ EXECUTABLE_NAME="$RF_MAPPING_EXECUTABLE_NAME"
 BUNDLE_ID="$RF_MAPPING_BUNDLE_ID"
 EXPECTED_VERSION="$RF_MAPPING_APP_VERSION"
 EXPECTED_BUILD="$RF_MAPPING_APP_BUILD"
+EXPECTED_EDITION="$RF_MAPPING_RELEASE_EDITION"
 EXPECTED_ARCHITECTURE="$RF_MAPPING_APP_ARCHITECTURE"
+EXPECTED_MINIMUM_MACOS_VERSION="$RF_MAPPING_MINIMUM_MACOS_VERSION"
 
 ACTION="preflight"
 ACTION_WAS_EXPLICIT=0
@@ -58,7 +60,8 @@ usage:
   $0 --rollback BACKUP_APP [--target APP]
 
 With no action, the script performs a read-only preflight. --install publishes
-the verified Python $EXPECTED_VERSION ($EXPECTED_BUILD) arm64 bundle. Existing
+the verified Python $EXPECTED_VERSION $EXPECTED_EDITION ($EXPECTED_BUILD)
+arm64 bundle. Existing
 apps are exchanged atomically and retained below the target's sibling
 .rfmapping-backups directory. --rollback atomically exchanges one of those
 backups with the installed app.
@@ -226,12 +229,28 @@ verify_plist_value() {
     || fail "$bundle Info.plist $key is '$actual'; expected '$expected'"
 }
 
+verify_plist_missing() {
+  local bundle="$1"
+  local key="$2"
+  if plist_value "$bundle" "$key" >/dev/null 2>&1; then
+    fail "$bundle Info.plist unexpectedly contains $key"
+  fi
+}
+
 bundle_version() {
   plist_value "$1" CFBundleShortVersionString
 }
 
 bundle_build() {
   plist_value "$1" CFBundleVersion
+}
+
+validate_release_contract() {
+  local bundle="$1"
+  verify_plist_value "$bundle" CFBundleShortVersionString "$EXPECTED_VERSION"
+  verify_plist_value "$bundle" CFBundleVersion "$EXPECTED_BUILD"
+  verify_plist_value "$bundle" RFMappingReleaseEdition "$EXPECTED_EDITION"
+  verify_plist_value "$bundle" LSMinimumSystemVersion "$EXPECTED_MINIMUM_MACOS_VERSION"
 }
 
 bundle_cdhash() {
@@ -292,12 +311,16 @@ validate_bundle() {
   verify_plist_value "$bundle" CFBundleIdentifier "$BUNDLE_ID"
 
   if [[ "$require_release_version" -eq 1 ]]; then
-    verify_plist_value "$bundle" CFBundleShortVersionString "$EXPECTED_VERSION"
-    verify_plist_value "$bundle" CFBundleVersion "$EXPECTED_BUILD"
+    validate_release_contract "$bundle"
     verify_plist_value "$bundle" LSMultipleInstancesProhibited true
     verify_plist_value "$bundle" CFBundleDocumentTypes:0:CFBundleTypeRole Viewer
-    verify_plist_value "$bundle" CFBundleDocumentTypes:0:LSItemContentTypes:0 public.json
-    verify_plist_value "$bundle" CFBundleDocumentTypes:0:CFBundleTypeExtensions:0 json
+    verify_plist_value "$bundle" CFBundleDocumentTypes:0:LSItemContentTypes:0 org.local.rfmapping.rfmap
+    verify_plist_value "$bundle" CFBundleDocumentTypes:0:CFBundleTypeExtensions:0 rfmap
+    verify_plist_value "$bundle" CFBundleDocumentTypes:1:CFBundleTypeExtensions:0 json
+    verify_plist_missing "$bundle" CFBundleDocumentTypes:2
+    verify_plist_value "$bundle" UTExportedTypeDeclarations:0:UTTypeIdentifier org.local.rfmapping.rfmap
+    verify_plist_value "$bundle" UTExportedTypeDeclarations:1:UTTypeIdentifier org.local.rfmapping.tc
+    verify_plist_value "$bundle" UTExportedTypeDeclarations:2:UTTypeIdentifier org.local.rfmapping.probe
   else
     [[ -n "$(bundle_version "$bundle")" ]] \
       || fail "Bundle has an empty CFBundleShortVersionString: $bundle"
@@ -787,7 +810,7 @@ install_release() {
   /bin/sync
   finish_transaction
   refresh_launch_services
-  echo "Installed $APP_NAME $EXPECTED_VERSION (build $EXPECTED_BUILD) at $TARGET_BUNDLE"
+  echo "Installed $APP_NAME $EXPECTED_VERSION $EXPECTED_EDITION (build $EXPECTED_BUILD) at $TARGET_BUNDLE"
   if [[ -n "$RESULT_BACKUP" ]]; then
     echo "Previous app backup: $RESULT_BACKUP"
   else
@@ -835,7 +858,8 @@ show_preflight_result() {
   source_cdhash="$(bundle_cdhash "$SOURCE_BUNDLE")"
   echo "Preflight passed; no files were changed."
   echo "Candidate: $SOURCE_BUNDLE"
-  echo "Candidate version: $EXPECTED_VERSION (build $EXPECTED_BUILD)"
+  echo "Candidate version: $EXPECTED_VERSION $EXPECTED_EDITION (build $EXPECTED_BUILD)"
+  echo "Candidate minimum macOS: $EXPECTED_MINIMUM_MACOS_VERSION"
   echo "Candidate architecture: $EXPECTED_ARCHITECTURE only"
   echo "Candidate CDHash: $source_cdhash"
   echo "Install target: $TARGET_BUNDLE"

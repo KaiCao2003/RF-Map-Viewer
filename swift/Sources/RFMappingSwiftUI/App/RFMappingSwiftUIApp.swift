@@ -171,7 +171,7 @@ final class WindowRouter {
 }
 
 struct RFMappingCommandActions {
-    let openJSON: () -> Void
+    let openRFMap: () -> Void
     let exportFigures: () -> Void
     let exportDisplayed: () -> Void
     let previousUnit: () -> Void
@@ -277,7 +277,7 @@ private struct RFMappingWindow: View {
             pairingCoordinator: pairingCoordinator,
             pairingWindowID: pairingWindowID,
             openFigureExporter: openFigureExporter,
-            openJSONInNewWindow: { url in
+            openRFMapInNewWindow: { url in
                 if isInitialWindow, !store.hasData,
                    WindowRouter.shared.claimColdInitialWindow(for: url) {
                     return
@@ -330,7 +330,7 @@ private struct RFMappingWindow: View {
 
     private var commandActions: RFMappingCommandActions {
         RFMappingCommandActions(
-            openJSON: { store.isImporting = true },
+            openRFMap: { store.isImporting = true },
             exportFigures: openFigureExporter,
             exportDisplayed: store.prepareExport,
             previousUnit: { store.stepUnit(-1) },
@@ -434,7 +434,7 @@ private struct RFMappingCommands: Commands {
 
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
-            Button("Open JSON in New Window…") { actions?.openJSON() }
+            Button("Open RF Map in New Window…") { actions?.openRFMap() }
                 .keyboardShortcut("o", modifiers: [.command])
                 .disabled(actions == nil)
         }
@@ -625,7 +625,7 @@ private func showKeyboardShortcuts() {
     P   Cycle palette
     Esc   Show full time range
     [ / ]   Previous / next unit
-    Command-O   Open JSON in a new window
+    Command-O   Open RF map in a new window
     Command-E   Open Figure Export Composer
     Shift-Command-E   Export displayed CSV matrix
     Command-W   Close current window

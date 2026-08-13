@@ -8,7 +8,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
-from .paths import is_within
+from .paths import (
+    has_supported_probe_suffix,
+    has_supported_tuning_suffix,
+    is_within,
+)
 
 
 HD_RAW_BIN_COUNT = 180
@@ -161,12 +165,11 @@ def discover_tuning_curve_path(rf_json_path: Path, scope_root: Path) -> Path | N
             continue
         sessions.append((int(match.group("index")), sibling))
     for _index, session in sorted(sessions):
-        candidate = (
-            session / "data" / "tuning_curves" / probe_name / "tuning_curves.json"
-        )
-        resolved = _safe_file(candidate, root)
-        if resolved is not None:
-            return resolved
+        tuning_directory = session / "data" / "tuning_curves" / probe_name
+        for filename in ("tuning_curves.tc", "tuning_curves.json"):
+            resolved = _safe_file(tuning_directory / filename, root)
+            if resolved is not None:
+                return resolved
     return None
 
 
@@ -175,10 +178,16 @@ def _geometry_path_pairs(
 ) -> tuple[tuple[Path, Path | None], ...]:
     return (
         (
+            base / "spike_position" / probe_name / "positions.probe",
+            base / "waveform" / probe_name / "channels.csv",
+        ),
+        (
             base / "spike_position" / probe_name / "positions.csv",
             base / "waveform" / probe_name / "channels.csv",
         ),
+        (base / probe_name / "positions.probe", base / probe_name / "channels.csv"),
         (base / probe_name / "positions.csv", base / probe_name / "channels.csv"),
+        (base / "positions.probe", base / "channels.csv"),
         (base / "positions.csv", base / "channels.csv"),
     )
 
@@ -317,7 +326,9 @@ def companion_for_positions(
     root = scope_root.resolve(strict=True)
     resolved = _safe_file(positions_path, root)
     if resolved is None:
-        raise ValueError(f"CSV file not found: {positions_path}")
+        raise ValueError(f"Probe-position file not found: {positions_path}")
+    if not has_supported_probe_suffix(resolved):
+        raise ValueError("Probe-position file must end with .probe or .csv")
     parent_probe = resolved.parent.name
     probe = (
         f"Probe{parent_probe[-1].upper()}"
@@ -358,6 +369,31 @@ def _finite_csv_float(value: str, label: str) -> float:
     if not math.isfinite(parsed):
         raise ValueError(f"{label} must be finite")
     return parsed
+
+
+def _probe_unit_coordinates(
+    x_value: str, y_value: str
+) -> tuple[float | None, float | None]:
+    """Return one finite unit position or an explicit missing-coordinate pair."""
+
+    try:
+        x = float(x_value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Invalid unit x: {x_value!r}") from exc
+    try:
+        y = float(y_value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Invalid unit y: {y_value!r}") from exc
+    # SpikeInterface writes ``nan,nan`` when a unit has no estimated location.
+    # Preserve that unit as unavailable geometry so the viewer can keep the
+    # probe background visible and label the selected position as NaN.
+    if math.isnan(x) and math.isnan(y):
+        return None, None
+    if not math.isfinite(x):
+        raise ValueError("unit x must be finite")
+    if not math.isfinite(y):
+        raise ValueError("unit y must be finite")
+    return x, y
 
 
 def _csv_integer(value: str, label: str) -> int:
@@ -413,21 +449,28 @@ def load_probe_geometry(
         fields,
         ("unit_index", "unit_id", "x_um", "y_um"),
     )
-    units: list[dict[str, int | float]] = []
+    units: list[dict[str, int | float | None]] = []
     seen_unit_ids: set[int] = set()
     for row_number, row in enumerate(rows, start=2):
         try:
             _csv_integer(row["unit_index"], "unit_index")
             unit_id = _csv_integer(row["unit_id"], "unit_id")
-            x = _finite_csv_float(row["x_um"], "unit x")
-            y = _finite_csv_float(row["y_um"], "unit y")
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError(
-                f"Invalid positions.csv value on row {row_number}: {exc}"
+                f"Invalid {companions.positions_path.name} value on row {row_number}: {exc}"
             ) from exc
         if unit_id in seen_unit_ids:
-            raise ValueError(f"Duplicate unit_id {unit_id} in positions.csv")
+            raise ValueError(
+                f"Duplicate unit_id {unit_id} in {companions.positions_path.name}"
+            )
         seen_unit_ids.add(unit_id)
+        try:
+            coordinates = _probe_unit_coordinates(row["x_um"], row["y_um"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Invalid {companions.positions_path.name} value on row {row_number}: {exc}"
+            ) from exc
+        x, y = coordinates
         units.append({"unitId": unit_id, "x": x, "y": y})
 
     if unit_pool is not None:
@@ -435,7 +478,7 @@ def load_probe_geometry(
         units = [unit for unit in units if unit["unitId"] in allowed]
         if not units:
             raise ValueError(
-                "positions.csv contains no unit IDs from this RF dataset's unitPool"
+                f"{companions.positions_path.name} contains no unit IDs from this RF dataset's unitPool"
             )
 
     channels: list[dict[str, int | float]] = []
@@ -954,6 +997,8 @@ def _load_tuning_curve_payload(
 
 def load_tuning_curve(path: Path) -> TuningCurveData:
     resolved = Path(path).expanduser().resolve()
+    if not has_supported_tuning_suffix(resolved):
+        raise ValueError("Tuning-curve file must end with .tc or .json.")
     try:
         payload = json.loads(
             resolved.read_text(encoding="utf-8"),

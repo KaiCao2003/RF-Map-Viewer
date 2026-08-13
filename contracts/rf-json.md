@@ -1,6 +1,8 @@
-# RF Mapping JSON Contract
+# RF Mapping File Contract
 
-All three viewers consume the same read-only RF JSON document.
+All three viewers consume the same read-only RF JSON document. New files use
+the `.rfmap` extension; the existing `.json` extension remains supported. The
+extension changes only the filename, not the JSON payload described below.
 
 Required top-level fields:
 
@@ -20,7 +22,11 @@ Unit array index and recorded unit ID are different namespaces. Time-window
 sums use the half-open interval `[start, end)` and endpoints must correspond to
 stored edges. Viewers convert seconds to milliseconds only for display.
 
-Companion probe geometry is discovered from session-relative
-`data/spike_position/ProbeX/positions.csv` and
-`data/waveform/ProbeX/channels.csv`. HD tuning data is matched by recorded unit
-ID. Inputs are never modified by a viewer.
+Companion HD tuning JSON uses `tuning_curves.tc`, with the existing
+`tuning_curves.json` name retained as a fallback. Spike-position CSV uses
+`positions.probe`, with `positions.csv` retained as a fallback. Probe channels
+remain in `channels.csv`. Session-relative companion discovery prefers the new
+extensions and HD tuning data is matched by recorded unit ID. RF maps are the
+primary viewer documents; `.tc` and `.probe` are attached to an open RF map so
+their recorded unit IDs have a dataset context. Inputs are never modified by a
+viewer.

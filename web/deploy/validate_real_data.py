@@ -64,6 +64,13 @@ M14_RF = M14_DATA / (
 M14_CHANNELS = M14_DATA / "waveform/ProbeA/channels.csv"
 M14_POSITIONS = M14_DATA / "spike_position/ProbeA/positions.csv"
 
+M18_DATA = RF_ROOT / "Kai/#Recording/m18/260812/260812_3/data"
+M18_RF = M18_DATA / (
+    "rfmapping/good/-100_400_1ms/ProbeA/regular_unitsSpikeCounts_260812_3.json"
+)
+M18_CHANNELS = M18_DATA / "waveform/ProbeA/channels.csv"
+M18_POSITIONS = M18_DATA / "spike_position/ProbeA/positions.csv"
+
 SOURCE_FILES = (
     M17_HD,
     M17_PROBE_RF,
@@ -77,6 +84,9 @@ SOURCE_FILES = (
     M14_RF,
     M14_CHANNELS,
     M14_POSITIONS,
+    M18_RF,
+    M18_CHANNELS,
+    M18_POSITIONS,
 )
 
 EXPECTED_M17_PROBE_BYTES = 130_480_048
@@ -96,6 +106,10 @@ EXPECTED_WEB_VERSION = "1.9.0-web"
 
 EXPECTED_M14_RF_BYTES = 35_783_459
 EXPECTED_M14_RF_SHAPE = [220, 9, 30, 300]
+
+EXPECTED_M18_RF_BYTES = 40_412_516
+EXPECTED_M18_RF_SHAPE = [192, 7, 30, 500]
+EXPECTED_M18_UNPOSITIONED_UNITS = {50, 118}
 
 HD_RAW_BINS = 180
 TUNING_TOP_LEVEL_KEYS = (
@@ -326,6 +340,7 @@ def validate_probe_files(
     expected_channels: int,
     expected_units: int,
     label: str,
+    expected_unpositioned_units: set[int] | None = None,
 ) -> None:
     channels = csv_rows(channels_path, {"channel_id", "x_um", "y_um", "shank_id"})
     positions = csv_rows(positions_path, {"unit_id", "x_um", "y_um"})
@@ -338,8 +353,28 @@ def validate_probe_files(
         fail(f"{label} contains duplicate channel IDs")
     if len({row["unit_id"] for row in positions}) != expected_units:
         fail(f"{label} contains duplicate unit IDs")
+    unpositioned: set[int] = set()
+    for row in positions:
+        try:
+            unit_id = int(row["unit_id"])
+            x = float(row["x_um"])
+            y = float(row["y_um"])
+        except (TypeError, ValueError) as exc:
+            fail(f"{label} contains malformed unit geometry: {row!r}")
+            raise AssertionError from exc
+        if math.isnan(x) and math.isnan(y):
+            unpositioned.add(unit_id)
+        elif not math.isfinite(x) or not math.isfinite(y):
+            fail(f"{label} cluster {unit_id} has an incomplete/non-finite position")
+    expected_missing = expected_unpositioned_units or set()
+    if unpositioned != expected_missing:
+        fail(
+            f"{label} unpositioned units changed: "
+            f"{sorted(unpositioned)} != {sorted(expected_missing)}"
+        )
     note(
-        f"PASS {label}: {expected_channels} channels, {expected_units} positioned units"
+        f"PASS {label}: {expected_channels} channels, "
+        f"{expected_units - len(unpositioned)}/{expected_units} positioned units"
     )
 
 
@@ -736,7 +771,12 @@ def validate_remote_listing(client: ApiClient, expected: Path, kind: str) -> Non
 
 
 def validate_probe_payload(
-    payload: dict[str, Any], *, expected_channels: int, expected_units: int, label: str
+    payload: dict[str, Any],
+    *,
+    expected_channels: int,
+    expected_units: int,
+    label: str,
+    expected_unpositioned_units: set[int] | None = None,
 ) -> None:
     if str(payload.get("probe", "")).casefold() != "probea":
         fail(f"{label} returned the wrong probe: {payload.get('probe')}")
@@ -745,7 +785,29 @@ def validate_probe_payload(
     if not isinstance(channels, list) or len(channels) != expected_channels:
         fail(f"{label} did not return all {expected_channels} channels")
     if not isinstance(units, list) or len(units) != expected_units:
-        fail(f"{label} did not return all {expected_units} positioned units")
+        fail(f"{label} did not return all {expected_units} expected units")
+    unpositioned: set[int] = set()
+    for unit in units:
+        if not isinstance(unit, dict) or type(unit.get("unitId")) is not int:
+            fail(f"{label} returned a malformed unit row: {unit!r}")
+        unit_id = unit["unitId"]
+        x = unit.get("x")
+        y = unit.get("y")
+        if x is None and y is None:
+            unpositioned.add(unit_id)
+        elif (
+            type(x) not in (int, float)
+            or type(y) not in (int, float)
+            or not math.isfinite(float(x))
+            or not math.isfinite(float(y))
+        ):
+            fail(f"{label} returned incomplete/non-finite coordinates for {unit_id}")
+    expected_missing = expected_unpositioned_units or set()
+    if unpositioned != expected_missing:
+        fail(
+            f"{label} returned the wrong unpositioned units: "
+            f"{sorted(unpositioned)} != {sorted(expected_missing)}"
+        )
 
 
 def _numeric_lists_equal(actual: Any, expected: Iterable[Any], label: str) -> None:
@@ -943,6 +1005,22 @@ def validate_remote_m14(client: ApiClient) -> None:
     note("PASS m14 API: RF plus ProbeA with 384 channels and 220 units")
 
 
+def validate_remote_m18(client: ApiClient) -> None:
+    metadata = open_dataset(client, M18_RF, EXPECTED_M18_RF_SHAPE)
+    capabilities = metadata.get("capabilities")
+    if not isinstance(capabilities, dict) or capabilities.get("probe") is not True:
+        fail("m18 API did not discover the real ProbeA geometry")
+    probe = client.json(f"api/datasets/{metadata['id']}/probe", timeout=120)
+    validate_probe_payload(
+        probe,
+        expected_channels=384,
+        expected_units=192,
+        expected_unpositioned_units=EXPECTED_M18_UNPOSITIONED_UNITS,
+        label="m18 260812_3 /probe",
+    )
+    note("PASS m18 API: 384-channel background plus NaN positions for clusters 50/118")
+
+
 def validate_api(base_url: str, host_header: str | None) -> None:
     client = ApiClient(base_url, host_header)
     client.login()
@@ -958,6 +1036,7 @@ def validate_api(base_url: str, host_header: str | None) -> None:
     validate_remote_m17(client)
     validate_remote_m15(client, m15_hd)
     validate_remote_m14(client)
+    validate_remote_m18(client)
 
 
 def validate_files() -> tuple[dict[int, list[float]], dict[str, Any]]:
@@ -993,6 +1072,14 @@ def validate_files() -> tuple[dict[int, list[float]], dict[str, Any]]:
         end_s=0.2,
         label="m14 260615_3 RF",
     )
+    validate_rf_file(
+        M18_RF,
+        expected_bytes=EXPECTED_M18_RF_BYTES,
+        expected_shape=EXPECTED_M18_RF_SHAPE,
+        start_s=-0.1,
+        end_s=0.4,
+        label="m18 260812_3 RF",
+    )
     validate_probe_files(
         M17_CHANNELS,
         M17_POSITIONS,
@@ -1013,6 +1100,14 @@ def validate_files() -> tuple[dict[int, list[float]], dict[str, Any]]:
         expected_channels=384,
         expected_units=220,
         label="m14 260615_3 ProbeA",
+    )
+    validate_probe_files(
+        M18_CHANNELS,
+        M18_POSITIONS,
+        expected_channels=384,
+        expected_units=192,
+        expected_unpositioned_units=EXPECTED_M18_UNPOSITIONED_UNITS,
+        label="m18 260812_3 ProbeA",
     )
     legacy = load_legacy_hd()
     m15_hd = load_m15_hd()
