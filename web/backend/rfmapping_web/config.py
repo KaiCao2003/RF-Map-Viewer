@@ -9,6 +9,9 @@ GIB = 1024**3
 DEFAULT_ALLOWED_NETWORKS = (
     "127.0.0.0/8",
     "::1/128",
+    # macOS commonly prefers the server's mDNS IPv6 address for *.local.
+    # Link-local traffic is non-routable and remains confined to the LAN.
+    "fe80::/10",
     "198.51.100.0/24",
     "192.0.2.0/24",
     "203.0.113.0/24",

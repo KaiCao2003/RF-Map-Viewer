@@ -43,7 +43,9 @@ enum JSONDiscovery {
                     includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey],
                     options: [.skipsHiddenFiles]
                 ) else { continue }
-                candidates.append(contentsOf: contents.filter { $0.pathExtension.lowercased() == "json" })
+                candidates.append(contentsOf: contents.filter(
+                    RFMappingFileTypes.isDiscoverableRFMappingURL
+                ))
             }
         }
 

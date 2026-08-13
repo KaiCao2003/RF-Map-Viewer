@@ -133,6 +133,34 @@ final class ProbeGeometryDataTests: XCTestCase {
         XCTAssertNil(ProbeGeometryDiscovery.discover(forRFURL: rfURL))
     }
 
+    func testDiscoveryPrefersProbeAliasAndFallsBackToCSV() throws {
+        let root = try temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let rfDirectory = root.appendingPathComponent("legacy/ProbeA", isDirectory: true)
+        let rfURL = rfDirectory.appendingPathComponent("rf.rfmap")
+        try write("{}", to: rfURL)
+        let aliasURL = rfDirectory.appendingPathComponent("positions.probe")
+        let legacyURL = rfDirectory.appendingPathComponent("positions.csv")
+        let contents = "unit_index,unit_id,x_um,y_um\n0,17,7.5,120.0\n"
+        try write(contents, to: aliasURL)
+        try write(contents, to: legacyURL)
+
+        let aliasPaths = try XCTUnwrap(
+            ProbeGeometryDiscovery.discover(forRFURL: rfURL)
+        )
+        XCTAssertEqual(aliasPaths.positionsURL, aliasURL.resolvingSymlinksInPath())
+        XCTAssertEqual(
+            try ProbeGeometryDiscovery.load(aliasPaths, rfUnitIDs: [17]).units.map(\.unitID),
+            [17]
+        )
+
+        try FileManager.default.removeItem(at: aliasURL)
+        let legacyPaths = try XCTUnwrap(
+            ProbeGeometryDiscovery.discover(forRFURL: rfURL)
+        )
+        XCTAssertEqual(legacyPaths.positionsURL, legacyURL.resolvingSymlinksInPath())
+    }
+
     func testNoUnitOverlapFailsAndMalformedOptionalChannelsAreIgnored() throws {
         let root = try temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }

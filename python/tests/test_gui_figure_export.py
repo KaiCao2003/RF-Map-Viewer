@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 import rfmapping_gui
 
 from rfmapping_viewer.figure_export import (
@@ -27,6 +31,58 @@ from rfmapping_gui import (
     composer_unit_checkbox_hit,
     composer_unit_selection_after_click,
 )
+
+
+def test_atomic_csv_publish_replaces_only_after_fsync(tmp_path: Path, monkeypatch) -> None:
+    destination = tmp_path / "displayed.csv"
+    destination.write_text("old\n", encoding="utf-8")
+    calls: list[str] = []
+    real_fsync = os.fsync
+    real_replace = os.replace
+
+    def tracked_fsync(descriptor: int) -> None:
+        calls.append("fsync")
+        real_fsync(descriptor)
+
+    def tracked_replace(*args, **kwargs) -> None:
+        calls.append("replace")
+        real_replace(*args, **kwargs)
+
+    monkeypatch.setattr(rfmapping_gui.os, "fsync", tracked_fsync)
+    monkeypatch.setattr(rfmapping_gui.os, "replace", tracked_replace)
+    rfmapping_gui._atomic_write_csv(destination, lambda writer: writer.writerow(["new"]))
+
+    assert destination.read_text(encoding="utf-8") == "new\n"
+    assert calls == ["fsync", "fsync", "replace", "fsync"]
+    assert not tuple(tmp_path.glob(".displayed.csv.tmp-*"))
+
+
+def test_atomic_csv_write_failure_preserves_existing_file(tmp_path: Path) -> None:
+    destination = tmp_path / "displayed.csv"
+    destination.write_bytes(b"previous export\n")
+
+    def fail_after_header(writer) -> None:
+        writer.writerow(["partial"])
+        raise OSError("injected write failure")
+
+    with np.testing.assert_raises_regex(OSError, "injected write failure"):
+        rfmapping_gui._atomic_write_csv(destination, fail_after_header)
+
+    assert destination.read_bytes() == b"previous export\n"
+    assert not tuple(tmp_path.glob(".displayed.csv.tmp-*"))
+
+
+def test_atomic_csv_rejects_symlink_destination(tmp_path: Path) -> None:
+    victim = tmp_path / "victim.csv"
+    victim.write_text("do not replace\n", encoding="utf-8")
+    destination = tmp_path / "displayed.csv"
+    destination.symlink_to(victim)
+
+    with np.testing.assert_raises_regex(ValueError, "regular file"):
+        rfmapping_gui._atomic_write_csv(
+            destination, lambda writer: writer.writerow(["new"]),
+        )
+    assert victim.read_text(encoding="utf-8") == "do not replace\n"
 
 
 def _write_fixture(tmp_path: Path) -> Path:
@@ -349,6 +405,82 @@ def test_probe_payload_filters_non_rf_units_and_requires_selected_unit(
     }
 
 
+def test_probe_nan_position_keeps_unit_channels_and_export_annotation(
+    tmp_path: Path,
+) -> None:
+    rf_path, positions_path = _write_probe_fixture(tmp_path)
+    positions_path.write_text(
+        "unit_index,unit_id,x_um,y_um\n"
+        "0,17,7.5,120.0\n"
+        "1,42,nan,nan\n",
+        encoding="utf-8",
+    )
+    data = RFMappingData(rf_path)
+    geometry = data.probe_geometry()
+
+    assert geometry is not None
+    assert tuple(unit.unit_id for unit in geometry.units) == (17, 42)
+    assert geometry.units_by_id[42].x_um is None
+    assert geometry.units_by_id[42].y_um is None
+    region = rfmapping_gui.SpatialRegion.from_corners(-1000, -1000, 1000, 1000)
+    assert geometry.unit_ids_in_region(region, [17, 42]) == [17]
+
+    payload = GUIFigureDataProvider(data, _snapshot())(
+        42,
+        PlotSpec(PlotKind.PROBE_LAYOUT),
+    ).data
+    assert payload["missingPosition"] is True
+    assert payload["points"] == [
+        {"x": 0.0, "y": 0.0, "label": "", "color": "#94a3b8"},
+        {"x": 20.0, "y": 20.0, "label": "", "color": "#94a3b8"},
+    ]
+
+
+def test_probe_nan_position_exports_without_channel_background(
+    tmp_path: Path,
+) -> None:
+    rf_path, positions_path = _write_probe_fixture(tmp_path)
+    positions_path.write_text(
+        "unit_index,unit_id,x_um,y_um\n"
+        "0,42,nan,nan\n",
+        encoding="utf-8",
+    )
+    channels_path = (
+        positions_path.parents[2] / "waveform" / "ProbeA" / "channels.csv"
+    )
+    channels_path.unlink()
+
+    payload = GUIFigureDataProvider(RFMappingData(rf_path), _snapshot())(
+        42,
+        PlotSpec(PlotKind.PROBE_LAYOUT),
+    ).data
+
+    assert payload == {"points": [], "missingPosition": True}
+
+
+@pytest.mark.parametrize(
+    ("x_value", "y_value"),
+    (("nan", "20"), ("10", "nan"), ("inf", "inf"), ("bad", "bad")),
+)
+def test_probe_rejects_malformed_missing_coordinate_pairs(
+    tmp_path: Path,
+    x_value: str,
+    y_value: str,
+) -> None:
+    rf_path, positions_path = _write_probe_fixture(tmp_path)
+    positions_path.write_text(
+        "unit_index,unit_id,x_um,y_um\n"
+        f"0,17,{x_value},{y_value}\n",
+        encoding="utf-8",
+    )
+
+    data = RFMappingData(rf_path)
+
+    assert data.probe_geometry() is None
+    assert data.probe_geometry_error is not None
+    assert "positions.csv value on row 2" in data.probe_geometry_error
+
+
 def test_figure_composer_unit_ids_and_name_stay_bound_to_frozen_session(
     tmp_path: Path,
 ) -> None:
@@ -500,6 +632,7 @@ def test_hd_lazy_load_is_published_atomically_across_preview_and_export_threads(
     release = threading.Event()
     sentinel = object()
     load_calls = 0
+    (tmp_path / "tuning_curves.json").write_text("{}", encoding="utf-8")
 
     monkeypatch.setattr(
         rfmapping_gui,
@@ -528,3 +661,224 @@ def test_hd_lazy_load_is_published_atomically_across_preview_and_export_threads(
         assert second.result(timeout=1.0) is sentinel
 
     assert load_calls == 1
+
+
+def test_frozen_file_hash_rejects_changed_source(tmp_path: Path) -> None:
+    source = tmp_path / "source.json"
+    source.write_text("original", encoding="utf-8")
+    identity = rfmapping_gui.FrozenFileIdentity.capture(source)
+    assert rfmapping_gui._hash_frozen_file(identity) == __import__("hashlib").sha256(b"original").hexdigest()
+
+    source.write_text("modified after load", encoding="utf-8")
+    with np.testing.assert_raises_regex(RuntimeError, "changed after it was loaded"):
+        rfmapping_gui._hash_frozen_file(identity)
+
+
+def test_gui_shared_rf_scale_is_selection_scoped_and_frozen_in_plot_options(
+    tmp_path: Path,
+) -> None:
+    data = RFMappingData(_write_fixture(tmp_path))
+    provider = GUIFigureDataProvider(data, _snapshot())
+    scale_one = provider.shared_rf_bounds((17,))
+    scale_both = provider.shared_rf_bounds((17, 42))
+    assert scale_one == (0.0, 5.0)
+    assert scale_both == (0.0, 7.0)
+
+    composer = SimpleNamespace(
+        pages=[{"name": "RF", "plots": [PlotKind.RF_CARTESIAN, PlotKind.RF_POLAR]}],
+        snapshot=_snapshot(),
+        data=data,
+    )
+    raw = FigureExportWindow._export_pages(composer)
+    resolved = FigureExportWindow._resolved_export_pages(composer, raw, scale_both)
+    assert all(plot.options["vmin"] == 0.0 for plot in resolved[0].plots)
+    assert all(plot.options["vmax"] == 7.0 for plot in resolved[0].plots)
+    assert all(plot.options["value_unit"] == "spikes" for plot in resolved[0].plots)
+
+
+def test_polar_export_labels_follow_provider_rows_for_both_radius_modes_and_flip(
+    tmp_path: Path,
+) -> None:
+    data = RFMappingData(_write_fixture(tmp_path))
+    raw = (ExportPage("Polar", (PlotSpec(PlotKind.RF_POLAR),)),)
+    base_snapshot = _snapshot()
+
+    for flip_y in (False, True):
+        y_groups = base_snapshot.y_groups
+        if flip_y:
+            y_groups = tuple(reversed(y_groups))
+        for radius_mode in POLAR_RADIUS_MODES:
+            snapshot = replace(
+                base_snapshot,
+                y_groups=y_groups,
+                polar_radius=radius_mode,
+            )
+            composer = SimpleNamespace(snapshot=snapshot, data=data)
+            resolved = FigureExportWindow._resolved_export_pages(composer, raw, None)
+            resolved_plot = resolved[0].plots[0]
+            provider = GUIFigureDataProvider(data, snapshot)
+            cartesian = provider(17, PlotSpec(PlotKind.RF_CARTESIAN))
+            polar = provider(17, resolved_plot)
+
+            if radius_mode == POLAR_RADIUS_MODES[0]:
+                row_indices = sorted(
+                    range(len(y_groups)),
+                    key=lambda index: y_groups[index][0],
+                )
+            else:
+                row_indices = list(range(len(y_groups) - 1, -1, -1))
+            expected_y_values = [
+                (data.y_positions[y_groups[index][0]] + data.y_positions[y_groups[index][1]])
+                / 2.0
+                for index in row_indices
+            ]
+
+            assert resolved_plot.options["y_values"] == tuple(expected_y_values)
+            assert polar.data == [cartesian.data[index] for index in row_indices]
+
+
+def test_freeze_context_revalidates_cached_source(tmp_path: Path) -> None:
+    data = RFMappingData(_write_fixture(tmp_path))
+    snapshot = _snapshot()
+    composer = SimpleNamespace(
+        data=data,
+        snapshot=snapshot,
+        _provider_lock=threading.Lock(),
+        _base_data_provider=None,
+        _provenance_metadata=None,
+        _context_cache={},
+        pages=[{"name": "RF", "plots": [PlotKind.RF_CARTESIAN]}],
+        _recipe_key=lambda unit_ids, pages: (unit_ids, tuple(p.name for p in pages)),
+    )
+    composer._verify_export_inputs = lambda: FigureExportWindow._verify_export_inputs(composer)
+    composer._export_pages = lambda: FigureExportWindow._export_pages(composer)
+    composer._resolved_export_pages = lambda pages, scale: FigureExportWindow._resolved_export_pages(composer, pages, scale)
+    raw = composer._export_pages()
+    FigureExportWindow._freeze_context(composer, (17,), raw)
+
+    data.path.write_text(data.path.read_text() + " ", encoding="utf-8")
+    with np.testing.assert_raises_regex(RuntimeError, "changed after it was loaded"):
+        FigureExportWindow._freeze_context(composer, (17,), raw)
+
+
+def test_active_export_registry_tracks_non_daemon_future_until_completion() -> None:
+    root = SimpleNamespace()
+    viewer = object()
+    release = threading.Event()
+    future = rfmapping_gui._export_executor(root).submit(lambda: release.wait(timeout=2.0))
+    rfmapping_gui._register_export_job(root, viewer, future)
+    assert rfmapping_gui._active_export_jobs(root, viewer) == (future,)
+    release.set()
+    future.result(timeout=1.0)
+    # A completed worker remains active until Tk consumes and reports its result.
+    assert rfmapping_gui._active_export_jobs(root, viewer) == (future,)
+    rfmapping_gui._unregister_export_job(root, future)
+    assert rfmapping_gui._active_export_jobs(root, viewer) == ()
+    rfmapping_gui._shutdown_export_executor(root)
+
+
+def test_atomic_csv_detects_destination_created_during_write(tmp_path: Path) -> None:
+    destination = tmp_path / "displayed.csv"
+
+    def race() -> None:
+        destination.write_text("other writer\n", encoding="utf-8")
+
+    with np.testing.assert_raises_regex(RuntimeError, "destination changed"):
+        rfmapping_gui._atomic_write_csv(
+            destination,
+            lambda writer: writer.writerow(["ours"]),
+            before_publish=race,
+        )
+    assert destination.read_text(encoding="utf-8") == "other writer\n"
+    assert not tuple(tmp_path.glob(".displayed.csv.tmp-*"))
+
+
+def test_atomic_csv_detects_existing_file_modified_during_write(tmp_path: Path) -> None:
+    destination = tmp_path / "displayed.csv"
+    destination.write_text("old\n", encoding="utf-8")
+
+    def race() -> None:
+        destination.write_text("changed in place with different size\n", encoding="utf-8")
+
+    with np.testing.assert_raises_regex(RuntimeError, "destination changed"):
+        rfmapping_gui._atomic_write_csv(
+            destination,
+            lambda writer: writer.writerow(["ours"]),
+            before_publish=race,
+        )
+    assert destination.read_text(encoding="utf-8") == "changed in place with different size\n"
+    assert not tuple(tmp_path.glob(".displayed.csv.tmp-*"))
+
+
+def test_atomic_csv_replace_failure_preserves_existing_file(tmp_path: Path, monkeypatch) -> None:
+    destination = tmp_path / "displayed.csv"
+    destination.write_text("old\n", encoding="utf-8")
+
+    def fail_replace(*_args, **_kwargs) -> None:
+        raise OSError("injected replace failure")
+
+    monkeypatch.setattr(rfmapping_gui.os, "replace", fail_replace)
+    with np.testing.assert_raises_regex(OSError, "replace failure"):
+        rfmapping_gui._atomic_write_csv(
+            destination, lambda writer: writer.writerow(["new"]),
+        )
+    assert destination.read_text(encoding="utf-8") == "old\n"
+    assert not tuple(tmp_path.glob(".displayed.csv.tmp-*"))
+
+
+def test_atomic_csv_ignores_unsupported_directory_fsync(tmp_path: Path, monkeypatch) -> None:
+    destination = tmp_path / "displayed.csv"
+    real_fsync = os.fsync
+
+    def selective_fsync(descriptor: int) -> None:
+        if __import__("stat").S_ISDIR(os.fstat(descriptor).st_mode):
+            raise OSError(__import__("errno").EINVAL, "directory fsync unsupported")
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(rfmapping_gui.os, "fsync", selective_fsync)
+    rfmapping_gui._atomic_write_csv(
+        destination, lambda writer: writer.writerow(["new"]),
+    )
+    assert destination.read_text(encoding="utf-8") == "new\n"
+
+
+def test_atomic_csv_accepts_replace_lost_success_reply(tmp_path: Path, monkeypatch) -> None:
+    destination = tmp_path / "displayed.csv"
+    destination.write_text("old\n", encoding="utf-8")
+    real_replace = os.replace
+
+    def replace_then_raise(*args, **kwargs) -> None:
+        real_replace(*args, **kwargs)
+        raise OSError(__import__("errno").EIO, "lost replace success reply")
+
+    monkeypatch.setattr(rfmapping_gui.os, "replace", replace_then_raise)
+    rfmapping_gui._atomic_write_csv(
+        destination, lambda writer: writer.writerow(["complete new"]),
+    )
+    assert destination.read_text(encoding="utf-8") == "complete new\n"
+    assert not tuple(tmp_path.glob(".displayed.csv.tmp-*"))
+
+
+def test_atomic_csv_reports_post_publish_durability_failure(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    destination = tmp_path / "displayed.csv"
+    destination.write_text("old\n", encoding="utf-8")
+    real_fsync = os.fsync
+
+    def fail_directory_fsync(descriptor: int) -> None:
+        if __import__("stat").S_ISDIR(os.fstat(descriptor).st_mode):
+            raise OSError(__import__("errno").EIO, "injected directory fsync failure")
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(rfmapping_gui.os, "fsync", fail_directory_fsync)
+    with np.testing.assert_raises_regex(
+        RuntimeError,
+        "atomically published.*durability could not be confirmed",
+    ):
+        rfmapping_gui._atomic_write_csv(
+            destination, lambda writer: writer.writerow(["complete new"]),
+        )
+    assert destination.read_text(encoding="utf-8") == "complete new\n"
+    assert not tuple(tmp_path.glob(".displayed.csv.tmp-*"))

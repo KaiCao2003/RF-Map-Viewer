@@ -6,7 +6,7 @@ struct ContentView: View {
     @Bindable var pairingCoordinator: WindowPairingCoordinator
     let pairingWindowID: UUID
     let openFigureExporter: () -> Void
-    let openJSONInNewWindow: (URL) -> Void
+    let openRFMapInNewWindow: (URL) -> Void
 
     var body: some View {
         HStack(spacing: 0) {
@@ -33,12 +33,12 @@ struct ContentView: View {
         }
         .fileImporter(
             isPresented: $store.isImporting,
-            allowedContentTypes: [.json, .data],
+            allowedContentTypes: UTType.rfMappingReadableTypes,
             allowsMultipleSelection: true
         ) { result in
             switch result {
             case .success(let urls):
-                urls.forEach(openJSONInNewWindow)
+                urls.forEach(openRFMapInNewWindow)
             case .failure(let error):
                 if (error as? CocoaError)?.code != .userCancelled {
                     store.errorMessage = error.localizedDescription
@@ -129,9 +129,9 @@ struct ContentView: View {
             ContentUnavailableView {
                 Label("RF Map Viewer", systemImage: "waveform.path.ecg.rectangle")
             } description: {
-                Text("Open a unitsSpikeCounts JSON file to begin.")
+                Text("Open an RF mapping .rfmap or JSON file to begin.")
             } actions: {
-                Button("Open JSON") { store.isImporting = true }
+                Button("Open RF Map") { store.isImporting = true }
                     .keyboardShortcut("o", modifiers: [.command])
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)

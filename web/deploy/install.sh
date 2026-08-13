@@ -9,8 +9,9 @@ usage() {
     cat <<'EOF'
 Usage: deploy/install.sh [--install-deps] [--nginx-file]
 
-Initialize the persistent rfmapping_remote deployment layout. Existing environment
-configuration is never overwritten.
+Initialize the persistent rfmapping_remote deployment layout. Operator-customized
+environment settings are preserved; recognized legacy stock defaults may be
+migrated to their current secure values.
 
   --install-deps  Install requirements.txt into ~/.virtualenvs/rfmapping.
   --nginx-file    Install only the Nginx location snippet. This requires cached
@@ -64,6 +65,13 @@ acquire_deploy_lock
 ENV_TARGET="${RFMAPPING_DEPLOY_ROOT}/shared/rfmapping-web.env"
 if [[ -e "${ENV_TARGET}" ]]; then
     deploy_note "Preserved existing environment file: ${ENV_TARGET}"
+    legacy_allowed_networks='RFMAPPING_ALLOWED_NETWORKS=127.0.0.0/8,::1/128,198.51.100.0/24,192.0.2.0/24,203.0.113.0/24'
+    link_local_allowed_networks='RFMAPPING_ALLOWED_NETWORKS=127.0.0.0/8,::1/128,fe80::/10,198.51.100.0/24,192.0.2.0/24,203.0.113.0/24'
+    if grep -Fxq "${legacy_allowed_networks}" "${ENV_TARGET}"; then
+        sed -i -e "s|^${legacy_allowed_networks}$|${link_local_allowed_networks}|" \
+            "${ENV_TARGET}"
+        deploy_note "Allowed non-routable IPv6 link-local clients in the existing environment file."
+    fi
     if grep -q '^RFMAPPING_UPLOAD_' "${ENV_TARGET}"; then
         sed -i -E \
             -e '/^# Cache and uploads live on rfmapping_remote/d' \

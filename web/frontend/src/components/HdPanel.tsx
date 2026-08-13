@@ -272,7 +272,7 @@ export default function HdPanel({
             ? <span className={`hd-class-badge class-${unit.hdClass}`}>HD {unit.hdClass}</span>
             : null}
           {artifact?.metadata && <button type="button" onClick={() => setShowInfo((value) => !value)}>Info</button>}
-          <button type="button" onClick={onChoosePath}>Choose tuning_curves.json…</button>
+          <button type="button" onClick={onChoosePath}>Choose .tc / tuning_curves.json…</button>
           <button type="button" aria-label="Collapse HD tuning curve" onClick={onToggleCollapsed}>›</button>
         </div>
       </header>
@@ -290,9 +290,9 @@ export default function HdPanel({
       ) : loading ? (
         <div className="companion-empty"><span className="spinner" /> Loading HD tuning data…</div>
       ) : error ? (
-        <div className="companion-empty error-state"><strong>HD tuning data could not be loaded</strong><span>{error}</span><button type="button" onClick={onChoosePath}>Choose tuning_curves.json…</button></div>
+        <div className="companion-empty error-state"><strong>HD tuning data could not be loaded</strong><span>{error}</span><button type="button" onClick={onChoosePath}>Choose .tc / tuning_curves.json…</button></div>
       ) : !artifact?.available ? (
-        <div className="companion-empty"><strong>HD tuning unavailable</strong><span>Choose the matching remote tuning_curves.json.</span><button type="button" onClick={onChoosePath}>Choose tuning_curves.json…</button></div>
+        <div className="companion-empty"><strong>HD tuning unavailable</strong><span>No tuning_curves.tc or tuning_curves.json was found automatically for this recording date. Generate one with the analysis pipeline, or choose a matching remote file.</span><button type="button" onClick={onChoosePath}>Choose .tc / tuning_curves.json…</button></div>
       ) : !unit ? (
         <div className="companion-empty"><strong>No HD curve for cluster {clusterId}</strong><span>The RF map remains available.</span></div>
       ) : processed.error ? (

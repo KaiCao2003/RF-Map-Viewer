@@ -301,12 +301,14 @@ enum HDTuningDiscovery {
         }.sorted { $0.0 < $1.0 }
 
         for (_, sibling) in matching {
-            let candidate = sibling
+            let directory = sibling
                 .appendingPathComponent("data", isDirectory: true)
                 .appendingPathComponent("tuning_curves", isDirectory: true)
                 .appendingPathComponent(probe, isDirectory: true)
-                .appendingPathComponent("tuning_curves.json")
-            if fileManager.fileExists(atPath: candidate.path) { return candidate }
+            for filename in ["tuning_curves.tc", "tuning_curves.json"] {
+                let candidate = directory.appendingPathComponent(filename)
+                if fileManager.fileExists(atPath: candidate.path) { return candidate }
+            }
         }
         return nil
     }

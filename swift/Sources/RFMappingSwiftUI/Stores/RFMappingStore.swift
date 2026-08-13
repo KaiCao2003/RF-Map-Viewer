@@ -191,7 +191,7 @@ final class RFMappingStore {
             loadJSON(url)
         } else {
             isAwaitingStartupDocument = false
-            errorMessage = "No RF mapping JSON files found. Use Open JSON to choose one."
+            errorMessage = "No RF mapping .rfmap or JSON files found. Use Open RF Map to choose one."
         }
     }
 
@@ -202,7 +202,7 @@ final class RFMappingStore {
         } else {
             isLoadingData = false
             isAwaitingStartupDocument = false
-            errorMessage = "No RF mapping JSON files found. Use Open JSON to choose one."
+            errorMessage = "No RF mapping .rfmap or JSON files found. Use Open RF Map to choose one."
         }
     }
 
@@ -249,7 +249,7 @@ final class RFMappingStore {
     }
 
     var dataSummary: String {
-        guard let data else { return "No JSON loaded" }
+        guard let data else { return "No RF map loaded" }
         return """
         \(data.url.path)
         \(data.nUnits) units  \(data.nY) y x \(data.nX) x  \(data.nBins) bins
@@ -271,7 +271,7 @@ final class RFMappingStore {
     }
 
     var statusText: String {
-        guard let data else { return "Open a unitsSpikeCounts JSON file." }
+        guard let data else { return "Open an RF mapping .rfmap or JSON file." }
         if let hoverCell {
             let prefix = hoverExtra.isEmpty ? "Hover" : "Hover \(hoverExtra);"
             return "\(prefix) \(yGroupText(hoverCell.yStart, hoverCell.yEnd)), \(xGroupText(hoverCell.xStart, hoverCell.xEnd))"

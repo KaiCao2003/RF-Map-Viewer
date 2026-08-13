@@ -106,35 +106,32 @@ enum ProbeGeometryDiscovery {
         }
 
         for base in searchBases {
-            let candidates: [(URL, URL)] = [
+            let candidateDirectories: [(URL, URL)] = [
                 (
                     base.appendingPathComponent("spike_position", isDirectory: true)
-                        .appendingPathComponent(probeName, isDirectory: true)
-                        .appendingPathComponent("positions.csv"),
+                        .appendingPathComponent(probeName, isDirectory: true),
                     base.appendingPathComponent("waveform", isDirectory: true)
                         .appendingPathComponent(probeName, isDirectory: true)
-                        .appendingPathComponent("channels.csv")
                 ),
                 (
+                    base.appendingPathComponent(probeName, isDirectory: true),
                     base.appendingPathComponent(probeName, isDirectory: true)
-                        .appendingPathComponent("positions.csv"),
-                    base.appendingPathComponent(probeName, isDirectory: true)
-                        .appendingPathComponent("channels.csv")
                 ),
-                (
-                    base.appendingPathComponent("positions.csv"),
-                    base.appendingPathComponent("channels.csv")
-                ),
+                (base, base),
             ]
-            for (positionsCandidate, channelsCandidate) in candidates {
-                guard let positionsURL = inScopeRegularFile(positionsCandidate) else {
-                    continue
+            for (positionsDirectory, channelsDirectory) in candidateDirectories {
+                for positionsFilename in ["positions.probe", "positions.csv"] {
+                    guard let positionsURL = inScopeRegularFile(
+                        positionsDirectory.appendingPathComponent(positionsFilename)
+                    ) else { continue }
+                    return ProbeGeometryPaths(
+                        probeName: probeName,
+                        positionsURL: positionsURL,
+                        channelsURL: inScopeRegularFile(
+                            channelsDirectory.appendingPathComponent("channels.csv")
+                        )
+                    )
                 }
-                return ProbeGeometryPaths(
-                    probeName: probeName,
-                    positionsURL: positionsURL,
-                    channelsURL: inScopeRegularFile(channelsCandidate)
-                )
             }
         }
         return nil

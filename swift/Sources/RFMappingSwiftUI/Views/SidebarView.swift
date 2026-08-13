@@ -11,7 +11,7 @@ struct SidebarView: View {
             VStack(alignment: .leading, spacing: 14) {
                 titleSection
                 Divider()
-                jsonSection
+                rfMapSection
                 Divider()
                 pairingSection
                 Divider()
@@ -69,10 +69,10 @@ struct SidebarView: View {
         }
     }
 
-    private var jsonSection: some View {
+    private var rfMapSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Current JSON").font(.headline)
-            Picker("JSON", selection: Binding(
+            Text("Current RF map").font(.headline)
+            Picker("RF map", selection: Binding(
                 get: { store.selectedJSONPath },
                 set: { path in
                     Task { @MainActor in

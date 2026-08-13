@@ -11,3 +11,4 @@ python/dist/
 swift/dist/
 web/frontend/node_modules/
 web/frontend/dist/
+python/.__codex_hd_stage__/

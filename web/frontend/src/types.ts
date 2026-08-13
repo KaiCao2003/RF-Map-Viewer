@@ -57,11 +57,9 @@ export interface ProbeChannel {
   shank: number;
 }
 
-export interface ProbeUnit {
-  unitId: number;
-  x: number;
-  y: number;
-}
+export type ProbeUnit =
+  | { unitId: number; x: number; y: number }
+  | { unitId: number; x: null; y: null };
 
 export interface ProbeGeometry {
   probe: string;

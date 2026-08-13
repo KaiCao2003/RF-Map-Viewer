@@ -1170,21 +1170,28 @@ class FigurePageRenderer:
             selected_unit = next(
                 unit for unit in probe_units if unit["unitId"] == cluster_id
             )
-            points.append(
-                {
-                    "x": selected_unit["x"],
-                    "y": selected_unit["y"],
-                    "label": str(selected_unit["unitId"]),
-                    "color": "#dc2626",
-                }
-            )
-            if not points:
-                return self._unavailable(
-                    plot, "Probe geometry contains no channels or units.", placeholders
+            selected_x = selected_unit.get("x")
+            selected_y = selected_unit.get("y")
+            if (selected_x is None) != (selected_y is None):
+                raise FigureExportValidationError(
+                    f"Probe geometry for cluster {cluster_id} has incomplete coordinates."
+                )
+            missing_position = selected_x is None and selected_y is None
+            if not missing_position:
+                points.append(
+                    {
+                        "x": selected_unit["x"],
+                        "y": selected_unit["y"],
+                        "label": str(selected_unit["unitId"]),
+                        "color": "#dc2626",
+                    }
                 )
             return SharedPlotSpec(
                 plot.type_id,
-                {"points": points},
+                {
+                    "points": points,
+                    **({"missingPosition": True} if missing_position else {}),
+                },
                 title=f"{self.probe.get('probe', 'Probe')} layout",
             )
         raise FigureExportValidationError(f"Unknown renderer family: {family}")

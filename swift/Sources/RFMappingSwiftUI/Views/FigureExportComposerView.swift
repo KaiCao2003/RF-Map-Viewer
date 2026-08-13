@@ -292,33 +292,37 @@ struct FigureExportComposerView: View {
                         .font(.callout.weight(.semibold))
                     Text(workspace.hdTuningURL?.path
                         ?? workspace.companions.hdError
-                        ?? "No tuning_curves.json selected")
+                        ?? "No tuning curve selected")
                         .font(.system(size: 9, design: .monospaced))
                         .foregroundStyle(.secondary)
                         .lineLimit(3)
                         .textSelection(.enabled)
                 }
                 Spacer()
-                Button("Choose HD JSON…", action: chooseHDTuning)
+                Button("Choose Tuning Curve…", action: chooseHDTuning)
             }
-            VStack(alignment: .leading, spacing: 2) {
-                if let geometry = workspace.companions.probeGeometry {
-                    Label("\(geometry.probeName) geometry ready", systemImage: "checkmark.circle.fill")
-                        .font(.callout.weight(.semibold))
-                        .foregroundStyle(.green)
-                    Text(geometry.positionsURL.path)
-                        .font(.system(size: 9, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(3)
-                        .textSelection(.enabled)
-                    Text("\(geometry.channels.count) channels · \(geometry.units.count) RF units")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                } else {
-                    Label(workspace.companions.probeUnavailableReason, systemImage: "info.circle")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    if let geometry = workspace.companions.probeGeometry {
+                        Label("\(geometry.probeName) geometry ready", systemImage: "checkmark.circle.fill")
+                            .font(.callout.weight(.semibold))
+                            .foregroundStyle(.green)
+                        Text(geometry.positionsURL.path)
+                            .font(.system(size: 9, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(3)
+                            .textSelection(.enabled)
+                        Text("\(geometry.channels.count) channels · \(geometry.units.count) RF units")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Label(workspace.companions.probeUnavailableReason, systemImage: "info.circle")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
+                Spacer()
+                Button("Choose Probe Positions…", action: chooseProbePositions)
             }
         }
     }
@@ -426,9 +430,9 @@ struct FigureExportComposerView: View {
 
     private func chooseHDTuning() {
         let panel = NSOpenPanel()
-        panel.title = "Choose tuning_curves.json"
+        panel.title = "Choose tuning curve (.tc or JSON)"
         panel.prompt = "Load"
-        panel.allowedContentTypes = [.json, .data]
+        panel.allowedContentTypes = UTType.rfTuningCurveReadableTypes
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
@@ -436,6 +440,22 @@ struct FigureExportComposerView: View {
             ?? workspace.seed.data.url.deletingLastPathComponent()
         if panel.runModal() == .OK, let url = panel.url {
             workspace.setHDTuningURL(url)
+        }
+    }
+
+    private func chooseProbePositions() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose probe positions (.probe or CSV)"
+        panel.prompt = "Load"
+        panel.allowedContentTypes = UTType.rfProbeReadableTypes
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = workspace.companions.probeGeometry?.positionsURL
+            .deletingLastPathComponent()
+            ?? workspace.seed.data.url.deletingLastPathComponent()
+        if panel.runModal() == .OK, let url = panel.url {
+            workspace.setProbePositionsURL(url)
         }
     }
 }

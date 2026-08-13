@@ -263,6 +263,36 @@ final class FigureExportWorkspace {
         }
     }
 
+    func setProbePositionsURL(_ url: URL) {
+        let accessing = url.startAccessingSecurityScopedResource()
+        defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+        let probeName = HDTuningDiscovery.probeName(forRFURL: seed.data.url)
+            ?? HDTuningDiscovery.probeName(forRFURL: url)
+            ?? "Probe"
+        let directory = url.deletingLastPathComponent()
+        let adjacentChannels = directory.appendingPathComponent("channels.csv")
+        let channelsURL = FileManager.default.fileExists(atPath: adjacentChannels.path)
+            ? adjacentChannels
+            : nil
+        let paths = ProbeGeometryPaths(
+            probeName: probeName,
+            positionsURL: url.standardizedFileURL,
+            channelsURL: channelsURL?.standardizedFileURL
+        )
+        do {
+            companions.probeGeometry = try ProbeGeometryDiscovery.load(
+                paths,
+                rfUnitIDs: seed.data.unitPool
+            )
+            companions.probeError = nil
+            successMessage = "Loaded probe positions from \(url.lastPathComponent)."
+        } catch {
+            companions.probeGeometry = nil
+            companions.probeError = error.localizedDescription
+            errorMessage = "Probe positions could not be loaded: \(error.localizedDescription)"
+        }
+    }
+
     func export() {
         guard !isExporting else { return }
         let issues = validationIssues
@@ -312,7 +342,7 @@ final class FigureExportWorkspace {
 
     private func discoverHDTuning() {
         guard let url = HDTuningDiscovery.discover(forRFURL: seed.data.url) else {
-            companions.hdError = "No companion HD tuning_curves.json was discovered."
+            companions.hdError = "No companion HD tuning_curves.tc or tuning_curves.json was discovered."
             return
         }
         hdTuningURL = url
