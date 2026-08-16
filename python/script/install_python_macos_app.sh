@@ -316,11 +316,9 @@ validate_bundle() {
     verify_plist_value "$bundle" CFBundleDocumentTypes:0:CFBundleTypeRole Viewer
     verify_plist_value "$bundle" CFBundleDocumentTypes:0:LSItemContentTypes:0 org.local.rfmapping.rfmap
     verify_plist_value "$bundle" CFBundleDocumentTypes:0:CFBundleTypeExtensions:0 rfmap
-    verify_plist_value "$bundle" CFBundleDocumentTypes:1:CFBundleTypeExtensions:0 json
-    verify_plist_missing "$bundle" CFBundleDocumentTypes:2
+    verify_plist_missing "$bundle" CFBundleDocumentTypes:1
     verify_plist_value "$bundle" UTExportedTypeDeclarations:0:UTTypeIdentifier org.local.rfmapping.rfmap
-    verify_plist_value "$bundle" UTExportedTypeDeclarations:1:UTTypeIdentifier org.local.rfmapping.tc
-    verify_plist_value "$bundle" UTExportedTypeDeclarations:2:UTTypeIdentifier org.local.rfmapping.probe
+    verify_plist_missing "$bundle" UTExportedTypeDeclarations:1
   else
     [[ -n "$(bundle_version "$bundle")" ]] \
       || fail "Bundle has an empty CFBundleShortVersionString: $bundle"

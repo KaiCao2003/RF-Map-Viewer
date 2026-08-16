@@ -35,7 +35,7 @@ def main() -> int:
     args = parser.parse_args()
 
     root = args.root.resolve()
-    gui_path = root / "rfmapping_gui.py"
+    gui_path = root / "rfmapping_fm_gui.py"
     pyproject_path = root / "pyproject.toml"
     requirements_path = root / "requirements.txt"
     for required in (gui_path, pyproject_path, requirements_path):
@@ -46,11 +46,11 @@ def main() -> int:
     source_edition = literal_assignment(gui_path, "APP_EDITION")
     if source_version != args.version:
         raise ValueError(
-            f"rfmapping_gui.py APP_VERSION is {source_version!r}; expected {args.version!r}"
+            f"rfmapping_fm_gui.py APP_VERSION is {source_version!r}; expected {args.version!r}"
         )
     if source_edition != args.edition:
         raise ValueError(
-            f"rfmapping_gui.py APP_EDITION is {source_edition!r}; expected {args.edition!r}"
+            f"rfmapping_fm_gui.py APP_EDITION is {source_edition!r}; expected {args.edition!r}"
         )
 
     with pyproject_path.open("rb") as stream:
@@ -60,6 +60,8 @@ def main() -> int:
             f"pyproject.toml version is {project.get('version')!r}; expected {args.version!r}"
         )
     dependencies = project.get("dependencies", [])
+    if not any(re.fullmatch(r"h5py>=3\.16,<4", item) for item in dependencies):
+        raise ValueError("pyproject.toml must require h5py>=3.16,<4")
     if not any(re.fullmatch(r"tkinterdnd2==0\.6\.2", item) for item in dependencies):
         raise ValueError("pyproject.toml must pin tkinterdnd2==0.6.2")
 
@@ -68,12 +70,14 @@ def main() -> int:
         for line in requirements_path.read_text(encoding="utf-8").splitlines()
         if line.strip() and not line.lstrip().startswith("#")
     }
+    if "h5py>=3.16,<4" not in requirements:
+        raise ValueError("requirements.txt must require h5py>=3.16,<4")
     if "tkinterdnd2==0.6.2" not in requirements:
         raise ValueError("requirements.txt must pin tkinterdnd2==0.6.2")
 
     gui_source = gui_path.read_text(encoding="utf-8")
     if "--self-test-dnd" not in gui_source:
-        raise ValueError("rfmapping_gui.py must expose the frozen TkDND smoke test")
+        raise ValueError("rfmapping_fm_gui.py must expose the frozen TkDND smoke test")
 
     print(f"release metadata verified: Python {args.version} {args.edition}")
     return 0
