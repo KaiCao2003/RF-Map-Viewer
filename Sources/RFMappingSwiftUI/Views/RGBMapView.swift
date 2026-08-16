@@ -56,6 +56,13 @@ struct RGBMapView: View {
             xGroups: rgb.reference.xGroups,
             yGroups: rgb.reference.yGroups,
             valueDescription: { displayY, displayX, value in
+                guard let value, value.isFinite else {
+                    return responseValueAccessibilityDescription(
+                        nil,
+                        mode: store.valueMode,
+                        hasPresentationMetadata: store.data?.presentationCounts != nil
+                    )
+                }
                 let delay = rgb.delay.indices.contains(displayY)
                     && rgb.delay[displayY].indices.contains(displayX)
                     ? rgb.delay[displayY][displayX]
@@ -93,33 +100,34 @@ private func drawRGB(
     drawTitle(
         context: &context,
         title: "RGB composite",
-        subtitle: "R \(store.valueMode.rawValue); G count-peak delay; B count entropy"
+        subtitle: "R \(store.valueMode.rawValue); G count-rate-peak delay; B count entropy"
     )
 
+    var missingCells = Path()
     for displayY in rgb.total.indices {
         for groupIndex in rgb.total[displayY].indices {
-            let totalValue = rgb.total[displayY][groupIndex] ?? 0.0
-            let fill: Color
-            if totalValue <= 0 {
-                fill = Color(red: 0.929, green: 0.941, blue: 0.953)
-            } else {
-                let delay = rgb.delay[displayY][groupIndex]
-                let entropy = rgb.entropy[displayY][groupIndex] ?? 0.0
-                fill = rgbColor(
-                    red: clamp(totalValue / rgb.maxTotal),
-                    green: delay.map { clamp(($0 - rgb.minDelay) / rgb.delaySpan) } ?? 0.0,
-                    blue: clamp(entropy)
-                )
-            }
             let rect = CGRect(
                 x: layout.x0 + CGFloat(groupIndex) * layout.cell,
                 y: layout.y0 + CGFloat(displayY) * layout.cell,
                 width: layout.cell,
                 height: layout.cell
             )
-            context.fill(Path(rect), with: .color(fill))
+            guard let totalValue = rgb.total[displayY][groupIndex], totalValue.isFinite else {
+                missingCells.addRect(rect)
+                continue
+            }
+            context.fill(
+                Path(rect),
+                with: .color(rgbCellColor(
+                    rgb: rgb,
+                    displayY: displayY,
+                    displayX: groupIndex,
+                    totalValue: totalValue
+                ))
+            )
         }
     }
+    drawMissingSamples(context: &context, path: missingCells)
 
     if drawInteraction {
         drawSelectionAndHover(context: &context, store: store, layout: layout)
@@ -141,6 +149,12 @@ private func drawRGB(
             anchor: .leading
         )
     }
+    drawRGBMissingLegend(
+        context: &context,
+        store: store,
+        x: legendX,
+        y: layout.y0 + CGFloat(items.count * 26 + 4)
+    )
 }
 
 private func drawPolarRGB(
@@ -152,7 +166,7 @@ private func drawPolarRGB(
     drawTitle(
         context: &context,
         title: "Polar RGB composite",
-        subtitle: "R \(store.valueMode.rawValue); G count-peak delay; B count entropy"
+        subtitle: "R \(store.valueMode.rawValue); G count-rate-peak delay; B count entropy"
     )
 
     let innerRadius = CGFloat(innerBlankRows) * layout.scale
@@ -170,6 +184,7 @@ private func drawPolarRGB(
             * (90.0 + layout.totalDegrees / 2.0
                 - layout.totalDegrees * Double($0) / Double(layout.xGroups.count))
     }
+    var missingCells = Path()
     for (ringIndex, displayRow) in layout.ringRows.enumerated() {
         for col in layout.xGroups.indices {
             let path = polarCellPath(
@@ -180,9 +195,22 @@ private func drawPolarRGB(
                 thetaStart: thetaEdges[col],
                 thetaEnd: thetaEdges[col + 1]
             )
-            context.fill(path, with: .color(rgbCellColor(rgb: rgb, displayY: displayRow, displayX: col)))
+            guard let totalValue = rgb.total[displayRow][col], totalValue.isFinite else {
+                missingCells.addPath(path)
+                continue
+            }
+            context.fill(
+                path,
+                with: .color(rgbCellColor(
+                    rgb: rgb,
+                    displayY: displayRow,
+                    displayX: col,
+                    totalValue: totalValue
+                ))
+            )
         }
     }
+    drawMissingSamples(context: &context, path: missingCells)
 
     let outer = CGFloat(innerBlankRows + layout.yGroups.count) * layout.scale
     context.stroke(
@@ -210,12 +238,22 @@ private func drawPolarRGB(
             anchor: .leading
         )
     }
+    drawRGBMissingLegend(
+        context: &context,
+        store: store,
+        x: legendX,
+        y: legendY + 82
+    )
 }
 
-private func rgbCellColor(rgb: RGBPlot, displayY: Int, displayX: Int) -> Color {
-    let totalValue = rgb.total[displayY][displayX] ?? 0.0
+private func rgbCellColor(
+    rgb: RGBPlot,
+    displayY: Int,
+    displayX: Int,
+    totalValue: Double
+) -> Color {
     guard totalValue > 0 else {
-        return Color(red: 0.929, green: 0.941, blue: 0.953)
+        return .black
     }
     let delay = rgb.delay[displayY][displayX]
     let entropy = rgb.entropy[displayY][displayX] ?? 0.0
@@ -223,5 +261,25 @@ private func rgbCellColor(rgb: RGBPlot, displayY: Int, displayX: Int) -> Color {
         red: clamp(totalValue / rgb.maxTotal),
         green: delay.map { clamp(($0 - rgb.minDelay) / rgb.delaySpan) } ?? 0.0,
         blue: clamp(entropy)
+    )
+}
+
+private func drawRGBMissingLegend(
+    context: inout GraphicsContext,
+    store: RFMappingStore,
+    x: CGFloat,
+    y: CGFloat
+) {
+    let rect = CGRect(x: x, y: y, width: 16, height: 16)
+    drawMissingSamples(context: &context, path: Path(rect))
+    context.draw(
+        Text(responseMissingLegendLabel(
+            store.valueMode,
+            hasPresentationMetadata: store.data?.presentationCounts != nil
+        ))
+        .font(.system(size: 11))
+        .foregroundStyle(.secondary),
+        at: CGPoint(x: x + 24, y: y + 8),
+        anchor: .leading
     )
 }

@@ -93,8 +93,7 @@ struct TimelineLayout {
     let miniLayouts: [TimelineMiniLayout]
     let miniMatrices: [OptionalMatrix]
     let contentHeight: CGFloat
-    let maxTotal: Double
-    let selectedMax: Double
+    let responseHigh: Double
     let timeTotals: [Double]
     let selectedValues: [Double]?
     let cellHigh: Double
@@ -119,6 +118,7 @@ private struct TimelineRenderState {
     let hasTimeSelection: Bool
     let selectedDisplayRange: AxisGroup?
     let timeGroupLabels: [String]
+    let timeGroupCentersMS: [Double]
     let timeGroupEndBoundsMS: [Double]
 }
 
@@ -294,6 +294,7 @@ private func makeTimelineLayout(store: RFMappingStore, width: CGFloat, height: C
     let hasTimeSelection = store.hasTimeSelection
     let selectedDisplayRange = hasTimeSelection ? store.displayRangeIndices() : nil
     let timeGroupLabels = visibleBins.map(store.timeGroupLabel)
+    let timeGroupCentersMS = visibleBins.map(store.timeGroupCenterMS)
     let timeGroupEndBoundsMS = visibleBins.map { store.timeGroupBoundsMS($0).1 }
 
     let chartRect = CGRect(x: 64, y: 78, width: max(320, width - 140), height: 62)
@@ -357,6 +358,7 @@ private func makeTimelineLayout(store: RFMappingStore, width: CGFloat, height: C
         hasTimeSelection: hasTimeSelection,
         selectedDisplayRange: selectedDisplayRange,
         timeGroupLabels: timeGroupLabels,
+        timeGroupCentersMS: timeGroupCentersMS,
         timeGroupEndBoundsMS: timeGroupEndBoundsMS
     )
     let renderKey = TimelineBaseRenderKey(
@@ -383,8 +385,10 @@ private func makeTimelineLayout(store: RFMappingStore, width: CGFloat, height: C
         miniLayouts: miniLayouts,
         miniMatrices: miniMatrices,
         contentHeight: contentHeight,
-        maxTotal: max(timeTotals.max() ?? 0.0, 1.0),
-        selectedMax: max(selectedValues?.max() ?? 0.0, 1.0),
+        responseHigh: timelineResponseHigh(
+            allPositionValues: timeTotals,
+            selectedPositionValues: selectedValues
+        ),
         timeTotals: timeTotals,
         selectedValues: selectedValues,
         cellHigh: snapshot.sharedHigh,
@@ -485,7 +489,7 @@ private func drawTimelineSelection(
     drawTitle(
         context: &context,
         title: "Timeline and \(layout.displayBins) bin maps",
-        subtitle: "Full time axis; Timeline highlight \(formatMS(renderState.selectedBoundsStartMS)) to \(formatMS(renderState.selectedBoundsEndMS)) ms; time res \(formatMS(renderState.timeResolutionMS)) ms; \(renderState.spatialFormat.rawValue) maps.\(negativeWarning)"
+        subtitle: "Full time axis; Timeline highlight \(formatMS(renderState.selectedBoundsStartMS)) to \(formatMS(renderState.selectedBoundsEndMS)) ms; target width \(formatMS(renderState.timeResolutionMS)) ms; maps are labelled with actual intervals; \(renderState.spatialFormat.rawValue) maps.\(negativeWarning)"
     )
 
     drawTimelineChart(context: &context, layout: layout)
@@ -520,7 +524,7 @@ private func drawTimelineChart(
             style: StrokeStyle(lineWidth: 1, dash: [4, 3])
         )
         context.draw(
-            Text("VS 0 ms").font(.system(size: 8, weight: .semibold)).foregroundStyle(.purple),
+            Text("VS 0 ms").font(.system(size: 10, weight: .semibold)).foregroundStyle(.purple),
             at: CGPoint(x: zeroX + 4, y: rect.minY + 5),
             anchor: .topLeading
         )
@@ -530,7 +534,9 @@ private func drawTimelineChart(
     drawTimelinePath(
         context: &context,
         values: layout.timeTotals,
-        high: layout.maxTotal,
+        centerTimesMS: renderState.timeGroupCentersMS,
+        axisRangeMS: axisRange,
+        high: layout.responseHigh,
         rect: rect,
         color: .blue,
         lineWidth: 2
@@ -539,27 +545,21 @@ private func drawTimelineChart(
         drawTimelinePath(
             context: &context,
             values: selectedValues,
-            high: layout.selectedMax,
+            centerTimesMS: renderState.timeGroupCentersMS,
+            axisRangeMS: axisRange,
+            high: layout.responseHigh,
             rect: rect,
             color: .red,
             lineWidth: 1.8,
             dash: [5, 2]
-        )
-        drawAxisScale(
-            context: &context,
-            x: rect.minX - 20,
-            rect: rect,
-            highLabel: renderState.valueMode.format(layout.selectedMax),
-            color: .red,
-            leading: true
         )
     }
     drawAxisScale(
         context: &context,
         x: rect.maxX + 20,
         rect: rect,
-        highLabel: renderState.valueMode.format(layout.maxTotal),
-        color: .blue,
+        highLabel: renderState.valueMode.format(layout.responseHigh),
+        color: .secondary,
         leading: false
     )
 
@@ -584,23 +584,29 @@ private func drawTimelineChart(
         boundaries.append(layout.displayBins)
     }
     for boundary in boundaries {
-        let x = rect.minX + rect.width * CGFloat(boundary) / CGFloat(layout.displayBins)
         let timeMS = boundary == 0
             ? axisRange.0
             : renderState.timeGroupEndBoundsMS[min(boundary - 1, renderState.timeGroupEndBoundsMS.count - 1)]
+        let x = rect.minX + rect.width * CGFloat(
+            timelinePositionFraction(
+                timeMS: timeMS,
+                axisStartMS: axisRange.0,
+                axisEndMS: axisRange.1
+            )
+        )
         var tick = Path()
         tick.move(to: CGPoint(x: x, y: rect.maxY))
         tick.addLine(to: CGPoint(x: x, y: rect.maxY + 4))
         context.stroke(tick, with: .color(.secondary), lineWidth: 1)
         let anchor: UnitPoint = boundary == 0 ? .leading : (boundary == layout.displayBins ? .trailing : .center)
         context.draw(
-            Text(formatMS(timeMS)).font(.system(size: 8)).foregroundStyle(.secondary),
+            Text(formatMS(timeMS)).font(.system(size: 10)).foregroundStyle(.secondary),
             at: CGPoint(x: x, y: rect.maxY + 17),
             anchor: anchor
         )
     }
     context.draw(
-        Text("Time from VS onset (ms)").font(.system(size: 9)).foregroundStyle(.secondary),
+        Text("Time from VS onset (ms)").font(.system(size: 10)).foregroundStyle(.secondary),
         at: CGPoint(x: rect.midX, y: rect.maxY + 36),
         anchor: .center
     )
@@ -619,7 +625,7 @@ private func drawTimelineLegend(
         ? "All positions (sum)"
         : "All positions (weighted mean)"
     context.draw(
-        Text(totalLabel).font(.system(size: 8)).foregroundStyle(.blue),
+        Text(totalLabel).font(.system(size: 10)).foregroundStyle(.blue),
         at: CGPoint(x: layout.chartRect.minX + 21, y: y),
         anchor: .leading
     )
@@ -631,7 +637,7 @@ private func drawTimelineLegend(
         redLine.addLine(to: CGPoint(x: selectedX + 16, y: y))
         context.stroke(redLine, with: .color(.red), style: StrokeStyle(lineWidth: 2, dash: [5, 2]))
         context.draw(
-            Text("Selected cell").font(.system(size: 8)).foregroundStyle(.red),
+            Text("Selected cell · same y").font(.system(size: 10)).foregroundStyle(.red),
             at: CGPoint(x: selectedX + 21, y: y),
             anchor: .leading
         )
@@ -641,41 +647,91 @@ private func drawTimelineLegend(
 private func drawTimelinePath(
     context: inout GraphicsContext,
     values: [Double],
+    centerTimesMS: [Double],
+    axisRangeMS: (Double, Double),
     high: Double,
     rect: CGRect,
     color: Color,
     lineWidth: CGFloat,
     dash: [CGFloat] = []
 ) {
-    guard !values.isEmpty else { return }
-    let points = values.enumerated().map { index, value in
-        CGPoint(
-            x: rect.minX + rect.width * (CGFloat(index) + 0.5) / CGFloat(values.count),
-            y: rect.maxY - rect.height * CGFloat(max(0.0, value) / max(high, 1e-12))
+    let points = timelineChartPoints(
+        values: values,
+        centerTimesMS: centerTimesMS,
+        axisRangeMS: axisRangeMS,
+        high: high,
+        rect: rect
+    )
+    guard !points.isEmpty else { return }
+    if points.count == 1 {
+        context.fill(
+            Path(ellipseIn: CGRect(
+                x: points[0].x - lineWidth,
+                y: points[0].y - lineWidth,
+                width: lineWidth * 2,
+                height: lineWidth * 2
+            )),
+            with: .color(color)
         )
+        return
     }
     var path = Path()
     path.move(to: points[0])
-    if points.count == 2 {
-        path.addLine(to: points[1])
-    } else if points.count > 2 {
-        for index in 0..<(points.count - 1) {
-            let p0 = points[max(0, index - 1)]
-            let p1 = points[index]
-            let p2 = points[index + 1]
-            let p3 = points[min(points.count - 1, index + 2)]
-            let control1 = CGPoint(
-                x: p1.x + (p2.x - p0.x) / 6,
-                y: p1.y + (p2.y - p0.y) / 6
-            )
-            let control2 = CGPoint(
-                x: p2.x - (p3.x - p1.x) / 6,
-                y: p2.y - (p3.y - p1.y) / 6
-            )
-            path.addCurve(to: p2, control1: control1, control2: control2)
-        }
+    for point in points.dropFirst() {
+        path.addLine(to: point)
     }
     context.stroke(path, with: .color(color), style: StrokeStyle(lineWidth: lineWidth, dash: dash))
+}
+
+func timelinePositionFraction(
+    timeMS: Double,
+    axisStartMS: Double,
+    axisEndMS: Double
+) -> Double {
+    let span = axisEndMS - axisStartMS
+    guard timeMS.isFinite, axisStartMS.isFinite, axisEndMS.isFinite, span > 0 else { return 0 }
+    return min(1, max(0, (timeMS - axisStartMS) / span))
+}
+
+func timelineChartPoints(
+    values: [Double],
+    centerTimesMS: [Double],
+    axisRangeMS: (Double, Double),
+    high: Double,
+    rect: CGRect
+) -> [CGPoint] {
+    let safeHigh = high.isFinite && high > 0 ? high : 1
+    return zip(values, centerTimesMS).map { value, centerMS in
+        let safeValue = value.isFinite ? value : 0
+        let responseFraction = min(1, max(0, safeValue / safeHigh))
+        return CGPoint(
+            x: rect.minX + rect.width * CGFloat(
+                timelinePositionFraction(
+                    timeMS: centerMS,
+                    axisStartMS: axisRangeMS.0,
+                    axisEndMS: axisRangeMS.1
+                )
+            ),
+            y: rect.maxY - rect.height * CGFloat(responseFraction)
+        )
+    }
+}
+
+func timelineResponseHigh(
+    allPositionValues: [Double],
+    selectedPositionValues: [Double]?
+) -> Double {
+    (allPositionValues + (selectedPositionValues ?? [])).reduce(0.0) { high, value in
+        value.isFinite ? max(high, value) : high
+    }
+}
+
+func timelineBinIndex(timeMS: Double, endBoundsMS: [Double]) -> Int? {
+    guard !endBoundsMS.isEmpty else { return nil }
+    if let index = endBoundsMS.firstIndex(where: { timeMS < $0 }) {
+        return index
+    }
+    return endBoundsMS.count - 1
 }
 
 private func drawAxisScale(
@@ -693,12 +749,12 @@ private func drawAxisScale(
     let anchor: UnitPoint = leading ? .trailing : .leading
     let textX = leading ? x - 7 : x + 7
     context.draw(
-        Text(highLabel).font(.system(size: 8)).foregroundStyle(color),
+        Text(highLabel).font(.system(size: 10)).foregroundStyle(color),
         at: CGPoint(x: textX, y: rect.minY),
         anchor: anchor
     )
     context.draw(
-        Text("0").font(.system(size: 8)).foregroundStyle(color),
+        Text("0").font(.system(size: 10)).foregroundStyle(color),
         at: CGPoint(x: textX, y: rect.maxY),
         anchor: anchor
     )
@@ -797,7 +853,7 @@ private func drawTimelineMiniMapFrames(
         context.stroke(framePath, with: .color(outline), lineWidth: lineWidth)
         context.draw(
             Text(renderState.timeGroupLabels[mini.bin])
-                .font(.system(size: 8, weight: inSelectedRange ? .semibold : .regular))
+                .font(.system(size: 10, weight: inSelectedRange ? .semibold : .regular))
                 .foregroundStyle(inSelectedRange ? Color.green : Color.secondary),
             at: CGPoint(x: mini.x0, y: mini.y0 + mini.gridHeight + layout.labelGap),
             anchor: .topLeading
@@ -948,9 +1004,12 @@ private struct TimelineScrollOffsetTracker: NSViewRepresentable {
 private func timelineHit(at point: CGPoint, layout: TimelineLayout) -> TimelineHit? {
     let chart = layout.chartRect
     if chart.contains(point) {
-        let binWidth = chart.width / CGFloat(layout.displayBins)
-        let bin = max(0, min(layout.displayBins - 1, Int((point.x - chart.minX) / binWidth)))
-        return .bin(bin)
+        let state = layout.renderState
+        let fraction = max(0, min(1, Double((point.x - chart.minX) / chart.width)))
+        let timeMS = state.axisStartMS + fraction * (state.axisEndMS - state.axisStartMS)
+        if let bin = timelineBinIndex(timeMS: timeMS, endBoundsMS: state.timeGroupEndBoundsMS) {
+            return .bin(bin)
+        }
     }
 
     guard let firstMini = layout.miniLayouts.first,

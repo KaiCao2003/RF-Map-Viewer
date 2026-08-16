@@ -34,9 +34,14 @@ struct PolarMapView: View {
                     yGroups: plot.yGroups,
                     valueDescription: { _, _, value in
                         if kind == .delay {
-                            return value.map { String(format: "%.1f milliseconds", $0) } ?? "no delay"
+                            return value.map { String(format: "%.1f milliseconds", $0) }
+                                ?? "Delay unavailable; no detected response"
                         }
-                        return "\(store.valueMode.format(value)) \(store.valueMode.unit)"
+                        return responseValueAccessibilityDescription(
+                            value,
+                            mode: store.valueMode,
+                            hasPresentationMetadata: store.data?.presentationCounts != nil
+                        )
                     }
                 )
             }
@@ -113,7 +118,7 @@ func makePolarLayout(size: CGSize, store: RFMappingStore, plot: HeatmapPlot) -> 
     let totalDegrees = store.data?.inferTotalDeg() ?? 360.0
     let rowCount = max(1, plot.yGroups.count)
     let radiusUnits = Double(innerBlankRows + rowCount + polarPadRows)
-    let scale = max(4.0, min((size.width - 180.0) / CGFloat(2.0 * radiusUnits), (size.height - 130.0) / CGFloat(2.0 * radiusUnits)))
+    let scale = max(4.0, min((size.width - 300.0) / CGFloat(2.0 * radiusUnits), (size.height - 130.0) / CGFloat(2.0 * radiusUnits)))
     let center = CGPoint(x: size.width / 2.0, y: size.height / 2.0 + 22.0)
     let ringRows: [Int]
     if store.polarRadiusMode == .matlabRowOneInner {
@@ -136,7 +141,7 @@ private func drawPolar(
     drawTitle(
         context: &context,
         title: isDelay
-            ? "Polar delay map - peak displayed bin center"
+            ? "Polar delay map - peak count-rate interval center"
             : "Polar RF map - \(store.currentMatrixLabel())",
         subtitle: "total_deg inferred: \(String(format: "%.0f", layout.totalDegrees)); radius: \(store.polarRadiusMode.rawValue)"
     )
@@ -156,14 +161,12 @@ private func drawPolar(
         Double.pi / 180.0 * (90.0 + layout.totalDegrees / 2.0 - layout.totalDegrees * Double($0) / Double(layout.xGroups.count))
     }
 
+    var missingCells = Path()
     for (ringIndex, displayRow) in layout.ringRows.enumerated() {
         let rInner = Double(innerBlankRows + ringIndex)
         let rOuter = Double(innerBlankRows + ringIndex + 1)
         for col in layout.xGroups.indices {
             let value = plot.matrix[displayRow][col]
-            let fill = isDelay
-                ? delayColor(value, low: plot.low, high: plot.high)
-                : paletteColor(value, low: plot.low, high: plot.high, palette: store.palette)
             let path = polarCellPath(
                 center: layout.center,
                 scale: layout.scale,
@@ -172,9 +175,17 @@ private func drawPolar(
                 thetaStart: thetaEdges[col],
                 thetaEnd: thetaEdges[col + 1]
             )
+            guard case .normalized = spatialSampleEncoding(value, low: plot.low, high: plot.high) else {
+                missingCells.addPath(path)
+                continue
+            }
+            let fill = isDelay
+                ? delayColor(value, low: plot.low, high: plot.high)
+                : paletteColor(value, low: plot.low, high: plot.high, palette: store.palette)
             context.fill(path, with: .color(fill))
         }
     }
+    drawMissingSamples(context: &context, path: missingCells)
 
     if drawInteraction {
         if let selected = store.selectedCell, let selectedPath = polarPath(for: selected, layout: layout) {
@@ -197,7 +208,7 @@ private func drawPolar(
         anchor: .center
     )
     context.draw(
-        Text(isDelay ? "Delay: peak time" : "RF values: \(store.valueMode.rawValue)")
+        Text(isDelay ? "Delay: count-rate peak time" : "RF values: \(store.valueMode.rawValue)")
             .font(.system(size: 11))
             .foregroundStyle(.secondary),
         at: CGPoint(x: layout.center.x, y: layout.center.y + outer + 22),
@@ -211,7 +222,13 @@ private func drawPolar(
         low: plot.low,
         high: plot.high,
         palette: isDelay ? nil : store.palette,
-        suffix: isDelay ? " ms" : store.valueMode.suffix
+        suffix: isDelay ? " ms" : store.valueMode.suffix,
+        missingLabel: isDelay
+            ? "No detected peak"
+            : responseMissingLegendLabel(
+                store.valueMode,
+                hasPresentationMetadata: store.data?.presentationCounts != nil
+            )
     )
 }
 
