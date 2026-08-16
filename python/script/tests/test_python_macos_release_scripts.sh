@@ -80,13 +80,13 @@ CC_BIN="$(command -v cc)" || fail_test "a C compiler is required for helper synt
 pass_test "atomic helper passes non-macOS and macOS-API C syntax validation"
 
 (
-  [[ "$RF_MAPPING_APP_NAME" == "RF Map Viewer" ]]
-  [[ "$RF_MAPPING_EXECUTABLE_NAME" == "RF Map Viewer" ]]
-  [[ "$RF_MAPPING_BUNDLE_ID" == "org.local.rfmapping.viewer" ]]
-  [[ "$RF_MAPPING_APP_VERSION" == "1.9.2" ]]
-  [[ "$RF_MAPPING_APP_BUILD" == "10902" ]]
-  [[ "$RF_MAPPING_RELEASE_EDITION" == "Full" ]]
-  [[ "$RF_MAPPING_RELEASE_FLAVOR" == "full" ]]
+  [[ "$RF_MAPPING_APP_NAME" == "Free-Moving RF Viewer" ]]
+  [[ "$RF_MAPPING_EXECUTABLE_NAME" == "Free-Moving RF Viewer" ]]
+  [[ "$RF_MAPPING_BUNDLE_ID" == "org.local.rfmapping.viewer.freemoving" ]]
+  [[ "$RF_MAPPING_APP_VERSION" == "1.10.0.1" ]]
+  [[ "$RF_MAPPING_APP_BUILD" == "110001" ]]
+  [[ "$RF_MAPPING_RELEASE_EDITION" == "FreeMovingPreview" ]]
+  [[ "$RF_MAPPING_RELEASE_FLAVOR" == "freemoving-preview" ]]
   [[ "$RF_MAPPING_APP_ARCHITECTURE" == "arm64" ]]
   [[ "$RF_MAPPING_MINIMUM_MACOS_VERSION" == "14.0" ]]
 ) || fail_test "release metadata is incomplete or unexpected"
@@ -102,27 +102,27 @@ assert_file_contains "$BUILD_SCRIPT" '[[ ! -L "$dist_parent" ]]'
 assert_file_contains "$BUILD_SCRIPT" '[[ ! -L "$DIST_DIR" ]]'
 assert_file_contains "$BUILD_SCRIPT" '[[ "$dist_physical" == "$root_physical/dist/python" ]]'
 assert_file_contains "$BUILD_SCRIPT" '# Recheck immediately before destructive cleanup.'
+assert_file_contains "$BUILD_SCRIPT" 'H5PY_VERSION="3.16.0"'
 assert_file_contains "$BUILD_SCRIPT" 'TKINTERDND2_VERSION="0.6.2"'
 assert_file_contains "$BUILD_SCRIPT" '--additional-hooks-dir "$PYINSTALLER_HOOKS"'
 assert_file_contains "$BUILD_SCRIPT" '--add-data "$SUPPORT_DOCUMENTATION:."'
-assert_file_contains "$BUILD_SCRIPT" '"$APP_BINARY" --self-test "$SMOKE_JSON"'
+assert_file_contains "$BUILD_SCRIPT" '"$BUILD_VENV/bin/python" "$SMOKE_FIXTURE_GENERATOR" "$SMOKE_RF"'
+assert_file_contains "$BUILD_SCRIPT" '"$APP_BINARY" --self-test "$SMOKE_RF"'
 assert_file_contains "$BUILD_SCRIPT" '"$APP_BINARY" --self-test-dnd'
 assert_file_contains "$BUILD_SCRIPT" 'Add :LSMinimumSystemVersion string $MINIMUM_MACOS_VERSION'
 assert_file_contains "$BUILD_SCRIPT" 'Add :RFMappingReleaseEdition string $RELEASE_EDITION'
 assert_file_contains "$BUILD_SCRIPT" 'Add :CFBundleDocumentTypes:0:CFBundleTypeExtensions:0 string rfmap'
-assert_file_contains "$BUILD_SCRIPT" 'Add :CFBundleDocumentTypes:1:CFBundleTypeExtensions:0 string json'
-assert_file_not_contains "$BUILD_SCRIPT" 'Add :CFBundleDocumentTypes:2'
-assert_file_contains "$BUILD_SCRIPT" 'verify_plist_missing CFBundleDocumentTypes:2'
-assert_file_contains "$BUILD_SCRIPT" 'verify_archive_plist_missing CFBundleDocumentTypes.2'
+assert_file_not_contains "$BUILD_SCRIPT" 'Add :CFBundleDocumentTypes:1'
+assert_file_contains "$BUILD_SCRIPT" 'verify_plist_missing CFBundleDocumentTypes:1'
+assert_file_contains "$BUILD_SCRIPT" 'verify_archive_plist_missing CFBundleDocumentTypes.1'
 assert_file_contains "$BUILD_SCRIPT" 'Add :UTExportedTypeDeclarations:0:UTTypeIdentifier string org.local.rfmapping.rfmap'
-assert_file_contains "$BUILD_SCRIPT" 'Add :UTExportedTypeDeclarations:1:UTTypeIdentifier string org.local.rfmapping.tc'
-assert_file_contains "$BUILD_SCRIPT" 'Add :UTExportedTypeDeclarations:2:UTTypeIdentifier string org.local.rfmapping.probe'
-assert_file_contains "$BUILD_SCRIPT" 'find "$DATA_SOURCE" -type f \( -iname '\''*.rfmap'\'' -o -iname '\''*.json'\'' \)'
+assert_file_not_contains "$BUILD_SCRIPT" 'Add :UTExportedTypeDeclarations:1'
+assert_file_contains "$BUILD_SCRIPT" 'find "$DATA_SOURCE" -type f -iname '\''*.rfmap'\'''
 assert_file_contains "$BUILD_SCRIPT" 'SIGN_ARGUMENTS+=(--options runtime --timestamp)'
 assert_file_contains "$BUILD_SCRIPT" '/usr/bin/xattr -cr "$bundle"'
 assert_file_contains "$BUILD_SCRIPT" 'ditto -c -k --norsrc --keepParent'
 assert_file_contains "$BUILD_SCRIPT" 'verify_archive_metadata "$ARCHIVE_PATH"'
-assert_file_contains "$BUILD_SCRIPT" 'ARCHIVE_NAME="RF_Map_Viewer-python-$APP_VERSION-$RELEASE_FLAVOR-macos-$APP_ARCHITECTURE.zip"'
+assert_file_contains "$BUILD_SCRIPT" 'ARCHIVE_NAME="Free_Moving_RF_Viewer-python-$APP_VERSION-$RELEASE_FLAVOR-macos-$APP_ARCHITECTURE.zip"'
 if /usr/bin/grep -F -- '--sequesterRsrc' "$BUILD_SCRIPT" >/dev/null; then
   fail_test "build script still requests AppleDouble resource-fork entries"
 fi
@@ -135,8 +135,8 @@ assert_file_contains "$INSTALLER" 'verify_plist_value "$bundle" RFMappingRelease
 assert_file_contains "$INSTALLER" 'verify_plist_value "$bundle" LSMinimumSystemVersion "$EXPECTED_MINIMUM_MACOS_VERSION"'
 assert_file_contains "$INSTALLER" 'validate_release_contract "$bundle"'
 assert_file_contains "$INSTALLER" 'CFBundleDocumentTypes:0:CFBundleTypeExtensions:0 rfmap'
-assert_file_not_contains "$INSTALLER" 'CFBundleDocumentTypes:2:CFBundleTypeExtensions'
-assert_file_contains "$INSTALLER" 'verify_plist_missing "$bundle" CFBundleDocumentTypes:2'
+assert_file_not_contains "$INSTALLER" 'CFBundleDocumentTypes:1:CFBundleTypeExtensions'
+assert_file_contains "$INSTALLER" 'verify_plist_missing "$bundle" CFBundleDocumentTypes:1'
 pass_test "build, run, and install scripts share canonical release metadata"
 
 assert_file_contains "$INSTALLER" 'ACTION="preflight"'
@@ -179,10 +179,10 @@ printf '%s\n' "$RF_MAPPING_APP_BUILD" >"$RELEASE_CONTRACT_FIXTURE/CFBundleVersio
 printf '%s\n' "$RF_MAPPING_RELEASE_EDITION" >"$RELEASE_CONTRACT_FIXTURE/RFMappingReleaseEdition"
 printf '%s\n' "$RF_MAPPING_MINIMUM_MACOS_VERSION" >"$RELEASE_CONTRACT_FIXTURE/LSMinimumSystemVersion"
 run_release_contract_fixture "$RELEASE_CONTRACT_FIXTURE" >/dev/null \
-  || fail_test "installer rejected the canonical Full release contract"
-printf '%s\n' Minimal >"$RELEASE_CONTRACT_FIXTURE/RFMappingReleaseEdition"
+  || fail_test "installer rejected the canonical FM preview release contract"
+printf '%s\n' Full >"$RELEASE_CONTRACT_FIXTURE/RFMappingReleaseEdition"
 if run_release_contract_fixture "$RELEASE_CONTRACT_FIXTURE" >/dev/null 2>&1; then
-  fail_test "installer accepted Minimal metadata as the Full release candidate"
+  fail_test "installer accepted Full metadata as the FM preview candidate"
 fi
 printf '%s\n' "$RF_MAPPING_RELEASE_EDITION" >"$RELEASE_CONTRACT_FIXTURE/RFMappingReleaseEdition"
 printf '%s\n' 13.0 >"$RELEASE_CONTRACT_FIXTURE/LSMinimumSystemVersion"
@@ -361,11 +361,11 @@ run_fixture_transaction() (
 
 SUCCESS_FIXTURE="$FIXTURE_ROOT/success"
 /bin/mkdir -p "$SUCCESS_FIXTURE/source" "$SUCCESS_FIXTURE/Applications"
-fixture_bundle "$SUCCESS_FIXTURE/source/RF Map Viewer.app" new "$CANDIDATE_VERSION" "$CANDIDATE_BUILD"
-fixture_bundle "$SUCCESS_FIXTURE/Applications/RF Map Viewer.app" old 1.8.3 10803
+fixture_bundle "$SUCCESS_FIXTURE/source/Free-Moving RF Viewer.app" new "$CANDIDATE_VERSION" "$CANDIDATE_BUILD"
+fixture_bundle "$SUCCESS_FIXTURE/Applications/Free-Moving RF Viewer.app" old 1.8.3 10803
 run_fixture_transaction "$SUCCESS_FIXTURE" install >/dev/null \
   || fail_test "successful replacement fixture failed"
-[[ "$(/bin/cat "$SUCCESS_FIXTURE/Applications/RF Map Viewer.app/RELEASE")" == "new" ]] \
+[[ "$(/bin/cat "$SUCCESS_FIXTURE/Applications/Free-Moving RF Viewer.app/RELEASE")" == "new" ]] \
   || fail_test "successful replacement did not publish the new app"
 SUCCESS_BACKUPS=("$SUCCESS_FIXTURE"/Applications/.rfmapping-backups/*.app)
 [[ "${#SUCCESS_BACKUPS[@]}" -eq 1 \
@@ -380,14 +380,14 @@ pass_test "fixture replacement publishes the new app and retains the old app"
 
 FAILURE_FIXTURE="$FIXTURE_ROOT/failure"
 /bin/mkdir -p "$FAILURE_FIXTURE/source" "$FAILURE_FIXTURE/Applications"
-fixture_bundle "$FAILURE_FIXTURE/source/RF Map Viewer.app" new "$CANDIDATE_VERSION" "$CANDIDATE_BUILD"
-fixture_bundle "$FAILURE_FIXTURE/Applications/RF Map Viewer.app" old 1.8.3 10803
+fixture_bundle "$FAILURE_FIXTURE/source/Free-Moving RF Viewer.app" new "$CANDIDATE_VERSION" "$CANDIDATE_BUILD"
+fixture_bundle "$FAILURE_FIXTURE/Applications/Free-Moving RF Viewer.app" old 1.8.3 10803
 set +e
 run_fixture_transaction "$FAILURE_FIXTURE" install 1 >/dev/null 2>&1
 FAILURE_STATUS=$?
 set -e
 [[ "$FAILURE_STATUS" -ne 0 ]] || fail_test "post-swap validation failure unexpectedly succeeded"
-[[ "$(/bin/cat "$FAILURE_FIXTURE/Applications/RF Map Viewer.app/RELEASE")" == "old" ]] \
+[[ "$(/bin/cat "$FAILURE_FIXTURE/Applications/Free-Moving RF Viewer.app/RELEASE")" == "old" ]] \
   || fail_test "post-swap validation failure did not restore the old app"
 [[ ! -e "$FAILURE_FIXTURE/Applications/.rfmapping-install.lock" ]] \
   || fail_test "successful automatic rollback left its lock behind"
@@ -398,14 +398,14 @@ pass_test "post-swap validation failure automatically restores the previous app"
 
 ATOMIC_RETURN_FIXTURE="$FIXTURE_ROOT/atomic-return-failure"
 /bin/mkdir -p "$ATOMIC_RETURN_FIXTURE/source" "$ATOMIC_RETURN_FIXTURE/Applications"
-fixture_bundle "$ATOMIC_RETURN_FIXTURE/source/RF Map Viewer.app" new "$CANDIDATE_VERSION" "$CANDIDATE_BUILD"
-fixture_bundle "$ATOMIC_RETURN_FIXTURE/Applications/RF Map Viewer.app" old 1.8.3 10803
+fixture_bundle "$ATOMIC_RETURN_FIXTURE/source/Free-Moving RF Viewer.app" new "$CANDIDATE_VERSION" "$CANDIDATE_BUILD"
+fixture_bundle "$ATOMIC_RETURN_FIXTURE/Applications/Free-Moving RF Viewer.app" old 1.8.3 10803
 set +e
 run_fixture_transaction "$ATOMIC_RETURN_FIXTURE" install 0 0 1 >/dev/null 2>&1
 ATOMIC_RETURN_STATUS=$?
 set -e
 [[ "$ATOMIC_RETURN_STATUS" -ne 0 ]] || fail_test "post-syscall helper failure unexpectedly succeeded"
-[[ "$(/bin/cat "$ATOMIC_RETURN_FIXTURE/Applications/RF Map Viewer.app/RELEASE")" == "old" ]] \
+[[ "$(/bin/cat "$ATOMIC_RETURN_FIXTURE/Applications/Free-Moving RF Viewer.app/RELEASE")" == "old" ]] \
   || fail_test "pending transaction recovery did not restore the old app"
 [[ ! -e "$ATOMIC_RETURN_FIXTURE/Applications/.rfmapping-install.lock" ]] \
   || fail_test "pending transaction recovery left its lock behind"
@@ -415,9 +415,9 @@ ROLLBACK_VALIDATION_FAILURE_FIXTURE="$FIXTURE_ROOT/rollback-validation-failure"
 /bin/mkdir -p \
   "$ROLLBACK_VALIDATION_FAILURE_FIXTURE/source" \
   "$ROLLBACK_VALIDATION_FAILURE_FIXTURE/Applications/.rfmapping-backups"
-fixture_bundle "$ROLLBACK_VALIDATION_FAILURE_FIXTURE/source/RF Map Viewer.app" new "$CANDIDATE_VERSION" "$CANDIDATE_BUILD"
-fixture_bundle "$ROLLBACK_VALIDATION_FAILURE_FIXTURE/Applications/RF Map Viewer.app" new "$CANDIDATE_VERSION" "$CANDIDATE_BUILD"
-ROLLBACK_VALIDATION_REQUEST="$ROLLBACK_VALIDATION_FAILURE_FIXTURE/Applications/.rfmapping-backups/RF Map Viewer-previous-1.8.3-build10803-fixture.app"
+fixture_bundle "$ROLLBACK_VALIDATION_FAILURE_FIXTURE/source/Free-Moving RF Viewer.app" new "$CANDIDATE_VERSION" "$CANDIDATE_BUILD"
+fixture_bundle "$ROLLBACK_VALIDATION_FAILURE_FIXTURE/Applications/Free-Moving RF Viewer.app" new "$CANDIDATE_VERSION" "$CANDIDATE_BUILD"
+ROLLBACK_VALIDATION_REQUEST="$ROLLBACK_VALIDATION_FAILURE_FIXTURE/Applications/.rfmapping-backups/Free-Moving RF Viewer-previous-1.8.3-build10803-fixture.app"
 fixture_bundle "$ROLLBACK_VALIDATION_REQUEST" old 1.8.3 10803
 set +e
 run_fixture_transaction "$ROLLBACK_VALIDATION_FAILURE_FIXTURE" rollback 1 >/dev/null 2>&1
@@ -425,7 +425,7 @@ ROLLBACK_VALIDATION_FAILURE_STATUS=$?
 set -e
 [[ "$ROLLBACK_VALIDATION_FAILURE_STATUS" -ne 0 ]] \
   || fail_test "manual rollback validation failure unexpectedly succeeded"
-[[ "$(/bin/cat "$ROLLBACK_VALIDATION_FAILURE_FIXTURE/Applications/RF Map Viewer.app/RELEASE")" == "new" ]] \
+[[ "$(/bin/cat "$ROLLBACK_VALIDATION_FAILURE_FIXTURE/Applications/Free-Moving RF Viewer.app/RELEASE")" == "new" ]] \
   || fail_test "manual rollback validation failure did not restore the installed app"
 [[ "$(/bin/cat "$ROLLBACK_VALIDATION_REQUEST/RELEASE")" == "old" ]] \
   || fail_test "manual rollback validation failure deleted the requested backup"
@@ -437,9 +437,9 @@ ROLLBACK_HELPER_FAILURE_FIXTURE="$FIXTURE_ROOT/rollback-helper-return-failure"
 /bin/mkdir -p \
   "$ROLLBACK_HELPER_FAILURE_FIXTURE/source" \
   "$ROLLBACK_HELPER_FAILURE_FIXTURE/Applications/.rfmapping-backups"
-fixture_bundle "$ROLLBACK_HELPER_FAILURE_FIXTURE/source/RF Map Viewer.app" new "$CANDIDATE_VERSION" "$CANDIDATE_BUILD"
-fixture_bundle "$ROLLBACK_HELPER_FAILURE_FIXTURE/Applications/RF Map Viewer.app" new "$CANDIDATE_VERSION" "$CANDIDATE_BUILD"
-ROLLBACK_HELPER_REQUEST="$ROLLBACK_HELPER_FAILURE_FIXTURE/Applications/.rfmapping-backups/RF Map Viewer-previous-1.8.3-build10803-fixture.app"
+fixture_bundle "$ROLLBACK_HELPER_FAILURE_FIXTURE/source/Free-Moving RF Viewer.app" new "$CANDIDATE_VERSION" "$CANDIDATE_BUILD"
+fixture_bundle "$ROLLBACK_HELPER_FAILURE_FIXTURE/Applications/Free-Moving RF Viewer.app" new "$CANDIDATE_VERSION" "$CANDIDATE_BUILD"
+ROLLBACK_HELPER_REQUEST="$ROLLBACK_HELPER_FAILURE_FIXTURE/Applications/.rfmapping-backups/Free-Moving RF Viewer-previous-1.8.3-build10803-fixture.app"
 fixture_bundle "$ROLLBACK_HELPER_REQUEST" old 1.8.3 10803
 set +e
 run_fixture_transaction "$ROLLBACK_HELPER_FAILURE_FIXTURE" rollback 0 0 1 >/dev/null 2>&1
@@ -447,7 +447,7 @@ ROLLBACK_HELPER_FAILURE_STATUS=$?
 set -e
 [[ "$ROLLBACK_HELPER_FAILURE_STATUS" -ne 0 ]] \
   || fail_test "manual rollback helper-return failure unexpectedly succeeded"
-[[ "$(/bin/cat "$ROLLBACK_HELPER_FAILURE_FIXTURE/Applications/RF Map Viewer.app/RELEASE")" == "new" ]] \
+[[ "$(/bin/cat "$ROLLBACK_HELPER_FAILURE_FIXTURE/Applications/Free-Moving RF Viewer.app/RELEASE")" == "new" ]] \
   || fail_test "manual rollback helper-return recovery did not restore the installed app"
 [[ "$(/bin/cat "$ROLLBACK_HELPER_REQUEST/RELEASE")" == "old" ]] \
   || fail_test "manual rollback helper-return recovery deleted the requested backup"
@@ -455,72 +455,72 @@ pass_test "inode recovery after manual rollback helper failure retains the reque
 
 FIRST_INSTALL_FIXTURE="$FIXTURE_ROOT/first-install-failure"
 /bin/mkdir -p "$FIRST_INSTALL_FIXTURE/source" "$FIRST_INSTALL_FIXTURE/Applications"
-fixture_bundle "$FIRST_INSTALL_FIXTURE/source/RF Map Viewer.app" new "$CANDIDATE_VERSION" "$CANDIDATE_BUILD"
+fixture_bundle "$FIRST_INSTALL_FIXTURE/source/Free-Moving RF Viewer.app" new "$CANDIDATE_VERSION" "$CANDIDATE_BUILD"
 set +e
 run_fixture_transaction "$FIRST_INSTALL_FIXTURE" install 1 >/dev/null 2>&1
 FIRST_INSTALL_STATUS=$?
 set -e
 [[ "$FIRST_INSTALL_STATUS" -ne 0 ]] || fail_test "failed first-install validation unexpectedly succeeded"
-[[ ! -e "$FIRST_INSTALL_FIXTURE/Applications/RF Map Viewer.app" ]] \
+[[ ! -e "$FIRST_INSTALL_FIXTURE/Applications/Free-Moving RF Viewer.app" ]] \
   || fail_test "failed first installation left an app at the target"
 pass_test "failed first installation withdraws the unverified target"
 
 FIRST_PUBLISH_RETURN_FIXTURE="$FIXTURE_ROOT/first-publish-return-failure"
 /bin/mkdir -p "$FIRST_PUBLISH_RETURN_FIXTURE/source" "$FIRST_PUBLISH_RETURN_FIXTURE/Applications"
-fixture_bundle "$FIRST_PUBLISH_RETURN_FIXTURE/source/RF Map Viewer.app" new "$CANDIDATE_VERSION" "$CANDIDATE_BUILD"
+fixture_bundle "$FIRST_PUBLISH_RETURN_FIXTURE/source/Free-Moving RF Viewer.app" new "$CANDIDATE_VERSION" "$CANDIDATE_BUILD"
 set +e
 run_fixture_transaction "$FIRST_PUBLISH_RETURN_FIXTURE" install 0 0 0 1 >/dev/null 2>&1
 FIRST_PUBLISH_RETURN_STATUS=$?
 set -e
 [[ "$FIRST_PUBLISH_RETURN_STATUS" -ne 0 ]] \
   || fail_test "post-publication exclusive-helper failure unexpectedly succeeded"
-[[ ! -e "$FIRST_PUBLISH_RETURN_FIXTURE/Applications/RF Map Viewer.app" ]] \
+[[ ! -e "$FIRST_PUBLISH_RETURN_FIXTURE/Applications/Free-Moving RF Viewer.app" ]] \
   || fail_test "pending first-publication recovery did not withdraw the candidate"
 pass_test "inode-based pending state withdraws a first publication completed before helper failure"
 
 RACE_FIXTURE="$FIXTURE_ROOT/first-install-race"
 /bin/mkdir -p "$RACE_FIXTURE/source" "$RACE_FIXTURE/Applications"
-fixture_bundle "$RACE_FIXTURE/source/RF Map Viewer.app" new "$CANDIDATE_VERSION" "$CANDIDATE_BUILD"
+fixture_bundle "$RACE_FIXTURE/source/Free-Moving RF Viewer.app" new "$CANDIDATE_VERSION" "$CANDIDATE_BUILD"
 set +e
 run_fixture_transaction "$RACE_FIXTURE" install 0 1 >/dev/null 2>&1
 RACE_STATUS=$?
 set -e
 [[ "$RACE_STATUS" -ne 0 ]] || fail_test "first-install destination race unexpectedly succeeded"
-[[ -f "$RACE_FIXTURE/Applications/RF Map Viewer.app/RACER_SENTINEL" ]] \
+[[ -f "$RACE_FIXTURE/Applications/Free-Moving RF Viewer.app/RACER_SENTINEL" ]] \
   || fail_test "first-install destination race damaged the competing target"
-[[ ! -e "$RACE_FIXTURE/Applications/RF Map Viewer.app/RF Map Viewer.app" ]] \
+[[ ! -e "$RACE_FIXTURE/Applications/Free-Moving RF Viewer.app/Free-Moving RF Viewer.app" ]] \
   || fail_test "first-install destination race nested the release inside the competing target"
 pass_test "exclusive first publication fails closed when the destination appears concurrently"
 
 BACKUP_RACE_FIXTURE="$FIXTURE_ROOT/backup-publication-race"
 /bin/mkdir -p "$BACKUP_RACE_FIXTURE/source" "$BACKUP_RACE_FIXTURE/Applications"
-fixture_bundle "$BACKUP_RACE_FIXTURE/source/RF Map Viewer.app" new "$CANDIDATE_VERSION" "$CANDIDATE_BUILD"
-fixture_bundle "$BACKUP_RACE_FIXTURE/Applications/RF Map Viewer.app" old 1.8.3 10803
+fixture_bundle "$BACKUP_RACE_FIXTURE/source/Free-Moving RF Viewer.app" new "$CANDIDATE_VERSION" "$CANDIDATE_BUILD"
+fixture_bundle "$BACKUP_RACE_FIXTURE/Applications/Free-Moving RF Viewer.app" old 1.8.3 10803
 set +e
 run_fixture_transaction "$BACKUP_RACE_FIXTURE" install 0 0 0 0 1 >/dev/null 2>&1
 BACKUP_RACE_STATUS=$?
 set -e
 [[ "$BACKUP_RACE_STATUS" -ne 0 ]] || fail_test "backup destination race unexpectedly succeeded"
-[[ "$(/bin/cat "$BACKUP_RACE_FIXTURE/Applications/RF Map Viewer.app/RELEASE")" == "old" ]] \
+[[ "$(/bin/cat "$BACKUP_RACE_FIXTURE/Applications/Free-Moving RF Viewer.app/RELEASE")" == "old" ]] \
   || fail_test "backup destination race did not restore the previous app"
 BACKUP_RACE_SENTINELS=("$BACKUP_RACE_FIXTURE"/Applications/.rfmapping-backups/*.app/RACER_SENTINEL)
 [[ "${#BACKUP_RACE_SENTINELS[@]}" -eq 1 && -f "${BACKUP_RACE_SENTINELS[0]}" ]] \
   || fail_test "backup destination race did not preserve the competing directory"
-[[ ! -e "${BACKUP_RACE_SENTINELS[0]%/RACER_SENTINEL}/RF Map Viewer.app" ]] \
+[[ ! -e "${BACKUP_RACE_SENTINELS[0]%/RACER_SENTINEL}/Free-Moving RF Viewer.app" ]] \
   || fail_test "backup destination race nested an app in the competing directory"
 pass_test "exclusive backup publication fails closed without mv directory nesting"
 
 BACKUP_PENDING_FIXTURE="$FIXTURE_ROOT/backup-publication-return-failure"
 /bin/mkdir -p "$BACKUP_PENDING_FIXTURE/source" "$BACKUP_PENDING_FIXTURE/Applications"
-fixture_bundle "$BACKUP_PENDING_FIXTURE/source/RF Map Viewer.app" new "$CANDIDATE_VERSION" "$CANDIDATE_BUILD"
-fixture_bundle "$BACKUP_PENDING_FIXTURE/Applications/RF Map Viewer.app" old 1.8.3 10803
+fixture_bundle "$BACKUP_PENDING_FIXTURE/source/Free-Moving RF Viewer.app" new "$CANDIDATE_VERSION" "$CANDIDATE_BUILD"
+fixture_bundle "$BACKUP_PENDING_FIXTURE/Applications/Free-Moving RF Viewer.app" old 1.8.3 10803
 set +e
 run_fixture_transaction "$BACKUP_PENDING_FIXTURE" install 0 0 0 0 0 1 >/dev/null 2>&1
 BACKUP_PENDING_STATUS=$?
 set -e
 [[ "$BACKUP_PENDING_STATUS" -ne 0 ]] \
   || fail_test "post-publication backup helper failure unexpectedly succeeded"
-[[ "$(/bin/cat "$BACKUP_PENDING_FIXTURE/Applications/RF Map Viewer.app/RELEASE")" == "old" ]] \
+[[ "$(/bin/cat "$BACKUP_PENDING_FIXTURE/Applications/Free-Moving RF Viewer.app/RELEASE")" == "old" ]] \
   || fail_test "backup pending-state recovery did not restore the previous app"
 pass_test "inode-based pending state resolves exclusive backup publication before rollback"
 
@@ -528,9 +528,9 @@ ROLLBACK_PERSIST_PENDING_FIXTURE="$FIXTURE_ROOT/rollback-persistence-return-fail
 /bin/mkdir -p \
   "$ROLLBACK_PERSIST_PENDING_FIXTURE/source" \
   "$ROLLBACK_PERSIST_PENDING_FIXTURE/Applications/.rfmapping-backups"
-fixture_bundle "$ROLLBACK_PERSIST_PENDING_FIXTURE/source/RF Map Viewer.app" new "$CANDIDATE_VERSION" "$CANDIDATE_BUILD"
-fixture_bundle "$ROLLBACK_PERSIST_PENDING_FIXTURE/Applications/RF Map Viewer.app" new "$CANDIDATE_VERSION" "$CANDIDATE_BUILD"
-ROLLBACK_PERSIST_REQUEST="$ROLLBACK_PERSIST_PENDING_FIXTURE/Applications/.rfmapping-backups/RF Map Viewer-previous-1.8.3-build10803-fixture.app"
+fixture_bundle "$ROLLBACK_PERSIST_PENDING_FIXTURE/source/Free-Moving RF Viewer.app" new "$CANDIDATE_VERSION" "$CANDIDATE_BUILD"
+fixture_bundle "$ROLLBACK_PERSIST_PENDING_FIXTURE/Applications/Free-Moving RF Viewer.app" new "$CANDIDATE_VERSION" "$CANDIDATE_BUILD"
+ROLLBACK_PERSIST_REQUEST="$ROLLBACK_PERSIST_PENDING_FIXTURE/Applications/.rfmapping-backups/Free-Moving RF Viewer-previous-1.8.3-build10803-fixture.app"
 fixture_bundle "$ROLLBACK_PERSIST_REQUEST" old 1.8.3 10803
 set +e
 run_fixture_transaction "$ROLLBACK_PERSIST_PENDING_FIXTURE" rollback 0 0 0 0 0 1 >/dev/null 2>&1
@@ -538,7 +538,7 @@ ROLLBACK_PERSIST_PENDING_STATUS=$?
 set -e
 [[ "$ROLLBACK_PERSIST_PENDING_STATUS" -ne 0 ]] \
   || fail_test "manual rollback persistence helper failure unexpectedly succeeded"
-[[ "$(/bin/cat "$ROLLBACK_PERSIST_PENDING_FIXTURE/Applications/RF Map Viewer.app/RELEASE")" == "new" ]] \
+[[ "$(/bin/cat "$ROLLBACK_PERSIST_PENDING_FIXTURE/Applications/Free-Moving RF Viewer.app/RELEASE")" == "new" ]] \
   || fail_test "manual rollback persistence recovery did not restore the installed app"
 [[ "$(/bin/cat "$ROLLBACK_PERSIST_REQUEST/RELEASE")" == "old" ]] \
   || fail_test "manual rollback persistence recovery did not restore the requested backup path"
@@ -546,14 +546,14 @@ pass_test "manual rollback persistence failure restores and retains the requeste
 
 IDENTITY_RACE_FIXTURE="$FIXTURE_ROOT/identity-change-before-inverse"
 /bin/mkdir -p "$IDENTITY_RACE_FIXTURE/source" "$IDENTITY_RACE_FIXTURE/Applications"
-fixture_bundle "$IDENTITY_RACE_FIXTURE/source/RF Map Viewer.app" new "$CANDIDATE_VERSION" "$CANDIDATE_BUILD"
-fixture_bundle "$IDENTITY_RACE_FIXTURE/Applications/RF Map Viewer.app" old 1.8.3 10803
+fixture_bundle "$IDENTITY_RACE_FIXTURE/source/Free-Moving RF Viewer.app" new "$CANDIDATE_VERSION" "$CANDIDATE_BUILD"
+fixture_bundle "$IDENTITY_RACE_FIXTURE/Applications/Free-Moving RF Viewer.app" old 1.8.3 10803
 set +e
 run_fixture_transaction "$IDENTITY_RACE_FIXTURE" install 0 0 0 0 0 0 1 >/dev/null 2>&1
 IDENTITY_RACE_STATUS=$?
 set -e
 [[ "$IDENTITY_RACE_STATUS" -ne 0 ]] || fail_test "changed target identity unexpectedly recovered"
-[[ "$(/bin/cat "$IDENTITY_RACE_FIXTURE/Applications/RF Map Viewer.app/RELEASE")" == "concurrent" ]] \
+[[ "$(/bin/cat "$IDENTITY_RACE_FIXTURE/Applications/Free-Moving RF Viewer.app/RELEASE")" == "concurrent" ]] \
   || fail_test "identity mismatch recovery mutated the concurrent target"
 [[ -d "$IDENTITY_RACE_FIXTURE/Applications/.rfmapping-install.lock" ]] \
   || fail_test "identity mismatch did not preserve the install lock"
@@ -563,8 +563,8 @@ pass_test "inverse rollback fails closed when the live target identity changes"
 
 BACKUP_FAILURE_FIXTURE="$FIXTURE_ROOT/backup-move-failure"
 /bin/mkdir -p "$BACKUP_FAILURE_FIXTURE/source" "$BACKUP_FAILURE_FIXTURE/Applications/.rfmapping-backups"
-fixture_bundle "$BACKUP_FAILURE_FIXTURE/source/RF Map Viewer.app" new "$CANDIDATE_VERSION" "$CANDIDATE_BUILD"
-fixture_bundle "$BACKUP_FAILURE_FIXTURE/Applications/RF Map Viewer.app" old 1.8.3 10803
+fixture_bundle "$BACKUP_FAILURE_FIXTURE/source/Free-Moving RF Viewer.app" new "$CANDIDATE_VERSION" "$CANDIDATE_BUILD"
+fixture_bundle "$BACKUP_FAILURE_FIXTURE/Applications/Free-Moving RF Viewer.app" old 1.8.3 10803
 /bin/chmod 500 "$BACKUP_FAILURE_FIXTURE/Applications/.rfmapping-backups"
 set +e
 run_fixture_transaction "$BACKUP_FAILURE_FIXTURE" install >/dev/null 2>&1
@@ -572,22 +572,22 @@ BACKUP_FAILURE_STATUS=$?
 set -e
 /bin/chmod 700 "$BACKUP_FAILURE_FIXTURE/Applications/.rfmapping-backups"
 [[ "$BACKUP_FAILURE_STATUS" -ne 0 ]] || fail_test "unwritable backup directory unexpectedly succeeded"
-[[ "$(/bin/cat "$BACKUP_FAILURE_FIXTURE/Applications/RF Map Viewer.app/RELEASE")" == "old" ]] \
+[[ "$(/bin/cat "$BACKUP_FAILURE_FIXTURE/Applications/Free-Moving RF Viewer.app/RELEASE")" == "old" ]] \
   || fail_test "backup-move failure did not restore the previous app"
 pass_test "backup persistence failure automatically restores the previous app"
 
 ROLLBACK_FIXTURE="$FIXTURE_ROOT/manual-rollback"
 /bin/mkdir -p "$ROLLBACK_FIXTURE/source" "$ROLLBACK_FIXTURE/Applications/.rfmapping-backups"
-fixture_bundle "$ROLLBACK_FIXTURE/source/RF Map Viewer.app" new "$CANDIDATE_VERSION" "$CANDIDATE_BUILD"
-fixture_bundle "$ROLLBACK_FIXTURE/Applications/RF Map Viewer.app" new "$CANDIDATE_VERSION" "$CANDIDATE_BUILD"
+fixture_bundle "$ROLLBACK_FIXTURE/source/Free-Moving RF Viewer.app" new "$CANDIDATE_VERSION" "$CANDIDATE_BUILD"
+fixture_bundle "$ROLLBACK_FIXTURE/Applications/Free-Moving RF Viewer.app" new "$CANDIDATE_VERSION" "$CANDIDATE_BUILD"
 fixture_bundle \
-  "$ROLLBACK_FIXTURE/Applications/.rfmapping-backups/RF Map Viewer-previous-1.8.3-build10803-fixture.app" \
+  "$ROLLBACK_FIXTURE/Applications/.rfmapping-backups/Free-Moving RF Viewer-previous-1.8.3-build10803-fixture.app" \
   old \
   1.8.3 \
   10803
 run_fixture_transaction "$ROLLBACK_FIXTURE" rollback >/dev/null \
   || fail_test "manual rollback fixture failed"
-[[ "$(/bin/cat "$ROLLBACK_FIXTURE/Applications/RF Map Viewer.app/RELEASE")" == "old" ]] \
+[[ "$(/bin/cat "$ROLLBACK_FIXTURE/Applications/Free-Moving RF Viewer.app/RELEASE")" == "old" ]] \
   || fail_test "manual rollback did not restore the requested app"
 ROLLBACK_NEW_BACKUPS=("$ROLLBACK_FIXTURE"/Applications/.rfmapping-backups/*.app)
 [[ "${#ROLLBACK_NEW_BACKUPS[@]}" -eq 1 \

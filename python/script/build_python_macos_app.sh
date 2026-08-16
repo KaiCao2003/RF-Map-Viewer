@@ -19,6 +19,7 @@ MINIMUM_MACOS_VERSION="$RF_MAPPING_MINIMUM_MACOS_VERSION"
 PYINSTALLER_VERSION="6.21.0"
 NUMPY_VERSION="2.4.6"
 PILLOW_VERSION="12.3.0"
+H5PY_VERSION="3.16.0"
 TKINTERDND2_VERSION="0.6.2"
 
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -29,14 +30,15 @@ DIST_DIR="$ROOT_DIR/dist/python"
 APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
 APP_BINARY="$APP_BUNDLE/Contents/MacOS/$EXECUTABLE_NAME"
 APP_RESOURCES="$APP_BUNDLE/Contents/Resources"
-ARCHIVE_NAME="RF_Map_Viewer-python-$APP_VERSION-$RELEASE_FLAVOR-macos-$APP_ARCHITECTURE.zip"
+ARCHIVE_NAME="Free_Moving_RF_Viewer-python-$APP_VERSION-$RELEASE_FLAVOR-macos-$APP_ARCHITECTURE.zip"
 ARCHIVE_PATH="$DIST_DIR/$ARCHIVE_NAME"
 CHECKSUM_NAME="SHA256SUMS-python-$APP_VERSION-$RELEASE_FLAVOR.txt"
 CHECKSUM_PATH="$DIST_DIR/$CHECKSUM_NAME"
 INFO_PLIST="$APP_BUNDLE/Contents/Info.plist"
 DATA_SOURCE="$ROOT_DIR/data"
 SUPPORT_DOCUMENTATION="$ROOT_DIR/README.md"
-SMOKE_JSON="$ROOT_DIR/tests/fixtures/release_smoke_rf.json"
+SMOKE_RF="$WORK_DIR/release_smoke_fm.rfmap"
+SMOKE_FIXTURE_GENERATOR="$SCRIPT_DIR/create_fm_smoke_fixture.py"
 PYINSTALLER_HOOKS="$ROOT_DIR/packaging/pyinstaller-hooks"
 METADATA_AUDITOR="$SCRIPT_DIR/verify_python_release_metadata.py"
 ICON_MASTER="${RF_MAPPING_ICON_SOURCE:-$ROOT_DIR/assets/rf-mapping-viewer-icon-1024.png}"
@@ -219,12 +221,12 @@ if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
   return 0
 fi
 
-require_file "$ROOT_DIR/rfmapping_gui.py"
+require_file "$ROOT_DIR/rfmapping_fm_gui.py"
 require_file "$ROOT_DIR/pyproject.toml"
 require_file "$ROOT_DIR/requirements.txt"
 require_file "$ICON_MASTER"
 require_file "$SUPPORT_DOCUMENTATION"
-require_file "$SMOKE_JSON"
+require_file "$SMOKE_FIXTURE_GENERATOR"
 require_file "$METADATA_AUDITOR"
 require_file "$PYINSTALLER_HOOKS/hook-tkinterdnd2.py"
 [[ -x "$PLIST_BUDDY" ]] || fail "PlistBuddy not found: $PLIST_BUDDY"
@@ -264,9 +266,10 @@ BUILD_PYTHON_TARGET="$(
   || fail "Build virtual environment must use Python 3.14 $APP_ARCHITECTURE; got $BUILD_PYTHON_TARGET"
 
 if ! "$BUILD_VENV/bin/python" -c \
-  "import importlib.metadata as m, PyInstaller, numpy, PIL; raise SystemExit(PyInstaller.__version__ != '$PYINSTALLER_VERSION' or numpy.__version__ != '$NUMPY_VERSION' or PIL.__version__ != '$PILLOW_VERSION' or m.version('tkinterdnd2') != '$TKINTERDND2_VERSION')"; then
+  "import importlib.metadata as m, PyInstaller, h5py, numpy, PIL; raise SystemExit(PyInstaller.__version__ != '$PYINSTALLER_VERSION' or h5py.__version__ != '$H5PY_VERSION' or numpy.__version__ != '$NUMPY_VERSION' or PIL.__version__ != '$PILLOW_VERSION' or m.version('tkinterdnd2') != '$TKINTERDND2_VERSION')"; then
   "$BUILD_VENV/bin/python" -m pip install --disable-pip-version-check \
     "pyinstaller==$PYINSTALLER_VERSION" \
+    "h5py==$H5PY_VERSION" \
     "numpy==$NUMPY_VERSION" \
     "pillow==$PILLOW_VERSION" \
     "tkinterdnd2==$TKINTERDND2_VERSION"
@@ -318,7 +321,7 @@ run_pyinstaller() {
     --additional-hooks-dir "$PYINSTALLER_HOOKS" \
     --add-data "$SUPPORT_DOCUMENTATION:." \
     "$@" \
-    "$ROOT_DIR/rfmapping_gui.py"
+    "$ROOT_DIR/rfmapping_fm_gui.py"
 }
 
 # macOS ships Bash 3.2, where expanding an empty array under `set -u` fails.
@@ -349,41 +352,16 @@ fi
 "$PLIST_BUDDY" -c "Add :CFBundleDocumentTypes:0:CFBundleTypeExtensions:0 string rfmap" "$INFO_PLIST"
 "$PLIST_BUDDY" -c "Add :CFBundleDocumentTypes:0:LSItemContentTypes array" "$INFO_PLIST"
 "$PLIST_BUDDY" -c "Add :CFBundleDocumentTypes:0:LSItemContentTypes:0 string org.local.rfmapping.rfmap" "$INFO_PLIST"
-"$PLIST_BUDDY" -c "Add :CFBundleDocumentTypes:1 dict" "$INFO_PLIST"
-"$PLIST_BUDDY" -c "Add :CFBundleDocumentTypes:1:CFBundleTypeName string 'RF Mapping JSON'" "$INFO_PLIST"
-"$PLIST_BUDDY" -c "Add :CFBundleDocumentTypes:1:CFBundleTypeRole string Viewer" "$INFO_PLIST"
-"$PLIST_BUDDY" -c "Add :CFBundleDocumentTypes:1:LSHandlerRank string Alternate" "$INFO_PLIST"
-"$PLIST_BUDDY" -c "Add :CFBundleDocumentTypes:1:CFBundleTypeExtensions array" "$INFO_PLIST"
-"$PLIST_BUDDY" -c "Add :CFBundleDocumentTypes:1:CFBundleTypeExtensions:0 string json" "$INFO_PLIST"
-"$PLIST_BUDDY" -c "Add :CFBundleDocumentTypes:1:LSItemContentTypes array" "$INFO_PLIST"
-"$PLIST_BUDDY" -c "Add :CFBundleDocumentTypes:1:LSItemContentTypes:0 string public.json" "$INFO_PLIST"
 "$PLIST_BUDDY" -c "Delete :UTExportedTypeDeclarations" "$INFO_PLIST" 2>/dev/null || true
 "$PLIST_BUDDY" -c "Add :UTExportedTypeDeclarations array" "$INFO_PLIST"
 "$PLIST_BUDDY" -c "Add :UTExportedTypeDeclarations:0 dict" "$INFO_PLIST"
 "$PLIST_BUDDY" -c "Add :UTExportedTypeDeclarations:0:UTTypeIdentifier string org.local.rfmapping.rfmap" "$INFO_PLIST"
 "$PLIST_BUDDY" -c "Add :UTExportedTypeDeclarations:0:UTTypeDescription string 'RF Map document'" "$INFO_PLIST"
 "$PLIST_BUDDY" -c "Add :UTExportedTypeDeclarations:0:UTTypeConformsTo array" "$INFO_PLIST"
-"$PLIST_BUDDY" -c "Add :UTExportedTypeDeclarations:0:UTTypeConformsTo:0 string public.json" "$INFO_PLIST"
+"$PLIST_BUDDY" -c "Add :UTExportedTypeDeclarations:0:UTTypeConformsTo:0 string public.data" "$INFO_PLIST"
 "$PLIST_BUDDY" -c "Add :UTExportedTypeDeclarations:0:UTTypeTagSpecification dict" "$INFO_PLIST"
 "$PLIST_BUDDY" -c "Add :UTExportedTypeDeclarations:0:UTTypeTagSpecification:public.filename-extension array" "$INFO_PLIST"
 "$PLIST_BUDDY" -c "Add :UTExportedTypeDeclarations:0:UTTypeTagSpecification:public.filename-extension:0 string rfmap" "$INFO_PLIST"
-"$PLIST_BUDDY" -c "Add :UTExportedTypeDeclarations:1 dict" "$INFO_PLIST"
-"$PLIST_BUDDY" -c "Add :UTExportedTypeDeclarations:1:UTTypeIdentifier string org.local.rfmapping.tc" "$INFO_PLIST"
-"$PLIST_BUDDY" -c "Add :UTExportedTypeDeclarations:1:UTTypeDescription string 'Tuning Curve document'" "$INFO_PLIST"
-"$PLIST_BUDDY" -c "Add :UTExportedTypeDeclarations:1:UTTypeConformsTo array" "$INFO_PLIST"
-"$PLIST_BUDDY" -c "Add :UTExportedTypeDeclarations:1:UTTypeConformsTo:0 string public.json" "$INFO_PLIST"
-"$PLIST_BUDDY" -c "Add :UTExportedTypeDeclarations:1:UTTypeTagSpecification dict" "$INFO_PLIST"
-"$PLIST_BUDDY" -c "Add :UTExportedTypeDeclarations:1:UTTypeTagSpecification:public.filename-extension array" "$INFO_PLIST"
-"$PLIST_BUDDY" -c "Add :UTExportedTypeDeclarations:1:UTTypeTagSpecification:public.filename-extension:0 string tc" "$INFO_PLIST"
-"$PLIST_BUDDY" -c "Add :UTExportedTypeDeclarations:2 dict" "$INFO_PLIST"
-"$PLIST_BUDDY" -c "Add :UTExportedTypeDeclarations:2:UTTypeIdentifier string org.local.rfmapping.probe" "$INFO_PLIST"
-"$PLIST_BUDDY" -c "Add :UTExportedTypeDeclarations:2:UTTypeDescription string 'Probe Position document'" "$INFO_PLIST"
-"$PLIST_BUDDY" -c "Add :UTExportedTypeDeclarations:2:UTTypeConformsTo array" "$INFO_PLIST"
-"$PLIST_BUDDY" -c "Add :UTExportedTypeDeclarations:2:UTTypeConformsTo:0 string public.comma-separated-values-text" "$INFO_PLIST"
-"$PLIST_BUDDY" -c "Add :UTExportedTypeDeclarations:2:UTTypeTagSpecification dict" "$INFO_PLIST"
-"$PLIST_BUDDY" -c "Add :UTExportedTypeDeclarations:2:UTTypeTagSpecification:public.filename-extension array" "$INFO_PLIST"
-"$PLIST_BUDDY" -c "Add :UTExportedTypeDeclarations:2:UTTypeTagSpecification:public.filename-extension:0 string probe" "$INFO_PLIST"
-
 plutil -lint "$INFO_PLIST" >/dev/null
 verify_plist_value CFBundleDisplayName "$APP_NAME"
 verify_plist_value CFBundleExecutable "$EXECUTABLE_NAME"
@@ -397,19 +375,17 @@ verify_plist_value CFBundleDocumentTypes:0:CFBundleTypeRole Viewer
 verify_plist_value CFBundleDocumentTypes:0:LSHandlerRank Owner
 verify_plist_value CFBundleDocumentTypes:0:LSItemContentTypes:0 org.local.rfmapping.rfmap
 verify_plist_value CFBundleDocumentTypes:0:CFBundleTypeExtensions:0 rfmap
-verify_plist_value CFBundleDocumentTypes:1:CFBundleTypeExtensions:0 json
-verify_plist_missing CFBundleDocumentTypes:2
+verify_plist_missing CFBundleDocumentTypes:1
 verify_plist_value UTExportedTypeDeclarations:0:UTTypeIdentifier org.local.rfmapping.rfmap
-verify_plist_value UTExportedTypeDeclarations:1:UTTypeIdentifier org.local.rfmapping.tc
-verify_plist_value UTExportedTypeDeclarations:2:UTTypeIdentifier org.local.rfmapping.probe
+verify_plist_missing UTExportedTypeDeclarations:1
 
 require_nonempty_file "$APP_BINARY"
 require_nonempty_file "$APP_RESOURCES/RFMappingViewer.icns"
 require_nonempty_file "$APP_RESOURCES/README.md"
 if [[ -d "$DATA_SOURCE" ]]; then
   [[ -d "$APP_RESOURCES/data" ]] || fail "Bundled data directory is missing"
-  SOURCE_RF_COUNT="$(find "$DATA_SOURCE" -type f \( -iname '*.rfmap' -o -iname '*.json' \) | wc -l | tr -d '[:space:]')"
-  BUNDLED_RF_COUNT="$(find "$APP_RESOURCES/data" -type f \( -iname '*.rfmap' -o -iname '*.json' \) | wc -l | tr -d '[:space:]')"
+  SOURCE_RF_COUNT="$(find "$DATA_SOURCE" -type f -iname '*.rfmap' | wc -l | tr -d '[:space:]')"
+  BUNDLED_RF_COUNT="$(find "$APP_RESOURCES/data" -type f -iname '*.rfmap' | wc -l | tr -d '[:space:]')"
   [[ "$SOURCE_RF_COUNT" -gt 0 ]] || fail "No RF mapping resources found in $DATA_SOURCE"
   [[ "$BUNDLED_RF_COUNT" == "$SOURCE_RF_COUNT" ]] \
     || fail "Bundled RF mapping resource count does not match source"
@@ -419,7 +395,8 @@ fi
 verify_arm64_macho_files
 
 # These smoke tests run the frozen executable, not the build interpreter.
-"$APP_BINARY" --self-test "$SMOKE_JSON"
+"$BUILD_VENV/bin/python" "$SMOKE_FIXTURE_GENERATOR" "$SMOKE_RF"
+"$APP_BINARY" --self-test "$SMOKE_RF"
 "$APP_BINARY" --self-test-dnd
 
 clean_bundle_metadata "$APP_BUNDLE"
@@ -430,7 +407,7 @@ fi
 codesign "${SIGN_ARGUMENTS[@]}" "$APP_BUNDLE"
 codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE"
 
-# Finder must never cache the transient build-tree bundle as a second JSON
+# Finder must never cache the transient build-tree bundle as a second RF map
 # Open With candidate. The verified app remains for the guarded installer.
 if [[ -x "$LSREGISTER" ]]; then
   "$LSREGISTER" -u "$APP_BUNDLE" >/dev/null 2>&1 || true
@@ -446,8 +423,7 @@ verify_archive_plist_value CFBundleVersion "$APP_BUILD"
 verify_archive_plist_value RFMappingReleaseEdition "$RELEASE_EDITION"
 verify_archive_plist_value LSMinimumSystemVersion "$MINIMUM_MACOS_VERSION"
 verify_archive_plist_value CFBundleDocumentTypes.0.CFBundleTypeExtensions.0 rfmap
-verify_archive_plist_value CFBundleDocumentTypes.1.CFBundleTypeExtensions.0 json
-verify_archive_plist_missing CFBundleDocumentTypes.2
+verify_archive_plist_missing CFBundleDocumentTypes.1
 verify_archive_payload
 
 (
