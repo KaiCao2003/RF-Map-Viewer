@@ -83,10 +83,12 @@ pass_test "atomic helper passes non-macOS and macOS-API C syntax validation"
   [[ "$RF_MAPPING_APP_NAME" == "Free-Moving RF Viewer" ]]
   [[ "$RF_MAPPING_EXECUTABLE_NAME" == "Free-Moving RF Viewer" ]]
   [[ "$RF_MAPPING_BUNDLE_ID" == "org.local.rfmapping.viewer.freemoving" ]]
-  [[ "$RF_MAPPING_APP_VERSION" == "1.10.0.1" ]]
+  [[ "$RF_MAPPING_APP_VERSION" == "1.10.0" ]]
+  [[ "$RF_MAPPING_APP_PRERELEASE" == "alpha.1" ]]
+  [[ "$RF_MAPPING_PACKAGE_VERSION" == "1.10.0a1" ]]
   [[ "$RF_MAPPING_APP_BUILD" == "110001" ]]
-  [[ "$RF_MAPPING_RELEASE_EDITION" == "FreeMovingPreview" ]]
-  [[ "$RF_MAPPING_RELEASE_FLAVOR" == "freemoving-preview" ]]
+  [[ "$RF_MAPPING_RELEASE_EDITION" == "FreeMovingAlpha" ]]
+  [[ "$RF_MAPPING_RELEASE_FLAVOR" == "freemoving" ]]
   [[ "$RF_MAPPING_APP_ARCHITECTURE" == "arm64" ]]
   [[ "$RF_MAPPING_MINIMUM_MACOS_VERSION" == "14.0" ]]
 ) || fail_test "release metadata is incomplete or unexpected"
@@ -122,7 +124,7 @@ assert_file_contains "$BUILD_SCRIPT" 'SIGN_ARGUMENTS+=(--options runtime --times
 assert_file_contains "$BUILD_SCRIPT" '/usr/bin/xattr -cr "$bundle"'
 assert_file_contains "$BUILD_SCRIPT" 'ditto -c -k --norsrc --keepParent'
 assert_file_contains "$BUILD_SCRIPT" 'verify_archive_metadata "$ARCHIVE_PATH"'
-assert_file_contains "$BUILD_SCRIPT" 'ARCHIVE_NAME="Free_Moving_RF_Viewer-python-$APP_VERSION-$RELEASE_FLAVOR-macos-$APP_ARCHITECTURE.zip"'
+assert_file_contains "$BUILD_SCRIPT" 'ARCHIVE_NAME="Free_Moving_RF_Viewer-python-$RELEASE_VERSION-$RELEASE_FLAVOR-macos-$APP_ARCHITECTURE.zip"'
 if /usr/bin/grep -F -- '--sequesterRsrc' "$BUILD_SCRIPT" >/dev/null; then
   fail_test "build script still requests AppleDouble resource-fork entries"
 fi
@@ -179,10 +181,10 @@ printf '%s\n' "$RF_MAPPING_APP_BUILD" >"$RELEASE_CONTRACT_FIXTURE/CFBundleVersio
 printf '%s\n' "$RF_MAPPING_RELEASE_EDITION" >"$RELEASE_CONTRACT_FIXTURE/RFMappingReleaseEdition"
 printf '%s\n' "$RF_MAPPING_MINIMUM_MACOS_VERSION" >"$RELEASE_CONTRACT_FIXTURE/LSMinimumSystemVersion"
 run_release_contract_fixture "$RELEASE_CONTRACT_FIXTURE" >/dev/null \
-  || fail_test "installer rejected the canonical FM preview release contract"
+  || fail_test "installer rejected the canonical FM alpha release contract"
 printf '%s\n' Full >"$RELEASE_CONTRACT_FIXTURE/RFMappingReleaseEdition"
 if run_release_contract_fixture "$RELEASE_CONTRACT_FIXTURE" >/dev/null 2>&1; then
-  fail_test "installer accepted Full metadata as the FM preview candidate"
+  fail_test "installer accepted Full metadata as the FM alpha candidate"
 fi
 printf '%s\n' "$RF_MAPPING_RELEASE_EDITION" >"$RELEASE_CONTRACT_FIXTURE/RFMappingReleaseEdition"
 printf '%s\n' 13.0 >"$RELEASE_CONTRACT_FIXTURE/LSMinimumSystemVersion"
