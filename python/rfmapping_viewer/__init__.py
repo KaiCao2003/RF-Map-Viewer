@@ -1,5 +1,5 @@
-"""Implementation-local support code for the Python RF Map Viewer."""
+"""Implementation-local support code for the free-moving RF viewer."""
 
-from .rf_dataset import RFMap, RFMapList, load_rf_maps
+from .fm_dataset import FreeMovingRFMap, FreeMovingUnitMap, load_free_moving_rfmap
 
-__all__ = ["RFMap", "RFMapList", "load_rf_maps"]
+__all__ = ["FreeMovingRFMap", "FreeMovingUnitMap", "load_free_moving_rfmap"]

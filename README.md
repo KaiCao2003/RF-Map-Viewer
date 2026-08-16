@@ -6,7 +6,7 @@ data. It is self-contained: none of its runtime paths import the sibling
 
 | Implementation | Directory | Primary entry point |
 | --- | --- | --- |
-| Python/Tk | `python/` | `python/rfmapping_gui.py` |
+| Python/Tk FM preview | `python/` | `python/rfmapping_fm_gui.py` |
 | SwiftUI | `swift/` | `swift/Package.swift` |
 | Web | `web/` | FastAPI under `web/backend/`; React under `web/frontend/` |
 
@@ -15,10 +15,17 @@ sources remain in `../rfmapping`. The two repositories communicate only
 through versioned file contracts, principally the RF JSON described in
 [`contracts/rf-json.md`](contracts/rf-json.md).
 
-## File compatibility
+## Python free-moving preview
 
-All three viewers accept the new filename extensions without changing the
-underlying data encoding:
+Python version **1.10.0.1** is the **freemoving rf viewer preview**. It accepts
+only HDF5 `.rfmap` files with `format=rfmapping_fm_hdf5_v1`, displays the
+head-centric elevation/azimuth firing-rate result, and exposes exposure and
+calibration QA. Legacy JSON, tuning-curve, head-direction, and probe companions
+are intentionally outside this preview app. Swift and Web remain unchanged.
+
+## Legacy file compatibility
+
+The unchanged Swift and Web implementations retain these aliases:
 
 | Data | Preferred extension | Existing extension |
 | --- | --- | --- |
@@ -38,12 +45,7 @@ Project code is run on `hhw9l84` with `~/.virtualenvs/rfmapping`:
 ```sh
 ssh hhw9l84 'cd ~/Developer/rfmapping_gui/python && \
   PYTHONDONTWRITEBYTECODE=1 ~/.virtualenvs/rfmapping/bin/python -m pytest -q \
-    tests/test_rfmapping_gui.py \
-    tests/test_rf_dataset.py \
-    tests/test_hd_tuning.py \
-    tests/test_figure_export.py \
-    tests/test_gui_figure_export.py \
-    tests/test_full_legacy_model.py'
+    --ignore=tests/test_rfmapping_gui_tk.py'
 
 ssh hhw9l84 'cd ~/Developer/rfmapping_gui/web && \
   PYTHONDONTWRITEBYTECODE=1 ~/.virtualenvs/rfmapping/bin/python -m pytest -q'
@@ -52,11 +54,10 @@ ssh hhw9l84 'cd ~/Developer/rfmapping_gui/web/frontend && \
   npm ci --no-audit --no-fund && npm test && npm run build'
 ```
 
-The remote host is Linux and has neither Tk nor Swift, so it validates Python
-model/export logic, Web code, shell syntax, and static Swift layout. A real Tk
-launch or signed Python bundle requires a Tk-enabled Apple-silicon Mac; the
-Python bundle has a macOS 14.0 deployment minimum. Swift validation uses its
-separately intended macOS 15 Apple-silicon build host.
+The remote host is Linux and has no display, so it validates the Python HDF5
+model, aggregation, release scripts, and non-GUI smoke path. A real Tk launch
+or signed Python bundle requires a Tk-enabled Apple-silicon Mac; the Python
+bundle has a macOS 14.0 deployment minimum.
 
 See the implementation READMEs for target-specific install, build, and release
 commands.
