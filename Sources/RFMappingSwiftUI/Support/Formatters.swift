@@ -93,6 +93,10 @@ func smoothMatrix(_ matrix: OptionalMatrix, radius: Int) -> OptionalMatrix {
         var output = current
         for y in 0..<rows {
             for x in 0..<cols {
+                guard let center = current[y][x], center.isFinite else {
+                    output[y][x] = nil
+                    continue
+                }
                 var total = 0.0
                 var weightTotal = 0.0
                 for dy in -1...1 {

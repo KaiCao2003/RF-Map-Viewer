@@ -64,6 +64,12 @@ struct TimelineAccessibilityRepresentation: View {
             } else {
                 Text("Visual stimulation onset is zero milliseconds.")
             }
+            if layout.selectedValues != nil {
+                Text(
+                    "All-position and selected-cell traces share a scale from zero to "
+                        + "\(store.valueMode.format(layout.responseHigh)) \(store.valueMode.unit)."
+                )
+            }
 
             ForEach(layout.timeGroups.indices, id: \.self) { bin in
                 Button {

@@ -1,22 +1,29 @@
 #!/usr/bin/env python3
-"""Standalone native GUI viewer for RF mapping spike-count JSON files.
+"""Standalone native GUI viewer for RF maps and head-direction tuning curves.
 
-The app intentionally uses only Python's standard library and Tk. It does not
-depend on notebook state, web servers, numpy, matplotlib, or pandas.
+The application uses Tk for its native desktop UI and has no notebook or web
+server dependency.
 """
 
 from __future__ import annotations
 
 import argparse
+from bisect import bisect_left
 import csv
+import ctypes
 import json
 import math
 import os
+import queue
 import re
 import sys
-from dataclasses import dataclass, replace
+import tempfile
+import threading
+import webbrowser
+from dataclasses import asdict, dataclass, field, replace
+from functools import lru_cache
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Mapping, Sequence
 
 try:
     from tkinter import filedialog, messagebox, ttk
@@ -40,8 +47,20 @@ DEFAULT_JSON = DEFAULT_JSON_DIR / "unitsSpikeCounts_260701_1.json"
 INNER_BLANK_ROWS = 4
 POLAR_PAD_ROWS = 1
 STARTUP_EVENT_WAIT_MS = 350
+ASYNC_DOCUMENT_LOAD_BYTES = 8 * 1024 * 1024
 DEFAULT_RF_SUM_START_MS = 0.0
 DEFAULT_RF_SUM_END_MS = 200.0
+SETTINGS_SCHEMA_VERSION = 1
+HD_RAW_BIN_COUNT = 180
+DEFAULT_HD_DISPLAY_BINS = 30
+DEFAULT_HD_SMOOTH_SIGMA = 1.5
+GAUSSIAN_TRUNCATE = 4.0
+MACOS_FULLSCREEN_MAX_SIZE = float.fromhex("0x1.fffffep+127")
+HD_BIN_DIVISORS = tuple(
+    count for count in range(1, HD_RAW_BIN_COUNT + 1) if HD_RAW_BIN_COUNT % count == 0
+)
+TUNING_PLOT_MODES = ("Auto", "Polar", "Line")
+TUNING_LAYOUTS = ("Side by side", "Stacked")
 VALUE_MODE_COUNT = "Spike count"
 VALUE_MODE_PER_PRESENTATION = "Spikes / presentation"
 VALUE_MODE_RATE = "Mean firing rate (Hz)"
@@ -71,8 +90,24 @@ PAIR_SYNC_ALL_FIELDS = frozenset(
         "selected_cell",
         "timeline_scroll",
         "selected_tab",
+        "tuning_display",
+        "optional_views",
     }
 )
+
+
+class PreparedSpatialMatrix(list):
+    """A display-grouped matrix that must not be reduced or smoothed again."""
+
+    def __init__(
+        self,
+        values: list[list[float | None]],
+        x_groups: list[AxisGroup],
+        y_groups: list[AxisGroup],
+    ) -> None:
+        super().__init__(values)
+        self.x_groups = x_groups
+        self.y_groups = y_groups
 
 
 def timeline_scroll_progress(first: float, last: float) -> float | None:
@@ -107,6 +142,74 @@ def timeline_scroll_offset(progress: float, first: float, last: float) -> float 
     if max_first <= 1e-9:
         return None
     return max(0.0, min(1.0, float(progress))) * max_first
+
+
+def timeline_position_fraction(
+    time_ms: float,
+    axis_start_ms: float,
+    axis_end_ms: float,
+) -> float:
+    """Map physical time onto the timeline axis, clamped to its visible span."""
+
+    values = (float(time_ms), float(axis_start_ms), float(axis_end_ms))
+    if not all(math.isfinite(value) for value in values):
+        return 0.0
+    span = values[2] - values[1]
+    if span <= 0.0:
+        return 0.0
+    return max(0.0, min(1.0, (values[0] - values[1]) / span))
+
+
+def timeline_chart_points(
+    values: Sequence[float],
+    center_times_ms: Sequence[float],
+    axis_range_ms: tuple[float, float],
+    high: float,
+    chart_rect: tuple[float, float, float, float],
+) -> list[float]:
+    """Return a Tk polyline whose x coordinates use real bin-center times."""
+
+    chart_x, chart_y, chart_width, chart_height = map(float, chart_rect)
+    safe_high = float(high)
+    if not math.isfinite(safe_high) or safe_high <= 0.0:
+        safe_high = 1.0
+    points: list[float] = []
+    for value, center_ms in zip(values, center_times_ms):
+        numeric = float(value)
+        if not math.isfinite(numeric):
+            numeric = 0.0
+        response_fraction = max(0.0, min(1.0, numeric / safe_high))
+        points.extend(
+            (
+                chart_x
+                + chart_width
+                * timeline_position_fraction(center_ms, axis_range_ms[0], axis_range_ms[1]),
+                chart_y + chart_height - chart_height * response_fraction,
+            )
+        )
+    return points
+
+
+def timeline_response_high(values: Sequence[float]) -> float:
+    """Return one trace's non-negative y-axis maximum."""
+
+    high = 0.0
+    for value in values:
+        numeric = float(value)
+        if math.isfinite(numeric):
+            high = max(high, numeric)
+    return max(high, 1.0)
+
+
+def timeline_bin_index(time_ms: float, end_bounds_ms: Sequence[float]) -> int | None:
+    """Return the half-open physical-time bin containing ``time_ms``."""
+
+    if not end_bounds_ms:
+        return None
+    for index, end_ms in enumerate(end_bounds_ms):
+        if float(time_ms) < float(end_ms):
+            return index
+    return len(end_bounds_ms) - 1
 
 
 def safe_mtime(path: Path) -> float:
@@ -159,6 +262,938 @@ def startup_json_path() -> Path:
         resources = Path(sys.executable).resolve().parent.parent / "Resources"
         return latest_json_path(resources)
     return latest_json_path()
+
+
+def support_documentation_path(
+    *,
+    module_path: Path | None = None,
+    executable_path: Path | None = None,
+    frozen: bool | None = None,
+) -> Path | None:
+    """Return the installed local README used by the Help menu."""
+
+    module_path = Path(__file__) if module_path is None else Path(module_path)
+    executable_path = (
+        Path(sys.executable) if executable_path is None else Path(executable_path)
+    )
+    frozen = getattr(sys, "frozen", False) if frozen is None else frozen
+    candidates: list[Path] = []
+    if frozen:
+        executable = executable_path.expanduser().resolve()
+        candidates.extend(
+            (
+                executable.parent.parent / "Resources" / "README.md",
+                executable.parent / "Resources" / "README.md",
+            )
+        )
+        bundle_root = getattr(sys, "_MEIPASS", None)
+        if bundle_root:
+            candidates.append(Path(bundle_root) / "README.md")
+    candidates.append(module_path.expanduser().resolve().parent / "README.md")
+
+    for candidate in candidates:
+        resolved = _resolve_existing_file(candidate)
+        if resolved is not None:
+            return resolved
+    return None
+
+
+def viewer_settings_path(
+    *,
+    platform: str | None = None,
+    environ: Mapping[str, str] | None = None,
+    home: Path | None = None,
+) -> Path:
+    """Return the per-user settings path without requiring a GUI."""
+
+    platform = sys.platform if platform is None else platform
+    environ = os.environ if environ is None else environ
+    home = Path.home() if home is None else Path(home)
+    if platform == "darwin":
+        return home / "Library" / "Application Support" / "RF Map Viewer" / "settings.json"
+    if platform.startswith("win"):
+        appdata = environ.get("APPDATA")
+        base = Path(appdata) if appdata else home / "AppData" / "Roaming"
+        return base / "RF Map Viewer" / "settings.json"
+    xdg_config = environ.get("XDG_CONFIG_HOME")
+    base = Path(xdg_config) if xdg_config else home / ".config"
+    return base / "rf-map-viewer" / "settings.json"
+
+
+def normalize_hd_bin_count(value: int) -> int:
+    """Clamp a requested display count to the greatest divisor of 180 below it."""
+
+    requested = max(1, min(HD_RAW_BIN_COUNT, int(value)))
+    return max(divisor for divisor in HD_BIN_DIVISORS if divisor <= requested)
+
+
+@dataclass(frozen=True)
+class ViewerSettings:
+    schema_version: int = SETTINGS_SCHEMA_VERSION
+    show_tuning_curve: bool = True
+    auto_load_tuning_curve: bool = True
+    show_probe_layout: bool = True
+    auto_load_probe_layout: bool = True
+    rf_sum_start_ms: float = DEFAULT_RF_SUM_START_MS
+    rf_sum_end_ms: float = DEFAULT_RF_SUM_END_MS
+    rf_time_resolution_ms: float = 1.0
+    rf_value_mode: str = VALUE_MODE_COUNT
+    rf_x_bins: int = 0
+    rf_y_bins: int = 0
+    rf_smooth_radius: int = 0
+    rf_flip_y: bool = False
+    rf_palette: str = "Gray"
+    rf_polar_radius: str = POLAR_RADIUS_MODES[1]
+    rf_polar_layout: bool = False
+    rf_rgb_mode: bool = False
+    default_viewer_tab: str = "rf"
+    tuning_plot_mode: str = "Auto"
+    tuning_layout: str = TUNING_LAYOUTS[0]
+    tuning_display_bins: int = DEFAULT_HD_DISPLAY_BINS
+    tuning_smoothing: bool = True
+    tuning_smooth_sigma: float = DEFAULT_HD_SMOOTH_SIGMA
+    tuning_compare_scale: bool = False
+
+    @classmethod
+    def from_mapping(cls, payload: object) -> ViewerSettings:
+        defaults = cls()
+        if not isinstance(payload, Mapping):
+            return defaults
+        schema = payload.get("schema_version", SETTINGS_SCHEMA_VERSION)
+        if type(schema) is not int or schema != SETTINGS_SCHEMA_VERSION:
+            return defaults
+
+        def boolean(name: str) -> bool:
+            value = payload.get(name, getattr(defaults, name))
+            return value if type(value) is bool else getattr(defaults, name)
+
+        def finite_float(name: str, *, positive: bool = False) -> float:
+            value = payload.get(name, getattr(defaults, name))
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                return getattr(defaults, name)
+            result = float(value)
+            if not math.isfinite(result) or (positive and result <= 0.0):
+                return getattr(defaults, name)
+            return result
+
+        def integer(name: str, low: int, high: int) -> int:
+            value = payload.get(name, getattr(defaults, name))
+            if type(value) is not int:
+                return getattr(defaults, name)
+            return max(low, min(high, value))
+
+        start_ms = finite_float("rf_sum_start_ms")
+        end_ms = finite_float("rf_sum_end_ms")
+        if start_ms >= end_ms:
+            start_ms = defaults.rf_sum_start_ms
+            end_ms = defaults.rf_sum_end_ms
+
+        value_mode = payload.get("rf_value_mode", defaults.rf_value_mode)
+        if value_mode not in VALUE_MODES:
+            value_mode = defaults.rf_value_mode
+        palette = payload.get("rf_palette", defaults.rf_palette)
+        if palette not in PALETTES:
+            palette = defaults.rf_palette
+        polar_radius = payload.get("rf_polar_radius", defaults.rf_polar_radius)
+        if polar_radius not in POLAR_RADIUS_MODES:
+            polar_radius = defaults.rf_polar_radius
+        viewer_tab = payload.get("default_viewer_tab", defaults.default_viewer_tab)
+        if viewer_tab not in {"rf", "delay", "timeline"}:
+            viewer_tab = defaults.default_viewer_tab
+        tuning_mode = payload.get("tuning_plot_mode", defaults.tuning_plot_mode)
+        if tuning_mode not in TUNING_PLOT_MODES:
+            tuning_mode = defaults.tuning_plot_mode
+        tuning_layout = payload.get("tuning_layout", defaults.tuning_layout)
+        if tuning_layout not in TUNING_LAYOUTS:
+            tuning_layout = defaults.tuning_layout
+        raw_hd_bins = payload.get("tuning_display_bins", defaults.tuning_display_bins)
+        if type(raw_hd_bins) is not int:
+            raw_hd_bins = defaults.tuning_display_bins
+
+        return cls(
+            show_tuning_curve=boolean("show_tuning_curve"),
+            auto_load_tuning_curve=boolean("auto_load_tuning_curve"),
+            show_probe_layout=boolean("show_probe_layout"),
+            auto_load_probe_layout=boolean("auto_load_probe_layout"),
+            rf_sum_start_ms=start_ms,
+            rf_sum_end_ms=end_ms,
+            rf_time_resolution_ms=finite_float("rf_time_resolution_ms", positive=True),
+            rf_value_mode=value_mode,
+            rf_x_bins=integer("rf_x_bins", 0, 100_000),
+            rf_y_bins=integer("rf_y_bins", 0, 100_000),
+            rf_smooth_radius=integer("rf_smooth_radius", 0, 3),
+            rf_flip_y=boolean("rf_flip_y"),
+            rf_palette=palette,
+            rf_polar_radius=polar_radius,
+            rf_polar_layout=boolean("rf_polar_layout"),
+            rf_rgb_mode=boolean("rf_rgb_mode"),
+            default_viewer_tab=viewer_tab,
+            tuning_plot_mode=tuning_mode,
+            tuning_layout=tuning_layout,
+            tuning_display_bins=normalize_hd_bin_count(raw_hd_bins),
+            tuning_smoothing=boolean("tuning_smoothing"),
+            tuning_smooth_sigma=finite_float("tuning_smooth_sigma", positive=True),
+            tuning_compare_scale=boolean("tuning_compare_scale"),
+        )
+
+    def to_mapping(self) -> dict[str, object]:
+        return asdict(self)
+
+
+def load_viewer_settings(path: Path | None = None) -> ViewerSettings:
+    settings_path = viewer_settings_path() if path is None else Path(path)
+    try:
+        payload = json.loads(settings_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return ViewerSettings()
+    return ViewerSettings.from_mapping(payload)
+
+
+def save_viewer_settings(settings: ViewerSettings, path: Path | None = None) -> Path:
+    settings_path = viewer_settings_path() if path is None else Path(path)
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=settings_path.parent,
+            prefix=f".{settings_path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as stream:
+            json.dump(settings.to_mapping(), stream, indent=2, sort_keys=True)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+            temporary_path = Path(stream.name)
+        os.replace(temporary_path, settings_path)
+    finally:
+        if temporary_path is not None and temporary_path.exists():
+            temporary_path.unlink()
+    return settings_path
+
+
+@dataclass(frozen=True)
+class TuningCurveClassificationProvenance:
+    method: str | None = None
+    class_0: str | None = None
+    class_1: str | None = None
+    class_2: str | None = None
+    class_null: str | None = None
+    rayleigh_alpha: float | None = None
+    rayleigh_test: str | None = None
+    shuffle_alpha: float | None = None
+    num_shuffle: int | None = None
+    shuffle_seed: int | None = None
+
+
+@dataclass(frozen=True)
+class TuningCurveTTLProvenance:
+    ttl_pulse_count: int | None = None
+    first_exposure_s: float | None = None
+    last_exposure_s: float | None = None
+    median_period_s: float | None = None
+    measured_rate_hz: float | None = None
+    camera_input_channel: int | None = None
+    camera_ttl_threshold: float | None = None
+    camera_ttl_active_high: bool | None = None
+    motive_frame_count_raw: int | None = None
+    matched_motive_frame_count: int | None = None
+    dropped_motive_frame_ids: tuple[int, ...] | None = None
+    frame_alignment_policy_requested: str | None = None
+    frame_alignment_policy_applied: str | None = None
+    frame_timestamp_mapping: str | None = None
+
+
+@dataclass(frozen=True)
+class TuningCurveMetadata:
+    session: str | None = None
+    probe: str | None = None
+    kilosort_dir: str | None = None
+    timebase: str | None = None
+    adc_time_origin_raw_s: float | None = None
+    timestamp_reference: str | None = None
+    angle_convention_note: str | None = None
+    num_angle_bins: int | None = None
+    feature_fs_hz: float | None = None
+    classification: TuningCurveClassificationProvenance | None = None
+    ttl_qc: TuningCurveTTLProvenance | None = None
+
+
+@dataclass(frozen=True)
+class TuningCurveData:
+    path: Path
+    curves: Mapping[int, tuple[float, ...]]
+    spike_counts: Mapping[int, tuple[int, ...]] = field(default_factory=dict)
+    occupancy_time_s: tuple[float, ...] | None = None
+    hd_classes: Mapping[int, int | None] = field(default_factory=dict)
+    metadata: TuningCurveMetadata | None = None
+
+    @classmethod
+    def load(cls, path: Path) -> TuningCurveData:
+        resolved = Path(path).expanduser().resolve()
+        try:
+            payload = json.loads(resolved.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Invalid tuning-curve JSON: {exc}") from exc
+        if not isinstance(payload, dict) or not payload:
+            raise ValueError("Tuning-curve JSON must be a non-empty cluster mapping.")
+        if "schema_version" in payload:
+            if type(payload["schema_version"]) is not int or payload["schema_version"] != 2:
+                raise ValueError(
+                    f"Unsupported tuning-curve schema version: {payload['schema_version']!r}."
+                )
+            return cls._load_schema_v2(resolved, payload)
+        return cls._load_legacy(resolved, payload)
+
+    @classmethod
+    def _load_legacy(cls, resolved: Path, payload: Mapping[object, object]) -> TuningCurveData:
+        curves: dict[int, tuple[float, ...]] = {}
+        for raw_cluster_id, raw_rates in payload.items():
+            try:
+                cluster_id = int(raw_cluster_id)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"Invalid cluster ID: {raw_cluster_id!r}") from exc
+            if cluster_id in curves:
+                raise ValueError(f"Duplicate cluster ID after normalization: {cluster_id}")
+            if not isinstance(raw_rates, list) or len(raw_rates) != HD_RAW_BIN_COUNT:
+                length = len(raw_rates) if isinstance(raw_rates, list) else "non-list"
+                raise ValueError(
+                    f"Cluster {cluster_id} must contain exactly {HD_RAW_BIN_COUNT} rates; got {length}."
+                )
+            rates: list[float] = []
+            for index, raw_rate in enumerate(raw_rates):
+                if isinstance(raw_rate, bool) or not isinstance(raw_rate, (int, float)):
+                    raise ValueError(f"Cluster {cluster_id} rate {index + 1} is not numeric.")
+                rate = float(raw_rate)
+                if not math.isfinite(rate) or rate < 0.0:
+                    raise ValueError(
+                        f"Cluster {cluster_id} rate {index + 1} must be finite and non-negative."
+                    )
+                rates.append(rate)
+            curves[cluster_id] = tuple(rates)
+        return cls(path=resolved, curves=curves)
+
+    @staticmethod
+    def _metadata_string(
+        payload: Mapping[object, object], key: str, context: str
+    ) -> str | None:
+        value = payload.get(key)
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError(f"Schema v2 {context}.{key} must be a string or null.")
+        return value
+
+    @staticmethod
+    def _metadata_float(
+        payload: Mapping[object, object], key: str, context: str
+    ) -> float | None:
+        value = payload.get(key)
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"Schema v2 {context}.{key} must be numeric or null.")
+        number = float(value)
+        if not math.isfinite(number):
+            raise ValueError(f"Schema v2 {context}.{key} must be finite.")
+        return number
+
+    @staticmethod
+    def _metadata_int(
+        payload: Mapping[object, object], key: str, context: str
+    ) -> int | None:
+        value = payload.get(key)
+        if value is None:
+            return None
+        if type(value) is not int:
+            raise ValueError(f"Schema v2 {context}.{key} must be an integer or null.")
+        return int(value)
+
+    @staticmethod
+    def _metadata_bool(
+        payload: Mapping[object, object], key: str, context: str
+    ) -> bool | None:
+        value = payload.get(key)
+        if value is None:
+            return None
+        if type(value) is not bool:
+            raise ValueError(f"Schema v2 {context}.{key} must be boolean or null.")
+        return bool(value)
+
+    @staticmethod
+    def _metadata_int_tuple(
+        payload: Mapping[object, object], key: str, context: str
+    ) -> tuple[int, ...] | None:
+        value = payload.get(key)
+        if value is None:
+            return None
+        if not isinstance(value, list) or any(type(item) is not int for item in value):
+            raise ValueError(
+                f"Schema v2 {context}.{key} must be an integer list or null."
+            )
+        return tuple(int(item) for item in value)
+
+    @classmethod
+    def _load_metadata(cls, raw_metadata: object) -> TuningCurveMetadata | None:
+        if raw_metadata is None:
+            return None
+        if not isinstance(raw_metadata, dict):
+            raise ValueError("Schema v2 metadata must be an object or null.")
+        classification_raw = raw_metadata.get("classification")
+        if classification_raw is None:
+            classification = None
+        elif not isinstance(classification_raw, dict):
+            raise ValueError(
+                "Schema v2 metadata.classification must be an object or null."
+            )
+        else:
+            context = "metadata.classification"
+            classification = TuningCurveClassificationProvenance(
+                method=cls._metadata_string(classification_raw, "method", context),
+                class_0=cls._metadata_string(classification_raw, "class_0", context),
+                class_1=cls._metadata_string(classification_raw, "class_1", context),
+                class_2=cls._metadata_string(classification_raw, "class_2", context),
+                class_null=cls._metadata_string(
+                    classification_raw, "class_null", context
+                ),
+                rayleigh_alpha=cls._metadata_float(
+                    classification_raw, "rayleigh_alpha", context
+                ),
+                rayleigh_test=cls._metadata_string(
+                    classification_raw, "rayleigh_test", context
+                ),
+                shuffle_alpha=cls._metadata_float(
+                    classification_raw, "shuffle_alpha", context
+                ),
+                num_shuffle=cls._metadata_int(
+                    classification_raw, "num_shuffle", context
+                ),
+                shuffle_seed=cls._metadata_int(
+                    classification_raw, "shuffle_seed", context
+                ),
+            )
+
+        ttl_raw = raw_metadata.get("ttl_qc")
+        if ttl_raw is None:
+            ttl_qc = None
+        elif not isinstance(ttl_raw, dict):
+            raise ValueError("Schema v2 metadata.ttl_qc must be an object or null.")
+        else:
+            context = "metadata.ttl_qc"
+            ttl_qc = TuningCurveTTLProvenance(
+                ttl_pulse_count=cls._metadata_int(
+                    ttl_raw, "ttl_pulse_count", context
+                ),
+                first_exposure_s=cls._metadata_float(
+                    ttl_raw, "first_exposure_s", context
+                ),
+                last_exposure_s=cls._metadata_float(
+                    ttl_raw, "last_exposure_s", context
+                ),
+                median_period_s=cls._metadata_float(
+                    ttl_raw, "median_period_s", context
+                ),
+                measured_rate_hz=cls._metadata_float(
+                    ttl_raw, "measured_rate_hz", context
+                ),
+                camera_input_channel=cls._metadata_int(
+                    ttl_raw, "camera_input_channel", context
+                ),
+                camera_ttl_threshold=cls._metadata_float(
+                    ttl_raw, "camera_ttl_threshold", context
+                ),
+                camera_ttl_active_high=cls._metadata_bool(
+                    ttl_raw, "camera_ttl_active_high", context
+                ),
+                motive_frame_count_raw=cls._metadata_int(
+                    ttl_raw, "motive_frame_count_raw", context
+                ),
+                matched_motive_frame_count=cls._metadata_int(
+                    ttl_raw, "matched_motive_frame_count", context
+                ),
+                dropped_motive_frame_ids=cls._metadata_int_tuple(
+                    ttl_raw, "dropped_motive_frame_ids", context
+                ),
+                frame_alignment_policy_requested=cls._metadata_string(
+                    ttl_raw, "frame_alignment_policy_requested", context
+                ),
+                frame_alignment_policy_applied=cls._metadata_string(
+                    ttl_raw, "frame_alignment_policy_applied", context
+                ),
+                frame_timestamp_mapping=cls._metadata_string(
+                    ttl_raw, "frame_timestamp_mapping", context
+                ),
+            )
+
+        context = "metadata"
+        return TuningCurveMetadata(
+            session=cls._metadata_string(raw_metadata, "session", context),
+            probe=cls._metadata_string(raw_metadata, "probe", context),
+            kilosort_dir=cls._metadata_string(raw_metadata, "kilosort_dir", context),
+            timebase=cls._metadata_string(raw_metadata, "timebase", context),
+            adc_time_origin_raw_s=cls._metadata_float(
+                raw_metadata, "adc_time_origin_raw_s", context
+            ),
+            timestamp_reference=cls._metadata_string(
+                raw_metadata, "timestamp_reference", context
+            ),
+            angle_convention_note=cls._metadata_string(
+                raw_metadata, "angle_convention_note", context
+            ),
+            num_angle_bins=cls._metadata_int(
+                raw_metadata, "num_angle_bins", context
+            ),
+            feature_fs_hz=cls._metadata_float(
+                raw_metadata, "feature_fs_hz", context
+            ),
+            classification=classification,
+            ttl_qc=ttl_qc,
+        )
+
+    @classmethod
+    def _load_schema_v2(cls, resolved: Path, payload: Mapping[object, object]) -> TuningCurveData:
+        metadata = cls._load_metadata(payload.get("metadata"))
+        raw_edges = payload.get("angle_bin_edges_deg")
+        if not isinstance(raw_edges, list) or len(raw_edges) != HD_RAW_BIN_COUNT + 1:
+            raise ValueError(
+                f"Schema v2 angle_bin_edges_deg must contain {HD_RAW_BIN_COUNT + 1} values."
+            )
+        edges: list[float] = []
+        for index, raw_edge in enumerate(raw_edges):
+            if isinstance(raw_edge, bool) or not isinstance(raw_edge, (int, float)):
+                raise ValueError(f"Schema v2 angle edge {index + 1} is not numeric.")
+            edge = float(raw_edge)
+            if not math.isfinite(edge):
+                raise ValueError(f"Schema v2 angle edge {index + 1} must be finite.")
+            edges.append(edge)
+        if not all(after > before for before, after in zip(edges, edges[1:])):
+            raise ValueError("Schema v2 angle_bin_edges_deg must be strictly increasing.")
+        expected_width = 360.0 / HD_RAW_BIN_COUNT
+        if not all(
+            math.isclose(edge, index * expected_width, rel_tol=0.0, abs_tol=1e-8)
+            for index, edge in enumerate(edges)
+        ):
+            raise ValueError("Schema v2 angle bins must span 0–360° in 180 equal bins.")
+
+        raw_occupancy = payload.get("occupancy_time_s")
+        if not isinstance(raw_occupancy, list) or len(raw_occupancy) != HD_RAW_BIN_COUNT:
+            raise ValueError(
+                f"Schema v2 occupancy_time_s must contain {HD_RAW_BIN_COUNT} values."
+            )
+        occupancy: list[float] = []
+        for index, raw_value in enumerate(raw_occupancy):
+            if isinstance(raw_value, bool) or not isinstance(raw_value, (int, float)):
+                raise ValueError(f"Schema v2 occupancy time {index + 1} is not numeric.")
+            value = float(raw_value)
+            if not math.isfinite(value) or value < 0.0:
+                raise ValueError(
+                    f"Schema v2 occupancy time {index + 1} must be finite and non-negative."
+                )
+            occupancy.append(value)
+        if not any(value > 0.0 for value in occupancy):
+            raise ValueError("Schema v2 occupancy_time_s must contain positive occupancy.")
+
+        raw_units = payload.get("units")
+        if not isinstance(raw_units, list) or not raw_units:
+            raise ValueError("Schema v2 units must be a non-empty list.")
+        curves: dict[int, tuple[float, ...]] = {}
+        spike_counts: dict[int, tuple[int, ...]] = {}
+        hd_classes: dict[int, int | None] = {}
+        for unit_index, raw_unit in enumerate(raw_units):
+            if not isinstance(raw_unit, dict):
+                raise ValueError(f"Schema v2 unit {unit_index + 1} must be an object.")
+            raw_unit_id = raw_unit.get("unit_id")
+            if type(raw_unit_id) is not int:
+                raise ValueError(f"Schema v2 unit {unit_index + 1} has an invalid unit_id.")
+            unit_id = int(raw_unit_id)
+            if unit_id in curves:
+                raise ValueError(f"Duplicate schema v2 unit_id: {unit_id}")
+
+            raw_counts = raw_unit.get("spike_counts")
+            raw_rates = raw_unit.get("firing_rate_hz")
+            if not isinstance(raw_counts, list) or len(raw_counts) != HD_RAW_BIN_COUNT:
+                raise ValueError(
+                    f"Unit {unit_id} spike_counts must contain {HD_RAW_BIN_COUNT} values."
+                )
+            if not isinstance(raw_rates, list) or len(raw_rates) != HD_RAW_BIN_COUNT:
+                raise ValueError(
+                    f"Unit {unit_id} firing_rate_hz must contain {HD_RAW_BIN_COUNT} values."
+                )
+
+            counts: list[int] = []
+            rates: list[float] = []
+            for bin_index, (raw_count, raw_rate, occupied_s) in enumerate(
+                zip(raw_counts, raw_rates, occupancy)
+            ):
+                if type(raw_count) is not int or raw_count < 0:
+                    raise ValueError(
+                        f"Unit {unit_id} spike count {bin_index + 1} must be a non-negative integer."
+                    )
+                count = int(raw_count)
+                if occupied_s == 0.0:
+                    if count != 0 or raw_rate is not None:
+                        raise ValueError(
+                            f"Unit {unit_id} bin {bin_index + 1} has zero occupancy and must contain count 0 / rate null."
+                        )
+                    rate = math.nan
+                else:
+                    if isinstance(raw_rate, bool) or not isinstance(raw_rate, (int, float)):
+                        raise ValueError(
+                            f"Unit {unit_id} firing rate {bin_index + 1} is not numeric."
+                        )
+                    rate = float(raw_rate)
+                    expected_rate = count / occupied_s
+                    if (
+                        not math.isfinite(rate)
+                        or rate < 0.0
+                        or not math.isclose(rate, expected_rate, rel_tol=1e-7, abs_tol=1e-9)
+                    ):
+                        raise ValueError(
+                            f"Unit {unit_id} firing rate {bin_index + 1} does not match count / occupancy."
+                        )
+                counts.append(count)
+                rates.append(rate)
+
+            hd_class = raw_unit.get("hd_class")
+            if hd_class is not None and (type(hd_class) is not int or hd_class not in {0, 1, 2}):
+                raise ValueError(f"Unit {unit_id} hd_class must be 0, 1, 2, or null.")
+            curves[unit_id] = tuple(rates)
+            spike_counts[unit_id] = tuple(counts)
+            hd_classes[unit_id] = hd_class
+        return cls(
+            path=resolved,
+            curves=curves,
+            spike_counts=spike_counts,
+            occupancy_time_s=tuple(occupancy),
+            hd_classes=hd_classes,
+            metadata=metadata,
+        )
+
+    def rates_for(self, cluster_id: int) -> tuple[float, ...] | None:
+        return self.curves.get(int(cluster_id))
+
+    def hd_class_for(self, cluster_id: int) -> int | None:
+        return self.hd_classes.get(int(cluster_id))
+
+    def processed_for(
+        self,
+        cluster_id: int,
+        display_bins: int,
+        *,
+        smoothing: bool,
+        sigma: float,
+    ) -> tuple[tuple[float, ...], tuple[float, ...]] | None:
+        cluster_id = int(cluster_id)
+        rates = self.rates_for(cluster_id)
+        if rates is None:
+            return None
+        counts = self.spike_counts.get(cluster_id)
+        if counts is not None and self.occupancy_time_s is not None:
+            display_bins = normalize_hd_bin_count(display_bins)
+            if smoothing:
+                return smooth_tuning_counts(
+                    counts,
+                    self.occupancy_time_s,
+                    display_bins,
+                    sigma,
+                )
+            return aggregate_tuning_counts(
+                counts,
+                self.occupancy_time_s,
+                display_bins,
+            )
+        return processed_tuning_curve(
+            rates,
+            display_bins,
+            smoothing=smoothing,
+            sigma=sigma,
+        )
+
+
+def discover_tuning_curve_path(rf_json_path: Path) -> Path | None:
+    """Find the first session's tuning curve for the RF document's day/probe."""
+
+    rf_json_path = Path(rf_json_path).expanduser()
+    probe_name = probe_name_for_json(rf_json_path)
+    if probe_name is None:
+        return None
+    session_pattern = re.compile(r"^(?P<date>\d{6,8})_(?P<index>\d+)$")
+    session_dir: Path | None = None
+    session_match: re.Match[str] | None = None
+    for candidate in (rf_json_path.parent, *rf_json_path.parents):
+        match = session_pattern.fullmatch(candidate.name)
+        if match is not None:
+            session_dir = candidate
+            session_match = match
+            break
+    if session_dir is None or session_match is None:
+        return None
+
+    recording_date = session_match.group("date")
+    sessions: list[tuple[int, Path]] = []
+    try:
+        siblings = session_dir.parent.iterdir()
+    except OSError:
+        return None
+    for sibling in siblings:
+        if not sibling.is_dir():
+            continue
+        match = session_pattern.fullmatch(sibling.name)
+        if match is None or match.group("date") != recording_date:
+            continue
+        sessions.append((int(match.group("index")), sibling))
+    for _index, session in sorted(sessions):
+        candidate = session / "data" / "tuning_curves" / probe_name / "tuning_curves.json"
+        resolved = _resolve_existing_file(candidate)
+        if resolved is not None:
+            return resolved
+    return None
+
+
+def aggregate_tuning_curve(
+    rates: Sequence[float],
+    display_bins: int,
+) -> tuple[tuple[float, ...], tuple[float, ...]]:
+    """Average available raw HD rates and return display centers and rates."""
+
+    if len(rates) != HD_RAW_BIN_COUNT:
+        raise ValueError(f"Expected {HD_RAW_BIN_COUNT} raw HD rates; got {len(rates)}.")
+    display_bins = normalize_hd_bin_count(display_bins)
+    group_size = HD_RAW_BIN_COUNT // display_bins
+    values: list[float] = []
+    for start in range(0, HD_RAW_BIN_COUNT, group_size):
+        group = tuple(
+            float(value)
+            for value in rates[start : start + group_size]
+            if math.isfinite(float(value))
+        )
+        values.append(sum(group) / len(group) if group else math.nan)
+    bin_width_deg = 360.0 / display_bins
+    centers = tuple((index + 0.5) * bin_width_deg for index in range(display_bins))
+    return centers, tuple(values)
+
+
+def aggregate_tuning_counts(
+    spike_counts: Sequence[int],
+    occupancy_time_s: Sequence[float],
+    display_bins: int,
+) -> tuple[tuple[float, ...], tuple[float, ...]]:
+    """Aggregate counts and occupancy before converting to firing rate."""
+
+    centers, counts, occupancy = aggregate_tuning_observations(
+        spike_counts,
+        occupancy_time_s,
+        display_bins,
+    )
+    return centers, tuple(
+        count / occupied_s if occupied_s > 0.0 else math.nan
+        for count, occupied_s in zip(counts, occupancy)
+    )
+
+
+def aggregate_tuning_observations(
+    spike_counts: Sequence[float],
+    occupancy_time_s: Sequence[float],
+    display_bins: int,
+) -> tuple[tuple[float, ...], tuple[float, ...], tuple[float, ...]]:
+    """Return grouped angle centers, spike counts, and occupancy seconds."""
+
+    if len(spike_counts) != HD_RAW_BIN_COUNT:
+        raise ValueError(f"Expected {HD_RAW_BIN_COUNT} spike-count bins; got {len(spike_counts)}.")
+    if len(occupancy_time_s) != HD_RAW_BIN_COUNT:
+        raise ValueError(
+            f"Expected {HD_RAW_BIN_COUNT} occupancy-time bins; got {len(occupancy_time_s)}."
+    )
+    display_bins = normalize_hd_bin_count(display_bins)
+    group_size = HD_RAW_BIN_COUNT // display_bins
+    counts: list[float] = []
+    occupancy: list[float] = []
+    for start in range(0, HD_RAW_BIN_COUNT, group_size):
+        stop = start + group_size
+        counts.append(sum(float(value) for value in spike_counts[start:stop]))
+        occupancy.append(
+            sum(float(value) for value in occupancy_time_s[start:stop])
+        )
+    bin_width_deg = 360.0 / display_bins
+    centers = tuple((index + 0.5) * bin_width_deg for index in range(display_bins))
+    return centers, tuple(counts), tuple(occupancy)
+
+
+def tuning_smoothing_sigma(sigma: float, display_bins: int) -> float:
+    """Keep smoothing at a fixed angular width as the display bin count changes."""
+
+    sigma = float(sigma)
+    if not math.isfinite(sigma) or sigma <= 0.0:
+        raise ValueError("Tuning-curve smoothing sigma must be positive and finite.")
+    display_bins = normalize_hd_bin_count(display_bins)
+    return sigma * display_bins / DEFAULT_HD_DISPLAY_BINS
+
+
+@lru_cache(maxsize=64)
+def _circular_gaussian_kernel(sigma: float) -> tuple[tuple[int, float], ...]:
+    """Return SciPy-compatible order-zero Gaussian weights and offsets."""
+
+    radius = int(GAUSSIAN_TRUNCATE * sigma + 0.5)
+    offsets = range(-radius, radius + 1)
+    weights = [math.exp(-0.5 * (offset / sigma) ** 2) for offset in offsets]
+    weight_total = sum(weights)
+    return tuple(
+        (offset, weight / weight_total)
+        for offset, weight in zip(range(-radius, radius + 1), weights)
+    )
+
+
+def smooth_tuning_curve(rates: Sequence[float], sigma: float) -> tuple[float, ...]:
+    sigma = float(sigma)
+    if not math.isfinite(sigma) or sigma <= 0.0:
+        raise ValueError("Tuning-curve smoothing sigma must be positive and finite.")
+    values = tuple(float(value) for value in rates)
+    if not values:
+        return ()
+    kernel = _circular_gaussian_kernel(sigma)
+    count = len(values)
+    return tuple(
+        sum(
+            weight * values[(index + offset) % count]
+            for offset, weight in kernel
+        )
+        for index in range(count)
+    )
+
+
+def smooth_tuning_counts(
+    spike_counts: Sequence[int],
+    occupancy_time_s: Sequence[float],
+    display_bins: int,
+    sigma: float,
+) -> tuple[tuple[float, ...], tuple[float, ...]]:
+    """Smooth raw counts and occupancy, aggregate them, then compute rates."""
+
+    sigma_bins = tuning_smoothing_sigma(sigma, HD_RAW_BIN_COUNT)
+    smoothed_counts = smooth_tuning_curve(spike_counts, sigma_bins)
+    smoothed_occupancy = smooth_tuning_curve(occupancy_time_s, sigma_bins)
+    centers, counts, occupancy = aggregate_tuning_observations(
+        smoothed_counts,
+        smoothed_occupancy,
+        display_bins,
+    )
+    return centers, tuple(
+        count / occupied_s if occupied_s > 1e-12 else math.nan
+        for count, occupied_s in zip(counts, occupancy)
+    )
+
+
+def smooth_tuning_rates_missing_aware(
+    rates: Sequence[float],
+    sigma: float,
+) -> tuple[float, ...]:
+    """Circularly smooth raw rates without treating missing bins as zero Hz."""
+
+    values = tuple(float(value) for value in rates)
+    observed = tuple(1.0 if math.isfinite(value) else 0.0 for value in values)
+    numerator = smooth_tuning_curve(
+        tuple(value if math.isfinite(value) else 0.0 for value in values),
+        sigma,
+    )
+    denominator = smooth_tuning_curve(observed, sigma)
+    return tuple(
+        value / weight if weight > 1e-12 else math.nan
+        for value, weight in zip(numerator, denominator)
+    )
+
+
+def tuning_rate_peak(rates: Sequence[float]) -> float:
+    return max(
+        (float(rate) for rate in rates if math.isfinite(float(rate))),
+        default=0.0,
+    )
+
+
+def processed_tuning_curve(
+    rates: Sequence[float],
+    display_bins: int,
+    *,
+    smoothing: bool,
+    sigma: float,
+) -> tuple[tuple[float, ...], tuple[float, ...]]:
+    display_bins = normalize_hd_bin_count(display_bins)
+    source_rates = (
+        smooth_tuning_rates_missing_aware(
+            rates,
+            tuning_smoothing_sigma(sigma, HD_RAW_BIN_COUNT),
+        )
+        if smoothing
+        else rates
+    )
+    return aggregate_tuning_curve(source_rates, display_bins)
+
+
+def center_tuning_curve_on_zero(
+    angles_deg: Sequence[float],
+    rates: Sequence[float],
+) -> tuple[tuple[float, ...], tuple[float, ...]]:
+    """Mirror a circular HD curve onto -180..180 with 0 degrees centered."""
+
+    if len(angles_deg) != len(rates):
+        raise ValueError("Tuning-curve angles and rates must have the same length.")
+    centered = sorted(
+        (
+            ((-float(angle) + 180.0) % 360.0) - 180.0,
+            float(rate),
+        )
+        for angle, rate in zip(angles_deg, rates)
+    )
+    return (
+        tuple(angle for angle, _rate in centered),
+        tuple(rate for _angle, rate in centered),
+    )
+
+
+def head_direction_unit_vector(angle_deg: float) -> tuple[float, float]:
+    """Map HD degrees to Canvas coordinates: 0 north, positive counter-clockwise."""
+
+    radians = math.radians(float(angle_deg))
+    return -math.sin(radians), -math.cos(radians)
+
+
+class _NSSize(ctypes.Structure):
+    _fields_ = (("width", ctypes.c_double), ("height", ctypes.c_double))
+
+
+def allow_macos_fullscreen_resize(window: tk.Misc) -> bool:
+    """Remove Tk 8.6's initial-display size cap from native full screen."""
+
+    if sys.platform != "darwin":
+        return False
+    try:
+        window.update_idletasks()
+        process = ctypes.CDLL(None)
+        process.TkMacOSXDrawable.argtypes = (ctypes.c_void_p,)
+        process.TkMacOSXDrawable.restype = ctypes.c_void_p
+        native_window = process.TkMacOSXDrawable(window.winfo_id())
+        if not native_window:
+            return False
+
+        objc = ctypes.CDLL("/usr/lib/libobjc.A.dylib")
+        objc.sel_registerName.argtypes = (ctypes.c_char_p,)
+        objc.sel_registerName.restype = ctypes.c_void_p
+        message_address = ctypes.cast(objc.objc_msgSend, ctypes.c_void_p).value
+        if not message_address:
+            return False
+        send_size = ctypes.CFUNCTYPE(
+            None,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            _NSSize,
+        )(message_address)
+        selector = objc.sel_registerName(b"setMaxFullScreenContentSize:")
+        maximum = MACOS_FULLSCREEN_MAX_SIZE
+        send_size(native_window, selector, _NSSize(maximum, maximum))
+    except (AttributeError, OSError, TypeError, tk.TclError):
+        return False
+    return True
 
 
 @dataclass(frozen=True)
@@ -433,6 +1468,21 @@ class UnitMetrics:
 
 
 @dataclass(frozen=True)
+class SpatialGroupObservations:
+    count: float
+    presentations: float | None
+    source_pixel_count: int
+
+
+@dataclass(frozen=True)
+class SpatialGroupTemporalMetrics:
+    mean_total_count: float
+    peak_group_index: int | None
+    delay_ms: float | None
+    entropy: float
+
+
+@dataclass(frozen=True)
 class ViewerSyncState:
     """Persistent viewer controls shared by paired windows.
 
@@ -465,6 +1515,13 @@ class ViewerSyncState:
     selected_cell_x_midpoint: float | None
     timeline_scroll_fraction: float
     selected_tab: str
+    tuning_plot_mode: str = "Auto"
+    tuning_display_bins: int = DEFAULT_HD_DISPLAY_BINS
+    tuning_smoothing: bool = True
+    tuning_smooth_sigma: float = DEFAULT_HD_SMOOTH_SIGMA
+    tuning_compare_scale: bool = False
+    show_tuning_curve: bool = True
+    show_probe_layout: bool = True
 
     def changed_fields(self, baseline: ViewerSyncState) -> frozenset[str]:
         fields: set[str] = set()
@@ -509,6 +1566,19 @@ class ViewerSyncState:
             fields.add("timeline_scroll")
         if self.selected_tab != baseline.selected_tab:
             fields.add("selected_tab")
+        if (
+            self.tuning_plot_mode != baseline.tuning_plot_mode
+            or self.tuning_display_bins != baseline.tuning_display_bins
+            or self.tuning_smoothing != baseline.tuning_smoothing
+            or self.tuning_smooth_sigma != baseline.tuning_smooth_sigma
+            or self.tuning_compare_scale != baseline.tuning_compare_scale
+        ):
+            fields.add("tuning_display")
+        if (
+            self.show_tuning_curve != baseline.show_tuning_curve
+            or self.show_probe_layout != baseline.show_probe_layout
+        ):
+            fields.add("optional_views")
         return frozenset(fields)
 
     def merging(
@@ -558,6 +1628,19 @@ class ViewerSyncState:
             updates["timeline_scroll_fraction"] = incoming.timeline_scroll_fraction
         if "selected_tab" in fields:
             updates["selected_tab"] = incoming.selected_tab
+        if "tuning_display" in fields:
+            updates.update(
+                tuning_plot_mode=incoming.tuning_plot_mode,
+                tuning_display_bins=incoming.tuning_display_bins,
+                tuning_smoothing=incoming.tuning_smoothing,
+                tuning_smooth_sigma=incoming.tuning_smooth_sigma,
+                tuning_compare_scale=incoming.tuning_compare_scale,
+            )
+        if "optional_views" in fields:
+            updates.update(
+                show_tuning_curve=incoming.show_tuning_curve,
+                show_probe_layout=incoming.show_probe_layout,
+            )
         return replace(self, **updates)
 
 
@@ -612,6 +1695,7 @@ class RFMappingData:
                 presentation_counts = [[value] for value in presentation_counts]
         self.presentation_counts = presentation_counts
         self._metrics_cache: dict[int, UnitMetrics] = {}
+        self._best_cell_cache: dict[int, tuple[int, int]] = {}
 
         self._validate()
         if self.presentation_counts is not None:
@@ -816,7 +1900,34 @@ class RFMappingData:
             best_x=best_x,
         )
         self._metrics_cache[unit_idx] = metrics
+        self._best_cell_cache[unit_idx] = (best_y, best_x)
         return metrics
+
+    def best_cell(self, unit_idx: int) -> tuple[int, int]:
+        """Return the strongest cell without computing delay/entropy metrics.
+
+        RF navigation only needs a sensible default cell.  Keeping this path
+        separate avoids calculating every cell's peak, delay, and entropy the
+        first time each unit is visited.
+        """
+
+        cached = self._best_cell_cache.get(unit_idx)
+        if cached is not None:
+            return cached
+        unit = self.counts[unit_idx]
+        best_y = 0
+        best_x = 0
+        best_total = -1.0
+        for y_idx, row in enumerate(unit):
+            for x_idx, histogram in enumerate(row):
+                total = sum(float(value) for value in histogram)
+                if total > best_total:
+                    best_total = total
+                    best_y = y_idx
+                    best_x = x_idx
+        result = (best_y, best_x)
+        self._best_cell_cache[unit_idx] = result
+        return result
 
     def aggregate_matrix(
         self,
@@ -877,6 +1988,11 @@ class RFMappingData:
         start = max(0, min(self.n_bins - 1, requested_start))
         end = max(0, min(self.n_bins - 1, requested_end))
         count = float(sum(self.counts[unit_idx][y_idx][x_idx][start : end + 1]))
+        if (
+            self.presentation_counts is not None
+            and self.presentation_counts[y_idx][x_idx] <= 0
+        ):
+            return None
         if value_mode == VALUE_MODE_COUNT:
             return count
         if value_mode not in VALUE_MODES:
@@ -910,7 +2026,17 @@ class RFMappingData:
         end = max(0, min(self.n_bins - 1, requested_end))
         count_matrix = self.aggregate_matrix(unit_idx, "Range sum", 0, start, end)
         if value_mode == VALUE_MODE_COUNT:
-            return count_matrix
+            if self.presentation_counts is None:
+                return count_matrix
+            return [
+                [
+                    None
+                    if self.presentation_counts[y_idx][x_idx] <= 0
+                    else count_matrix[y_idx][x_idx]
+                    for x_idx in range(self.n_x)
+                ]
+                for y_idx in range(self.n_y)
+            ]
         if value_mode not in VALUE_MODES:
             raise ValueError(f"Unknown value mode: {value_mode}")
         if not self.supports_value_mode(value_mode):
@@ -935,6 +2061,217 @@ class RFMappingData:
             for y_idx in range(self.n_y)
         ]
 
+    def spatial_group_observations(
+        self,
+        unit_idx: int,
+        y_group: AxisGroup,
+        x_group: AxisGroup,
+        start: int,
+        end: int,
+    ) -> SpatialGroupObservations:
+        """Pool raw observations for one displayed spatial cell.
+
+        ``stimulusPresentationCounts`` is exposure metadata for each source
+        position.  A displayed cell that combines positions therefore has one
+        pooled numerator and one pooled exposure; averaging already-normalized
+        source rates would give sparsely sampled positions too much weight.
+        """
+
+        y_start = max(0, min(self.n_y - 1, min(y_group)))
+        y_end = max(0, min(self.n_y - 1, max(y_group)))
+        x_start = max(0, min(self.n_x - 1, min(x_group)))
+        x_end = max(0, min(self.n_x - 1, max(x_group)))
+        requested_start, requested_end = min(start, end), max(start, end)
+        start = max(0, min(self.n_bins - 1, requested_start))
+        end = max(0, min(self.n_bins - 1, requested_end))
+        source_indices = [
+            (y_idx, x_idx)
+            for y_idx in range(y_start, y_end + 1)
+            for x_idx in range(x_start, x_end + 1)
+            if self.presentation_counts is None
+            or self.presentation_counts[y_idx][x_idx] > 0
+        ]
+        counts = [
+            float(sum(self.counts[unit_idx][y_idx][x_idx][start : end + 1]))
+            for y_idx, x_idx in source_indices
+        ]
+        presentations = (
+            sum(
+                float(self.presentation_counts[y_idx][x_idx])
+                for y_idx, x_idx in source_indices
+            )
+            if self.presentation_counts is not None
+            else None
+        )
+        return SpatialGroupObservations(
+            count=sum(counts),
+            presentations=presentations,
+            source_pixel_count=len(counts),
+        )
+
+    def spatial_group_response_value(
+        self,
+        unit_idx: int,
+        y_group: AxisGroup,
+        x_group: AxisGroup,
+        start: int,
+        end: int,
+        value_mode: str,
+    ) -> float | None:
+        observations = self.spatial_group_observations(
+            unit_idx,
+            y_group,
+            x_group,
+            start,
+            end,
+        )
+        if value_mode == VALUE_MODE_COUNT:
+            if observations.source_pixel_count <= 0:
+                return None
+            return observations.count / observations.source_pixel_count
+        if value_mode not in VALUE_MODES:
+            raise ValueError(f"Unknown value mode: {value_mode}")
+        if observations.presentations is None:
+            raise ValueError(
+                f"{value_mode} requires stimulusPresentationCounts metadata in the JSON file."
+            )
+        if observations.presentations <= 0:
+            return None
+        value = observations.count / observations.presentations
+        if value_mode == VALUE_MODE_RATE:
+            value /= self.time_span_seconds(start, end)
+        return value
+
+    def spatial_group_response_matrix(
+        self,
+        unit_idx: int,
+        start: int,
+        end: int,
+        value_mode: str,
+        y_groups: list[AxisGroup],
+        x_groups: list[AxisGroup],
+    ) -> list[list[float | None]]:
+        return [
+            [
+                self.spatial_group_response_value(
+                    unit_idx,
+                    y_group,
+                    x_group,
+                    start,
+                    end,
+                    value_mode,
+                )
+                for x_group in x_groups
+            ]
+            for y_group in y_groups
+        ]
+
+    def spatial_group_count_histogram(
+        self,
+        unit_idx: int,
+        y_group: AxisGroup,
+        x_group: AxisGroup,
+    ) -> list[float]:
+        y_start = max(0, min(self.n_y - 1, min(y_group)))
+        y_end = max(0, min(self.n_y - 1, max(y_group)))
+        x_start = max(0, min(self.n_x - 1, min(x_group)))
+        x_end = max(0, min(self.n_x - 1, max(x_group)))
+        return [
+            sum(
+                float(self.counts[unit_idx][y_idx][x_idx][bin_idx])
+                for y_idx in range(y_start, y_end + 1)
+                for x_idx in range(x_start, x_end + 1)
+                if self.presentation_counts is None
+                or self.presentation_counts[y_idx][x_idx] > 0
+            )
+            for bin_idx in range(self.n_bins)
+        ]
+
+    def spatial_group_source_pixel_count(
+        self,
+        y_group: AxisGroup,
+        x_group: AxisGroup,
+    ) -> int:
+        """Return measured sources, retaining legacy behavior without metadata."""
+
+        y_start = max(0, min(self.n_y - 1, min(y_group)))
+        y_end = max(0, min(self.n_y - 1, max(y_group)))
+        x_start = max(0, min(self.n_x - 1, min(x_group)))
+        x_end = max(0, min(self.n_x - 1, max(x_group)))
+        if self.presentation_counts is None:
+            return (y_end - y_start + 1) * (x_end - x_start + 1)
+        return sum(
+            1
+            for y_idx in range(y_start, y_end + 1)
+            for x_idx in range(x_start, x_end + 1)
+            if self.presentation_counts[y_idx][x_idx] > 0
+        )
+
+    def spatial_group_temporal_metrics(
+        self,
+        unit_idx: int,
+        y_group: AxisGroup,
+        x_group: AxisGroup,
+        time_groups: list[AxisGroup],
+    ) -> SpatialGroupTemporalMetrics:
+        """Derive delay and entropy after pooling the full count histogram."""
+
+        hist = self.spatial_group_count_histogram(unit_idx, y_group, x_group)
+        source_pixel_count = self.spatial_group_source_pixel_count(y_group, x_group)
+        return self.temporal_metrics_from_histogram(
+            hist,
+            time_groups,
+            source_pixel_count=source_pixel_count,
+        )
+
+    def temporal_metrics_from_histogram(
+        self,
+        hist: Sequence[float],
+        time_groups: list[AxisGroup],
+        *,
+        source_pixel_count: int = 1,
+    ) -> SpatialGroupTemporalMetrics:
+        if len(hist) != self.n_bins:
+            raise ValueError(
+                f"Expected {self.n_bins} temporal count bins; got {len(hist)}."
+            )
+        hist = [float(value) for value in hist]
+        total = sum(hist)
+        grouped: list[tuple[int, int, float, float]] = []
+        for raw_start, raw_end in time_groups:
+            start = max(0, min(self.n_bins - 1, min(raw_start, raw_end)))
+            end = max(0, min(self.n_bins - 1, max(raw_start, raw_end)))
+            count = sum(hist[start : end + 1])
+            duration_s = self.time_bin_edges[end + 1] - self.time_bin_edges[start]
+            grouped.append((start, end, count, count / duration_s))
+        if total > 0 and grouped:
+            peak_group_index = max(
+                range(len(grouped)),
+                key=lambda index: grouped[index][3],
+            )
+            group_start, group_end, _count, _rate = grouped[peak_group_index]
+            delay_ms = (
+                self.time_bin_edges[group_start]
+                + self.time_bin_edges[group_end + 1]
+            ) * 500.0
+            entropy = -sum(
+                (count / total) * math.log(count / total)
+                for count in hist
+                if count > 0
+            )
+            if self.n_bins > 1:
+                entropy /= math.log(self.n_bins)
+        else:
+            peak_group_index = None
+            delay_ms = None
+            entropy = 0.0
+        return SpatialGroupTemporalMetrics(
+            mean_total_count=total / max(1, int(source_pixel_count)),
+            peak_group_index=peak_group_index,
+            delay_ms=delay_ms,
+            entropy=entropy,
+        )
+
 
 def clone_matrix(matrix: list[list[float]]) -> list[list[float]]:
     return [row[:] for row in matrix]
@@ -955,6 +2292,49 @@ def axis_groups_for_target(source_count: int, target_count: int) -> list[AxisGro
         start = group_idx * source_count // target
         end = ((group_idx + 1) * source_count // target) - 1
         groups.append((start, max(start, end)))
+    return groups
+
+
+def physical_time_groups(
+    edges_ms: Sequence[float],
+    target_duration_ms: float,
+) -> list[AxisGroup]:
+    """Group native bins by measured timestamps around a target duration.
+
+    Starting at each native edge, the next boundary is the available edge
+    nearest ``target_duration_ms`` later. Exact ties choose the earlier edge so
+    the requested target is not silently exceeded. The final residual interval
+    is retained. Uniform edges with an integer-bin target therefore reproduce
+    fixed-count grouping exactly.
+    """
+
+    edges = tuple(float(edge) for edge in edges_ms)
+    if len(edges) < 2:
+        return []
+    source_bin_count = len(edges) - 1
+    target = float(target_duration_ms)
+    if not math.isfinite(target) or target <= 0.0:
+        target = max(edges[1] - edges[0], math.ulp(0.0))
+
+    groups: list[AxisGroup] = []
+    start = 0
+    while start < source_bin_count:
+        target_edge = edges[start] + target
+        upper = bisect_left(
+            edges,
+            target_edge,
+            lo=start + 1,
+            hi=source_bin_count + 1,
+        )
+        upper = min(source_bin_count, upper)
+        lower = max(start + 1, upper - 1)
+        end_exclusive = (
+            lower
+            if abs(edges[lower] - target_edge) <= abs(edges[upper] - target_edge)
+            else upper
+        )
+        groups.append((start, end_exclusive - 1))
+        start = end_exclusive
     return groups
 
 
@@ -1027,6 +2407,10 @@ def smooth_matrix(
         for y in range(rows):
             out_row: list[float | None] = []
             for x in range(cols):
+                center = current[y][x]
+                if center is None or not math.isfinite(float(center)):
+                    out_row.append(None)
+                    continue
                 total = 0.0
                 weight_total = 0.0
                 for dy in (-1, 0, 1):
@@ -1063,6 +2447,38 @@ def finite_min_max(matrix: list[list[float | None]]) -> tuple[float, float]:
     if abs(high - low) < 1e-12:
         high = low + 1.0
     return low, high
+
+
+def nonnegative_response_range(
+    matrix: Sequence[Sequence[float | None]],
+) -> tuple[float, float]:
+    """Use a truthful zero baseline for non-negative response estimands."""
+
+    peak = max(
+        (
+            max(0.0, float(value))
+            for row in matrix
+            for value in row
+            if value is not None and math.isfinite(float(value))
+        ),
+        default=0.0,
+    )
+    return 0.0, peak
+
+
+def palette_response_range(
+    matrix: list[list[float | None]],
+    palette: str,
+) -> tuple[float, float]:
+    """Return the response range used by each display palette.
+
+    Gray retains the previous Python viewer's contrast-stretched range, while
+    color palettes keep the explicit zero baseline.
+    """
+
+    if palette == "Gray":
+        return finite_min_max(matrix)
+    return nonnegative_response_range(matrix)
 
 
 def clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
@@ -1261,6 +2677,14 @@ def matrix_ppm_data(
     return f"P6\n{width} {height}\n255\n".encode("ascii") + bytes(pixels)
 
 
+class SettingsValidationError(ValueError):
+    """Validation failure associated with one Settings tab."""
+
+    def __init__(self, tab_name: str, message: str):
+        super().__init__(message)
+        self.tab_name = tab_name
+
+
 def matrix_atlas_ppm_data(
     tiles: list[tuple[list[list[float | None]], float, float, float]],
     width: int,
@@ -1272,34 +2696,135 @@ def matrix_atlas_ppm_data(
     height = max(1, int(height))
     pixels = bytearray(b"\xff" * (width * height * 3))
     color_cache: dict[str, bytes] = {}
+    value_color_cache: dict[float | None, bytes] = {}
 
     for matrix, origin_x, origin_y, cell_size in tiles:
         rows = len(matrix)
         cols = len(matrix[0]) if rows else 0
         if any(len(row) != cols for row in matrix):
             raise ValueError("Cannot rasterize a ragged matrix")
+        cell_size = float(cell_size)
+        if cell_size <= 0.0:
+            continue
+        x_ranges: list[tuple[int, int]] = []
+        for col_idx in range(cols):
+            x0 = max(0, min(width, int(round(origin_x + col_idx * cell_size))))
+            x1 = max(
+                x0,
+                min(width, int(round(origin_x + (col_idx + 1) * cell_size))),
+            )
+            x_ranges.append((x0, x1))
         for row_idx, row in enumerate(matrix):
             y0 = max(0, min(height, int(round(origin_y + row_idx * cell_size))))
             y1 = max(y0, min(height, int(round(origin_y + (row_idx + 1) * cell_size))))
+            if y1 <= y0:
+                continue
+            scanlines: list[tuple[int, bytes]] = []
+            scanline_start: int | None = None
+            scanline_end = 0
+            scanline_parts: list[bytes] = []
             for col_idx, value in enumerate(row):
-                x0 = max(0, min(width, int(round(origin_x + col_idx * cell_size))))
-                x1 = max(x0, min(width, int(round(origin_x + (col_idx + 1) * cell_size))))
-                if x1 <= x0 or y1 <= y0:
+                x0, x1 = x_ranges[col_idx]
+                if x1 <= x0:
                     continue
-                color = color_for_value(value).lower()
-                rgb = color_cache.get(color)
+                value_key = None if value is None else float(value)
+                rgb = value_color_cache.get(value_key)
                 if rgb is None:
-                    raw = color.lstrip("#")
-                    if len(raw) != 6:
-                        raise ValueError(f"Expected #RRGGBB color, got {color!r}")
-                    rgb = bytes(int(raw[index : index + 2], 16) for index in (0, 2, 4))
-                    color_cache[color] = rgb
-                scanline = rgb * (x1 - x0)
+                    color = color_for_value(value).lower()
+                    rgb = color_cache.get(color)
+                    if rgb is None:
+                        raw = color.lstrip("#")
+                        if len(raw) != 6:
+                            raise ValueError(f"Expected #RRGGBB color, got {color!r}")
+                        rgb = bytes(
+                            int(raw[index : index + 2], 16)
+                            for index in (0, 2, 4)
+                        )
+                        color_cache[color] = rgb
+                    value_color_cache[value_key] = rgb
+                if scanline_start is not None and x0 != scanline_end:
+                    scanlines.append((scanline_start, b"".join(scanline_parts)))
+                    scanline_start = None
+                    scanline_parts = []
+                if scanline_start is None:
+                    scanline_start = x0
+                scanline_end = x1
+                scanline_parts.append(rgb * (x1 - x0))
+            if scanline_start is not None:
+                scanlines.append((scanline_start, b"".join(scanline_parts)))
+            for x0, scanline in scanlines:
                 for pixel_y in range(y0, y1):
                     offset = (pixel_y * width + x0) * 3
                     pixels[offset : offset + len(scanline)] = scanline
 
     return f"P6\n{width} {height}\n255\n".encode("ascii") + bytes(pixels)
+
+
+@lru_cache(maxsize=256)
+def _polar_tile_pixel_runs(
+    origin_x_fraction: float,
+    origin_y_fraction: float,
+    scale: float,
+    total_deg: float,
+    rows: int,
+    cols: int,
+) -> tuple[tuple[int, int, int, int, int], ...]:
+    """Map one polar tile's scanlines to ring/column runs for reuse."""
+
+    radius_units = INNER_BLANK_ROWS + rows
+    diameter = 2.0 * radius_units * scale
+    center_x = origin_x_fraction + diameter / 2.0
+    center_y = origin_y_fraction + diameter / 2.0
+    local_width = int(math.ceil(origin_x_fraction + diameter))
+    local_height = int(math.ceil(origin_y_fraction + diameter))
+    column_span = total_deg / cols
+    theta_start = 90.0 + total_deg / 2.0
+    theta_end = 90.0 - total_deg / 2.0
+    runs: list[tuple[int, int, int, int, int]] = []
+
+    for pixel_y in range(local_height):
+        dy = (center_y - (pixel_y + 0.5)) / scale
+        run_start: int | None = None
+        run_value: tuple[int, int] | None = None
+        for pixel_x in range(local_width):
+            dx = ((pixel_x + 0.5) - center_x) / scale
+            radius = math.hypot(dx, dy)
+            value: tuple[int, int] | None = None
+            if INNER_BLANK_ROWS <= radius < radius_units:
+                ring_idx = int(radius - INNER_BLANK_ROWS)
+                if 0 <= ring_idx < rows:
+                    theta_deg = math.degrees(math.atan2(dy, dx))
+                    if total_deg >= 359.999:
+                        relative = (theta_start - theta_deg) % 360.0
+                    else:
+                        while theta_deg > theta_start:
+                            theta_deg -= 360.0
+                        while theta_deg < theta_end:
+                            theta_deg += 360.0
+                        if theta_end <= theta_deg <= theta_start:
+                            relative = theta_start - theta_deg
+                        else:
+                            relative = None
+                    if relative is not None:
+                        column = max(
+                            0,
+                            min(cols - 1, int(relative / column_span)),
+                        )
+                        value = ring_idx, column
+
+            if value == run_value:
+                continue
+            if run_value is not None and run_start is not None:
+                runs.append(
+                    (pixel_y, run_start, pixel_x, run_value[0], run_value[1])
+                )
+            run_start = pixel_x if value is not None else None
+            run_value = value
+        if run_value is not None and run_start is not None:
+            runs.append(
+                (pixel_y, run_start, local_width, run_value[0], run_value[1])
+            )
+    return tuple(runs)
 
 
 def polar_matrix_atlas_ppm_data(
@@ -1325,6 +2850,8 @@ def polar_matrix_atlas_ppm_data(
     width = max(1, int(width))
     height = max(1, int(height))
     pixels = bytearray(b"\xff" * (width * height * 3))
+    color_cache: dict[str, bytes] = {}
+    value_color_cache: dict[float | None, bytes] = {}
 
     for matrix, origin_x, origin_y, scale, total_deg, ring_rows in tiles:
         rows = len(matrix)
@@ -1340,53 +2867,593 @@ def polar_matrix_atlas_ppm_data(
         for row in matrix:
             rgb_row: list[bytes] = []
             for value in row:
-                raw = color_for_value(value).lstrip("#")
-                if len(raw) != 6:
-                    raise ValueError(f"Expected #RRGGBB color, got {raw!r}")
-                rgb_row.append(bytes(int(raw[index : index + 2], 16) for index in (0, 2, 4)))
+                value_key = None if value is None else float(value)
+                rgb = value_color_cache.get(value_key)
+                if rgb is None:
+                    color = color_for_value(value).lower()
+                    rgb = color_cache.get(color)
+                    if rgb is None:
+                        raw = color.lstrip("#")
+                        if len(raw) != 6:
+                            raise ValueError(f"Expected #RRGGBB color, got {color!r}")
+                        rgb = bytes(
+                            int(raw[index : index + 2], 16)
+                            for index in (0, 2, 4)
+                        )
+                        color_cache[color] = rgb
+                    value_color_cache[value_key] = rgb
+                rgb_row.append(rgb)
             rgb_by_cell.append(rgb_row)
 
         scale = max(float(scale), 1e-9)
-        radius_units = INNER_BLANK_ROWS + rows
-        diameter = 2.0 * radius_units * scale
-        cx = origin_x + diameter / 2.0
-        cy = origin_y + diameter / 2.0
-        x_start = max(0, int(math.floor(origin_x)))
-        x_end = min(width, int(math.ceil(origin_x + diameter)))
-        y_start = max(0, int(math.floor(origin_y)))
-        y_end = min(height, int(math.ceil(origin_y + diameter)))
-        column_span = total_deg / cols
-        theta_start = 90.0 + total_deg / 2.0
-        theta_end = 90.0 - total_deg / 2.0
-
-        for pixel_y in range(y_start, y_end):
-            dy = (cy - (pixel_y + 0.5)) / scale
-            for pixel_x in range(x_start, x_end):
-                dx = ((pixel_x + 0.5) - cx) / scale
-                radius = math.hypot(dx, dy)
-                if not (INNER_BLANK_ROWS <= radius < radius_units):
-                    continue
-                ring_idx = int(radius - INNER_BLANK_ROWS)
-                if not (0 <= ring_idx < len(ring_rows)):
-                    continue
-
-                theta_deg = math.degrees(math.atan2(dy, dx))
-                if total_deg >= 359.999:
-                    relative = (theta_start - theta_deg) % 360.0
-                else:
-                    while theta_deg > theta_start:
-                        theta_deg -= 360.0
-                    while theta_deg < theta_end:
-                        theta_deg += 360.0
-                    if not (theta_end <= theta_deg <= theta_start):
-                        continue
-                    relative = theta_start - theta_deg
-                column = max(0, min(cols - 1, int(relative / column_span)))
-                rgb = rgb_by_cell[ring_rows[ring_idx]][column]
-                offset = (pixel_y * width + pixel_x) * 3
-                pixels[offset : offset + 3] = rgb
+        origin_x_floor = math.floor(origin_x)
+        origin_y_floor = math.floor(origin_y)
+        runs = _polar_tile_pixel_runs(
+            float(origin_x - origin_x_floor),
+            float(origin_y - origin_y_floor),
+            scale,
+            float(total_deg),
+            rows,
+            cols,
+        )
+        for local_y, local_x0, local_x1, ring_idx, column in runs:
+            pixel_y = origin_y_floor + local_y
+            if not (0 <= pixel_y < height):
+                continue
+            pixel_x0 = max(0, origin_x_floor + local_x0)
+            pixel_x1 = min(width, origin_x_floor + local_x1)
+            if pixel_x1 <= pixel_x0:
+                continue
+            rgb = rgb_by_cell[ring_rows[ring_idx]][column]
+            offset = (pixel_y * width + pixel_x0) * 3
+            scanline = rgb * (pixel_x1 - pixel_x0)
+            pixels[offset : offset + len(scanline)] = scanline
 
     return f"P6\n{width} {height}\n255\n".encode("ascii") + bytes(pixels)
+
+
+class SettingsWindow(tk.Toplevel):
+    """Single native-style settings window shared by all viewer windows."""
+
+    TAB_NAMES = ("General", "RF Map", "Tuning Curve")
+
+    def __init__(self, owner: RFMViewer):
+        self.owner = owner
+        self._app_root = owner._app_root
+        super().__init__(self._app_root)
+        self.title("RF Map Viewer Settings")
+        self.geometry("640x600")
+        self.minsize(600, 540)
+        self.transient(owner)
+        self.protocol("WM_DELETE_WINDOW", self._close)
+        self._create_variables(owner._app_root._rfm_settings)
+        self._build()
+        self._select_remembered_tab()
+        self._sync_dependent_controls()
+
+    def _create_variables(self, settings: ViewerSettings) -> None:
+        self.show_tuning_curve_var = tk.BooleanVar(value=settings.show_tuning_curve)
+        self.auto_load_tuning_curve_var = tk.BooleanVar(value=settings.auto_load_tuning_curve)
+        self.show_probe_layout_var = tk.BooleanVar(value=settings.show_probe_layout)
+        self.auto_load_probe_layout_var = tk.BooleanVar(value=settings.auto_load_probe_layout)
+        self.rf_sum_start_var = tk.StringVar(value=format_ms(settings.rf_sum_start_ms))
+        self.rf_sum_end_var = tk.StringVar(value=format_ms(settings.rf_sum_end_ms))
+        self.rf_time_resolution_var = tk.StringVar(value=format_ms(settings.rf_time_resolution_ms))
+        self.rf_value_mode_var = tk.StringVar(value=settings.rf_value_mode)
+        self.rf_x_bins_var = tk.StringVar(
+            value="Native" if settings.rf_x_bins == 0 else str(settings.rf_x_bins)
+        )
+        self.rf_y_bins_var = tk.StringVar(
+            value="Native" if settings.rf_y_bins == 0 else str(settings.rf_y_bins)
+        )
+        self.rf_smooth_radius_var = tk.IntVar(value=settings.rf_smooth_radius)
+        self.rf_flip_y_var = tk.BooleanVar(value=settings.rf_flip_y)
+        self.rf_palette_var = tk.StringVar(value=settings.rf_palette)
+        self.rf_polar_radius_var = tk.StringVar(value=settings.rf_polar_radius)
+        self.rf_layout_var = tk.StringVar(
+            value="Polar" if settings.rf_polar_layout else "Rectangle"
+        )
+        self.rf_rgb_mode_var = tk.BooleanVar(value=settings.rf_rgb_mode)
+        viewer_tab_labels = {"rf": "RF", "delay": "Delay / RGB", "timeline": "Timeline"}
+        self.default_viewer_tab_var = tk.StringVar(
+            value=viewer_tab_labels[settings.default_viewer_tab]
+        )
+        self.tuning_plot_mode_var = tk.StringVar(value=settings.tuning_plot_mode)
+        self.tuning_layout_var = tk.StringVar(value=settings.tuning_layout)
+        self.tuning_display_bins_var = tk.StringVar(value=str(settings.tuning_display_bins))
+        self.tuning_smoothing_var = tk.BooleanVar(value=settings.tuning_smoothing)
+        self.tuning_compare_scale_var = tk.BooleanVar(value=settings.tuning_compare_scale)
+        self.tuning_smooth_sigma_var = tk.StringVar(
+            value=f"{settings.tuning_smooth_sigma * 360.0 / DEFAULT_HD_DISPLAY_BINS:g}"
+        )
+        self.error_var = tk.StringVar(value="")
+        self._tab_error_vars = {
+            name: tk.StringVar(value="") for name in self.TAB_NAMES
+        }
+
+    def _build(self) -> None:
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(0, weight=1)
+        outer = ttk.Frame(self, padding=(16, 14, 16, 12))
+        outer.grid(row=0, column=0, sticky="nsew")
+        outer.columnconfigure(0, weight=1)
+        outer.rowconfigure(0, weight=1)
+
+        self.notebook = ttk.Notebook(outer)
+        self.notebook.grid(row=0, column=0, sticky="nsew")
+        self._tab_name_by_widget: dict[str, str] = {}
+        self._tab_widget_by_name: dict[str, str] = {}
+        general = self._new_tab("General")
+        rf_map = self._new_tab("RF Map")
+        tuning = self._new_tab("Tuning Curve")
+        self._build_general_tab(general)
+        self._build_rf_tab(rf_map)
+        self._build_tuning_tab(tuning)
+        self.notebook.bind("<<NotebookTabChanged>>", self._remember_selected_tab)
+
+        footer = ttk.Frame(outer)
+        footer.grid(row=1, column=0, sticky="ew", pady=(12, 0))
+        footer.columnconfigure(0, weight=1)
+        ttk.Label(
+            footer,
+            textvariable=self.error_var,
+            foreground="#b42318",
+            wraplength=280,
+            justify="left",
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Button(footer, text="Cancel", command=self._close).grid(
+            row=0, column=1, padx=(12, 8)
+        )
+        ttk.Button(footer, text="Save", command=self._save).grid(row=0, column=2)
+
+        for variable in (
+            self.show_tuning_curve_var,
+            self.show_probe_layout_var,
+            self.tuning_smoothing_var,
+        ):
+            variable.trace_add("write", lambda *_args: self._sync_dependent_controls())
+
+    def _new_tab(self, name: str) -> ttk.Frame:
+        tab = ttk.Frame(self.notebook, padding=(18, 16))
+        # Keep forms anchored to the leading edge instead of centering their
+        # controls in the available Settings width.
+        tab.columnconfigure(0, minsize=164)
+        tab.columnconfigure(1, weight=0)
+        tab.columnconfigure(2, weight=1)
+        self.notebook.add(tab, text=name)
+        self._tab_name_by_widget[str(tab)] = name
+        self._tab_widget_by_name[name] = str(tab)
+        ttk.Label(
+            tab,
+            textvariable=self._tab_error_vars[name],
+            foreground="#b42318",
+            wraplength=500,
+            justify="left",
+        ).grid(row=99, column=0, columnspan=2, sticky="w", pady=(16, 0))
+        return tab
+
+    @staticmethod
+    def _section_label(parent: ttk.Frame, text: str, row: int) -> None:
+        ttk.Label(
+            parent,
+            text=text,
+            font=("TkDefaultFont", 11, "bold"),
+        ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(8 if row else 0, 8))
+
+    def _build_general_tab(self, tab: ttk.Frame) -> None:
+        self._section_label(tab, "Views and loading", 0)
+        ttk.Checkbutton(
+            tab,
+            text="Show HD tuning curve beside the RF map",
+            variable=self.show_tuning_curve_var,
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 6))
+        self.auto_tuning_check = ttk.Checkbutton(
+            tab,
+            text="Automatically find and load tuning_curves.json",
+            variable=self.auto_load_tuning_curve_var,
+        )
+        self.auto_tuning_check.grid(row=2, column=0, columnspan=2, sticky="w", padx=(22, 0), pady=(0, 14))
+        ttk.Checkbutton(
+            tab,
+            text="Show probe layout in the sidebar",
+            variable=self.show_probe_layout_var,
+        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(0, 6))
+        self.auto_probe_check = ttk.Checkbutton(
+            tab,
+            text="Automatically find and load probe geometry",
+            variable=self.auto_load_probe_layout_var,
+        )
+        self.auto_probe_check.grid(row=4, column=0, columnspan=2, sticky="w", padx=(22, 0))
+        ttk.Label(
+            tab,
+            text=(
+                "Hidden views are not discovered, read, or rendered. Turning off automatic "
+                "loading does not remove a file that is already attached."
+            ),
+            foreground="#667085",
+            wraplength=500,
+            justify="left",
+        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(20, 0))
+
+    def _labeled_entry(
+        self,
+        tab: ttk.Frame,
+        row: int,
+        label: str,
+        variable: tk.Variable,
+        *,
+        width: int = 12,
+    ) -> ttk.Entry:
+        ttk.Label(tab, text=label).grid(row=row, column=0, sticky="w", pady=5)
+        entry = ttk.Entry(tab, textvariable=variable, width=width)
+        entry.grid(row=row, column=1, sticky="w", pady=5)
+        return entry
+
+    def _labeled_combo(
+        self,
+        tab: ttk.Frame,
+        row: int,
+        label: str,
+        variable: tk.StringVar,
+        values: Sequence[str],
+        *,
+        width: int = 24,
+    ) -> ttk.Combobox:
+        ttk.Label(tab, text=label).grid(row=row, column=0, sticky="w", pady=5)
+        combo = ttk.Combobox(
+            tab,
+            state="readonly",
+            values=tuple(values),
+            textvariable=variable,
+            width=width,
+        )
+        combo.grid(row=row, column=1, sticky="w", pady=5)
+        return combo
+
+    def _build_rf_tab(self, tab: ttk.Frame) -> None:
+        self._section_label(tab, "Timing", 0)
+        range_frame = ttk.Frame(tab)
+        range_frame.grid(row=1, column=1, sticky="w", pady=5)
+        ttk.Label(tab, text="Default RF sum range (ms)").grid(row=1, column=0, sticky="w", pady=5)
+        ttk.Entry(range_frame, textvariable=self.rf_sum_start_var, width=8).grid(row=0, column=0)
+        ttk.Label(range_frame, text="to").grid(row=0, column=1, padx=6)
+        ttk.Entry(range_frame, textvariable=self.rf_sum_end_var, width=8).grid(row=0, column=2)
+        self._labeled_entry(tab, 2, "Target time width (ms)", self.rf_time_resolution_var)
+        self._labeled_combo(tab, 3, "Value", self.rf_value_mode_var, VALUE_MODES)
+
+        self._section_label(tab, "Spatial display", 4)
+        bins_frame = ttk.Frame(tab)
+        bins_frame.grid(row=5, column=1, sticky="w", pady=5)
+        ttk.Label(tab, text="Display bins").grid(row=5, column=0, sticky="w", pady=5)
+        ttk.Label(bins_frame, text="X").grid(row=0, column=0)
+        ttk.Entry(bins_frame, textvariable=self.rf_x_bins_var, width=8).grid(row=0, column=1, padx=(4, 12))
+        ttk.Label(bins_frame, text="Y").grid(row=0, column=2)
+        ttk.Entry(bins_frame, textvariable=self.rf_y_bins_var, width=8).grid(row=0, column=3, padx=(4, 0))
+        self._labeled_combo(tab, 6, "Layout", self.rf_layout_var, ("Rectangle", "Polar"))
+        self._labeled_combo(tab, 7, "Palette", self.rf_palette_var, PALETTES)
+        self._labeled_combo(tab, 8, "Polar radius", self.rf_polar_radius_var, POLAR_RADIUS_MODES)
+        ttk.Label(tab, text="RF smoothing radius").grid(row=9, column=0, sticky="w", pady=5)
+        ttk.Spinbox(
+            tab,
+            from_=0,
+            to=3,
+            increment=1,
+            textvariable=self.rf_smooth_radius_var,
+            width=10,
+        ).grid(row=9, column=1, sticky="w", pady=5)
+        toggles = ttk.Frame(tab)
+        toggles.grid(row=10, column=1, sticky="w", pady=5)
+        ttk.Checkbutton(toggles, text="Flip Y", variable=self.rf_flip_y_var).grid(row=0, column=0, padx=(0, 18))
+        ttk.Checkbutton(toggles, text="RGB composite", variable=self.rf_rgb_mode_var).grid(row=0, column=1)
+        self._labeled_combo(
+            tab,
+            11,
+            "Initial tab",
+            self.default_viewer_tab_var,
+            ("RF", "Delay / RGB", "Timeline"),
+        )
+        ttk.Label(
+            tab,
+            text="Use “Native” for all source X or Y bins.",
+            foreground="#667085",
+        ).grid(row=12, column=0, columnspan=2, sticky="w", pady=(8, 0))
+
+    def _build_tuning_tab(self, tab: ttk.Frame) -> None:
+        self._section_label(tab, "Head-direction display", 0)
+        self._labeled_combo(
+            tab,
+            1,
+            "Plot style",
+            self.tuning_plot_mode_var,
+            TUNING_PLOT_MODES,
+        )
+        ttk.Label(
+            tab,
+            text="Auto follows the RF map's Rectangle or Polar layout.",
+            foreground="#667085",
+            wraplength=440,
+        ).grid(row=2, column=1, sticky="w", pady=(0, 10))
+        self._labeled_combo(
+            tab,
+            3,
+            "RF + tuning arrangement",
+            self.tuning_layout_var,
+            TUNING_LAYOUTS,
+        )
+        self._labeled_entry(tab, 4, "Displayed HD bins", self.tuning_display_bins_var)
+        ttk.Label(
+            tab,
+            text="On Save, the value is rounded down to a divisor of 180 (for example, 8 → 6).",
+            foreground="#667085",
+            wraplength=440,
+            justify="left",
+        ).grid(row=5, column=1, sticky="w", pady=(0, 12))
+        ttk.Checkbutton(
+            tab,
+            text="Compare cells in this file on one shared 0–peak Hz scale",
+            variable=self.tuning_compare_scale_var,
+        ).grid(row=6, column=0, columnspan=2, sticky="w", pady=(0, 10))
+        ttk.Checkbutton(
+            tab,
+            text="Smooth the 180-bin source curve",
+            variable=self.tuning_smoothing_var,
+        ).grid(row=7, column=0, columnspan=2, sticky="w", pady=(0, 6))
+        ttk.Label(tab, text="Gaussian σ (degrees)").grid(
+            row=8,
+            column=0,
+            sticky="w",
+            pady=5,
+        )
+        self.tuning_sigma_entry = ttk.Entry(
+            tab,
+            textvariable=self.tuning_smooth_sigma_var,
+            width=12,
+        )
+        self.tuning_sigma_entry.grid(row=8, column=1, sticky="w", pady=5)
+        ttk.Label(
+            tab,
+            text=(
+                "Circular Gaussian smoothing uses mode=wrap on the raw 180-bin curve "
+                "before display aggregation, preserving one angular width at every resolution."
+            ),
+            foreground="#667085",
+            wraplength=440,
+            justify="left",
+        ).grid(row=9, column=0, columnspan=2, sticky="w", pady=(14, 0))
+
+    def _select_remembered_tab(self) -> None:
+        remembered = getattr(self._app_root, "_rfm_settings_tab", "General")
+        for tab_id in self.notebook.tabs():
+            if self._tab_name_by_widget.get(str(tab_id)) == remembered:
+                self.notebook.select(tab_id)
+                return
+
+    def _remember_selected_tab(self, _event: object | None = None) -> None:
+        selected = str(self.notebook.select())
+        self._app_root._rfm_settings_tab = self._tab_name_by_widget.get(
+            selected, "General"
+        )
+        self.after_idle(self._refresh_selected_tab_text)
+
+    def _refresh_selected_tab_text(self) -> None:
+        """Work around stale controls in initially hidden ttk tabs on macOS Tk."""
+
+        try:
+            selected = self.nametowidget(self.notebook.select())
+        except (KeyError, tk.TclError):
+            return
+        pending = list(selected.winfo_children())
+        while pending:
+            widget = pending.pop()
+            pending.extend(widget.winfo_children())
+            if isinstance(widget, (ttk.Label, ttk.Checkbutton)):
+                try:
+                    if not widget.cget("textvariable"):
+                        widget.configure(text=widget.cget("text"))
+                except tk.TclError:
+                    continue
+            elif isinstance(widget, (ttk.Entry, ttk.Combobox, ttk.Spinbox)):
+                try:
+                    # Aqua occasionally leaves a previously hidden field blank
+                    # until it receives focus. Re-applying the variable asks the
+                    # native theme to paint the current value immediately.
+                    variable = widget.cget("textvariable")
+                    if variable:
+                        widget.configure(textvariable=variable)
+                except tk.TclError:
+                    continue
+        try:
+            selected.update_idletasks()
+        except tk.TclError:
+            pass
+
+    def _clear_tab_errors(self) -> None:
+        for name, variable in self._tab_error_vars.items():
+            variable.set("")
+            tab_id = self._tab_widget_by_name.get(name)
+            if tab_id is not None:
+                self.notebook.tab(tab_id, text=name)
+
+    def _show_validation_error(self, error: SettingsValidationError) -> None:
+        self._clear_tab_errors()
+        tab_name = error.tab_name if error.tab_name in self.TAB_NAMES else "General"
+        self._tab_error_vars[tab_name].set(str(error))
+        tab_id = self._tab_widget_by_name[tab_name]
+        self.notebook.tab(tab_id, text=f"{tab_name} •")
+        self.notebook.select(tab_id)
+
+    def _sync_dependent_controls(self) -> None:
+        self.auto_tuning_check.state(
+            ["!disabled"] if self.show_tuning_curve_var.get() else ["disabled"]
+        )
+        self.auto_probe_check.state(
+            ["!disabled"] if self.show_probe_layout_var.get() else ["disabled"]
+        )
+        self.tuning_sigma_entry.state(
+            ["!disabled"] if self.tuning_smoothing_var.get() else ["disabled"]
+        )
+
+    @staticmethod
+    def _positive_float(raw: str, label: str) -> float:
+        try:
+            value = float(raw)
+        except ValueError as exc:
+            raise ValueError(f"{label} must be a number.") from exc
+        if not math.isfinite(value) or value <= 0.0:
+            raise ValueError(f"{label} must be positive and finite.")
+        return value
+
+    @staticmethod
+    def _native_or_positive_int(raw: str, label: str) -> int:
+        cleaned = raw.strip()
+        if cleaned.casefold() in {"native", "auto"}:
+            return 0
+        try:
+            value = int(cleaned)
+        except ValueError as exc:
+            raise ValueError(f"{label} must be “Native” or a positive integer.") from exc
+        if value <= 0:
+            raise ValueError(f"{label} must be “Native” or a positive integer.")
+        return value
+
+    def _validated_settings(self) -> ViewerSettings:
+        try:
+            start_ms = float(self.rf_sum_start_var.get())
+            end_ms = float(self.rf_sum_end_var.get())
+        except ValueError as exc:
+            raise SettingsValidationError(
+                "RF Map", "RF sum range must contain two numbers."
+            ) from exc
+        if not math.isfinite(start_ms) or not math.isfinite(end_ms) or start_ms >= end_ms:
+            raise SettingsValidationError(
+                "RF Map", "RF sum range must be finite and start before end."
+            )
+        try:
+            time_resolution = self._positive_float(
+                self.rf_time_resolution_var.get(), "Time resolution"
+            )
+            x_bins = self._native_or_positive_int(self.rf_x_bins_var.get(), "X bins")
+            y_bins = self._native_or_positive_int(self.rf_y_bins_var.get(), "Y bins")
+            smooth_radius = max(0, min(3, int(self.rf_smooth_radius_var.get())))
+        except (tk.TclError, ValueError) as exc:
+            raise SettingsValidationError("RF Map", str(exc)) from exc
+
+        value_mode = self.rf_value_mode_var.get()
+        palette = self.rf_palette_var.get()
+        polar_radius = self.rf_polar_radius_var.get()
+        layout = self.rf_layout_var.get()
+        tab_keys = {"RF": "rf", "Delay / RGB": "delay", "Timeline": "timeline"}
+        initial_tab = self.default_viewer_tab_var.get()
+        if value_mode not in VALUE_MODES:
+            raise SettingsValidationError("RF Map", "Choose a supported RF value mode.")
+        if palette not in PALETTES:
+            raise SettingsValidationError("RF Map", "Choose a supported RF palette.")
+        if polar_radius not in POLAR_RADIUS_MODES:
+            raise SettingsValidationError("RF Map", "Choose a supported polar-radius mode.")
+        if layout not in {"Rectangle", "Polar"}:
+            raise SettingsValidationError("RF Map", "Choose Rectangle or Polar layout.")
+        if initial_tab not in tab_keys:
+            raise SettingsValidationError("RF Map", "Choose a supported initial tab.")
+
+        smoothing = bool(self.tuning_smoothing_var.get())
+        try:
+            sigma_degrees = self._positive_float(
+                self.tuning_smooth_sigma_var.get(), "Tuning smoothing sigma"
+            )
+            sigma = sigma_degrees * DEFAULT_HD_DISPLAY_BINS / 360.0
+        except ValueError as exc:
+            if smoothing:
+                raise SettingsValidationError("Tuning Curve", str(exc)) from exc
+            current = getattr(self._app_root, "_rfm_settings", ViewerSettings())
+            sigma = float(current.tuning_smooth_sigma)
+            if not math.isfinite(sigma) or sigma <= 0.0:
+                sigma = ViewerSettings().tuning_smooth_sigma
+            self.tuning_smooth_sigma_var.set(
+                f"{sigma * 360.0 / DEFAULT_HD_DISPLAY_BINS:g}"
+            )
+        try:
+            raw_hd_bins = int(self.tuning_display_bins_var.get().strip())
+        except ValueError as exc:
+            raise SettingsValidationError(
+                "Tuning Curve", "Displayed HD bins must be an integer."
+            ) from exc
+        if raw_hd_bins <= 0:
+            raise SettingsValidationError(
+                "Tuning Curve", "Displayed HD bins must be a positive integer."
+            )
+        hd_bins = normalize_hd_bin_count(raw_hd_bins)
+        self.tuning_display_bins_var.set(str(hd_bins))
+        tuning_mode = self.tuning_plot_mode_var.get()
+        if tuning_mode not in TUNING_PLOT_MODES:
+            raise SettingsValidationError(
+                "Tuning Curve", "Choose Auto, Polar, or Line plot style."
+            )
+        tuning_layout = self.tuning_layout_var.get()
+        if tuning_layout not in TUNING_LAYOUTS:
+            raise SettingsValidationError(
+                "Tuning Curve", "Choose Side by side or Stacked arrangement."
+            )
+        return ViewerSettings(
+            show_tuning_curve=bool(self.show_tuning_curve_var.get()),
+            auto_load_tuning_curve=bool(self.auto_load_tuning_curve_var.get()),
+            show_probe_layout=bool(self.show_probe_layout_var.get()),
+            auto_load_probe_layout=bool(self.auto_load_probe_layout_var.get()),
+            rf_sum_start_ms=start_ms,
+            rf_sum_end_ms=end_ms,
+            rf_time_resolution_ms=time_resolution,
+            rf_value_mode=value_mode,
+            rf_x_bins=x_bins,
+            rf_y_bins=y_bins,
+            rf_smooth_radius=smooth_radius,
+            rf_flip_y=bool(self.rf_flip_y_var.get()),
+            rf_palette=palette,
+            rf_polar_radius=polar_radius,
+            rf_polar_layout=layout == "Polar",
+            rf_rgb_mode=bool(self.rf_rgb_mode_var.get()),
+            default_viewer_tab=tab_keys[initial_tab],
+            tuning_plot_mode=tuning_mode,
+            tuning_layout=tuning_layout,
+            tuning_display_bins=hd_bins,
+            tuning_smoothing=smoothing,
+            tuning_smooth_sigma=sigma,
+            tuning_compare_scale=bool(self.tuning_compare_scale_var.get()),
+        )
+
+    def _commit(self, *, close: bool) -> None:
+        self.error_var.set("")
+        self._clear_tab_errors()
+        try:
+            settings = self._validated_settings()
+        except SettingsValidationError as exc:
+            self._show_validation_error(exc)
+            return
+        except (KeyError, tk.TclError, ValueError) as exc:
+            selected = self._tab_name_by_widget.get(
+                str(self.notebook.select()), "General"
+            )
+            self._show_validation_error(SettingsValidationError(selected, str(exc)))
+            return
+        active = self.owner._active_viewer()
+        if not getattr(active, "_viewer_ready", False):
+            self.error_var.set("The viewer is still opening. Try again when it is ready.")
+            return
+        if not active._apply_viewer_settings(settings, persist=True, broadcast=True):
+            self.error_var.set("Settings could not be saved.")
+            return
+        self.error_var.set("")
+        if close:
+            self._close()
+
+    def _save(self) -> None:
+        self._commit(close=True)
+
+    def _close(self) -> None:
+        if getattr(self._app_root, "_rfm_settings_window", None) is self:
+            self._app_root._rfm_settings_window = None
+        try:
+            self.destroy()
+        except tk.TclError:
+            pass
 
 
 class RFMViewer(tk.Toplevel):
@@ -1404,6 +3471,18 @@ class RFMViewer(tk.Toplevel):
             master = tk.Tk()
             master.withdraw()
         self._app_root = master.winfo_toplevel()
+        if not hasattr(self._app_root, "_rfm_settings_path"):
+            self._app_root._rfm_settings_path = viewer_settings_path()
+        if not hasattr(self._app_root, "_rfm_settings"):
+            self._app_root._rfm_settings = load_viewer_settings(
+                self._app_root._rfm_settings_path
+            )
+        if not hasattr(self._app_root, "_rfm_settings_window"):
+            self._app_root._rfm_settings_window = None
+            self._app_root._rfm_settings_tab = "General"
+        if not hasattr(self._app_root, "_rfm_tuning_cache"):
+            self._app_root._rfm_tuning_cache = {}
+        self.settings: ViewerSettings = self._app_root._rfm_settings
         super().__init__(self._app_root)
         windows = getattr(self._app_root, "_rfm_viewer_windows", None)
         if windows is None:
@@ -1419,7 +3498,23 @@ class RFMViewer(tk.Toplevel):
         self._pair_apply_in_progress = False
         self._pair_last_local_state: ViewerSyncState | None = None
         self._startup_after: str | None = None
+        self._startup_poll_after: str | None = None
+        self._startup_generation = 0
+        self._startup_result_queue: queue.SimpleQueue[
+            tuple[int, Path, RFMappingData | None, Exception | None]
+        ] = queue.SimpleQueue()
+        self._startup_loading_frame: ttk.Frame | None = None
+        self._startup_progress: ttk.Progressbar | None = None
+        self._optional_autoload_after: str | None = None
+        self._optional_poll_after: str | None = None
+        self._optional_autoload_generation = 0
+        self._optional_result_queue: queue.SimpleQueue[dict[str, object]] = (
+            queue.SimpleQueue()
+        )
         self._redraw_after: str | None = None
+        self._optional_redraw_after: str | None = None
+        self._optional_redraw_dirty: set[str] = set()
+        self._show_settings_when_ready = False
         self.title("RF Map Viewer")
         self.withdraw()
         self._install_application_handlers()
@@ -1428,13 +3523,16 @@ class RFMViewer(tk.Toplevel):
             self._initialize_viewer(data)
         else:
             assert startup_path is not None
+            self._show_startup_loading_shell(startup_path)
             self._startup_after = self.after(
                 STARTUP_EVENT_WAIT_MS,
                 lambda path=startup_path: self._load_startup_document(path),
             )
 
     def _initialize_viewer(self, data: RFMappingData) -> None:
+        self._remove_startup_loading_shell()
         self.data = data
+        self.settings = self._app_root._rfm_settings
         self.title(f"{data.path.name} — RF Map Viewer")
         self.geometry("1440x900")
         self.minsize(1120, 720)
@@ -1442,27 +3540,46 @@ class RFMViewer(tk.Toplevel):
         self.unit_idx = tk.IntVar(value=0)
         self._selected_unit_id = data.unit_pool[0]
         self._last_supported_unit_id = data.unit_pool[0]
-        self.value_mode_var = tk.StringVar(value=VALUE_MODE_COUNT)
+        value_mode = self.settings.rf_value_mode
+        if not data.supports_value_mode(value_mode):
+            value_mode = VALUE_MODE_COUNT
+        self.value_mode_var = tk.StringVar(value=value_mode)
         self.bin_var = tk.IntVar(value=0)
         self.range_start_var = tk.IntVar(value=0)
         self.range_end_var = tk.IntVar(value=data.n_bins - 1)
         plot_start_ms, plot_end_ms = self._default_plot_time_bounds_ms()
         self.range_start_ms_var = tk.StringVar(value=format_ms(plot_start_ms))
         self.range_end_ms_var = tk.StringVar(value=format_ms(plot_end_ms))
-        self.flip_y_var = tk.BooleanVar(value=False)
-        self.palette_var = tk.StringVar(value="Gray")
-        self.polar_radius_var = tk.StringVar(value=POLAR_RADIUS_MODES[1])
-        self.polar_layout_var = tk.BooleanVar(value=False)
-        self.rgb_mode_var = tk.BooleanVar(value=False)
+        self.flip_y_var = tk.BooleanVar(value=self.settings.rf_flip_y)
+        self.palette_var = tk.StringVar(value=self.settings.rf_palette)
+        self.polar_radius_var = tk.StringVar(value=self.settings.rf_polar_radius)
+        self.polar_layout_var = tk.BooleanVar(value=self.settings.rf_polar_layout)
+        self.rgb_mode_var = tk.BooleanVar(value=self.settings.rf_rgb_mode)
         self.pair_windows_var = tk.BooleanVar(
             value=bool(getattr(self._app_root, "_rfm_pairing_enabled", False))
         )
-        self.x_bins_var = tk.IntVar(value=data.n_x)
-        self.y_bins_var = tk.IntVar(value=data.n_y)
-        self.time_res_ms_var = tk.StringVar(value=format_ms(self._base_bin_ms()))
+        self.x_bins_var = tk.IntVar(
+            value=min(data.n_x, self.settings.rf_x_bins or data.n_x)
+        )
+        self.y_bins_var = tk.IntVar(
+            value=min(data.n_y, self.settings.rf_y_bins or data.n_y)
+        )
+        self.time_res_ms_var = tk.StringVar(
+            value=format_ms(max(self._base_bin_ms(), self.settings.rf_time_resolution_ms))
+        )
         self._last_time_group_count = data.n_bins
         self._last_time_groups = [(index, index) for index in range(data.n_bins)]
-        self.smooth_radius_var = tk.IntVar(value=0)
+        self.smooth_radius_var = tk.IntVar(value=self.settings.rf_smooth_radius)
+        self.show_tuning_curve_var = tk.BooleanVar(value=self.settings.show_tuning_curve)
+        self.show_probe_layout_var = tk.BooleanVar(value=self.settings.show_probe_layout)
+        self.tuning_plot_mode_var = tk.StringVar(value=self.settings.tuning_plot_mode)
+        self.tuning_layout_var = tk.StringVar(value=self.settings.tuning_layout)
+        self.tuning_display_bins_var = tk.IntVar(value=self.settings.tuning_display_bins)
+        self.tuning_smoothing_var = tk.BooleanVar(value=self.settings.tuning_smoothing)
+        self.tuning_smooth_sigma_var = tk.DoubleVar(value=self.settings.tuning_smooth_sigma)
+        self.tuning_compare_scale_var = tk.BooleanVar(
+            value=self.settings.tuning_compare_scale
+        )
         self.selected_cell: CellRef | None = None
         self.hover_cell: CellRef | None = None
         self.json_paths: list[Path] = []
@@ -1479,55 +3596,177 @@ class RFMViewer(tk.Toplevel):
         self._tab_keys: dict[str, str] = {}
         self._hover_signature: tuple[object, ...] | None = None
         self._hover_tooltip_text = ""
-        self.probe_geometry = discover_probe_geometry(data.path)
+        self.probe_geometry: ProbeGeometry | None = None
+        self.tuning_curve_data: TuningCurveData | None = None
+        self._tuning_curve_error: str | None = None
+        self._tuning_curve_candidate: Path | None = None
+        self._tuning_processed_cache: tuple[object, ...] | None = None
+        self._tuning_scale_cache: tuple[object, ...] | None = None
+        self._probe_static_signature: tuple[object, ...] | None = None
         self.spatial_region: SpatialRegion | None = None
         self._probe_drag_start: tuple[float, float] | None = None
         self._probe_drag_moved = False
         self._probe_canvas_transform: tuple[float, float, float, float] | None = None
+        self.probe_collapsed_var = tk.BooleanVar(value=False)
+        self.tuning_collapsed_var = tk.BooleanVar(value=False)
         self.display_expanded_var = tk.BooleanVar(value=False)
 
         self._build_style()
         self._build_layout()
         self._build_menu()
         self._wire_events()
+        self._sync_optional_view_visibility(redraw=False)
         self._sync_json_menu()
         self._sync_unit_combo()
+        self._select_tab_key(self.settings.default_viewer_tab)
         self._update_all()
         self._viewer_ready = True
         self._pair_ready_viewer_set_changed(adopt_viewer=self)
         self.deiconify()
+        allow_macos_fullscreen_resize(self)
         self.lift()
         self.after_idle(lambda: self.canvases["rf"].focus_set())
+        self._schedule_optional_autoload()
+        if self._show_settings_when_ready:
+            self._show_settings_when_ready = False
+            self.after_idle(self._show_settings)
 
     def _load_startup_document(self, path: Path) -> None:
         self._startup_after = None
         if self._quitting or self._viewer_ready:
             return
-        try:
-            data = RFMappingData(path)
-        except Exception as exc:
-            messagebox.showerror("Could not open JSON", str(exc), parent=self)
+        self._startup_generation += 1
+        generation = self._startup_generation
+        path = Path(path).expanduser()
+        self._show_startup_loading_shell(path)
+
+        def decode_document() -> None:
+            try:
+                data = RFMappingData(path)
+            except Exception as exc:
+                self._startup_result_queue.put((generation, path, None, exc))
+            else:
+                self._startup_result_queue.put((generation, path, data, None))
+
+        threading.Thread(
+            target=decode_document,
+            name=f"rf-map-load-{generation}",
+            daemon=True,
+        ).start()
+        self._schedule_startup_result_poll()
+
+    def _show_startup_loading_shell(self, path: Path) -> None:
+        if self._startup_loading_frame is None:
+            self.geometry("560x190")
+            self.minsize(480, 170)
+            frame = ttk.Frame(self, padding=24)
+            frame.pack(fill="both", expand=True)
+            frame.columnconfigure(0, weight=1)
+            ttk.Label(
+                frame,
+                text="Opening RF mapping data",
+                font=("TkDefaultFont", 15, "bold"),
+            ).grid(row=0, column=0, sticky="w")
+            self._startup_path_label = ttk.Label(
+                frame,
+                text="",
+                foreground="#667085",
+                wraplength=500,
+            )
+            self._startup_path_label.grid(row=1, column=0, sticky="ew", pady=(8, 16))
+            progress = ttk.Progressbar(frame, mode="indeterminate")
+            progress.grid(row=2, column=0, sticky="ew")
+            progress.start(12)
+            ttk.Label(
+                frame,
+                text="Decoding and validating counts off the interface thread…",
+                foreground="#667085",
+            ).grid(row=3, column=0, sticky="w", pady=(10, 0))
+            self._startup_loading_frame = frame
+            self._startup_progress = progress
+        self._startup_path_label.configure(text=path.name)
+        self.title(f"Opening {path.name} — RF Map Viewer")
+        self.deiconify()
+        self.lift()
+
+    def _remove_startup_loading_shell(self) -> None:
+        if self._startup_progress is not None:
+            self._startup_progress.stop()
+            self._startup_progress = None
+        if self._startup_loading_frame is not None:
+            self._startup_loading_frame.destroy()
+            self._startup_loading_frame = None
+
+    def _schedule_startup_result_poll(self) -> None:
+        if self._startup_poll_after is None:
+            self._startup_poll_after = self.after(30, self._poll_startup_result)
+
+    def _poll_startup_result(self) -> None:
+        self._startup_poll_after = None
+        matching: tuple[int, Path, RFMappingData | None, Exception | None] | None = None
+        while True:
+            try:
+                candidate = self._startup_result_queue.get_nowait()
+            except queue.Empty:
+                break
+            if candidate[0] == self._startup_generation:
+                matching = candidate
+        if matching is None:
+            if not self._quitting and not self._viewer_ready:
+                self._schedule_startup_result_poll()
+            return
+        _generation, _path, data, error = matching
+        if error is not None:
+            messagebox.showerror("Could not open JSON", str(error), parent=self)
             self._quit_application()
             return
+        assert data is not None
         self._initialize_viewer(data)
 
     def _cancel_startup_callback(self) -> None:
+        self._startup_generation = getattr(self, "_startup_generation", 0) + 1
         if self._startup_after is None:
-            return
-        try:
-            self.after_cancel(self._startup_after)
-        except tk.TclError:
             pass
-        self._startup_after = None
+        else:
+            try:
+                self.after_cancel(self._startup_after)
+            except tk.TclError:
+                pass
+            self._startup_after = None
+        if getattr(self, "_startup_poll_after", None) is not None:
+            try:
+                self.after_cancel(self._startup_poll_after)
+            except tk.TclError:
+                pass
+            self._startup_poll_after = None
 
     def destroy(self) -> None:
         self._cancel_startup_callback()
+        if self._optional_autoload_after is not None:
+            try:
+                self.after_cancel(self._optional_autoload_after)
+            except tk.TclError:
+                pass
+            self._optional_autoload_after = None
+        self._optional_autoload_generation += 1
+        if self._optional_poll_after is not None:
+            try:
+                self.after_cancel(self._optional_poll_after)
+            except tk.TclError:
+                pass
+            self._optional_poll_after = None
         if self._redraw_after is not None:
             try:
                 self.after_cancel(self._redraw_after)
             except tk.TclError:
                 pass
             self._redraw_after = None
+        if self._optional_redraw_after is not None:
+            try:
+                self.after_cancel(self._optional_redraw_after)
+            except tk.TclError:
+                pass
+            self._optional_redraw_after = None
         windows = getattr(self._app_root, "_rfm_viewer_windows", [])
         if self in windows:
             windows.remove(self)
@@ -1550,18 +3789,86 @@ class RFMViewer(tk.Toplevel):
 
     def _build_style(self) -> None:
         style = ttk.Style(self)
-        if "clam" in style.theme_names():
+        if sys.platform == "darwin" and "aqua" in style.theme_names():
+            style.theme_use("aqua")
+        elif "clam" in style.theme_names():
             style.theme_use("clam")
-        style.configure("TFrame", background="#f5f7fa")
+        style.configure("TFrame", background="#f5f5f7")
         style.configure("Panel.TFrame", background="#ffffff")
-        style.configure("TLabel", background="#f5f7fa", foreground="#18212f")
-        style.configure("Panel.TLabel", background="#ffffff", foreground="#18212f")
-        style.configure("Muted.TLabel", background="#ffffff", foreground="#667085")
-        style.configure("Title.TLabel", background="#ffffff", foreground="#0f172a", font=("TkDefaultFont", 15, "bold"))
-        style.configure("Value.TLabel", background="#ffffff", foreground="#0f172a", font=("TkDefaultFont", 11, "bold"))
-        style.configure("TButton", padding=(8, 5))
-        style.configure("TNotebook", background="#f5f7fa", borderwidth=0)
-        style.configure("TNotebook.Tab", padding=(12, 7))
+        style.configure("Sidebar.TFrame", background="#eef0f4")
+        style.configure("Toolbar.TFrame", background="#f5f5f7")
+        style.configure("TLabel", background="#f5f5f7", foreground="#1d1d1f")
+        style.configure("Panel.TLabel", background="#ffffff", foreground="#1d1d1f")
+        style.configure("Sidebar.TLabel", background="#eef0f4", foreground="#1d1d1f")
+        style.configure("Muted.TLabel", background="#ffffff", foreground="#6e6e73")
+        style.configure("SidebarMuted.TLabel", background="#eef0f4", foreground="#6e6e73")
+        style.configure(
+            "Section.TLabel",
+            background="#eef0f4",
+            foreground="#6e6e73",
+            font=("TkDefaultFont", 10, "bold"),
+        )
+        style.configure(
+            "Title.TLabel",
+            background="#ffffff",
+            foreground="#1d1d1f",
+            font=("TkDefaultFont", 13, "bold"),
+        )
+        style.configure(
+            "Value.TLabel",
+            background="#ffffff",
+            foreground="#1d1d1f",
+            font=("TkDefaultFont", 11, "bold"),
+        )
+        style.configure(
+            "Status.TLabel",
+            background="#f5f5f7",
+            foreground="#6e6e73",
+            font=("TkDefaultFont", 10),
+        )
+        style.configure(
+            "HDClass1.TLabel",
+            background="#fff3c4",
+            foreground="#805b00",
+            font=("TkDefaultFont", 10, "bold"),
+            padding=(6, 2),
+        )
+        style.configure(
+            "HDClass2.TLabel",
+            background="#dff5e8",
+            foreground="#08783f",
+            font=("TkDefaultFont", 10, "bold"),
+            padding=(6, 2),
+        )
+        style.configure("TButton", padding=(7, 4))
+        style.configure("TNotebook", background="#ffffff", borderwidth=0)
+        style.configure("TNotebook.Tab", padding=(14, 7))
+        self._pane_icons = {
+            placement: self._make_pane_icon(placement)
+            for placement in ("leading", "trailing", "bottom")
+        }
+
+    def _make_pane_icon(self, placement: str) -> tk.PhotoImage:
+        """Draw a compact sidebar/split-pane icon without font glyph arrows."""
+
+        image = tk.PhotoImage(master=self, width=18, height=18)
+        outline = "#667085"
+        panel = "#98a2b3"
+        interior = "#f8fafc"
+        image.put(outline, to=(2, 3, 16, 15))
+        image.put(interior, to=(3, 4, 15, 14))
+        if placement == "leading":
+            image.put(panel, to=(3, 4, 7, 14))
+            image.put(outline, to=(7, 4, 8, 14))
+        elif placement == "trailing":
+            image.put(panel, to=(11, 4, 15, 14))
+            image.put(outline, to=(10, 4, 11, 14))
+        elif placement == "bottom":
+            image.put(panel, to=(3, 11, 15, 14))
+            image.put(outline, to=(3, 10, 15, 11))
+        else:
+            raise ValueError(f"Unsupported pane icon placement: {placement}")
+        return image
 
     def _build_menu(self) -> None:
         menu = tk.Menu(self)
@@ -1578,6 +3885,10 @@ class RFMViewer(tk.Toplevel):
             label="Attach Probe Geometry…",
             command=self._attach_probe_geometry,
         )
+        file_menu.add_command(
+            label="Attach Tuning Curves…",
+            command=self._attach_tuning_curve,
+        )
         file_menu.add_separator()
         file_menu.add_command(
             label="Export Displayed…",
@@ -1591,6 +3902,7 @@ class RFMViewer(tk.Toplevel):
             command=self._close_window,
         )
         menu.add_cascade(label="File", menu=file_menu)
+        self._file_menu = file_menu
 
         navigate_menu = tk.Menu(menu, tearoff=False)
         navigate_menu.add_command(label="Previous Unit", accelerator="←  or  [", command=lambda: self._step_unit(-1))
@@ -1598,8 +3910,16 @@ class RFMViewer(tk.Toplevel):
         navigate_menu.add_separator()
         navigate_menu.add_command(label="Previous Timeline Bin", accelerator="↑", command=lambda: self._step_timeline_bin(-1))
         navigate_menu.add_command(label="Next Timeline Bin", accelerator="↓", command=lambda: self._step_timeline_bin(1))
-        navigate_menu.add_command(label="Decrease Time Resolution 1 ms", accelerator="⇧,", command=lambda: self._step_time_resolution(-1.0))
-        navigate_menu.add_command(label="Increase Time Resolution 1 ms", accelerator="⇧.", command=lambda: self._step_time_resolution(1.0))
+        navigate_menu.add_command(
+            label="Decrease Time Resolution",
+            accelerator="⇧,",
+            command=lambda: self._step_time_resolution(1.0),
+        )
+        navigate_menu.add_command(
+            label="Increase Time Resolution",
+            accelerator="⇧.",
+            command=lambda: self._step_time_resolution(-1.0),
+        )
         navigate_menu.add_separator()
         navigate_menu.add_command(
             label="Clear Probe Region / Show Full Timeline",
@@ -1607,6 +3927,7 @@ class RFMViewer(tk.Toplevel):
             command=self._handle_escape,
         )
         menu.add_cascade(label="Navigate", menu=navigate_menu)
+        self._navigate_menu = navigate_menu
 
         view_menu = tk.Menu(menu, tearoff=False)
         for tab_index, title in enumerate(("RF", "Delay / RGB", "Timeline")):
@@ -1618,11 +3939,24 @@ class RFMViewer(tk.Toplevel):
         view_menu.add_separator()
         view_menu.add_command(label="Show / Hide Display Controls", command=self._toggle_display_controls)
         view_menu.add_command(label="Cycle Palette", accelerator="P", command=self._cycle_palette)
+        if sys.platform != "darwin":
+            view_menu.add_separator()
+            view_menu.add_command(
+                label="Settings…",
+                accelerator="Ctrl+,",
+                command=self._show_settings,
+            )
         menu.add_cascade(label="View", menu=view_menu)
 
-        help_menu = tk.Menu(menu, tearoff=False)
+        help_menu = tk.Menu(menu, name="help", tearoff=False)
         help_menu.add_command(label="Keyboard Shortcuts", accelerator="?", command=self._show_shortcuts)
+        help_menu.add_separator()
+        help_menu.add_command(
+            label="Support Documentation",
+            command=self._open_support_documentation,
+        )
         menu.add_cascade(label="Help", menu=help_menu)
+        self._help_menu = help_menu
         self.configure(menu=menu)
         self._menu = menu
 
@@ -1631,12 +3965,25 @@ class RFMViewer(tk.Toplevel):
         self.columnconfigure(1, weight=1)
         self.rowconfigure(0, weight=1)
 
-        sidebar = ttk.Frame(self, style="Panel.TFrame", padding=14)
+        sidebar = ttk.Frame(self, style="Sidebar.TFrame", padding=(12, 10))
         sidebar.grid(row=0, column=0, sticky="nsew")
         sidebar.columnconfigure(0, weight=1)
+        self.sidebar_panel = sidebar
         self.sidebar_frame = sidebar
+        self.sidebar_collapsed_rail = ttk.Frame(
+            self, style="Sidebar.TFrame", padding=(4, 10)
+        )
+        ttk.Button(
+            self.sidebar_collapsed_rail,
+            image=self._pane_icons["leading"],
+            text="Show sidebar",
+            width=2,
+            command=self._toggle_probe_collapsed,
+        ).grid(row=0, column=0, sticky="n")
+        self.sidebar_collapsed_rail.grid(row=0, column=0, sticky="ns")
+        self.sidebar_collapsed_rail.grid_remove()
 
-        main = ttk.Frame(self, padding=(12, 12, 12, 12))
+        main = ttk.Frame(self, style="Panel.TFrame")
         main.grid(row=0, column=1, sticky="nsew")
         main.columnconfigure(0, weight=1)
         main.rowconfigure(2, weight=1)
@@ -1646,105 +3993,161 @@ class RFMViewer(tk.Toplevel):
 
     def _build_sidebar(self, parent: ttk.Frame) -> None:
         row = 0
-        ttk.Label(parent, text="RF Map Viewer", style="Title.TLabel").grid(
-            row=row,
-            column=0,
-            sticky="w",
-            pady=(0, 8),
+        ttk.Label(parent, text="Windows", style="Section.TLabel").grid(
+            row=row, column=0, sticky="w", pady=(0, 5)
         )
         row += 1
 
         self.pair_windows_toggle = ttk.Checkbutton(
             parent,
-            text="Sync windows",
+            text="Sync viewer windows",
             variable=self.pair_windows_var,
             command=self._on_pair_windows_toggled,
         )
-        self.pair_windows_toggle.grid(row=row, column=0, sticky="w", pady=(0, 8))
+        self.pair_windows_toggle.grid(row=row, column=0, sticky="w", pady=(0, 5))
         row += 1
         self.pair_status_label = ttk.Label(
             parent,
             text="Open another loaded viewer window to enable sync.",
-            style="Muted.TLabel",
-            wraplength=260,
+            style="SidebarMuted.TLabel",
+            wraplength=220,
             justify="left",
         )
-        self.pair_status_label.grid(row=row, column=0, sticky="ew", pady=(4, 10))
+        self.pair_status_label.grid(row=row, column=0, sticky="ew", pady=(2, 8))
         self.pair_status_label.grid_remove()
         row += 1
 
-        ttk.Label(parent, text="Unit", style="Panel.TLabel").grid(row=row, column=0, sticky="w")
-        row += 1
-        unit_row = ttk.Frame(parent, style="Panel.TFrame")
-        unit_row.grid(row=row, column=0, sticky="ew", pady=(5, 10))
-        unit_row.columnconfigure(1, weight=1)
-        self.previous_unit_button = ttk.Button(unit_row, text="<", width=3, command=lambda: self._step_unit(-1))
-        self.previous_unit_button.grid(row=0, column=0, padx=(0, 5))
-        self.unit_combo = ttk.Combobox(unit_row, state="readonly", width=23)
-        self.unit_combo.grid(row=0, column=1, sticky="ew")
-        self.next_unit_button = ttk.Button(unit_row, text=">", width=3, command=lambda: self._step_unit(1))
-        self.next_unit_button.grid(row=0, column=2, padx=(5, 0))
-        row += 1
+        self.probe_section = ttk.Frame(parent, style="Sidebar.TFrame")
+        self.probe_section.grid(row=row, column=0, sticky="nsew", pady=(10, 0))
+        self.probe_section.columnconfigure(0, weight=1)
+        self.probe_section.rowconfigure(1, weight=1)
+        self._probe_section_row = row
+        parent.rowconfigure(row, weight=1)
 
-        probe_header = ttk.Frame(parent, style="Panel.TFrame")
-        probe_header.grid(row=row, column=0, sticky="ew", pady=(0, 5))
-        probe_header.columnconfigure(0, weight=1)
-        ttk.Label(probe_header, text="Probe", style="Panel.TLabel").grid(row=0, column=0, sticky="w")
+        probe_header = ttk.Frame(self.probe_section, style="Sidebar.TFrame")
+        probe_header.grid(row=0, column=0, sticky="ew", pady=(0, 5))
+        probe_header.columnconfigure(1, weight=1)
+        self.probe_fold_button = ttk.Button(
+            probe_header,
+            image=self._pane_icons["leading"],
+            text="Hide sidebar",
+            width=2,
+            command=self._toggle_probe_collapsed,
+        )
+        self.probe_fold_button.grid(row=0, column=0, sticky="w", padx=(0, 5))
+        ttk.Label(probe_header, text="Probe", style="Section.TLabel").grid(
+            row=0, column=1, sticky="w"
+        )
         self.clear_spatial_button = ttk.Button(
             probe_header,
             text="Clear",
             width=6,
             command=self._clear_spatial_filter,
         )
-        self.clear_spatial_button.grid(row=0, column=1, sticky="e")
+        self.clear_spatial_button.grid(row=0, column=2, sticky="e")
         row += 1
 
         self.probe_canvas = tk.Canvas(
-            parent,
-            width=260,
+            self.probe_section,
+            width=220,
             height=330,
-            background="#f8fafc",
+            background="#ffffff",
             highlightthickness=1,
-            highlightbackground="#d0d5dd",
+            highlightbackground="#d7d9de",
         )
-        probe_canvas_row = row
-        self.probe_canvas.grid(row=row, column=0, sticky="nsew")
-        row += 1
+        self.probe_canvas.grid(row=1, column=0, sticky="nsew")
+        self.probe_attach_button = ttk.Button(
+            self.probe_canvas,
+            text="Choose positions.csv…",
+            command=self._attach_probe_geometry,
+        )
         self.spatial_status_label = ttk.Label(
+            self.probe_section,
+            text="",
+            style="SidebarMuted.TLabel",
+            wraplength=220,
+            justify="left",
+        )
+        self.spatial_status_label.grid(row=2, column=0, sticky="ew", pady=(5, 10))
+        row += 1
+
+        ttk.Label(parent, text="Selection", style="Section.TLabel").grid(
+            row=row, column=0, sticky="w", pady=(8, 5)
+        )
+        row += 1
+        self.cell_label = ttk.Label(
             parent,
             text="",
-            style="Muted.TLabel",
-            wraplength=260,
+            style="SidebarMuted.TLabel",
+            font=("TkFixedFont", 10),
+            wraplength=220,
             justify="left",
         )
-        self.spatial_status_label.grid(row=row, column=0, sticky="ew", pady=(5, 10))
+        self.cell_label.grid(row=row, column=0, sticky="ew")
         row += 1
-
-        ttk.Label(
+        self.unit_stats_label = ttk.Label(
             parent,
-            text="←/→ unit   ↑/↓ timeline\n⇧,/⇧. time resolution   ? all shortcuts",
-            style="Muted.TLabel",
+            text="",
+            style="SidebarMuted.TLabel",
+            wraplength=220,
             justify="left",
-        ).grid(row=row, column=0, sticky="ew", pady=(0, 8))
-        row += 1
-
-        self.cell_label = ttk.Label(parent, text="", style="Muted.TLabel")
-        self.unit_stats_label = ttk.Label(parent, text="", style="Muted.TLabel")
-        parent.rowconfigure(probe_canvas_row, weight=1)
+        )
+        self.unit_stats_label.grid(row=row, column=0, sticky="ew", pady=(2, 0))
 
     def _build_main(self, parent: ttk.Frame) -> None:
-        header = ttk.Frame(parent)
-        header.grid(row=0, column=0, sticky="ew", pady=(0, 6))
-        header.columnconfigure(0, weight=1)
-        self.header_label = ttk.Label(header, text="", font=("TkDefaultFont", 13, "bold"))
-        self.header_label.grid(row=0, column=0, sticky="w")
-        self.status_label = ttk.Label(header, text="", foreground="#667085")
-        self.status_label.grid(row=1, column=0, sticky="w", pady=(3, 0))
+        toolbar = ttk.Frame(parent, style="Toolbar.TFrame", padding=(10, 7))
+        toolbar.grid(row=0, column=0, sticky="ew")
+        toolbar.columnconfigure(4, weight=1)
+
+        self.previous_unit_button = ttk.Button(
+            toolbar,
+            text="‹",
+            width=3,
+            command=lambda: self._step_unit(-1),
+        )
+        self.previous_unit_button.grid(row=0, column=0, padx=(0, 4))
+        self.unit_combo = ttk.Combobox(toolbar, state="readonly", width=27)
+        self.unit_combo.grid(row=0, column=1, sticky="w")
+        self.next_unit_button = ttk.Button(
+            toolbar,
+            text="›",
+            width=3,
+            command=lambda: self._step_unit(1),
+        )
+        self.next_unit_button.grid(row=0, column=2, padx=(4, 0))
+        ttk.Separator(toolbar, orient="vertical").grid(
+            row=0, column=3, sticky="ns", padx=10
+        )
+
+        # Kept as a data-bearing widget for the update path; the unit picker
+        # already exposes the same context, so repeating it would add chrome.
+        self.header_label = ttk.Label(toolbar, text="", style="Status.TLabel")
+        self.open_toolbar_button = ttk.Button(
+            toolbar,
+            text="Open…",
+            command=self._open_json,
+        )
+        self.open_toolbar_button.grid(row=0, column=5, padx=(8, 4))
+        self.export_toolbar_button = ttk.Button(
+            toolbar,
+            text="Export",
+            command=self._export_current_matrix,
+        )
+        self.export_toolbar_button.grid(row=0, column=6)
 
         self._build_plot_controls(parent)
 
         self.notebook = ttk.Notebook(parent)
         self.notebook.grid(row=2, column=0, sticky="nsew")
+
+        self.status_label = ttk.Label(
+            parent,
+            text="",
+            style="Status.TLabel",
+            anchor="w",
+            padding=(10, 4),
+        )
+        self.status_label.grid(row=3, column=0, sticky="ew")
 
         self.canvases: dict[str, tk.Canvas] = {}
         self._tab_keys = {}
@@ -1756,8 +4159,155 @@ class RFMViewer(tk.Toplevel):
             frame = ttk.Frame(self.notebook)
             frame.columnconfigure(0, weight=1)
             frame.rowconfigure(0, weight=1)
-            canvas = tk.Canvas(frame, background="#ffffff", highlightthickness=0)
-            canvas.grid(row=0, column=0, sticky="nsew")
+            if key == "rf":
+                self.rf_tab_frame = frame
+                self.rf_split_container = ttk.Frame(frame)
+                self.rf_split_container.grid(row=0, column=0, sticky="nsew")
+                self._rf_split_responsive_stacked = False
+                self.rf_split_container.bind(
+                    "<Configure>",
+                    self._on_rf_split_configure,
+                    add="+",
+                )
+                self.rf_map_pane = ttk.Frame(
+                    self.rf_split_container,
+                    style="Panel.TFrame",
+                )
+                self.rf_map_pane.columnconfigure(0, weight=1)
+                self.rf_map_pane.rowconfigure(1, weight=1)
+                rf_header = ttk.Frame(
+                    self.rf_map_pane,
+                    style="Panel.TFrame",
+                    padding=(12, 9),
+                )
+                rf_header.grid(row=0, column=0, sticky="ew")
+                rf_header.columnconfigure(0, weight=1)
+                ttk.Label(
+                    rf_header,
+                    text="RF Map",
+                    style="Title.TLabel",
+                ).grid(row=0, column=0, sticky="w")
+                self.rf_map_subtitle_label = ttk.Label(
+                    rf_header,
+                    text="",
+                    style="Muted.TLabel",
+                    font=("TkDefaultFont", 10),
+                )
+                self.rf_map_subtitle_label.grid(
+                    row=1, column=0, sticky="w", pady=(2, 0)
+                )
+                canvas = tk.Canvas(
+                    self.rf_map_pane,
+                    background="#ffffff",
+                    highlightthickness=0,
+                )
+                canvas.grid(row=1, column=0, sticky="nsew")
+
+                self.tuning_curve_pane = ttk.Frame(
+                    self.rf_split_container,
+                    style="Panel.TFrame",
+                )
+                self.tuning_curve_pane.columnconfigure(0, weight=1)
+                self.tuning_curve_pane.rowconfigure(1, weight=1)
+                tuning_header = ttk.Frame(
+                    self.tuning_curve_pane,
+                    style="Panel.TFrame",
+                    padding=(12, 9),
+                )
+                tuning_header.grid(row=0, column=0, sticky="ew")
+                tuning_header.columnconfigure(0, weight=1)
+                ttk.Label(
+                    tuning_header,
+                    text="HD Tuning Curve",
+                    style="Title.TLabel",
+                ).grid(row=0, column=0, sticky="w")
+                self.tuning_cluster_label = ttk.Label(
+                    tuning_header,
+                    text="",
+                    style="Muted.TLabel",
+                    font=("TkDefaultFont", 10),
+                )
+                self.tuning_cluster_label.grid(
+                    row=1, column=0, sticky="w", pady=(2, 0)
+                )
+                self.tuning_hd_class_label = ttk.Label(
+                    tuning_header,
+                    text="",
+                    style="Panel.TLabel",
+                    width=2,
+                    anchor="center",
+                )
+                self.tuning_hd_class_label.grid(
+                    row=0,
+                    column=1,
+                    sticky="e",
+                    padx=(6, 4),
+                )
+                self.tuning_hd_class_label.grid_remove()
+                self.tuning_provenance_button = ttk.Button(
+                    tuning_header,
+                    text="Info",
+                    width=4,
+                    command=self._show_tuning_provenance,
+                )
+                self.tuning_provenance_button.grid(
+                    row=0,
+                    column=2,
+                    sticky="e",
+                    padx=(4, 4),
+                )
+                self.tuning_provenance_button.grid_remove()
+                self.tuning_fold_button = ttk.Button(
+                    tuning_header,
+                    image=self._pane_icons["trailing"],
+                    text="Collapse HD tuning curve",
+                    width=2,
+                    command=self._toggle_tuning_collapsed,
+                )
+                self.tuning_fold_button.grid(row=0, column=3, sticky="e")
+                self.tuning_curve_canvas = tk.Canvas(
+                    self.tuning_curve_pane,
+                    background="#ffffff",
+                    highlightthickness=0,
+                )
+                self.tuning_curve_canvas.grid(row=1, column=0, sticky="nsew")
+                self.tuning_attach_button = ttk.Button(
+                    self.tuning_curve_canvas,
+                    text="Choose tuning_curves.json…",
+                    command=self._attach_tuning_curve,
+                )
+                self.tuning_curve_status_label = ttk.Label(
+                    self.tuning_curve_pane,
+                    text="",
+                    style="Muted.TLabel",
+                    wraplength=360,
+                    justify="left",
+                )
+                self.tuning_curve_status_label.grid(
+                    row=2,
+                    column=0,
+                    sticky="ew",
+                    padx=12,
+                    pady=(5, 7),
+                )
+                self.tuning_collapsed_rail = ttk.Frame(
+                    self.rf_split_container,
+                    style="Panel.TFrame",
+                    padding=(4, 6),
+                )
+                self.tuning_collapsed_rail.columnconfigure(0, weight=1)
+                self.tuning_restore_button = ttk.Button(
+                    self.tuning_collapsed_rail,
+                    image=self._pane_icons["trailing"],
+                    text="Restore HD tuning curve",
+                    width=2,
+                    command=self._toggle_tuning_collapsed,
+                )
+                self.tuning_restore_button.grid(row=0, column=0, sticky="n")
+                self._layout_rf_and_tuning()
+            else:
+                canvas = tk.Canvas(frame, background="#ffffff", highlightthickness=0)
+                canvas.grid(row=0, column=0, sticky="nsew")
             if key == "timeline":
                 frame.columnconfigure(1, weight=0)
                 self.timeline_scrollbar = ttk.Scrollbar(frame, orient="vertical", command=self._timeline_yview)
@@ -1767,45 +4317,166 @@ class RFMViewer(tk.Toplevel):
             self.canvases[key] = canvas
             self._tab_keys[str(frame)] = key
 
+    def _layout_rf_and_tuning(self) -> None:
+        """Place the RF and tuning views using the saved arrangement."""
+
+        if not hasattr(self, "rf_split_container"):
+            return
+        container = self.rf_split_container
+        self.rf_map_pane.grid_forget()
+        self.tuning_curve_pane.grid_forget()
+        self.tuning_collapsed_rail.grid_forget()
+        for index in range(2):
+            container.columnconfigure(index, weight=0, uniform="")
+            container.rowconfigure(index, weight=0, uniform="")
+
+        tuning_visible = bool(self.show_tuning_curve_var.get())
+        collapsed = bool(self.tuning_collapsed_var.get())
+        stacked = (
+            self.tuning_layout_var.get() == "Stacked"
+            or bool(getattr(self, "_rf_split_responsive_stacked", False))
+        )
+        self.rf_map_pane.grid(row=0, column=0, sticky="nsew")
+        container.columnconfigure(0, weight=1)
+        container.rowconfigure(0, weight=1)
+
+        if not tuning_visible:
+            return
+        if collapsed:
+            if stacked:
+                self.tuning_collapsed_rail.grid(
+                    row=1, column=0, sticky="ew", pady=(2, 0)
+                )
+                self.tuning_restore_button.configure(
+                    image=self._pane_icons["bottom"],
+                    text="Restore HD tuning curve",
+                )
+            else:
+                self.tuning_collapsed_rail.grid(
+                    row=0, column=1, sticky="ns", padx=(2, 0)
+                )
+                self.tuning_restore_button.configure(
+                    image=self._pane_icons["trailing"],
+                    text="Restore HD tuning curve",
+                )
+            return
+        if stacked:
+            self.tuning_curve_pane.grid(
+                row=1, column=0, sticky="nsew", pady=(1, 0)
+            )
+            container.rowconfigure(0, weight=5, uniform="rf-hd-rows")
+            container.rowconfigure(1, weight=3, uniform="rf-hd-rows")
+            self.tuning_fold_button.configure(
+                image=self._pane_icons["bottom"],
+                text="Collapse HD tuning curve",
+            )
+        else:
+            self.tuning_curve_pane.grid(
+                row=0, column=1, sticky="nsew", padx=(1, 0)
+            )
+            container.columnconfigure(0, weight=5, uniform="rf-hd-columns")
+            container.columnconfigure(1, weight=2, uniform="rf-hd-columns")
+            self.tuning_fold_button.configure(
+                image=self._pane_icons["trailing"],
+                text="Collapse HD tuning curve",
+            )
+
+    def _on_rf_split_configure(self, event: tk.Event) -> None:
+        # At narrow window widths a side-by-side HD pane would be smaller than
+        # its scientific axes. Switch arrangement without changing the saved
+        # user preference, then restore it when space returns.
+        responsive_stacked = int(event.width) < 1050
+        if responsive_stacked == getattr(self, "_rf_split_responsive_stacked", False):
+            return
+        self._rf_split_responsive_stacked = responsive_stacked
+        self._layout_rf_and_tuning()
+
+    def _toggle_probe_collapsed(self) -> None:
+        self.probe_collapsed_var.set(not self.probe_collapsed_var.get())
+        self._sync_probe_collapsed_state()
+
+    def _sync_probe_collapsed_state(self, *, schedule_redraw: bool = True) -> None:
+        if not hasattr(self, "probe_canvas"):
+            return
+        collapsed = bool(self.probe_collapsed_var.get())
+        self.probe_fold_button.configure(
+            image=self._pane_icons["leading"],
+            text="Hide sidebar",
+        )
+        if collapsed:
+            self.sidebar_panel.grid_remove()
+            self.sidebar_collapsed_rail.grid()
+        else:
+            self.sidebar_collapsed_rail.grid_remove()
+            self.sidebar_panel.grid()
+            if schedule_redraw and self.__dict__.get("_viewer_ready", False):
+                self._schedule_optional_redraw("probe")
+
+    def _toggle_tuning_collapsed(self) -> None:
+        self.tuning_collapsed_var.set(not self.tuning_collapsed_var.get())
+        self._sync_tuning_collapsed_state()
+
+    def _sync_tuning_collapsed_state(self, *, schedule_redraw: bool = True) -> None:
+        if not hasattr(self, "tuning_curve_canvas"):
+            return
+        collapsed = bool(self.tuning_collapsed_var.get())
+        if collapsed:
+            self.tuning_curve_canvas.grid_remove()
+            self.tuning_curve_status_label.grid_remove()
+        else:
+            self.tuning_curve_canvas.grid()
+            self.tuning_curve_status_label.grid()
+        self._layout_rf_and_tuning()
+        if (
+            not collapsed
+            and schedule_redraw
+            and self.__dict__.get("_viewer_ready", False)
+        ):
+            self._schedule_optional_redraw("tuning")
+
     def _build_plot_controls(self, parent: ttk.Frame) -> None:
-        controls = ttk.Frame(parent, style="Panel.TFrame", padding=(8, 6))
-        controls.grid(row=1, column=0, sticky="ew", pady=(0, 8))
-        controls.columnconfigure(8, weight=1)
+        controls = ttk.Frame(parent, style="Panel.TFrame", padding=(10, 6))
+        controls.grid(row=1, column=0, sticky="ew")
+        controls.columnconfigure(6, weight=1)
         self.plot_controls_frame = controls
 
-        ttk.Label(controls, text="Value", style="Panel.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 6))
+        ttk.Label(controls, text="Metric", style="Panel.TLabel").grid(
+            row=0, column=0, sticky="w", padx=(0, 6)
+        )
         self.value_mode_combo = ttk.Combobox(
             controls,
             state="readonly",
             values=VALUE_MODES,
             textvariable=self.value_mode_var,
-            width=21,
+            width=18,
         )
-        self.value_mode_combo.grid(row=0, column=1, sticky="w", padx=(0, 18))
+        self.value_mode_combo.grid(row=0, column=1, sticky="w", padx=(0, 10))
 
-        ttk.Label(controls, text="Time resolution (ms)", style="Panel.TLabel").grid(row=0, column=2, sticky="w", padx=(0, 6))
+        ttk.Separator(controls, orient="vertical").grid(
+            row=0, column=2, sticky="ns", padx=(0, 10)
+        )
+        ttk.Label(controls, text="Target width", style="Panel.TLabel").grid(
+            row=0, column=3, sticky="w", padx=(0, 6)
+        )
         self.time_res_spin = ttk.Spinbox(
             controls,
             from_=self._base_bin_ms(),
             to=self._total_time_ms(),
             increment=self._base_bin_ms(),
-            width=8,
+            width=6,
             textvariable=self.time_res_ms_var,
             command=self._on_time_resolution_changed,
         )
-        self.time_res_spin.grid(row=0, column=3, sticky="w", padx=(0, 18))
+        self.time_res_spin.grid(row=0, column=4, sticky="w")
+        ttk.Label(controls, text="ms", style="Panel.TLabel").grid(
+            row=0, column=5, sticky="w", padx=(4, 12)
+        )
 
         range_controls = ttk.Frame(controls, style="Panel.TFrame")
-        range_controls.grid(
-            row=1,
-            column=0,
-            columnspan=9,
-            sticky="w",
-            pady=(6, 0),
-        )
+        range_controls.grid(row=0, column=7, sticky="w")
         self.range_controls_frame = range_controls
 
-        ttk.Label(range_controls, text="RF sum range (ms)", style="Panel.TLabel").grid(
+        ttk.Label(range_controls, text="RF window", style="Panel.TLabel").grid(
             row=0,
             column=0,
             sticky="w",
@@ -1816,36 +4487,57 @@ class RFMViewer(tk.Toplevel):
             from_=self._time_axis_start_ms(),
             to=self._time_axis_end_ms(),
             increment=self._base_bin_ms(),
-            width=8,
+            width=6,
             textvariable=self.range_start_ms_var,
             command=self._on_range_changed,
         )
         self.range_start_spin.grid(row=0, column=1, sticky="w")
-        ttk.Label(range_controls, text="to", style="Panel.TLabel").grid(row=0, column=2, padx=6)
+        ttk.Label(range_controls, text="–", style="Panel.TLabel").grid(
+            row=0, column=2, padx=5
+        )
         self.range_end_spin = ttk.Spinbox(
             range_controls,
             from_=self._time_axis_start_ms(),
             to=self._time_axis_end_ms(),
             increment=self._base_bin_ms(),
-            width=8,
+            width=6,
             textvariable=self.range_end_ms_var,
             command=self._on_range_changed,
         )
-        self.range_end_spin.grid(row=0, column=3, sticky="w", padx=(0, 12))
+        self.range_end_spin.grid(row=0, column=3, sticky="w")
+        ttk.Label(range_controls, text="ms", style="Panel.TLabel").grid(
+            row=0, column=4, sticky="w", padx=(4, 8)
+        )
 
         self.reset_plot_range_button = ttk.Button(
             range_controls,
-            text="Reset 0–200",
+            text="Reset",
             command=self._reset_plot_range,
         )
-        self.reset_plot_range_button.grid(row=0, column=4, sticky="w", padx=(0, 8))
+        self.reset_plot_range_button.grid(row=0, column=5, sticky="w")
+
+        self.delay_controls_frame = ttk.Frame(controls, style="Panel.TFrame")
+        self.rgb_mode_toggle = ttk.Checkbutton(
+            self.delay_controls_frame,
+            text="RGB composite",
+            variable=self.rgb_mode_var,
+            command=self._on_control_changed,
+        )
+        self.rgb_mode_toggle.grid(row=0, column=0, sticky="w")
+
+        self.timeline_context_frame = ttk.Frame(controls, style="Panel.TFrame")
+        ttk.Label(
+            self.timeline_context_frame,
+            text="Full physical time axis",
+            style="Panel.TLabel",
+        ).grid(row=0, column=0, sticky="w")
 
         self.display_toggle_button = ttk.Button(
-            range_controls,
-            text="Display ▸",
+            controls,
+            text="Display Options",
             command=self._toggle_display_controls,
         )
-        self.display_toggle_button.grid(row=0, column=5, sticky="w")
+        self.display_toggle_button.grid(row=0, column=8, sticky="e", padx=(10, 0))
         self.display_controls_frame = ttk.Frame(controls, style="Panel.TFrame")
         display = self.display_controls_frame
         for column in (1, 3, 5):
@@ -1908,13 +4600,6 @@ class RFMViewer(tk.Toplevel):
             command=self._on_spatial_format_changed,
         )
         self.polar_layout_toggle.grid(row=1, column=4, sticky="w", pady=(8, 0))
-        self.rgb_mode_toggle = ttk.Checkbutton(
-            display,
-            text="RGB composite",
-            variable=self.rgb_mode_var,
-            command=self._on_control_changed,
-        )
-        self.rgb_mode_toggle.grid(row=1, column=5, sticky="w", padx=(6, 0), pady=(8, 0))
 
     def _wire_events(self) -> None:
         self.unit_combo.bind("<<ComboboxSelected>>", self._on_unit_selected)
@@ -1941,8 +4626,8 @@ class RFMViewer(tk.Toplevel):
         self.bind("<bracketright>", lambda event: self._run_navigation_shortcut(event, self._step_unit, 1))
         self.bind("<Up>", lambda event: self._run_navigation_shortcut(event, self._step_timeline_bin, -1))
         self.bind("<Down>", lambda event: self._run_navigation_shortcut(event, self._step_timeline_bin, 1))
-        self.bind("<less>", lambda event: self._run_navigation_shortcut(event, self._step_time_resolution, -1.0))
-        self.bind("<greater>", lambda event: self._run_navigation_shortcut(event, self._step_time_resolution, 1.0))
+        self.bind("<less>", lambda event: self._run_navigation_shortcut(event, self._step_time_resolution, 1.0))
+        self.bind("<greater>", lambda event: self._run_navigation_shortcut(event, self._step_time_resolution, -1.0))
         self.bind("<Escape>", lambda event: self._run_navigation_shortcut(event, self._handle_escape))
         self.bind("<KeyPress-p>", lambda event: self._run_navigation_shortcut(event, self._cycle_palette))
         self.bind("<question>", lambda event: self._run_navigation_shortcut(event, self._show_shortcuts))
@@ -1964,17 +4649,28 @@ class RFMViewer(tk.Toplevel):
         self.canvases["timeline"].bind("<MouseWheel>", self._on_timeline_mousewheel)
         self.canvases["timeline"].bind("<Button-4>", self._on_timeline_mousewheel)
         self.canvases["timeline"].bind("<Button-5>", self._on_timeline_mousewheel)
-        self.probe_canvas.bind("<Configure>", lambda _event: self._draw_probe_canvas())
+        self.probe_canvas.bind(
+            "<Configure>", lambda _event: self._schedule_optional_redraw("probe")
+        )
         self.probe_canvas.bind("<ButtonPress-1>", self._on_probe_press)
         self.probe_canvas.bind("<B1-Motion>", self._on_probe_drag)
         self.probe_canvas.bind("<ButtonRelease-1>", self._on_probe_release)
+        self.tuning_curve_canvas.bind(
+            "<Configure>", lambda _event: self._schedule_optional_redraw("tuning")
+        )
+        self.tuning_curve_canvas.bind("<Button-1>", self._on_tuning_curve_click)
+        self._install_optional_drop_targets()
 
     def _toggle_display_controls(self) -> None:
         expanded = not self.display_expanded_var.get()
         self.display_expanded_var.set(expanded)
-        self.display_toggle_button.configure(text="Display ▾" if expanded else "Display ▸")
+        self.display_toggle_button.configure(
+            text="Hide Display Options" if expanded else "Display Options"
+        )
         if expanded:
-            self.display_controls_frame.grid(row=2, column=0, columnspan=9, sticky="ew", pady=(6, 0))
+            self.display_controls_frame.grid(
+                row=1, column=0, columnspan=9, sticky="ew", pady=(7, 0)
+            )
         else:
             self.display_controls_frame.grid_remove()
 
@@ -2021,32 +4717,63 @@ class RFMViewer(tk.Toplevel):
         self.palette_var.set(PALETTES[(index + 1) % len(PALETTES)])
 
     def _show_shortcuts(self) -> None:
+        primary = "Command" if sys.platform == "darwin" else "Ctrl"
         messagebox.showinfo(
             "Keyboard Shortcuts",
             "← / →   Previous / next unit\n"
             "↑ / ↓   Previous / next timeline bin\n"
-            "Shift+, / Shift+.   Time resolution −/+ 1 ms\n"
+            "Shift+, / Shift+.   Coarser / finer by one source bin\n"
             "1–3   Switch plot tab\n"
             "P   Cycle palette\n"
             "Esc   Clear probe region, then show full timeline\n"
             "[ / ]   Previous / next unit (legacy)\n"
-            "Command-O   Open JSON in a new window\n"
-            "Command-E   Export displayed matrix\n"
-            "Command-W   Close current window",
+            f"{primary}-O   Open JSON in a new window\n"
+            f"{primary}-E   Export displayed matrix\n"
+            f"{primary}-W   Close current window",
             parent=self,
         )
+
+    def _open_support_documentation(self) -> None:
+        path = support_documentation_path()
+        if path is None:
+            messagebox.showerror(
+                "Support Documentation",
+                "The local README.md could not be found in this installation.",
+                parent=self,
+            )
+            return
+        try:
+            opened = webbrowser.open(path.as_uri())
+        except (OSError, webbrowser.Error) as exc:
+            messagebox.showerror(
+                "Support Documentation",
+                f"Could not open {path.name}:\n\n{exc}",
+                parent=self,
+            )
+            return
+        if not opened:
+            messagebox.showerror(
+                "Support Documentation",
+                f"Could not open the local documentation:\n\n{path}",
+                parent=self,
+            )
 
     def _install_application_handlers(self) -> None:
         self.protocol("WM_DELETE_WINDOW", self._close_window)
         self._app_root._rfm_active_viewer = self
         self.bind_all("<Control-o>", self._dispatch_open_json)
+        settings_callback = getattr(self, "_dispatch_settings", lambda *_args: None)
+        self.bind_all("<Control-comma>", settings_callback)
 
         if sys.platform != "darwin":
             return
         try:
             self.bind_all("<Command-o>", self._dispatch_open_json)
+            self.bind_all("<Command-comma>", settings_callback)
             self.tk.createcommand("::tk::mac::OpenDocument", self._dispatch_macos_open_documents)
             self.tk.createcommand("::tk::mac::Quit", self._quit_application)
+            self.tk.createcommand("::tk::mac::ShowPreferences", settings_callback)
+            self.tk.createcommand("::tk::mac::ShowHelp", self._open_support_documentation)
         except tk.TclError:
             # The in-app Open button and window close protocol remain usable
             # if this Tk build does not expose the macOS application callbacks.
@@ -2342,6 +5069,15 @@ class RFMViewer(tk.Toplevel):
                 max(0.0, min(1.0, float(self._timeline_scroll_fraction))), 9
             ),
             selected_tab=selected_tab,
+            tuning_plot_mode=self.tuning_plot_mode_var.get(),
+            tuning_display_bins=normalize_hd_bin_count(
+                self.tuning_display_bins_var.get()
+            ),
+            tuning_smoothing=bool(self.tuning_smoothing_var.get()),
+            tuning_smooth_sigma=float(self.tuning_smooth_sigma_var.get()),
+            tuning_compare_scale=bool(self.tuning_compare_scale_var.get()),
+            show_tuning_curve=bool(self.show_tuning_curve_var.get()),
+            show_probe_layout=bool(self.show_probe_layout_var.get()),
         )
 
     def _time_group_index_for_ms(self, time_ms: float) -> int:
@@ -2489,6 +5225,46 @@ class RFMViewer(tk.Toplevel):
                 self._timeline_scroll_fraction = max(
                     0.0, min(1.0, float(state.timeline_scroll_fraction))
                 )
+            if "tuning_display" in fields:
+                self.tuning_plot_mode_var.set(
+                    state.tuning_plot_mode
+                    if state.tuning_plot_mode in TUNING_PLOT_MODES
+                    else "Auto"
+                )
+                self.tuning_display_bins_var.set(
+                    normalize_hd_bin_count(state.tuning_display_bins)
+                )
+                self.tuning_smoothing_var.set(bool(state.tuning_smoothing))
+                self.tuning_smooth_sigma_var.set(
+                    state.tuning_smooth_sigma
+                    if math.isfinite(state.tuning_smooth_sigma)
+                    and state.tuning_smooth_sigma > 0.0
+                    else DEFAULT_HD_SMOOTH_SIGMA
+                )
+                self.tuning_compare_scale_var.set(bool(state.tuning_compare_scale))
+                self._tuning_processed_cache = None
+                self._tuning_scale_cache = None
+            if "optional_views" in fields:
+                self.show_tuning_curve_var.set(bool(state.show_tuning_curve))
+                self.show_probe_layout_var.set(bool(state.show_probe_layout))
+                self._sync_optional_view_visibility(redraw=False)
+                if (
+                    state.show_probe_layout
+                    and self.probe_geometry is None
+                    and self.settings.auto_load_probe_layout
+                ):
+                    self.probe_geometry = discover_probe_geometry(self.data.path)
+                    self._probe_static_signature = None
+                if (
+                    state.show_tuning_curve
+                    and self.tuning_curve_data is None
+                    and self.settings.auto_load_tuning_curve
+                ):
+                    candidate = discover_tuning_curve_path(self.data.path)
+                    if candidate is not None:
+                        self._load_tuning_curve_path(
+                            candidate, show_error=False, redraw=False
+                        )
 
             self._normalize_control_values()
             if "active_time" in fields:
@@ -2545,6 +5321,8 @@ class RFMViewer(tk.Toplevel):
                     "spatial_format",
                     "delay_rgb",
                     "rf_range",
+                    "tuning_display",
+                    "optional_views",
                 }
             ):
                 self._timeline_preview_cache_key = None
@@ -2628,6 +5406,125 @@ class RFMViewer(tk.Toplevel):
     def _dispatch_open_json(self, _event: object | None = None) -> None:
         self._active_viewer()._open_json()
 
+    def _dispatch_settings(self, _event: object | None = None) -> None:
+        self._active_viewer()._show_settings()
+
+    def _show_settings(self) -> None:
+        active = self._active_viewer()
+        if not getattr(active, "_viewer_ready", False):
+            active._show_settings_when_ready = True
+            return
+        existing = getattr(self._app_root, "_rfm_settings_window", None)
+        if existing is not None:
+            try:
+                if existing.winfo_exists():
+                    existing.owner = active
+                    existing.transient(active)
+                    existing.deiconify()
+                    existing.lift()
+                    existing.focus_force()
+                    return
+            except tk.TclError:
+                pass
+        window = SettingsWindow(active)
+        self._app_root._rfm_settings_window = window
+        window.lift()
+
+    def _apply_viewer_settings(
+        self,
+        settings: ViewerSettings,
+        *,
+        persist: bool,
+        broadcast: bool,
+    ) -> bool:
+        previous = self.settings
+        if persist:
+            try:
+                save_viewer_settings(settings, self._app_root._rfm_settings_path)
+            except OSError as exc:
+                messagebox.showerror("Could not save settings", str(exc), parent=self)
+                return False
+            self._app_root._rfm_settings = settings
+        self.settings = settings
+
+        old_show_probe = bool(self.show_probe_layout_var.get())
+        old_show_tuning = bool(self.show_tuning_curve_var.get())
+        needs_optional_autoload = False
+        previous_pair_apply = self._pair_apply_in_progress
+        self._pair_apply_in_progress = True
+        try:
+            self.show_probe_layout_var.set(settings.show_probe_layout)
+            self.show_tuning_curve_var.set(settings.show_tuning_curve)
+            value_mode = settings.rf_value_mode
+            if not self.data.supports_value_mode(value_mode):
+                value_mode = VALUE_MODE_COUNT
+            self.value_mode_var.set(value_mode)
+            self.range_start_ms_var.set(format_ms(settings.rf_sum_start_ms))
+            self.range_end_ms_var.set(format_ms(settings.rf_sum_end_ms))
+            self.time_res_ms_var.set(format_ms(settings.rf_time_resolution_ms))
+            self.x_bins_var.set(min(self.data.n_x, settings.rf_x_bins or self.data.n_x))
+            self.y_bins_var.set(min(self.data.n_y, settings.rf_y_bins or self.data.n_y))
+            self.smooth_radius_var.set(settings.rf_smooth_radius)
+            self.flip_y_var.set(settings.rf_flip_y)
+            self.palette_var.set(settings.rf_palette)
+            self.polar_radius_var.set(settings.rf_polar_radius)
+            self.polar_layout_var.set(settings.rf_polar_layout)
+            self.rgb_mode_var.set(settings.rf_rgb_mode)
+            self.tuning_plot_mode_var.set(settings.tuning_plot_mode)
+            self.tuning_layout_var.set(settings.tuning_layout)
+            self.tuning_display_bins_var.set(settings.tuning_display_bins)
+            self.tuning_smoothing_var.set(settings.tuning_smoothing)
+            self.tuning_smooth_sigma_var.set(settings.tuning_smooth_sigma)
+            self.tuning_compare_scale_var.set(settings.tuning_compare_scale)
+            self._tuning_processed_cache = None
+            self._tuning_scale_cache = None
+
+            self._sync_optional_view_visibility(redraw=False)
+            if settings.show_probe_layout and self.probe_geometry is None:
+                should_load_probe = settings.auto_load_probe_layout and (
+                    not old_show_probe or not previous.auto_load_probe_layout
+                )
+                if should_load_probe:
+                    needs_optional_autoload = True
+            if settings.show_tuning_curve and self.tuning_curve_data is None:
+                should_load_tuning = settings.auto_load_tuning_curve and (
+                    not old_show_tuning or not previous.auto_load_tuning_curve
+                )
+                if should_load_tuning:
+                    needs_optional_autoload = True
+            self._normalize_control_values()
+            self._timeline_preview_cache_key = None
+            self._timeline_preview_images = {}
+            self._sync_unit_combo()
+            self._update_all()
+        finally:
+            self._pair_apply_in_progress = previous_pair_apply
+
+        if needs_optional_autoload:
+            self._schedule_optional_autoload()
+
+        if (
+            broadcast
+            and getattr(self._app_root, "_rfm_pairing_enabled", False)
+            and not getattr(self._app_root, "_rfm_pairing_broadcasting", False)
+        ):
+            self._app_root._rfm_pairing_broadcasting = True
+            try:
+                for window in self._ready_pairing_viewers():
+                    if window is not self:
+                        window._apply_viewer_settings(
+                            settings,
+                            persist=False,
+                            broadcast=False,
+                        )
+            finally:
+                self._app_root._rfm_pairing_broadcasting = False
+            state = self._capture_pairing_state()
+            self._app_root._rfm_pairing_state = state
+            for window in self._ready_pairing_viewers():
+                window._pair_last_local_state = window._capture_pairing_state()
+        return True
+
     def _dispatch_macos_open_documents(self, *paths: str) -> None:
         self._active_viewer()._on_macos_open_documents(*paths)
 
@@ -2642,6 +5539,19 @@ class RFMViewer(tk.Toplevel):
         self._app_root.destroy()
 
     def _open_json_window(self, path: Path) -> RFMViewer | None:
+        path = Path(path).expanduser()
+        try:
+            use_background_load = path.stat().st_size >= ASYNC_DOCUMENT_LOAD_BYTES
+        except OSError:
+            use_background_load = False
+        if use_background_load:
+            window = RFMViewer(startup_path=path, master=self._app_root)
+            window._cancel_startup_callback()
+            window._startup_after = window.after_idle(
+                lambda: window._load_startup_document(path)
+            )
+            window.lift()
+            return window
         try:
             data = RFMappingData(path)
         except Exception as exc:
@@ -2740,6 +5650,940 @@ class RFMViewer(tk.Toplevel):
             return
         self._open_json_window(path)
 
+    def _autoload_optional_resources(self, *, redraw: bool = True) -> None:
+        if self.show_probe_layout_var.get() and self.settings.auto_load_probe_layout:
+            self.probe_geometry = discover_probe_geometry(self.data.path)
+            self._probe_static_signature = None
+        if self.show_tuning_curve_var.get() and self.settings.auto_load_tuning_curve:
+            candidate = discover_tuning_curve_path(self.data.path)
+            if candidate is not None:
+                self._load_tuning_curve_path(
+                    candidate, show_error=False, redraw=False
+                )
+        if redraw:
+            self._draw_probe_canvas()
+            if self._active_tab_key() == "rf":
+                self._draw_tuning_curve()
+
+    def _autoload_optional_resources_deferred(self, generation: int) -> None:
+        self._optional_autoload_after = None
+        if (
+            generation != self._optional_autoload_generation
+            or not self.__dict__.get("_viewer_ready", False)
+            or self._quitting
+        ):
+            return
+        snapshot = {
+            "generation": generation,
+            "data_path": self.data.path,
+            "load_probe": bool(
+                self.show_probe_layout_var.get()
+                and self.settings.auto_load_probe_layout
+            ),
+            "load_tuning": bool(
+                self.show_tuning_curve_var.get()
+                and self.settings.auto_load_tuning_curve
+            ),
+            "cluster_id": self._selected_unit_id_value(),
+            "tuning_bins": normalize_hd_bin_count(
+                self.tuning_display_bins_var.get()
+            ),
+            "tuning_smoothing": bool(self.tuning_smoothing_var.get()),
+            "tuning_sigma": float(self.tuning_smooth_sigma_var.get()),
+        }
+        threading.Thread(
+            target=self._optional_autoload_worker,
+            args=(snapshot,),
+            name=f"rfmapping-optional-{generation}",
+            daemon=True,
+        ).start()
+        self._schedule_optional_result_poll()
+
+    def _optional_autoload_worker(self, snapshot: Mapping[str, object]) -> None:
+        """Discover and parse optional files without blocking Tk's UI thread."""
+
+        result: dict[str, object] = {
+            "generation": snapshot.get("generation"),
+            "data_path": snapshot.get("data_path"),
+            "probe_geometry": None,
+            "tuning_path": None,
+            "tuning_signature": None,
+            "tuning_data": None,
+            "tuning_error": None,
+            "worker_error": None,
+            "processed": None,
+            "processed_cluster": snapshot.get("cluster_id"),
+            "processed_bins": snapshot.get("tuning_bins"),
+            "processed_smoothing": snapshot.get("tuning_smoothing"),
+            "processed_sigma": snapshot.get("tuning_sigma"),
+        }
+        try:
+            data_path = Path(snapshot["data_path"])
+            result["data_path"] = data_path
+            if snapshot["load_probe"]:
+                result["probe_geometry"] = discover_probe_geometry(data_path)
+            if snapshot["load_tuning"]:
+                candidate = discover_tuning_curve_path(data_path)
+                result["tuning_path"] = candidate
+                if candidate is not None:
+                    stat = candidate.stat()
+                    tuning_data = TuningCurveData.load(candidate)
+                    result["tuning_signature"] = (stat.st_mtime_ns, stat.st_size)
+                    result["tuning_data"] = tuning_data
+                    raw_rates = tuning_data.rates_for(int(snapshot["cluster_id"]))
+                    if raw_rates is not None:
+                        result["processed"] = tuning_data.processed_for(
+                            int(snapshot["cluster_id"]),
+                            int(snapshot["tuning_bins"]),
+                            smoothing=bool(snapshot["tuning_smoothing"]),
+                            sigma=float(snapshot["tuning_sigma"]),
+                        )
+        except Exception as exc:
+            result["worker_error"] = f"{type(exc).__name__}: {exc}"
+            if snapshot.get("load_tuning"):
+                if isinstance(exc, (ImportError, OSError, ValueError)):
+                    result["tuning_error"] = str(exc)
+                else:
+                    result["tuning_error"] = "Could not auto-load tuning curves."
+        finally:
+            # Always end the matching poll generation, even if mounted-volume
+            # discovery or optional preprocessing fails unexpectedly.
+            self._optional_result_queue.put(result)
+
+    def _schedule_optional_result_poll(self) -> None:
+        if self._optional_poll_after is not None:
+            return
+        self._optional_poll_after = self.after(30, self._poll_optional_results)
+
+    def _poll_optional_results(self) -> None:
+        self._optional_poll_after = None
+        current_result: dict[str, object] | None = None
+        while True:
+            try:
+                candidate = self._optional_result_queue.get_nowait()
+            except queue.Empty:
+                break
+            if candidate.get("generation") == self._optional_autoload_generation:
+                current_result = candidate
+        if current_result is None:
+            if not self._quitting:
+                self._schedule_optional_result_poll()
+            return
+        if (
+            current_result.get("data_path") != self.data.path
+            or not self.__dict__.get("_viewer_ready", False)
+        ):
+            return
+
+        if (
+            self.show_probe_layout_var.get()
+            and self.settings.auto_load_probe_layout
+            and self.probe_geometry is None
+        ):
+            geometry = current_result.get("probe_geometry")
+            if geometry is None or isinstance(geometry, ProbeGeometry):
+                self.probe_geometry = geometry
+                self._probe_static_signature = None
+
+        if (
+            self.show_tuning_curve_var.get()
+            and self.settings.auto_load_tuning_curve
+            and self.tuning_curve_data is None
+        ):
+            tuning_path = current_result.get("tuning_path")
+            tuning_data = current_result.get("tuning_data")
+            if isinstance(tuning_path, Path):
+                self._tuning_curve_candidate = tuning_path
+            if isinstance(tuning_data, TuningCurveData):
+                self.tuning_curve_data = tuning_data
+                self._tuning_curve_error = None
+                self._tuning_scale_cache = None
+                self.tuning_collapsed_var.set(False)
+                self._sync_tuning_collapsed_state(schedule_redraw=False)
+                signature = current_result.get("tuning_signature")
+                if (
+                    isinstance(signature, tuple)
+                    and len(signature) == 2
+                    and isinstance(tuning_path, Path)
+                ):
+                    self._app_root._rfm_tuning_cache[str(tuning_path)] = (
+                        *signature,
+                        tuning_data,
+                    )
+                processed = current_result.get("processed")
+                processed_cluster = int(current_result["processed_cluster"])
+                if (
+                    isinstance(processed, tuple)
+                    and len(processed) == 2
+                    and processed_cluster == self._selected_unit_id_value()
+                    and int(current_result["processed_bins"])
+                    == normalize_hd_bin_count(self.tuning_display_bins_var.get())
+                    and bool(current_result["processed_smoothing"])
+                    == bool(self.tuning_smoothing_var.get())
+                    and math.isclose(
+                        float(current_result["processed_sigma"]),
+                        float(self.tuning_smooth_sigma_var.get()),
+                    )
+                ):
+                    key = (
+                        tuning_data.path,
+                        processed_cluster,
+                        int(current_result["processed_bins"]),
+                        bool(current_result["processed_smoothing"]),
+                        float(current_result["processed_sigma"]),
+                    )
+                    self._tuning_processed_cache = (key, processed[0], processed[1])
+            elif current_result.get("tuning_error"):
+                self._tuning_curve_error = str(current_result["tuning_error"])
+            elif (
+                self.settings.auto_load_tuning_curve
+                and current_result.get("tuning_path") is None
+            ):
+                # A missing optional file should not reserve two fifths of the
+                # RF tab. Keep a small, explicit HD restore control instead.
+                self.tuning_collapsed_var.set(True)
+                self._sync_tuning_collapsed_state(schedule_redraw=False)
+
+        self._draw_probe_canvas()
+        if self._active_tab_key() == "rf":
+            self._draw_tuning_curve()
+
+    def _schedule_optional_autoload(self) -> None:
+        if self._optional_autoload_after is not None:
+            try:
+                self.after_cancel(self._optional_autoload_after)
+            except tk.TclError:
+                pass
+        self._optional_autoload_generation += 1
+        generation = self._optional_autoload_generation
+        # Give Tk a chance to map and paint the RF window before starting the
+        # mounted-volume discovery worker.
+        self._optional_autoload_after = self.after(
+            100,
+            lambda: self._autoload_optional_resources_deferred(generation),
+        )
+
+    def _load_tuning_curve_path(
+        self,
+        path: Path,
+        *,
+        show_error: bool = True,
+        redraw: bool = True,
+    ) -> bool:
+        resolved = Path(path).expanduser().resolve()
+        previous_data = self.tuning_curve_data
+        previous_error = self._tuning_curve_error
+        previous_candidate = self._tuning_curve_candidate
+        try:
+            stat = resolved.stat()
+            signature = (stat.st_mtime_ns, stat.st_size)
+            cache_key = str(resolved)
+            cached = self._app_root._rfm_tuning_cache.get(cache_key)
+            if cached is not None and cached[:2] == signature:
+                data = cached[2]
+            else:
+                data = TuningCurveData.load(resolved)
+                self._app_root._rfm_tuning_cache[cache_key] = (*signature, data)
+        except (OSError, ValueError) as exc:
+            if show_error:
+                self.tuning_curve_data = previous_data
+                self._tuning_curve_error = previous_error
+                self._tuning_curve_candidate = previous_candidate
+                messagebox.showerror("Could not attach tuning curves", str(exc), parent=self)
+            else:
+                self.tuning_curve_data = None
+                self._tuning_curve_error = str(exc)
+                self._tuning_curve_candidate = resolved
+                self._tuning_processed_cache = None
+                self._tuning_scale_cache = None
+            if redraw:
+                self._draw_tuning_curve()
+            return False
+        self.tuning_curve_data = data
+        self._tuning_curve_error = None
+        self._tuning_curve_candidate = resolved
+        self._tuning_processed_cache = None
+        self._tuning_scale_cache = None
+        self.tuning_collapsed_var.set(False)
+        self._sync_tuning_collapsed_state(schedule_redraw=False)
+        if redraw:
+            self._draw_tuning_curve()
+        return True
+
+    def _attach_tuning_curve(self) -> None:
+        if not self.show_tuning_curve_var.get():
+            return
+        initial_dir = (
+            self._tuning_curve_candidate.parent
+            if self._tuning_curve_candidate is not None
+            else self.data.path.parent
+        )
+        path = filedialog.askopenfilename(
+            parent=self,
+            title="Attach tuning_curves.json",
+            initialdir=str(initial_dir),
+            filetypes=(("JSON files", "*.json"), ("All files", "*.*")),
+        )
+        if path:
+            self._load_tuning_curve_path(Path(path))
+
+    def _clear_tuning_curve(self) -> None:
+        self.tuning_curve_data = None
+        self._tuning_curve_error = None
+        self._tuning_curve_candidate = None
+        self._tuning_processed_cache = None
+        self._tuning_scale_cache = None
+        self._draw_tuning_curve()
+
+    def _on_tuning_curve_click(self, _event: object | None = None) -> None:
+        if self.show_tuning_curve_var.get() and self.tuning_curve_data is None:
+            self._attach_tuning_curve()
+
+    def _load_probe_geometry_path(
+        self,
+        positions: Path,
+        *,
+        show_error: bool = True,
+        redraw: bool = True,
+    ) -> bool:
+        previous_geometry = self.probe_geometry
+        try:
+            geometry = load_probe_geometry(
+                positions,
+                self._infer_attached_channels_path(positions),
+                probe_name=probe_name_for_json(self.data.path) or positions.parent.name,
+            )
+        except (OSError, ValueError) as exc:
+            self.probe_geometry = previous_geometry
+            if show_error:
+                messagebox.showerror("Could not attach probe geometry", str(exc), parent=self)
+            if redraw:
+                self._draw_probe_canvas()
+            return False
+        self.probe_geometry = geometry
+        self._probe_static_signature = None
+        self.spatial_region = None
+        self._sync_unit_combo()
+        if redraw:
+            self._draw_probe_canvas()
+        return True
+
+    def _install_optional_drop_targets(self) -> None:
+        self._optional_drop_available = False
+        self._dnd_copy_action = "copy"
+        self._dnd_refuse_action = "refuse_drop"
+        try:
+            from tkinterdnd2 import COPY, DND_FILES, REFUSE_DROP, TkinterDnD
+
+            TkinterDnD.require(self._app_root)
+            self._dnd_copy_action = COPY
+            self._dnd_refuse_action = REFUSE_DROP
+            for widget, resource in (
+                (self.probe_canvas, "probe"),
+                (self.tuning_curve_canvas, "tuning"),
+            ):
+                widget.drop_target_register(DND_FILES)
+                widget.dnd_bind(
+                    "<<Drop>>",
+                    lambda event, target=resource: self._on_optional_file_drop(
+                        target, event
+                    ),
+                )
+        except (ImportError, RuntimeError, tk.TclError):
+            return
+        self._optional_drop_available = True
+
+    def _on_optional_file_drop(self, resource: str, event: object) -> str:
+        copy_action = getattr(self, "_dnd_copy_action", "copy")
+        refuse_action = getattr(self, "_dnd_refuse_action", "refuse_drop")
+        if resource not in {"probe", "tuning"}:
+            return refuse_action
+        visible = (
+            self.show_probe_layout_var.get()
+            if resource == "probe"
+            else self.show_tuning_curve_var.get()
+        )
+        if not visible:
+            return refuse_action
+        raw_data = getattr(event, "data", "")
+        try:
+            paths = tuple(Path(value) for value in self.tk.splitlist(raw_data))
+        except tk.TclError:
+            paths = ()
+        if len(paths) != 1:
+            messagebox.showerror(
+                "Could not attach file",
+                "Drop exactly one file at a time.",
+                parent=self,
+            )
+            return refuse_action
+        if resource == "probe":
+            loaded = self._load_probe_geometry_path(paths[0])
+        else:
+            loaded = self._load_tuning_curve_path(paths[0])
+        return copy_action if loaded else refuse_action
+
+    def _sync_optional_menu_states(self) -> None:
+        menu = getattr(self, "_file_menu", None)
+        if menu is None:
+            return
+        try:
+            menu.entryconfigure(
+                "Attach Probe Geometry…",
+                state="normal" if self.show_probe_layout_var.get() else "disabled",
+            )
+            menu.entryconfigure(
+                "Attach Tuning Curves…",
+                state="normal" if self.show_tuning_curve_var.get() else "disabled",
+            )
+        except tk.TclError:
+            return
+
+    def _sync_optional_view_visibility(self, *, redraw: bool = True) -> None:
+        if not self.show_probe_layout_var.get():
+            self.spatial_region = None
+            self.probe_geometry = None
+            self._probe_static_signature = None
+            self.probe_section.grid_remove()
+            self.sidebar_frame.rowconfigure(self._probe_section_row, weight=0)
+        else:
+            self.probe_section.grid()
+            self._sync_probe_collapsed_state(schedule_redraw=False)
+
+        if not self.show_tuning_curve_var.get():
+            self.tuning_curve_data = None
+            self._tuning_curve_error = None
+            self._tuning_curve_candidate = None
+            self._tuning_processed_cache = None
+            self._tuning_scale_cache = None
+        self._sync_tuning_collapsed_state(schedule_redraw=False)
+        self._layout_rf_and_tuning()
+        self._sync_optional_menu_states()
+        if redraw:
+            self._draw_probe_canvas()
+            self._draw_tuning_curve()
+
+    def _effective_tuning_plot_mode(self) -> str:
+        mode = self.tuning_plot_mode_var.get()
+        if mode == "Auto":
+            return "Polar" if self.polar_layout_var.get() else "Line"
+        return mode if mode in {"Polar", "Line"} else "Line"
+
+    def _processed_tuning_values(
+        self,
+        cluster_id: int,
+        rates: Sequence[float],
+    ) -> tuple[tuple[float, ...], tuple[float, ...]]:
+        bins = normalize_hd_bin_count(self.tuning_display_bins_var.get())
+        smoothing = bool(self.tuning_smoothing_var.get())
+        sigma = float(self.tuning_smooth_sigma_var.get())
+        key = (
+            self.tuning_curve_data.path if self.tuning_curve_data is not None else None,
+            int(cluster_id),
+            bins,
+            smoothing,
+            sigma,
+        )
+        cached = self._tuning_processed_cache
+        if cached is not None and cached[0] == key:
+            return cached[1], cached[2]
+        processed = (
+            self.tuning_curve_data.processed_for(
+                cluster_id,
+                bins,
+                smoothing=smoothing,
+                sigma=sigma,
+            )
+            if self.tuning_curve_data is not None
+            else None
+        )
+        if processed is None:
+            centers, values = processed_tuning_curve(
+                rates,
+                bins,
+                smoothing=smoothing,
+                sigma=sigma,
+            )
+        else:
+            centers, values = processed
+        self._tuning_processed_cache = (key, centers, values)
+        return centers, values
+
+    def _shared_tuning_scale_high(self) -> float:
+        data = self.tuning_curve_data
+        if data is None:
+            return 0.0
+        bins = normalize_hd_bin_count(self.tuning_display_bins_var.get())
+        smoothing = bool(self.tuning_smoothing_var.get())
+        sigma = float(self.tuning_smooth_sigma_var.get())
+        cached = self._tuning_scale_cache
+        if (
+            cached is not None
+            and cached[0] is data
+            and cached[1:4] == (bins, smoothing, sigma)
+        ):
+            return float(cached[4])
+
+        high = 0.0
+        for cluster_id in data.curves:
+            processed = data.processed_for(
+                cluster_id,
+                bins,
+                smoothing=smoothing,
+                sigma=sigma,
+            )
+            if processed is not None:
+                high = max(high, tuning_rate_peak(processed[1]))
+        self._tuning_scale_cache = (data, bins, smoothing, sigma, high)
+        return high
+
+    def _set_tuning_hd_class_label(self, hd_class: int | None) -> None:
+        if not hasattr(self, "tuning_hd_class_label"):
+            return
+        if hd_class == 1:
+            self.tuning_hd_class_label.configure(text="1", style="HDClass1.TLabel")
+            self.tuning_hd_class_label.grid()
+        elif hd_class == 2:
+            self.tuning_hd_class_label.configure(text="2", style="HDClass2.TLabel")
+            self.tuning_hd_class_label.grid()
+        else:
+            self.tuning_hd_class_label.configure(text="", style="Panel.TLabel")
+            self.tuning_hd_class_label.grid_remove()
+
+    def _show_tuning_provenance(self) -> None:
+        data = self.tuning_curve_data
+        metadata = data.metadata if data is not None else None
+        if metadata is None:
+            return
+
+        rows = [
+            ("Schema", "2"),
+            ("Timestamp", metadata.timestamp_reference or "Not recorded"),
+            ("Timebase", metadata.timebase or "Not recorded"),
+            ("Direction", metadata.angle_convention_note or "Not recorded"),
+        ]
+        if metadata.feature_fs_hz is not None:
+            rows.append(("Tracking", f"{metadata.feature_fs_hz:g} Hz"))
+        classification = metadata.classification
+        if classification is not None:
+            rows.append(("Classification", classification.method or "Not recorded"))
+            if classification.rayleigh_alpha is not None:
+                rows.append(("Rayleigh α", f"{classification.rayleigh_alpha:g}"))
+            if classification.shuffle_alpha is not None:
+                rows.append(("Shuffle α", f"{classification.shuffle_alpha:g}"))
+            if classification.num_shuffle is not None:
+                rows.append(("Shuffles", str(classification.num_shuffle)))
+        ttl_qc = metadata.ttl_qc
+        if ttl_qc is not None:
+            if ttl_qc.ttl_pulse_count is not None:
+                rows.append(("Motive trigger TTLs", str(ttl_qc.ttl_pulse_count)))
+            if ttl_qc.measured_rate_hz is not None:
+                rows.append(("Measured rate", f"{ttl_qc.measured_rate_hz:g} Hz"))
+            if ttl_qc.median_period_s is not None:
+                rows.append(("Median period", f"{ttl_qc.median_period_s:g} s"))
+            if ttl_qc.camera_input_channel is not None:
+                rows.append(("Camera input", str(ttl_qc.camera_input_channel)))
+            if ttl_qc.camera_ttl_threshold is not None:
+                rows.append(("TTL threshold", f"{ttl_qc.camera_ttl_threshold:g}"))
+            if ttl_qc.camera_ttl_active_high is not None:
+                rows.append(
+                    (
+                        "TTL polarity",
+                        "Active high" if ttl_qc.camera_ttl_active_high else "Active low",
+                    )
+                )
+            if (
+                ttl_qc.matched_motive_frame_count is not None
+                and ttl_qc.motive_frame_count_raw is not None
+            ):
+                rows.append(
+                    (
+                        "Matched frames",
+                        f"{ttl_qc.matched_motive_frame_count} / {ttl_qc.motive_frame_count_raw}",
+                    )
+                )
+            if ttl_qc.frame_alignment_policy_applied is not None:
+                rows.append(
+                    ("Alignment", ttl_qc.frame_alignment_policy_applied)
+                )
+            if ttl_qc.dropped_motive_frame_ids:
+                rows.append(
+                    (
+                        "Dropped frame IDs",
+                        ", ".join(str(value) for value in ttl_qc.dropped_motive_frame_ids),
+                    )
+                )
+            if ttl_qc.frame_timestamp_mapping is not None:
+                rows.append(("Frame mapping", ttl_qc.frame_timestamp_mapping))
+        label_width = max(len(label) for label, _value in rows)
+        messagebox.showinfo(
+            "Tuning Provenance",
+            "\n".join(f"{label:<{label_width}}   {value}" for label, value in rows),
+            parent=self,
+        )
+
+    def _draw_tuning_placeholder(self, title: str, detail: str) -> None:
+        canvas = self.tuning_curve_canvas
+        width = max(canvas.winfo_width(), 280)
+        height = max(canvas.winfo_height(), 220)
+        offers_attach = title in {"No tuning curves", "Could not load tuning curves"}
+        canvas.create_text(
+            width / 2,
+            height / 2 - 28 if offers_attach else height / 2 - 12,
+            text=title,
+            fill="#1d1d1f",
+            font=("TkDefaultFont", 13, "bold"),
+        )
+        canvas.create_text(
+            width / 2,
+            height / 2 + 4 if offers_attach else height / 2 + 22,
+            text=detail,
+            justify="center",
+            fill="#6e6e73",
+            font=("TkDefaultFont", 10),
+        )
+        if offers_attach and hasattr(self, "tuning_attach_button"):
+            canvas.create_window(
+                width / 2,
+                height / 2 + 48,
+                window=self.tuning_attach_button,
+            )
+
+    def _draw_tuning_curve(self) -> None:
+        if (
+            not hasattr(self, "tuning_curve_canvas")
+            or not self.show_tuning_curve_var.get()
+            or self.tuning_collapsed_var.get()
+        ):
+            return
+        self._set_tuning_hd_class_label(None)
+        canvas = self.tuning_curve_canvas
+        canvas.delete("all")
+        cluster_id = self._selected_unit_id_value()
+        if hasattr(self, "tuning_cluster_label"):
+            self.tuning_cluster_label.configure(text=f"Cluster {cluster_id}")
+        data = self.tuning_curve_data
+        if data is None:
+            if hasattr(self, "tuning_provenance_button"):
+                self.tuning_provenance_button.grid_remove()
+            detail = "Attach head-direction data for the selected RF unit."
+            if self._optional_drop_available:
+                detail += "\nYou can also drop tuning_curves.json here."
+            if self._tuning_curve_error:
+                self._draw_tuning_placeholder("Could not load tuning curves", detail)
+                self.tuning_curve_status_label.configure(text=self._tuning_curve_error)
+            else:
+                self._draw_tuning_placeholder("No tuning curves", detail)
+                self.tuning_curve_status_label.configure(text="Tuning curves optional")
+            return
+
+        if hasattr(self, "tuning_provenance_button"):
+            if data.metadata is None:
+                self.tuning_provenance_button.grid_remove()
+            else:
+                self.tuning_provenance_button.grid()
+
+        if getattr(self._app_root, "_rfm_pairing_enabled", False):
+            ready, eligible = self._pairing_eligibility()
+            rf_unit_ids = set(self._pairing_unit_ids(ready)) if eligible else set(self.data.unit_pool)
+        else:
+            rf_unit_ids = set(self.data.unit_pool)
+        if cluster_id not in rf_unit_ids:
+            self._draw_tuning_placeholder(
+                f"Cluster {cluster_id} skipped",
+                "No open RF map contains this cluster.",
+            )
+            self.tuning_curve_status_label.configure(text=data.path.name)
+            return
+        raw_rates = data.rates_for(cluster_id)
+        if raw_rates is None:
+            self._draw_tuning_placeholder(
+                f"No tuning curve for cluster {cluster_id}",
+                "The selected RF unit is not present in this tuning file.",
+            )
+            self.tuning_curve_status_label.configure(text=data.path.name)
+            return
+        self._set_tuning_hd_class_label(data.hd_class_for(cluster_id))
+        try:
+            angles_deg, rates = self._processed_tuning_values(cluster_id, raw_rates)
+            scale_high = (
+                self._shared_tuning_scale_high()
+                if self.tuning_compare_scale_var.get()
+                else tuning_rate_peak(rates)
+            )
+        except (ImportError, ValueError) as exc:
+            self._draw_tuning_placeholder("Could not plot tuning curve", str(exc))
+            self.tuning_curve_status_label.configure(text=data.path.name)
+            return
+
+        if self._effective_tuning_plot_mode() == "Polar":
+            self._draw_tuning_polar(angles_deg, rates, cluster_id, scale_high)
+        else:
+            self._draw_tuning_line(angles_deg, rates, cluster_id, scale_high)
+        sigma_deg = (
+            float(self.tuning_smooth_sigma_var.get())
+            * 360.0
+            / DEFAULT_HD_DISPLAY_BINS
+        )
+        smooth_label = (
+            f" · smoothed σ={sigma_deg:g}°"
+            if self.tuning_smoothing_var.get()
+            else " · smoothing off"
+        )
+        scale_label = (
+            f" · shared within file: 0–{format_response_value(scale_high, VALUE_MODE_RATE)} Hz"
+            if self.tuning_compare_scale_var.get()
+            else " · per-cell 0–peak Hz scale"
+        )
+        missing_bins = sum(not math.isfinite(float(rate)) for rate in rates)
+        missing_label = f" · {missing_bins} bins without occupancy" if missing_bins else ""
+        legacy_label = ""
+        if data.occupancy_time_s is None:
+            legacy_label = " · legacy schema (timing/occupancy provenance unavailable)"
+            if len(rates) < HD_RAW_BIN_COUNT:
+                legacy_label += " · rebinned rates averaged"
+        self.tuning_curve_status_label.configure(
+            text=(
+                f"{data.path.name} · {len(rates)} bins{smooth_label}"
+                f"{scale_label}{missing_label}{legacy_label}"
+            )
+        )
+
+    def _draw_tuning_line(
+        self,
+        angles_deg: Sequence[float],
+        rates: Sequence[float],
+        cluster_id: int,
+        scale_high: float | None = None,
+    ) -> None:
+        canvas = self.tuning_curve_canvas
+        width = max(canvas.winfo_width(), 280)
+        height = max(canvas.winfo_height(), 220)
+        left, right, top, bottom = 54.0, width - 16.0, 18.0, height - 44.0
+        plot_width = max(1.0, right - left)
+        plot_height = max(1.0, bottom - top)
+        current_high = tuning_rate_peak(rates)
+        high = max(
+            current_high,
+            float(scale_high) if scale_high is not None else current_high,
+        )
+        denominator = high if high > 1e-12 else 1.0
+        centered_angles, centered_rates = center_tuning_curve_on_zero(
+            angles_deg,
+            rates,
+        )
+        canvas.create_line(left, top, left, bottom, right, bottom, fill="#98a2b3")
+        for angle, label in zip(
+            (-180, -90, 0, 90, 180),
+            ("180", "90", "0", "270", "180"),
+        ):
+            x = left + plot_width * (angle + 180.0) / 360.0
+            canvas.create_line(x, bottom, x, bottom + 4, fill="#98a2b3")
+            canvas.create_text(x, bottom + 16, text=label, fill="#667085", font=("TkDefaultFont", 10))
+        tick_fractions = (0.0, 0.5, 1.0) if high > 1e-12 else (0.0,)
+        for fraction in tick_fractions:
+            y = bottom - plot_height * fraction
+            if fraction:
+                canvas.create_line(left, y, right, y, fill="#eaecf0", dash=(3, 3))
+            canvas.create_text(
+                left - 7,
+                y,
+                anchor="e",
+                text=f"{high * fraction:.3g}",
+                fill="#667085",
+                font=("TkDefaultFont", 10),
+            )
+        segments: list[list[float]] = []
+        points: list[float] = []
+        for angle, rate in zip(centered_angles, centered_rates):
+            if not math.isfinite(float(rate)):
+                if points:
+                    segments.append(points)
+                    points = []
+                continue
+            normalized = max(0.0, float(rate)) / denominator
+            points.extend(
+                (
+                    left + plot_width * (float(angle) + 180.0) / 360.0,
+                    bottom - plot_height * normalized,
+                )
+            )
+        if points:
+            segments.append(points)
+        for points in segments:
+            if len(points) >= 4:
+                canvas.create_line(*points, fill="#1570ef", width=2, joinstyle="round")
+            elif len(points) == 2:
+                x, y = points
+                canvas.create_oval(
+                    x - 3,
+                    y - 3,
+                    x + 3,
+                    y + 3,
+                    fill="#1570ef",
+                    outline="",
+                )
+        canvas.create_text(
+            (left + right) / 2,
+            height - 10,
+            text="Head direction (deg)",
+            fill="#475467",
+            font=("TkDefaultFont", 10),
+        )
+        canvas.create_text(
+            12,
+            (top + bottom) / 2,
+            text="Hz",
+            angle=90,
+            fill="#475467",
+            font=("TkDefaultFont", 10),
+        )
+
+    def _draw_tuning_polar(
+        self,
+        angles_deg: Sequence[float],
+        rates: Sequence[float],
+        cluster_id: int,
+        scale_high: float | None = None,
+    ) -> None:
+        canvas = self.tuning_curve_canvas
+        width = max(canvas.winfo_width(), 280)
+        height = max(canvas.winfo_height(), 220)
+        center_x = width / 2.0
+        center_y = height / 2.0 + 8.0
+        radius = max(30.0, min(width, height) / 2.0 - 40.0)
+        current_high = tuning_rate_peak(rates)
+        radial_high = max(
+            current_high,
+            float(scale_high) if scale_high is not None else current_high,
+        )
+        denominator = radial_high if radial_high > 1e-12 else 1.0
+        canvas.create_oval(
+            center_x - radius,
+            center_y - radius,
+            center_x + radius,
+            center_y + radius,
+            outline="#c7c9ce",
+        )
+        for angle, label in ((0, "0°"), (90, "90°"), (180, "180°"), (270, "270°")):
+            vector_x, vector_y = head_direction_unit_vector(angle)
+            canvas.create_line(
+                center_x,
+                center_y,
+                center_x + vector_x * radius,
+                center_y + vector_y * radius,
+                fill="#eaecf0",
+            )
+            canvas.create_text(
+                center_x + vector_x * (radius + 15),
+                center_y + vector_y * (radius + 15),
+                text=label,
+                fill="#667085",
+                font=("TkDefaultFont", 10),
+            )
+
+        # A single labelled radial axis states the scale without implying
+        # that decorative rings are measured contours.
+        scale_x, scale_y = head_direction_unit_vector(315.0)
+        normal_x, normal_y = -scale_y, scale_x
+        canvas.create_line(
+            center_x,
+            center_y,
+            center_x + scale_x * radius,
+            center_y + scale_y * radius,
+            fill="#d2d3d7",
+        )
+        tick_fractions = (0.0, 0.5, 1.0) if radial_high > 1e-12 else (0.0,)
+        for fraction in tick_fractions:
+            tick_x = center_x + scale_x * radius * fraction
+            tick_y = center_y + scale_y * radius * fraction
+            canvas.create_line(
+                tick_x - normal_x * 3,
+                tick_y - normal_y * 3,
+                tick_x + normal_x * 3,
+                tick_y + normal_y * 3,
+                fill="#8e8e93",
+            )
+            canvas.create_text(
+                tick_x + normal_x * 8,
+                tick_y + normal_y * 8,
+                anchor="w",
+                text=f"{radial_high * fraction:.3g} Hz",
+                fill="#6e6e73",
+                font=("TkDefaultFont", 10),
+            )
+        points: list[tuple[float, float] | None] = []
+        for angle, rate in zip(angles_deg, rates):
+            if not math.isfinite(float(rate)):
+                points.append(None)
+                continue
+            vector_x, vector_y = head_direction_unit_vector(angle)
+            scaled = radius * max(0.0, float(rate)) / denominator
+            points.append((center_x + vector_x * scaled, center_y + vector_y * scaled))
+        finite_points = [point for point in points if point is not None]
+        if radial_high <= 1e-12 and finite_points:
+            canvas.create_oval(
+                center_x - 3,
+                center_y - 3,
+                center_x + 3,
+                center_y + 3,
+                fill="#1570ef",
+                outline="",
+            )
+        elif len(finite_points) >= 3 and len(finite_points) == len(points):
+            flattened = [coordinate for point in finite_points for coordinate in point]
+            canvas.create_line(
+                *flattened,
+                *finite_points[0],
+                fill="#1570ef",
+                width=2,
+                joinstyle="round",
+            )
+        elif len(finite_points) <= 2:
+            for x, y in finite_points:
+                canvas.create_oval(
+                    x - 3,
+                    y - 3,
+                    x + 3,
+                    y + 3,
+                    fill="#1570ef",
+                    outline="",
+                )
+        else:
+            segments: list[list[tuple[float, float]]] = []
+            segment: list[tuple[float, float]] = []
+            for point in points:
+                if point is None:
+                    if segment:
+                        segments.append(segment)
+                        segment = []
+                else:
+                    segment.append(point)
+            if segment:
+                segments.append(segment)
+            if points[0] is not None and points[-1] is not None and len(segments) > 1:
+                segments[0] = segments[-1] + segments[0]
+                segments.pop()
+            for segment in segments:
+                flattened = [coordinate for point in segment for coordinate in point]
+                if len(segment) >= 2:
+                    canvas.create_line(
+                        *flattened,
+                        fill="#1570ef",
+                        width=2,
+                        joinstyle="round",
+                    )
+                else:
+                    x, y = segment[0]
+                    canvas.create_oval(
+                        x - 3,
+                        y - 3,
+                        x + 3,
+                        y + 3,
+                        fill="#1570ef",
+                        outline="",
+                    )
+
     def _infer_attached_channels_path(self, positions_path: Path) -> Path | None:
         sibling = positions_path.with_name("channels.csv")
         if sibling.is_file():
@@ -2752,6 +6596,8 @@ class RFMViewer(tk.Toplevel):
         return None
 
     def _attach_probe_geometry(self) -> None:
+        if not self.show_probe_layout_var.get():
+            return
         path = filedialog.askopenfilename(
             parent=self,
             title="Attach probe positions.csv",
@@ -2760,19 +6606,7 @@ class RFMViewer(tk.Toplevel):
         )
         if not path:
             return
-        positions = Path(path)
-        try:
-            self.probe_geometry = load_probe_geometry(
-                positions,
-                self._infer_attached_channels_path(positions),
-                probe_name=probe_name_for_json(self.data.path) or positions.parent.name,
-            )
-        except (OSError, ValueError) as exc:
-            messagebox.showerror("Could not attach probe geometry", str(exc), parent=self)
-            return
-        self.spatial_region = None
-        self._sync_unit_combo()
-        self._draw_probe_canvas()
+        self._load_probe_geometry_path(Path(path))
 
     def _probe_to_canvas(self, x_um: float, y_um: float) -> tuple[float, float] | None:
         transform = self._probe_canvas_transform
@@ -2800,18 +6634,57 @@ class RFMViewer(tk.Toplevel):
     def _draw_probe_canvas(self) -> None:
         if not hasattr(self, "probe_canvas"):
             return
+        if self.probe_collapsed_var.get():
+            return
         canvas = self.probe_canvas
-        canvas.delete("all")
+        if not self.show_probe_layout_var.get():
+            return
         geometry = self.probe_geometry
+        compact = geometry is None
+        requested_height = 170 if compact else 330
+        self.probe_section.rowconfigure(1, weight=0 if compact else 1)
+        self.sidebar_frame.rowconfigure(
+            self._probe_section_row,
+            weight=0 if compact else 1,
+        )
+        if int(float(canvas.cget("height"))) != requested_height:
+            canvas.configure(height=requested_height)
+        width = max(canvas.winfo_width(), 220)
+        height = max(canvas.winfo_height(), 200)
         if geometry is None:
             self._probe_canvas_transform = None
-            canvas.create_text(
-                max(canvas.winfo_width(), 260) / 2,
-                max(canvas.winfo_height(), 200) / 2,
-                text="No probe geometry\nFile → Attach Probe Geometry…",
-                justify="center",
-                fill="#667085",
-            )
+            detail = "Geometry is optional"
+            if getattr(self, "_optional_drop_available", False):
+                detail += " · drop is supported"
+            signature = ("missing", width, height, detail)
+            if signature != self._probe_static_signature:
+                canvas.delete("all")
+                canvas.create_text(
+                    width / 2,
+                    height / 2 - 34,
+                    text="No probe geometry",
+                    justify="center",
+                    fill="#1d1d1f",
+                    font=("TkDefaultFont", 12, "bold"),
+                    tags=("probe-static",),
+                )
+                canvas.create_text(
+                    width / 2,
+                    height / 2 - 8,
+                    text=detail,
+                    justify="center",
+                    fill="#6e6e73",
+                    font=("TkDefaultFont", 10),
+                    tags=("probe-static",),
+                )
+                if hasattr(self, "probe_attach_button"):
+                    canvas.create_window(
+                        width / 2,
+                        height / 2 + 30,
+                        window=self.probe_attach_button,
+                        tags=("probe-static",),
+                    )
+                self._probe_static_signature = signature
             self.spatial_status_label.configure(text="Geometry optional")
             self.clear_spatial_button.state(["disabled"])
             return
@@ -2822,58 +6695,112 @@ class RFMViewer(tk.Toplevel):
         points.extend((unit.x_um, unit.y_um) for unit in units)
         if not points:
             self._probe_canvas_transform = None
-            canvas.create_text(130, 150, text="Geometry has no matching units", fill="#667085")
+            signature = ("no-matches", id(geometry), width, height)
+            if signature != self._probe_static_signature:
+                canvas.delete("all")
+                canvas.create_text(
+                    width / 2,
+                    height / 2,
+                    text="Geometry has no matching units",
+                    fill="#667085",
+                    tags=("probe-static",),
+                )
+                self._probe_static_signature = signature
             self.spatial_status_label.configure(text="No matching unit IDs")
             return
-        xs, ys = zip(*points)
-        x_min, x_max = min(xs), max(xs)
-        y_min, y_max = min(ys), max(ys)
-        if x_max <= x_min:
-            x_min, x_max = x_min - 1.0, x_max + 1.0
-        if y_max <= y_min:
-            y_min, y_max = y_min - 1.0, y_max + 1.0
-        width = max(canvas.winfo_width(), 260)
-        height = max(canvas.winfo_height(), 200)
-        margin = 14.0
-        self._probe_canvas_transform = (
-            x_min,
-            y_min,
-            (width - margin * 2.0) / (x_max - x_min),
-            (height - margin * 2.0) / (y_max - y_min),
-        )
-        shank_colors = ("#98a2b3", "#7f8ea3", "#667085", "#475467")
-        for channel in geometry.channels:
-            point = self._probe_to_canvas(channel.x_um, channel.y_um)
-            if point is None:
-                continue
-            x, y = point
-            color = shank_colors[channel.shank_id % len(shank_colors)]
-            canvas.create_rectangle(x - 2, y - 2, x + 2, y + 2, fill=color, outline="")
-
         region_ids = set(self._unit_navigation_ids()) if self.spatial_region is not None else set()
-        selected_id = self._selected_unit_id_value()
-        for unit in units:
-            point = self._probe_to_canvas(unit.x_um, unit.y_um)
-            if point is None:
-                continue
-            x, y = point
-            in_region = unit.unit_id in region_ids
-            fill = "#f79009" if in_region else "#2e90fa"
-            radius = 4 if in_region else 3
-            canvas.create_oval(x - radius, y - radius, x + radius, y + radius, fill=fill, outline="#ffffff")
-            if unit.unit_id == selected_id and (self.spatial_region is None or in_region):
-                canvas.create_oval(x - 7, y - 7, x + 7, y + 7, outline="#d92d20", width=2)
-
-        if self.spatial_region is not None:
-            top_left = self._probe_to_canvas(self.spatial_region.x_min, self.spatial_region.y_max)
-            bottom_right = self._probe_to_canvas(self.spatial_region.x_max, self.spatial_region.y_min)
-            if top_left is not None and bottom_right is not None:
+        signature = (
+            id(geometry),
+            id(self.data),
+            width,
+            height,
+            self.spatial_region,
+            frozenset(region_ids),
+        )
+        if signature != self._probe_static_signature:
+            canvas.delete("all")
+            xs, ys = zip(*points)
+            x_min, x_max = min(xs), max(xs)
+            y_min, y_max = min(ys), max(ys)
+            if x_max <= x_min:
+                x_min, x_max = x_min - 1.0, x_max + 1.0
+            if y_max <= y_min:
+                y_min, y_max = y_min - 1.0, y_max + 1.0
+            margin = 14.0
+            self._probe_canvas_transform = (
+                x_min,
+                y_min,
+                (width - margin * 2.0) / (x_max - x_min),
+                (height - margin * 2.0) / (y_max - y_min),
+            )
+            shank_colors = ("#98a2b3", "#7f8ea3", "#667085", "#475467")
+            for channel in geometry.channels:
+                point = self._probe_to_canvas(channel.x_um, channel.y_um)
+                if point is None:
+                    continue
+                x, y = point
+                color = shank_colors[channel.shank_id % len(shank_colors)]
                 canvas.create_rectangle(
-                    *top_left,
-                    *bottom_right,
-                    outline="#f04438",
+                    x - 2,
+                    y - 2,
+                    x + 2,
+                    y + 2,
+                    fill=color,
+                    outline="",
+                    tags=("probe-static",),
+                )
+            for unit in units:
+                point = self._probe_to_canvas(unit.x_um, unit.y_um)
+                if point is None:
+                    continue
+                x, y = point
+                in_region = unit.unit_id in region_ids
+                fill = "#f79009" if in_region else "#2e90fa"
+                radius = 4 if in_region else 3
+                canvas.create_oval(
+                    x - radius,
+                    y - radius,
+                    x + radius,
+                    y + radius,
+                    fill=fill,
+                    outline="#ffffff",
+                    tags=("probe-static",),
+                )
+            if self.spatial_region is not None:
+                top_left = self._probe_to_canvas(
+                    self.spatial_region.x_min, self.spatial_region.y_max
+                )
+                bottom_right = self._probe_to_canvas(
+                    self.spatial_region.x_max, self.spatial_region.y_min
+                )
+                if top_left is not None and bottom_right is not None:
+                    canvas.create_rectangle(
+                        *top_left,
+                        *bottom_right,
+                        outline="#f04438",
+                        width=2,
+                        dash=(5, 3),
+                        tags=("probe-static",),
+                    )
+            self._probe_static_signature = signature
+
+        canvas.delete("probe-selection")
+        selected_id = self._selected_unit_id_value()
+        selected = geometry.units_by_id.get(selected_id)
+        if selected is not None and (
+            self.spatial_region is None or selected_id in region_ids
+        ):
+            point = self._probe_to_canvas(selected.x_um, selected.y_um)
+            if point is not None:
+                x, y = point
+                canvas.create_oval(
+                    x - 7,
+                    y - 7,
+                    x + 7,
+                    y + 7,
+                    outline="#d92d20",
                     width=2,
-                    dash=(5, 3),
+                    tags=("probe-selection",),
                 )
         count = len(region_ids) if self.spatial_region is not None else len(units)
         if self.spatial_region is None:
@@ -2903,6 +6830,9 @@ class RFMViewer(tk.Toplevel):
         start = self._probe_drag_start
         end = self._canvas_to_probe(float(event.x), float(event.y))
         self._probe_drag_start = None
+        if self.probe_geometry is None and not self._probe_drag_moved:
+            self._attach_probe_geometry()
+            return
         if start is None or end is None or self.probe_geometry is None:
             return
         if self._probe_drag_moved:
@@ -3018,12 +6948,16 @@ class RFMViewer(tk.Toplevel):
         self._update_all()
         self._publish_pairing_state_if_changed()
 
-    def _step_time_resolution(self, delta_ms: float) -> None:
+    def _step_time_resolution(self, delta_groups: float) -> None:
         try:
             current = float(self.time_res_ms_var.get())
         except (tk.TclError, TypeError, ValueError):
             current = self._base_bin_ms()
-        target = max(self._base_bin_ms(), min(self._total_time_ms(), current + delta_ms))
+        source_bin_ms = self._base_bin_ms()
+        target = max(
+            source_bin_ms,
+            min(self._total_time_ms(), current + delta_groups * source_bin_ms),
+        )
         self.time_res_ms_var.set(format_ms(target))
         self._on_time_resolution_changed()
 
@@ -3121,9 +7055,21 @@ class RFMViewer(tk.Toplevel):
     def _sync_context_controls(self) -> None:
         if not hasattr(self, "rgb_mode_toggle"):
             return
-        if self._active_tab_key() == "delay":
+        for frame in (
+            self.range_controls_frame,
+            self.delay_controls_frame,
+            self.timeline_context_frame,
+        ):
+            frame.grid_remove()
+        tab = self._active_tab_key()
+        if tab == "delay":
+            self.delay_controls_frame.grid(row=0, column=7, sticky="w")
             self.rgb_mode_toggle.state(["!disabled"])
+        elif tab == "timeline":
+            self.timeline_context_frame.grid(row=0, column=7, sticky="w")
+            self.rgb_mode_toggle.state(["disabled"])
         else:
+            self.range_controls_frame.grid(row=0, column=7, sticky="w")
             self.rgb_mode_toggle.state(["disabled"])
 
     def _schedule_redraw(self, _event: object | None = None) -> None:
@@ -3133,7 +7079,29 @@ class RFMViewer(tk.Toplevel):
 
     def _run_scheduled_redraw(self) -> None:
         self._redraw_after = None
-        self._update_all()
+        self._draw_active_tab()
+
+    def _schedule_optional_redraw(self, view: str) -> None:
+        if view not in {"probe", "tuning"}:
+            return
+        self._optional_redraw_dirty.add(view)
+        if self._optional_redraw_after is not None:
+            try:
+                self.after_cancel(self._optional_redraw_after)
+            except tk.TclError:
+                pass
+        self._optional_redraw_after = self.after(
+            60, self._run_scheduled_optional_redraw
+        )
+
+    def _run_scheduled_optional_redraw(self) -> None:
+        self._optional_redraw_after = None
+        dirty = set(self._optional_redraw_dirty)
+        self._optional_redraw_dirty.clear()
+        if "probe" in dirty:
+            self._draw_probe_canvas()
+        if "tuning" in dirty and self._active_tab_key() == "rf":
+            self._draw_tuning_curve()
 
     def _timeline_scroll_set(self, first: str, last: str) -> None:
         if hasattr(self, "timeline_scrollbar"):
@@ -3239,9 +7207,10 @@ class RFMViewer(tk.Toplevel):
             return fallback
 
     def _default_plot_time_bounds_ms(self) -> tuple[float, float]:
+        settings = self.__dict__.get("settings", ViewerSettings())
         start, end = self._snap_time_range_to_bins(
-            DEFAULT_RF_SUM_START_MS,
-            DEFAULT_RF_SUM_END_MS,
+            settings.rf_sum_start_ms,
+            settings.rf_sum_end_ms,
         )
         return (
             self.data.time_bin_edges[start] * 1000.0,
@@ -3302,9 +7271,12 @@ class RFMViewer(tk.Toplevel):
         key = self._active_tab_key()
         if self._selected_local_unit_index() is None:
             self._draw_unavailable_unit(key)
+            if key == "rf":
+                self._draw_tuning_curve()
             return
         if key == "rf":
             self._draw_rf()
+            self._draw_tuning_curve()
         elif key == "delay":
             self._draw_rgb() if self.rgb_mode_var.get() else self._draw_delay()
         elif key == "timeline":
@@ -3391,28 +7363,11 @@ class RFMViewer(tk.Toplevel):
         )
 
     def _delay_matrix_for_time_groups(self, floor: float = 0.0) -> list[list[float | None]]:
-        unit_idx = self._selected_local_unit_index()
-        if unit_idx is None:
-            return [[None for _x in range(self.data.n_x)] for _y in range(self.data.n_y)]
-        unit = self.data.counts[unit_idx]
-        metrics = self.data.metrics(unit_idx)
-        groups = self._time_groups()
-        delay_matrix: list[list[float | None]] = []
-        for y_idx in range(self.data.n_y):
-            row: list[float | None] = []
-            for x_idx in range(self.data.n_x):
-                if metrics.total[y_idx][x_idx] <= floor:
-                    row.append(None)
-                    continue
-                hist = [float(v) for v in unit[y_idx][x_idx]]
-                grouped = [sum(hist[start : end + 1]) for start, end in groups]
-                if not grouped or max(grouped) <= 0:
-                    row.append(None)
-                    continue
-                peak_group = max(range(len(grouped)), key=lambda idx: grouped[idx])
-                row.append(self._time_group_center_ms(peak_group))
-            delay_matrix.append(row)
-        return delay_matrix
+        delay, _entropy, _x_groups, _y_groups = self._grouped_temporal_metric_matrices(
+            floor,
+            smooth=False,
+        )
+        return delay
 
     def _base_bin_ms(self) -> float:
         if len(self.data.time_bin_edges) < 2:
@@ -3459,10 +7414,11 @@ class RFMViewer(tk.Toplevel):
 
     def _time_groups(self) -> list[AxisGroup]:
         group_size = self._time_group_size()
-        return [
-            (start, min(start + group_size - 1, self.data.n_bins - 1))
-            for start in range(0, self.data.n_bins, group_size)
-        ]
+        target_duration_ms = group_size * self._base_bin_ms()
+        return physical_time_groups(
+            [edge * 1000.0 for edge in self.data.time_bin_edges],
+            target_duration_ms,
+        )
 
     def _time_group_count(self) -> int:
         return max(1, len(self._time_groups()))
@@ -3508,8 +7464,8 @@ class RFMViewer(tk.Toplevel):
         return self.data.time_bin_edges[start] * 1000.0, self.data.time_bin_edges[end + 1] * 1000.0
 
     def _time_group_label(self, display_bin: int) -> str:
-        start_ms, _end_ms = self._time_group_bounds_ms(display_bin)
-        return f"{format_ms(start_ms)} ms"
+        start_ms, end_ms = self._time_group_bounds_ms(display_bin)
+        return f"{format_ms(start_ms)}–{format_ms(end_ms)} ms"
 
     def _time_group_start_label(self, display_bin: int) -> str:
         start_ms, _end_ms = self._time_group_bounds_ms(display_bin)
@@ -3605,6 +7561,8 @@ class RFMViewer(tk.Toplevel):
         *,
         smooth: bool = True,
     ) -> tuple[list[list[float | None]], list[AxisGroup], list[AxisGroup]]:
+        if isinstance(matrix, PreparedSpatialMatrix):
+            return [row[:] for row in matrix], matrix.x_groups, matrix.y_groups
         x_groups = self._x_groups()
         y_groups = self._display_y_groups()
         prepared = reduce_matrix_xy(matrix, y_groups, x_groups)
@@ -3612,18 +7570,188 @@ class RFMViewer(tk.Toplevel):
             prepared = smooth_matrix(prepared, self._smooth_radius())
         return prepared, x_groups, y_groups
 
-    def _group_hist(self, y_start: int, y_end: int, x_start: int, x_end: int) -> list[float]:
-        hist = [0.0 for _ in range(self.data.n_bins)]
+    def _prepare_response_plot_matrix(
+        self,
+        source_start: int,
+        source_end: int,
+        *,
+        smooth: bool = True,
+    ) -> tuple[list[list[float | None]], list[AxisGroup], list[AxisGroup]]:
+        """Pool display-cell observations before deriving normalized values."""
+
+        x_groups = self._x_groups()
+        y_groups = self._display_y_groups()
         unit_idx = self._selected_local_unit_index()
         if unit_idx is None:
-            return hist
-        n = max(1, (y_end - y_start + 1) * (x_end - x_start + 1))
-        unit = self.data.counts[unit_idx]
-        for y_idx in range(y_start, y_end + 1):
-            for x_idx in range(x_start, x_end + 1):
-                for bin_idx, value in enumerate(unit[y_idx][x_idx]):
-                    hist[bin_idx] += float(value) / n
-        return hist
+            return [], x_groups, y_groups
+        observations = [
+            [
+                self.data.spatial_group_observations(
+                    unit_idx,
+                    y_group,
+                    x_group,
+                    source_start,
+                    source_end,
+                )
+                for x_group in x_groups
+            ]
+            for y_group in y_groups
+        ]
+        valid = [
+            [value.source_pixel_count > 0 for value in row]
+            for row in observations
+        ]
+        value_mode = self.value_mode_var.get()
+        if value_mode == VALUE_MODE_COUNT:
+            matrix: list[list[float | None]] = [
+                [
+                    None
+                    if value.source_pixel_count <= 0
+                    else value.count / value.source_pixel_count
+                    for value in row
+                ]
+                for row in observations
+            ]
+            if smooth:
+                matrix = smooth_matrix(matrix, self._smooth_radius())
+                matrix = [
+                    [value if valid[y_idx][x_idx] else None for x_idx, value in enumerate(row)]
+                    for y_idx, row in enumerate(matrix)
+                ]
+            return matrix, x_groups, y_groups
+
+        counts: list[list[float | None]] = [
+            [value.count if value.source_pixel_count > 0 else None for value in row]
+            for row in observations
+        ]
+        presentations: list[list[float | None]] = [
+            [
+                (value.presentations or 0.0)
+                if value.source_pixel_count > 0
+                else None
+                for value in row
+            ]
+            for row in observations
+        ]
+        if smooth:
+            counts = smooth_matrix(counts, self._smooth_radius())
+            presentations = smooth_matrix(presentations, self._smooth_radius())
+        duration = self.data.time_span_seconds(source_start, source_end)
+        matrix = [
+            [
+                None
+                if (
+                    not valid[y_idx][x_idx]
+                    or count is None
+                    or exposure is None
+                    or exposure <= 0
+                )
+                else count
+                / exposure
+                / (duration if value_mode == VALUE_MODE_RATE else 1.0)
+                for x_idx, (count, exposure) in enumerate(zip(count_row, exposure_row))
+            ]
+            for y_idx, (count_row, exposure_row) in enumerate(zip(counts, presentations))
+        ]
+        return matrix, x_groups, y_groups
+
+    def _grouped_temporal_metric_matrices(
+        self,
+        floor: float = 0.0,
+        *,
+        smooth: bool = True,
+    ) -> tuple[
+        list[list[float | None]],
+        list[list[float | None]],
+        list[AxisGroup],
+        list[AxisGroup],
+    ]:
+        x_groups = self._x_groups()
+        y_groups = self._display_y_groups()
+        unit_idx = self._selected_local_unit_index()
+        if unit_idx is None:
+            return [], [], x_groups, y_groups
+        safe_floor = max(0.0, float(floor))
+        histograms = [
+            [
+                [
+                    value
+                    / max(
+                        1,
+                        self.data.spatial_group_source_pixel_count(
+                            y_group,
+                            x_group,
+                        ),
+                    )
+                    for value in self.data.spatial_group_count_histogram(
+                        unit_idx,
+                        y_group,
+                        x_group,
+                    )
+                ]
+                for x_group in x_groups
+            ]
+            for y_group in y_groups
+        ]
+        if smooth and self._smooth_radius() > 0 and histograms and histograms[0]:
+            output = [
+                [
+                    [0.0 for _bin_idx in range(self.data.n_bins)]
+                    for _x_group in x_groups
+                ]
+                for _y_group in y_groups
+            ]
+            for bin_idx in range(self.data.n_bins):
+                temporal_slice = [
+                    [histogram[bin_idx] for histogram in row]
+                    for row in histograms
+                ]
+                smoothed_slice = smooth_matrix(
+                    temporal_slice,
+                    self._smooth_radius(),
+                )
+                for y_idx, row in enumerate(smoothed_slice):
+                    for x_idx, value in enumerate(row):
+                        output[y_idx][x_idx][bin_idx] = float(value or 0.0)
+            histograms = output
+        delay: list[list[float | None]] = []
+        entropy: list[list[float | None]] = []
+        time_groups = self._time_groups()
+        for y_idx, _y_group in enumerate(y_groups):
+            delay_row: list[float | None] = []
+            entropy_row: list[float | None] = []
+            for x_idx, _x_group in enumerate(x_groups):
+                metrics = self.data.temporal_metrics_from_histogram(
+                    histograms[y_idx][x_idx],
+                    time_groups,
+                )
+                delay_row.append(
+                    metrics.delay_ms if metrics.mean_total_count > safe_floor else None
+                )
+                entropy_row.append(metrics.entropy)
+            delay.append(delay_row)
+            entropy.append(entropy_row)
+        return delay, entropy, x_groups, y_groups
+
+    def _group_hist(self, y_start: int, y_end: int, x_start: int, x_end: int) -> list[float]:
+        unit_idx = self._selected_local_unit_index()
+        if unit_idx is None:
+            return [0.0 for _ in range(self.data.n_bins)]
+        n = max(
+            1,
+            self.data.spatial_group_source_pixel_count(
+                (y_start, y_end),
+                (x_start, x_end),
+            ),
+        )
+        return [
+            value / n
+            for value in self.data.spatial_group_count_histogram(
+                unit_idx,
+                (y_start, y_end),
+                (x_start, x_end),
+            )
+        ]
 
     def _group_response_value(
         self,
@@ -3637,21 +7765,14 @@ class RFMViewer(tk.Toplevel):
         unit_idx = self._selected_local_unit_index()
         if unit_idx is None:
             return None
-        value_mode = self.value_mode_var.get()
-        values = [
-            self.data.response_value(
-                unit_idx,
-                y_idx,
-                x_idx,
-                source_start,
-                source_end,
-                value_mode,
-            )
-            for y_idx in range(y_start, y_end + 1)
-            for x_idx in range(x_start, x_end + 1)
-        ]
-        finite = [float(value) for value in values if value is not None and math.isfinite(float(value))]
-        return sum(finite) / len(finite) if finite else None
+        return self.data.spatial_group_response_value(
+            unit_idx,
+            (y_start, y_end),
+            (x_start, x_end),
+            source_start,
+            source_end,
+            self.value_mode_var.get(),
+        )
 
     def _group_response_values(
         self,
@@ -3704,8 +7825,6 @@ class RFMViewer(tk.Toplevel):
         unit_idx = self.unit_idx.get()
         value_mode = self.value_mode_var.get()
         unit = value_mode_unit(value_mode)
-        hist = self._group_hist(y_start, y_end, x_idx, x_end)
-        count_hist = self._time_grouped_hist(hist)
         display_values = self._group_response_values(y_start, y_end, x_idx, x_end)
         bin_idx = self.bin_var.get() if display_bin is None else int(display_bin)
         bin_idx = max(0, min(len(display_values) - 1, bin_idx))
@@ -3716,32 +7835,31 @@ class RFMViewer(tk.Toplevel):
         total_value = self._group_response_value(
             y_start, y_end, x_idx, x_end, 0, self.data.n_bins - 1
         )
-        finite_values = [
-            (index, float(value))
-            for index, value in enumerate(display_values)
-            if value is not None and math.isfinite(float(value))
-        ]
-        if finite_values and max(value for _index, value in finite_values) > 0:
-            peak_bin, peak_value = max(finite_values, key=lambda item: item[1])
-            delay = self._time_group_center_ms(peak_bin)
-        else:
-            peak_bin = None
-            peak_value = None
-            delay = None
-
-        total_hist = sum(count_hist)
-        if total_hist > 0:
-            ent = 0.0
-            for count in count_hist:
-                if count > 0:
-                    p = count / total_hist
-                    ent -= p * math.log(p)
-            ent = ent / math.log(len(count_hist)) if len(count_hist) > 1 else 0.0
-        else:
-            ent = 0.0
+        temporal = self.data.spatial_group_temporal_metrics(
+            unit_idx,
+            (y_start, y_end),
+            (x_idx, x_end),
+            self._time_groups(),
+        )
+        peak_bin = temporal.peak_group_index
+        peak_value = display_values[peak_bin] if peak_bin is not None else None
+        delay = temporal.delay_ms
+        ent = temporal.entropy
         delay_text = f"{delay:.1f} ms" if delay is not None else "n/a"
         peak_text = f"{peak_bin + 1} ({self._time_group_label(peak_bin)})" if peak_bin is not None else "n/a"
-        group_note = "avg over source pixels\n" if (x_end != x_idx or y_end != y_start) else ""
+        group_note = (
+            (
+                "mean over exposed source pixels\n"
+                if value_mode == VALUE_MODE_COUNT
+                and self.data.presentation_counts is not None
+                else (
+                    ("mean" if value_mode == VALUE_MODE_COUNT else "pooled")
+                    + " over source pixels\n"
+                )
+            )
+            if (x_end != x_idx or y_end != y_start)
+            else ""
+        )
         return (
             f"cluster {self.data.cluster_id(unit_idx)}\n"
             f"{self._y_group_text(y_start, y_end)}, {self._x_group_text(x_idx, x_end)}\n"
@@ -3752,7 +7870,7 @@ class RFMViewer(tk.Toplevel):
             f"full window {format_response_value(total_value, value_mode)} {unit}\n"
             f"peak {format_response_value(peak_value, value_mode)} {unit}\n"
             f"peak bin {peak_text}\n"
-            f"delay {delay_text}, count entropy {ent:.3f}"
+            f"count-rate peak delay {delay_text}, count entropy {ent:.3f}"
         )
 
     def _update_cell_label(
@@ -3768,8 +7886,8 @@ class RFMViewer(tk.Toplevel):
             cell = self.hover_cell
             prefix = "Hover\n"
         if cell is None and self.selected_cell is None:
-            metrics = self.data.metrics(self.unit_idx.get())
-            self.selected_cell = (metrics.best_y, metrics.best_y, metrics.best_x, metrics.best_x)
+            best_y, best_x = self.data.best_cell(self.unit_idx.get())
+            self.selected_cell = (best_y, best_y, best_x, best_x)
         if cell is None:
             cell = self.selected_cell
         if cell is None:
@@ -3786,16 +7904,13 @@ class RFMViewer(tk.Toplevel):
         display_values = self._group_response_values(y_start, y_end, x_start, x_end)
         bin_idx = self.bin_var.get() if display_bin is None else int(display_bin)
         bin_idx = max(0, min(len(display_values) - 1, bin_idx))
-        finite_values = [
-            (index, float(value))
-            for index, value in enumerate(display_values)
-            if value is not None and math.isfinite(float(value))
-        ]
-        if finite_values and max(value for _index, value in finite_values) > 0:
-            peak_bin, _peak_value = max(finite_values, key=lambda item: item[1])
-            delay = self._time_group_center_ms(peak_bin)
-        else:
-            delay = None
+        temporal = self.data.spatial_group_temporal_metrics(
+            self.unit_idx.get(),
+            (y_start, y_end),
+            (x_start, x_end),
+            self._time_groups(),
+        )
+        delay = temporal.delay_ms
         total = self._group_response_value(
             y_start,
             y_end,
@@ -3825,7 +7940,9 @@ class RFMViewer(tk.Toplevel):
         )
 
     def _draw_rf(self) -> None:
-        matrix = self._current_matrix()
+        source_start, source_end = self._source_bins_for_display_range()
+        prepared = self._prepare_response_plot_matrix(source_start, source_end)
+        matrix = PreparedSpatialMatrix(*prepared)
         title = f"RF map - {self._current_matrix_label()}"
         if self.polar_layout_var.get():
             self._draw_polar_matrix(
@@ -3847,12 +7964,13 @@ class RFMViewer(tk.Toplevel):
             )
 
     def _draw_delay(self) -> None:
-        delay_matrix = self._delay_matrix_for_time_groups(0.0)
+        delay, _entropy, x_groups, y_groups = self._grouped_temporal_metric_matrices(0.0)
+        delay_matrix = PreparedSpatialMatrix(delay, x_groups, y_groups)
         if self.polar_layout_var.get():
             self._draw_polar_matrix(
                 "delay",
                 delay_matrix,
-                "Delay map - peak displayed bin center",
+                "Delay map - peak count-rate interval center",
                 "Delay",
                 value_suffix=" ms",
                 fixed_range=self._time_axis_range_ms(),
@@ -3861,7 +7979,7 @@ class RFMViewer(tk.Toplevel):
             self._draw_heatmap(
                 "delay",
                 delay_matrix,
-                "Delay map - peak displayed bin center",
+                "Delay map - peak count-rate interval center",
                 "Delay",
                 value_suffix=" ms",
                 fixed_range=self._time_axis_range_ms(),
@@ -3879,7 +7997,7 @@ class RFMViewer(tk.Toplevel):
         canvas = self.canvases[key]
         canvas.delete("all")
         w, h = max(canvas.winfo_width(), 200), max(canvas.winfo_height(), 160)
-        margin_l, margin_r, margin_t, margin_b = 78, 104, 56, 68
+        margin_l, margin_r, margin_t, margin_b = 78, 128, (22 if key == "rf" else 56), 72
         plot_w = max(10, w - margin_l - margin_r)
         plot_h = max(10, h - margin_t - margin_b)
         disp, x_groups, y_groups = self._prepare_plot_matrix(matrix)
@@ -3891,12 +8009,27 @@ class RFMViewer(tk.Toplevel):
         x0 = margin_l + (plot_w - grid_w) / 2
         y0 = margin_t + (plot_h - grid_h) / 2
         if fixed_range is None:
-            low, high = finite_min_max(disp)
+            low, high = palette_response_range(disp, palette)
         else:
             low, high = fixed_range
 
-        canvas.create_text(20, 22, anchor="w", text=title, font=("TkDefaultFont", 15, "bold"), fill="#111827")
-        canvas.create_text(20, 44, anchor="w", text=f"Unit {self.unit_idx.get():03d} / cluster {self.data.cluster_id(self.unit_idx.get())}", fill="#667085")
+        unit_text = (
+            f"Unit {self.unit_idx.get():03d} · "
+            f"cluster {self.data.cluster_id(self.unit_idx.get())}"
+        )
+        if key == "rf" and hasattr(self, "rf_map_subtitle_label"):
+            summary = title.removeprefix("RF map - ").removeprefix("RF map – ")
+            self.rf_map_subtitle_label.configure(text=f"{summary} · {unit_text}")
+        else:
+            canvas.create_text(
+                20,
+                22,
+                anchor="w",
+                text=title,
+                font=("TkDefaultFont", 13, "bold"),
+                fill="#1d1d1f",
+            )
+            canvas.create_text(20, 44, anchor="w", text=unit_text, fill="#6e6e73")
 
         for display_y, row in enumerate(disp):
             y = y0 + display_y * cell
@@ -3906,7 +8039,17 @@ class RFMViewer(tk.Toplevel):
                     fill = delay_color(value, low, high)
                 else:
                     fill = palette_color(value, low, high, palette)
-                canvas.create_rectangle(x, y, x + cell, y + cell, fill=fill, outline="#ffffff", width=0)
+                canvas.create_rectangle(
+                    x,
+                    y,
+                    x + cell,
+                    y + cell,
+                    fill=fill,
+                    outline="#ffffff",
+                    width=0,
+                )
+                if value is None or not math.isfinite(float(value)):
+                    self._draw_missing_hatch(canvas, x, y, x + cell, y + cell)
 
         self._draw_selection_outline(canvas, x0, y0, cell, x_groups, y_groups)
         self._draw_axes(canvas, x0, y0, cell, grid_w, grid_h, x_groups, y_groups)
@@ -3922,6 +8065,39 @@ class RFMViewer(tk.Toplevel):
             "y_groups": y_groups,
         }
 
+    @staticmethod
+    def _draw_missing_hatch(
+        canvas: tk.Canvas,
+        x0: float,
+        y0: float,
+        x1: float,
+        y1: float,
+    ) -> None:
+        """Overlay clipped diagonal hatching so missing is not read as zero."""
+
+        diagonal = x0 + y0
+        diagonal_end = x1 + y1
+        while diagonal <= diagonal_end + 1e-9:
+            candidates: list[tuple[float, float]] = []
+            for x, y in (
+                (x0, diagonal - x0),
+                (x1, diagonal - x1),
+                (diagonal - y0, y0),
+                (diagonal - y1, y1),
+            ):
+                if x0 - 1e-9 <= x <= x1 + 1e-9 and y0 - 1e-9 <= y <= y1 + 1e-9:
+                    point = (x, y)
+                    if point not in candidates:
+                        candidates.append(point)
+            if len(candidates) >= 2:
+                canvas.create_line(
+                    *candidates[0],
+                    *candidates[-1],
+                    fill="#a9abb1",
+                    width=1,
+                )
+            diagonal += 7.0
+
     def _draw_axes(self, canvas: tk.Canvas, x0: float, y0: float, cell: float, grid_w: float, grid_h: float, x_groups: list[AxisGroup], y_groups: list[AxisGroup]) -> None:
         axis_color = "#475467"
         canvas.create_rectangle(x0, y0, x0 + grid_w, y0 + grid_h, outline="#1f2937", width=1)
@@ -3931,19 +8107,19 @@ class RFMViewer(tk.Toplevel):
             x = x0 + (group_idx + 0.5) * cell
             canvas.create_line(x, y0 + grid_h, x, y0 + grid_h + 5, fill=axis_color)
             pos = (self.data.x_positions[start] + self.data.x_positions[end]) / 2.0
-            canvas.create_text(x, y0 + grid_h + 18, text=format_pos(pos), fill=axis_color, font=("TkDefaultFont", 9))
+            canvas.create_text(x, y0 + grid_h + 18, text=format_pos(pos), fill=axis_color, font=("TkDefaultFont", 10))
         if (len(x_groups) - 1) not in range(0, len(x_groups), tick_step):
             start, end = x_groups[-1]
             x = x0 + (len(x_groups) - 0.5) * cell
             pos = (self.data.x_positions[start] + self.data.x_positions[end]) / 2.0
-            canvas.create_text(x, y0 + grid_h + 18, text=format_pos(pos), fill=axis_color, font=("TkDefaultFont", 9))
+            canvas.create_text(x, y0 + grid_h + 18, text=format_pos(pos), fill=axis_color, font=("TkDefaultFont", 10))
 
         for display_y, (y_start, y_end) in enumerate(y_groups):
             y = y0 + (display_y + 0.5) * cell
             canvas.create_line(x0 - 5, y, x0, y, fill=axis_color)
             pos = (self.data.y_positions[y_start] + self.data.y_positions[y_end]) / 2.0
             label = f"{y_start + 1} / {format_pos(pos)}" if y_start == y_end else f"{y_start + 1}-{y_end + 1} / {format_pos(pos)}"
-            canvas.create_text(x0 - 10, y, anchor="e", text=label, fill=axis_color, font=("TkDefaultFont", 9))
+            canvas.create_text(x0 - 10, y, anchor="e", text=label, fill=axis_color, font=("TkDefaultFont", 10))
 
         canvas.create_text(x0 + grid_w / 2, y0 + grid_h + 44, text="x position", fill=axis_color)
         canvas.create_text(x0 - 58, y0 + grid_h / 2, text="yIdx / y", angle=90, fill=axis_color)
@@ -3961,6 +8137,15 @@ class RFMViewer(tk.Toplevel):
     ) -> None:
         steps = 90
         width = 16
+        unit_title = suffix.strip() or "Value"
+        canvas.create_text(
+            x,
+            y - 17,
+            anchor="w",
+            text=unit_title,
+            fill="#6e6e73",
+            font=("TkDefaultFont", 10),
+        )
         for i in range(steps):
             t0 = i / steps
             value = high - (high - low) * t0
@@ -3969,8 +8154,47 @@ class RFMViewer(tk.Toplevel):
             y2 = y + height * (i + 1) / steps
             canvas.create_rectangle(x, y1, x + width, y2, outline="", fill=fill)
         canvas.create_rectangle(x, y, x + width, y + height, outline="#475467")
-        canvas.create_text(x + width + 8, y, anchor="w", text=f"{high:.1f}{suffix}", fill="#475467", font=("TkDefaultFont", 9))
-        canvas.create_text(x + width + 8, y + height, anchor="w", text=f"{low:.1f}{suffix}", fill="#475467", font=("TkDefaultFont", 9))
+        canvas.create_text(
+            x + width + 8,
+            y,
+            anchor="w",
+            text=f"{high:.3g}",
+            fill="#475467",
+            font=("TkDefaultFont", 10),
+        )
+        canvas.create_text(
+            x + width + 8,
+            y + height,
+            anchor="w",
+            text=f"{low:.3g}",
+            fill="#475467",
+            font=("TkDefaultFont", 10),
+        )
+
+        legend_y = y + height + 17
+        canvas.create_rectangle(
+            x,
+            legend_y,
+            x + 13,
+            legend_y + 13,
+            fill="#e6e8eb",
+            outline="#c4c6ca",
+        )
+        self._draw_missing_hatch(canvas, x, legend_y, x + 13, legend_y + 13)
+        if palette == "Delay":
+            missing_label = "No detected peak"
+        elif self.data.presentation_counts is not None:
+            missing_label = "No presentations"
+        else:
+            missing_label = "No data"
+        canvas.create_text(
+            x + 20,
+            legend_y + 6.5,
+            anchor="w",
+            text=missing_label,
+            fill="#6e6e73",
+            font=("TkDefaultFont", 10),
+        )
 
     def _draw_selection_outline(self, canvas: tk.Canvas, x0: float, y0: float, cell: float, x_groups: list[AxisGroup] | None = None, y_groups: list[AxisGroup] | None = None) -> None:
         if self.selected_cell is None:
@@ -4008,23 +8232,45 @@ class RFMViewer(tk.Toplevel):
         canvas.delete("all")
         w, h = max(canvas.winfo_width(), 200), max(canvas.winfo_height(), 160)
         disp, x_groups, y_groups = self._prepare_plot_matrix(matrix)
-        low, high = fixed_range if fixed_range is not None else finite_min_max(disp)
+        low, high = (
+            fixed_range
+            if fixed_range is not None
+            else palette_response_range(disp, palette)
+        )
         total_deg = self.data.infer_total_deg()
         n_rows = len(y_groups)
         radius_units = INNER_BLANK_ROWS + n_rows + POLAR_PAD_ROWS
-        scale = min((w - 180) / (2 * radius_units), (h - 130) / (2 * radius_units))
+        reserved_height = 84 if key == "rf" else 130
+        scale = min((w - 180) / (2 * radius_units), (h - reserved_height) / (2 * radius_units))
         scale = max(4.0, scale)
         cx = w / 2
-        cy = h / 2 + 22
+        cy = h / 2 + (0 if key == "rf" else 22)
 
-        canvas.create_text(20, 22, anchor="w", text=title, font=("TkDefaultFont", 15, "bold"), fill="#111827")
-        canvas.create_text(
-            20,
-            44,
-            anchor="w",
-            text=f"Polar layout; total angle {total_deg:.0f}°; radius: {self.polar_radius_var.get()}",
-            fill="#667085",
+        polar_summary = (
+            f"{title.removeprefix('RF map - ')} · polar {total_deg:.0f}° · "
+            f"radius {self.polar_radius_var.get()}"
         )
+        if key == "rf" and hasattr(self, "rf_map_subtitle_label"):
+            self.rf_map_subtitle_label.configure(text=polar_summary)
+        else:
+            canvas.create_text(
+                20,
+                22,
+                anchor="w",
+                text=title,
+                font=("TkDefaultFont", 13, "bold"),
+                fill="#1d1d1f",
+            )
+            canvas.create_text(
+                20,
+                44,
+                anchor="w",
+                text=(
+                    f"Polar layout · total angle {total_deg:.0f}° · "
+                    f"radius {self.polar_radius_var.get()}"
+                ),
+                fill="#6e6e73",
+            )
         canvas.create_oval(
             cx - INNER_BLANK_ROWS * scale,
             cy - INNER_BLANK_ROWS * scale,
@@ -4050,7 +8296,13 @@ class RFMViewer(tk.Toplevel):
                 value = disp[display_row][col]
                 fill = delay_color(value, low, high) if palette == "Delay" else palette_color(value, low, high, palette)
                 points = self._polar_cell_points(cx, cy, scale, r_inner, r_outer, theta_edges[col], theta_edges[col + 1])
-                canvas.create_polygon(points, fill=fill, outline="")
+                missing = value is None or not math.isfinite(float(value))
+                canvas.create_polygon(
+                    points,
+                    fill=fill,
+                    outline="#c4c6ca" if missing else "",
+                    stipple="gray25" if missing else "",
+                )
 
         self._draw_polar_selection_outline(
             canvas,
@@ -4154,29 +8406,26 @@ class RFMViewer(tk.Toplevel):
         return flat
 
     def _draw_rgb(self) -> None:
-        metrics = self.data.metrics(self.unit_idx.get())
         canvas = self.canvases["delay"]
         canvas.delete("all")
         w, h = max(canvas.winfo_width(), 200), max(canvas.winfo_height(), 160)
         margin_l, margin_r, margin_t, margin_b = 78, 188, 56, 68
         plot_w = max(10, w - margin_l - margin_r)
         plot_h = max(10, h - margin_t - margin_b)
-        response_matrix = self.data.response_matrix(
-            self.unit_idx.get(),
+        total_disp, x_groups, y_groups = self._prepare_response_plot_matrix(
             0,
             self.data.n_bins - 1,
-            self.value_mode_var.get(),
         )
-        total_disp, x_groups, y_groups = self._prepare_plot_matrix(response_matrix)
-        delay_disp, _x_groups_delay, _y_groups_delay = self._prepare_plot_matrix(self._delay_matrix_for_time_groups(0.0))
-        entropy_disp, _x_groups_entropy, _y_groups_entropy = self._prepare_plot_matrix(metrics.entropy)
+        delay_disp, entropy_disp, _x_groups_temporal, _y_groups_temporal = (
+            self._grouped_temporal_metric_matrices(0.0)
+        )
         n_rows = len(y_groups)
         cell = max(4.0, min(plot_w / len(x_groups), plot_h / n_rows))
         grid_w = cell * len(x_groups)
         grid_h = cell * n_rows
         x0 = margin_l + (plot_w - grid_w) / 2
         y0 = margin_t + (plot_h - grid_h) / 2
-        _response_low, response_high = finite_min_max(total_disp)
+        _response_low, response_high = nonnegative_response_range(total_disp)
         max_total = max(response_high, 1.0)
         min_delay, max_delay = self._time_axis_range_ms()
         delay_span = max(max_delay - min_delay, 1.0)
@@ -4194,25 +8443,29 @@ class RFMViewer(tk.Toplevel):
             )
             return
 
-        canvas.create_text(20, 22, anchor="w", text="RGB composite", font=("TkDefaultFont", 15, "bold"), fill="#111827")
+        canvas.create_text(20, 22, anchor="w", text="RGB composite", font=("TkDefaultFont", 13, "bold"), fill="#1d1d1f")
         canvas.create_text(
             20,
             44,
             anchor="w",
-            text=f"R {self.value_mode_var.get()}; G delay; B temporal entropy",
+            text=f"R {self.value_mode_var.get()}; G count-rate-peak delay; B temporal entropy",
             fill="#667085",
         )
 
         for display_y in range(n_rows):
             y = y0 + display_y * cell
             for group_idx, (x_start, x_end) in enumerate(x_groups):
-                total_value = total_disp[display_y][group_idx] or 0.0
+                raw_total = total_disp[display_y][group_idx]
+                missing = raw_total is None or not math.isfinite(float(raw_total))
+                total_value = 0.0 if missing else float(raw_total)
                 total_norm = clamp(total_value / max_total)
                 delay = delay_disp[display_y][group_idx]
                 delay_norm = 0.0 if delay is None else clamp((delay - min_delay) / delay_span)
                 entropy_norm = clamp(entropy_disp[display_y][group_idx] or 0.0)
-                if total_value <= 0:
-                    fill = "#edf0f3"
+                if missing:
+                    fill = "#e6e8eb"
+                elif total_value <= 0:
+                    fill = "#000000"
                 else:
                     fill = hex_color(
                         (
@@ -4223,6 +8476,8 @@ class RFMViewer(tk.Toplevel):
                     )
                 x = x0 + group_idx * cell
                 canvas.create_rectangle(x, y, x + cell, y + cell, fill=fill, outline="#ffffff", width=0)
+                if missing:
+                    self._draw_missing_hatch(canvas, x, y, x + cell, y + cell)
         self._draw_selection_outline(canvas, x0, y0, cell, x_groups, y_groups)
         self._draw_axes(canvas, x0, y0, cell, grid_w, grid_h, x_groups, y_groups)
         legend_x = min(x0 + grid_w + 34, w - 154)
@@ -4233,6 +8488,33 @@ class RFMViewer(tk.Toplevel):
             y = legend_y + i * 26
             canvas.create_rectangle(legend_x, y, legend_x + 16, y + 16, fill=color, outline="")
             canvas.create_text(legend_x + 24, y + 8, anchor="w", text=label, fill="#475467")
+        missing_y = legend_y + 82
+        canvas.create_rectangle(
+            legend_x,
+            missing_y,
+            legend_x + 16,
+            missing_y + 16,
+            fill="#e6e8eb",
+            outline="#c4c6ca",
+        )
+        self._draw_missing_hatch(
+            canvas,
+            legend_x,
+            missing_y,
+            legend_x + 16,
+            missing_y + 16,
+        )
+        canvas.create_text(
+            legend_x + 24,
+            missing_y + 8,
+            anchor="w",
+            text=(
+                "No presentations"
+                if self.data.presentation_counts is not None
+                else "No data"
+            ),
+            fill="#6e6e73",
+        )
         self._canvas_layouts["delay"] = {
             "geometry": "rectangle",
             "x0": x0,
@@ -4270,7 +8552,7 @@ class RFMViewer(tk.Toplevel):
             44,
             anchor="w",
             text=(
-                f"Polar layout; R {self.value_mode_var.get()}; G delay; "
+                f"Polar layout; R {self.value_mode_var.get()}; G count-rate-peak delay; "
                 "B temporal entropy"
             ),
             fill="#667085",
@@ -4294,10 +8576,14 @@ class RFMViewer(tk.Toplevel):
 
         for ring_idx, display_row in enumerate(ring_rows):
             for column in range(len(x_groups)):
-                total_value = total_disp[display_row][column] or 0.0
+                raw_total = total_disp[display_row][column]
+                missing = raw_total is None or not math.isfinite(float(raw_total))
+                total_value = 0.0 if missing else float(raw_total)
                 delay = delay_disp[display_row][column]
-                if total_value <= 0:
-                    fill = "#edf0f3"
+                if missing:
+                    fill = "#e6e8eb"
+                elif total_value <= 0:
+                    fill = "#000000"
                 else:
                     fill = hex_color(
                         (
@@ -4315,7 +8601,12 @@ class RFMViewer(tk.Toplevel):
                     theta_edges[column],
                     theta_edges[column + 1],
                 )
-                canvas.create_polygon(points, fill=fill, outline="")
+                canvas.create_polygon(
+                    points,
+                    fill=fill,
+                    outline="#c4c6ca" if missing else "",
+                    stipple="gray25" if missing else "",
+                )
 
         self._draw_polar_selection_outline(
             canvas,
@@ -4341,6 +8632,33 @@ class RFMViewer(tk.Toplevel):
             y = legend_y + index * 26
             canvas.create_rectangle(legend_x, y, legend_x + 16, y + 16, fill=color, outline="")
             canvas.create_text(legend_x + 24, y + 8, anchor="w", text=label, fill="#475467")
+        missing_y = legend_y + 82
+        canvas.create_rectangle(
+            legend_x,
+            missing_y,
+            legend_x + 16,
+            missing_y + 16,
+            fill="#e6e8eb",
+            outline="#c4c6ca",
+        )
+        self._draw_missing_hatch(
+            canvas,
+            legend_x,
+            missing_y,
+            legend_x + 16,
+            missing_y + 16,
+        )
+        canvas.create_text(
+            legend_x + 24,
+            missing_y + 8,
+            anchor="w",
+            text=(
+                "No presentations"
+                if self.data.presentation_counts is not None
+                else "No data"
+            ),
+            fill="#6e6e73",
+        )
         self._canvas_layouts["delay"] = {
             "geometry": "polar",
             "cx": cx,
@@ -4422,14 +8740,13 @@ class RFMViewer(tk.Toplevel):
         high = 0.0
         for bin_idx in visible_bins:
             source_start, source_end = time_groups[bin_idx]
-            matrix = self.data.response_matrix(
-                unit_idx,
+            prepared, _prepared_x_groups, _prepared_y_groups = (
+                self._prepare_response_plot_matrix(
                 source_start,
                 source_end,
-                self.value_mode_var.get(),
+                    smooth=True,
+                )
             )
-            prepared = reduce_matrix_xy(matrix, y_groups, x_groups)
-            prepared = smooth_matrix(prepared, smooth_radius)
             prepared_by_bin[bin_idx] = prepared
             high = max(
                 high,
@@ -4564,6 +8881,12 @@ class RFMViewer(tk.Toplevel):
         visible_bins = self._visible_timeline_bins(display_bins)
         time_totals = self._all_positions_timeline_values(unit_idx, time_groups)
         axis_start_ms, axis_end_ms = self._time_axis_range_ms()
+        time_group_centers_ms = [
+            self._time_group_center_ms(bin_idx) for bin_idx in range(display_bins)
+        ]
+        time_group_end_bounds_ms = [
+            self._time_group_bounds_ms(bin_idx)[1] for bin_idx in range(display_bins)
+        ]
         timing_warning = " Negative bins may include previous-stimulus responses." if axis_start_ms < 0.0 else ""
         canvas.create_text(20, 22, anchor="w", text=f"Timeline and {display_bins} bin maps", font=("TkDefaultFont", 15, "bold"), fill="#111827")
         canvas.create_text(
@@ -4572,7 +8895,8 @@ class RFMViewer(tk.Toplevel):
             anchor="w",
             text=(
                 f"Timeline selection {self._display_range_label()}; "
-                f"time res {format_ms(self._time_group_size() * self._base_bin_ms())} ms; "
+                f"target width {format_ms(self._time_group_size() * self._base_bin_ms())} ms; "
+                "maps show actual time intervals; "
                 f"{self.value_mode_var.get()}."
                 f"{timing_warning}"
             ),
@@ -4582,7 +8906,25 @@ class RFMViewer(tk.Toplevel):
         chart_x, chart_y = 64, 78
         chart_w = max(320, w - 140)
         chart_h = 62
-        max_total = max(max(time_totals), 1.0)
+        selected_values: list[float] | None = None
+        if self.selected_cell is not None:
+            y_start, y_end, x_start, x_end = self.selected_cell
+            selected_values_optional = self._group_response_values(
+                y_start,
+                y_end,
+                x_start,
+                x_end,
+            )
+            selected_values = [
+                float(value) if value is not None else 0.0
+                for value in selected_values_optional
+            ]
+        blue_high = timeline_response_high(time_totals)
+        red_high = (
+            timeline_response_high(selected_values)
+            if selected_values is not None
+            else None
+        )
         zero_x: float | None = None
         if axis_start_ms <= 0.0 <= axis_end_ms and axis_end_ms > axis_start_ms:
             zero_x = chart_x + chart_w * (0.0 - axis_start_ms) / (axis_end_ms - axis_start_ms)
@@ -4591,7 +8933,7 @@ class RFMViewer(tk.Toplevel):
         canvas.create_rectangle(chart_x, chart_y, chart_x + chart_w, chart_y + chart_h, outline="#cbd5e1")
         if zero_x is not None:
             canvas.create_line(zero_x, chart_y, zero_x, chart_y + chart_h, fill="#7c3aed", width=1, dash=(4, 3))
-            canvas.create_text(zero_x + 4, chart_y + 5, anchor="nw", text="VS 0 ms", fill="#6d28d9", font=("TkDefaultFont", 8, "bold"))
+            canvas.create_text(zero_x + 4, chart_y + 5, anchor="nw", text="VS 0 ms", fill="#6d28d9", font=("TkDefaultFont", 10, "bold"))
 
         legend_y = chart_y - 11
         canvas.create_line(chart_x, legend_y, chart_x + 16, legend_y, fill="#2563eb", width=2)
@@ -4606,35 +8948,58 @@ class RFMViewer(tk.Toplevel):
             anchor="w",
             text=all_positions_label,
             fill="#2563eb",
-            font=("TkDefaultFont", 8),
+            font=("TkDefaultFont", 10),
         )
         if self.selected_cell is not None:
             canvas.create_line(chart_x + 196, legend_y, chart_x + 212, legend_y, fill="#dc2626", width=2)
-            canvas.create_text(chart_x + 217, legend_y, anchor="w", text="Selected cell", fill="#dc2626", font=("TkDefaultFont", 8))
-        points: list[float] = []
-        for bin_idx, value in enumerate(time_totals):
-            x = chart_x + chart_w * (bin_idx + 0.5) / display_bins
-            y = chart_y + chart_h - chart_h * value / max_total
-            points.extend((x, y))
+            canvas.create_text(chart_x + 217, legend_y, anchor="w", text="Selected cell", fill="#dc2626", font=("TkDefaultFont", 10))
+        points = timeline_chart_points(
+            time_totals,
+            time_group_centers_ms,
+            (axis_start_ms, axis_end_ms),
+            blue_high,
+            (chart_x, chart_y, chart_w, chart_h),
+        )
         if len(points) >= 4:
-            canvas.create_line(*points, fill="#2563eb", width=2, smooth=True)
-        selected_max = 0.0
-        if self.selected_cell is not None:
-            y_start, y_end, x_start, x_end = self.selected_cell
-            selected_values_optional = self._group_response_values(y_start, y_end, x_start, x_end)
-            selected_values = [float(value) if value is not None else 0.0 for value in selected_values_optional]
-            selected_max = max(max(selected_values), 1.0)
-            selected_points: list[float] = []
-            for bin_idx, value in enumerate(selected_values):
-                x = chart_x + chart_w * (bin_idx + 0.5) / display_bins
-                y = chart_y + chart_h - chart_h * value / selected_max
-                selected_points.extend((x, y))
+            canvas.create_line(*points, fill="#2563eb", width=2, smooth=False)
+        elif len(points) == 2:
+            canvas.create_oval(
+                points[0] - 2,
+                points[1] - 2,
+                points[0] + 2,
+                points[1] + 2,
+                fill="#2563eb",
+                outline="",
+            )
+        if selected_values is not None:
+            assert red_high is not None
+            selected_points = timeline_chart_points(
+                selected_values,
+                time_group_centers_ms,
+                (axis_start_ms, axis_end_ms),
+                red_high,
+                (chart_x, chart_y, chart_w, chart_h),
+            )
             if len(selected_points) >= 4:
-                canvas.create_line(*selected_points, fill="#dc2626", width=1.8, smooth=True)
+                canvas.create_line(
+                    *selected_points,
+                    fill="#dc2626",
+                    width=1.8,
+                    smooth=False,
+                )
+            elif len(selected_points) == 2:
+                canvas.create_oval(
+                    selected_points[0] - 2,
+                    selected_points[1] - 2,
+                    selected_points[0] + 2,
+                    selected_points[1] + 2,
+                    fill="#dc2626",
+                    outline="",
+                )
         red_axis_x = chart_x - 20
         blue_axis_x = chart_x + chart_w + 20
-        axis_font = ("TkDefaultFont", 8)
-        if self.selected_cell is not None:
+        axis_font = ("TkDefaultFont", 10)
+        if red_high is not None:
             canvas.create_line(red_axis_x, chart_y, red_axis_x, chart_y + chart_h, fill="#dc2626", width=1)
             canvas.create_line(red_axis_x - 4, chart_y, red_axis_x, chart_y, fill="#dc2626")
             canvas.create_line(red_axis_x - 4, chart_y + chart_h, red_axis_x, chart_y + chart_h, fill="#dc2626")
@@ -4642,11 +9007,18 @@ class RFMViewer(tk.Toplevel):
                 red_axis_x - 7,
                 chart_y,
                 anchor="e",
-                text=format_response_value(selected_max, self.value_mode_var.get()),
+                text=format_response_value(red_high, self.value_mode_var.get()),
                 fill="#dc2626",
                 font=axis_font,
             )
-            canvas.create_text(red_axis_x - 7, chart_y + chart_h, anchor="e", text="0", fill="#dc2626", font=axis_font)
+            canvas.create_text(
+                red_axis_x - 7,
+                chart_y + chart_h,
+                anchor="e",
+                text="0",
+                fill="#dc2626",
+                font=axis_font,
+            )
         canvas.create_line(blue_axis_x, chart_y, blue_axis_x, chart_y + chart_h, fill="#2563eb", width=1)
         canvas.create_line(blue_axis_x, chart_y, blue_axis_x + 4, chart_y, fill="#2563eb")
         canvas.create_line(blue_axis_x, chart_y + chart_h, blue_axis_x + 4, chart_y + chart_h, fill="#2563eb")
@@ -4654,7 +9026,7 @@ class RFMViewer(tk.Toplevel):
             blue_axis_x + 7,
             chart_y,
             anchor="w",
-            text=format_response_value(max_total, self.value_mode_var.get()),
+            text=format_response_value(blue_high, self.value_mode_var.get()),
             fill="#2563eb",
             font=axis_font,
         )
@@ -4671,8 +9043,12 @@ class RFMViewer(tk.Toplevel):
         if tick_boundaries[-1] != display_bins:
             tick_boundaries.append(display_bins)
         for boundary in tick_boundaries:
-            x = chart_x + chart_w * boundary / display_bins
             time_ms = axis_start_ms if boundary == 0 else self._time_group_bounds_ms(boundary - 1)[1]
+            x = chart_x + chart_w * timeline_position_fraction(
+                time_ms,
+                axis_start_ms,
+                axis_end_ms,
+            )
             anchor = "w" if boundary == 0 else ("e" if boundary == display_bins else "center")
             canvas.create_line(x, chart_y + chart_h, x, chart_y + chart_h + 4, fill="#64748b")
             canvas.create_text(
@@ -4681,7 +9057,7 @@ class RFMViewer(tk.Toplevel):
                 anchor=anchor,
                 text=format_ms(time_ms),
                 fill="#475467",
-                font=("TkDefaultFont", 8),
+                font=("TkDefaultFont", 10),
             )
         canvas.create_text(
             chart_x + chart_w / 2,
@@ -4689,7 +9065,7 @@ class RFMViewer(tk.Toplevel):
             anchor="center",
             text="Time from VS onset (ms)",
             fill="#475467",
-            font=("TkDefaultFont", 9),
+            font=("TkDefaultFont", 10),
         )
 
         mini_top = chart_y + chart_h + 54
@@ -4775,6 +9151,9 @@ class RFMViewer(tk.Toplevel):
             "cols": cols,
             "display_bins": display_bins,
             "visible_bins": visible_bins,
+            "axis_start_ms": axis_start_ms,
+            "axis_end_ms": axis_end_ms,
+            "time_group_end_bounds_ms": time_group_end_bounds_ms,
         }
         self._timeline_cells = []
         self._timeline_cells_by_bin = {}
@@ -4837,12 +9216,12 @@ class RFMViewer(tk.Toplevel):
             else:
                 canvas.create_rectangle(x0, y0, x0 + grid_w, y0 + grid_h, outline=outline, width=width_line)
             label_color = "#15803d" if has_time_selection and in_selected_range else "#475467"
-            label_font = ("TkDefaultFont", 8, "bold") if has_time_selection and in_selected_range else ("TkDefaultFont", 8)
+            label_font = ("TkDefaultFont", 10, "bold") if has_time_selection and in_selected_range else ("TkDefaultFont", 10)
             canvas.create_text(
                 x0,
                 y0 + grid_h + label_gap,
                 anchor="nw",
-                text=f"{format_ms(self.data.time_bin_edges[source_start] * 1000.0)} ms",
+                text=self._time_group_label(bin_idx),
                 fill=label_color,
                 font=label_font,
             )
@@ -4855,7 +9234,14 @@ class RFMViewer(tk.Toplevel):
             + 12
         )
         last_col_count = min(cols, len(visible_bins))
-        content_right = max(w, blue_axis_x + 54, mini_left + last_col_count * slot_w + max(0, last_col_count - 1) * gap_x + 44)
+        content_right = max(
+            w,
+            blue_axis_x + 54,
+            mini_left
+            + last_col_count * slot_w
+            + max(0, last_col_count - 1) * gap_x
+            + 44,
+        )
         canvas.configure(scrollregion=(0, 0, content_right, max(h, content_bottom)))
         self._restore_timeline_scroll()
 
@@ -4943,6 +9329,24 @@ class RFMViewer(tk.Toplevel):
             and float(chart_y) <= event_y <= float(chart_y) + float(chart_h)
         ):
             display_bins = int(layout.get("display_bins", self._time_group_count()))
+            axis_start_ms = layout.get("axis_start_ms")
+            axis_end_ms = layout.get("axis_end_ms")
+            end_bounds_ms = layout.get("time_group_end_bounds_ms")
+            if (
+                axis_start_ms is not None
+                and axis_end_ms is not None
+                and isinstance(end_bounds_ms, (list, tuple))
+            ):
+                fraction = max(
+                    0.0,
+                    min(1.0, (event_x - float(chart_x)) / float(chart_w)),
+                )
+                time_ms = float(axis_start_ms) + fraction * (
+                    float(axis_end_ms) - float(axis_start_ms)
+                )
+                physical_bin = timeline_bin_index(time_ms, end_bounds_ms)
+                if physical_bin is not None:
+                    return max(0, min(display_bins - 1, physical_bin))
             bin_idx = int((event_x - float(chart_x)) / (float(chart_w) / display_bins))
             return max(0, min(display_bins - 1, bin_idx))
         cell_layout = self._timeline_layout_at_point(event_x, event_y, include_label=True)
@@ -5334,7 +9738,7 @@ class RFMViewer(tk.Toplevel):
         if y < view_top + 8:
             y = view_top + 8
         canvas.create_rectangle(x, y, x + width, y + height, fill="#111827", outline="#111827", tags="hover")
-        canvas.create_text(x + pad, y + pad, anchor="nw", text=text, fill="#f8fafc", font=("TkDefaultFont", 9), tags="hover")
+        canvas.create_text(x + pad, y + pad, anchor="nw", text=text, fill="#f8fafc", font=("TkDefaultFont", 10), tags="hover")
 
     def _load_json_path(self, path: Path) -> None:
         try:
@@ -5342,21 +9746,40 @@ class RFMViewer(tk.Toplevel):
         except Exception as exc:
             messagebox.showerror("Could not load JSON", str(exc))
             return
+        self.settings = self._app_root._rfm_settings
         self.title(f"{self.data.path.name} — RF Map Viewer")
         self.unit_idx.set(0)
         self._selected_unit_id = self.data.unit_pool[0]
         self._last_supported_unit_id = self.data.unit_pool[0]
         self.bin_var.set(0)
         self.range_start_var.set(0)
-        self.time_res_ms_var.set(format_ms(self._base_bin_ms()))
+        self.time_res_ms_var.set(
+            format_ms(max(self._base_bin_ms(), self.settings.rf_time_resolution_ms))
+        )
         self._last_time_group_count = self.data.n_bins
         self._last_time_groups = [(index, index) for index in range(self.data.n_bins)]
         self.range_end_var.set(self._time_group_count() - 1)
         plot_start_ms, plot_end_ms = self._default_plot_time_bounds_ms()
         self.range_start_ms_var.set(format_ms(plot_start_ms))
         self.range_end_ms_var.set(format_ms(plot_end_ms))
-        if not self.data.supports_value_mode(self.value_mode_var.get()):
-            self.value_mode_var.set(VALUE_MODE_COUNT)
+        value_mode = self.settings.rf_value_mode
+        self.value_mode_var.set(
+            value_mode if self.data.supports_value_mode(value_mode) else VALUE_MODE_COUNT
+        )
+        self.flip_y_var.set(self.settings.rf_flip_y)
+        self.palette_var.set(self.settings.rf_palette)
+        self.polar_radius_var.set(self.settings.rf_polar_radius)
+        self.polar_layout_var.set(self.settings.rf_polar_layout)
+        self.rgb_mode_var.set(self.settings.rf_rgb_mode)
+        self.smooth_radius_var.set(self.settings.rf_smooth_radius)
+        self.show_probe_layout_var.set(self.settings.show_probe_layout)
+        self.show_tuning_curve_var.set(self.settings.show_tuning_curve)
+        self.tuning_plot_mode_var.set(self.settings.tuning_plot_mode)
+        self.tuning_layout_var.set(self.settings.tuning_layout)
+        self.tuning_display_bins_var.set(self.settings.tuning_display_bins)
+        self.tuning_smoothing_var.set(self.settings.tuning_smoothing)
+        self.tuning_smooth_sigma_var.set(self.settings.tuning_smooth_sigma)
+        self.tuning_compare_scale_var.set(self.settings.tuning_compare_scale)
         self.selected_cell = None
         self.hover_cell = None
         self._hover_signature = None
@@ -5369,20 +9792,29 @@ class RFMViewer(tk.Toplevel):
         self._timeline_range_anchor = None
         self._timeline_scroll_fraction = 0.0
         self._pair_last_local_state = None
-        self.probe_geometry = discover_probe_geometry(self.data.path)
+        self.probe_geometry = None
+        self.tuning_curve_data = None
+        self._tuning_curve_error = None
+        self._tuning_curve_candidate = None
+        self._tuning_processed_cache = None
+        self._tuning_scale_cache = None
         self.spatial_region = None
         self._probe_drag_start = None
         self._probe_canvas_transform = None
+        self._probe_static_signature = None
         self._sync_time_control_ranges()
         self.time_res_spin.configure(from_=self._base_bin_ms(), to=self._total_time_ms(), increment=self._base_bin_ms())
-        self.x_bins_var.set(self.data.n_x)
-        self.y_bins_var.set(self.data.n_y)
+        self.x_bins_var.set(min(self.data.n_x, self.settings.rf_x_bins or self.data.n_x))
+        self.y_bins_var.set(min(self.data.n_y, self.settings.rf_y_bins or self.data.n_y))
         self.x_bins_spin.configure(to=self.data.n_x)
         self.y_bins_spin.configure(to=self.data.n_y)
+        self._sync_optional_view_visibility(redraw=False)
+        self._select_tab_key(self.settings.default_viewer_tab)
         self._sync_json_menu()
         self._sync_unit_combo()
         self._update_all()
         self._pair_ready_viewer_set_changed(adopt_viewer=self)
+        self._schedule_optional_autoload()
 
     def _export_current_matrix(self) -> None:
         if self._selected_local_unit_index() is None:
@@ -5392,8 +9824,12 @@ class RFMViewer(tk.Toplevel):
                 parent=self,
             )
             return
-        raw_matrix = self._current_matrix()
-        matrix, x_groups, y_groups = self._prepare_plot_matrix(raw_matrix, smooth=True)
+        source_start, source_end = self._source_bins_for_display_range()
+        matrix, x_groups, y_groups = self._prepare_response_plot_matrix(
+            source_start,
+            source_end,
+            smooth=True,
+        )
         export_space = "displayed"
 
         range_start, range_end = self._plot_range_group_indices()
@@ -5551,7 +9987,13 @@ def run_self_test(path: Path) -> None:
     assert one_bin[y_idx][x_idx] == hist[0]
     assert range_sum[y_idx][x_idx] == sum(hist[: test_range_end + 1])
     count_response = data.response_matrix(unit_idx, 0, test_range_end, VALUE_MODE_COUNT)
-    assert count_response[y_idx][x_idx] == range_sum[y_idx][x_idx]
+    if (
+        data.presentation_counts is not None
+        and data.presentation_counts[y_idx][x_idx] <= 0
+    ):
+        assert count_response[y_idx][x_idx] is None
+    else:
+        assert count_response[y_idx][x_idx] == range_sum[y_idx][x_idx]
     if data.presentation_counts is not None:
         presentations = data.presentation_counts[y_idx][x_idx]
         if presentations > 0:
@@ -5566,11 +10008,40 @@ def run_self_test(path: Path) -> None:
     assert 0.0 <= metrics.entropy[y_idx][x_idx] <= 1.0
     inferred_total_deg = data.infer_total_deg()
     assert math.isfinite(inferred_total_deg) and inferred_total_deg > 0
+    hd_angles, hd_rates = processed_tuning_curve(
+        tuple(float(index % 17) for index in range(HD_RAW_BIN_COUNT)),
+        DEFAULT_HD_DISPLAY_BINS,
+        smoothing=True,
+        sigma=DEFAULT_HD_SMOOTH_SIGMA,
+    )
+    assert len(hd_angles) == DEFAULT_HD_DISPLAY_BINS
+    assert len(hd_rates) == DEFAULT_HD_DISPLAY_BINS
+    assert all(math.isfinite(value) and value >= 0.0 for value in hd_rates)
     print(
         "self-test passed:",
         f"{data.n_units} units, {data.n_y} y, {data.n_x} x, {data.n_bins} bins",
         f"rate metadata: {'yes' if data.presentation_counts is not None else 'no'}",
     )
+
+
+def run_tkdnd_self_test() -> None:
+    """Verify that the optional-file drop runtime is usable in a frozen app."""
+
+    if not TK_AVAILABLE:
+        raise RuntimeError("tkinter is not available")
+    try:
+        from tkinterdnd2 import TkinterDnD
+    except (ImportError, ModuleNotFoundError) as exc:
+        raise RuntimeError("tkinterdnd2 is not available") from exc
+
+    root = TkinterDnD.Tk()
+    try:
+        root.withdraw()
+        version = TkinterDnD.require(root)
+        root.update_idletasks()
+    finally:
+        root.destroy()
+    print(f"TkDND self-test passed: {version}")
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -5582,11 +10053,23 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help=f"Path to unitsSpikeCounts JSON file. Default: latest JSON in {DEFAULT_JSON_DIR}/",
     )
     parser.add_argument("--self-test", action="store_true", help="Run data/model tests and exit.")
+    parser.add_argument(
+        "--self-test-dnd",
+        action="store_true",
+        help="Load the bundled TkDND runtime and exit.",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
+    if args.self_test_dnd:
+        try:
+            run_tkdnd_self_test()
+        except Exception as exc:
+            print(f"TkDND self-test failed: {exc}", file=sys.stderr)
+            return 1
+        return 0
     if args.json_path is not None:
         path = Path(args.json_path).expanduser()
     else:

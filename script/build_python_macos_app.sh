@@ -4,8 +4,8 @@ set -euo pipefail
 APP_NAME="RF Map Viewer"
 ARTIFACT_STEM="RF_Map_Viewer"
 BUNDLE_ID="org.local.rfmapping.viewer"
-APP_VERSION="${RF_MAP_VIEWER_VERSION:-1.6.1}"
-APP_BUILD="${RF_MAP_VIEWER_BUILD:-10601}"
+APP_VERSION="${RF_MAP_VIEWER_VERSION:-1.8.2}"
+APP_BUILD="${RF_MAP_VIEWER_BUILD:-10802}"
 PYINSTALLER_VERSION="${RF_MAPPING_PYINSTALLER_VERSION:-6.21.0}"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -16,9 +16,12 @@ DIST_DIR="$ROOT_DIR/dist/python"
 APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
 APP_BINARY="$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 APP_RESOURCES="$APP_BUNDLE/Contents/Resources"
-ARCHIVE_PATH="$DIST_DIR/$ARTIFACT_STEM-python-macos-universal2.zip"
+ARCHIVE_PATH="$DIST_DIR/$ARTIFACT_STEM-python-macos-arm64.zip"
 INFO_PLIST="$APP_BUNDLE/Contents/Info.plist"
 DATA_SOURCE="$ROOT_DIR/data"
+RUNTIME_REQUIREMENTS="$ROOT_DIR/requirements-python-runtime.txt"
+SUPPORT_DOCUMENTATION="$ROOT_DIR/README.md"
+PYINSTALLER_HOOKS="$ROOT_DIR/packaging/pyinstaller-hooks"
 ICON_MASTER="${RF_MAPPING_ICON_SOURCE:-$ROOT_DIR/assets/rf-mapping-viewer-icon-1024.png}"
 ICONSET_DIR="$WORK_DIR/RFMappingViewer.iconset"
 ICON_ICNS="$WORK_DIR/RFMappingViewer.icns"
@@ -80,7 +83,7 @@ verify_archive_metadata() {
   done < <(unzip -Z1 "$archive")
 }
 
-verify_universal_macho_files() {
+verify_arm64_macho_files() {
   local candidate
   local description
   local architectures
@@ -92,13 +95,8 @@ verify_universal_macho_files() {
     ((macho_count += 1))
     architectures="$(lipo -archs "$candidate" 2>/dev/null)" \
       || fail "Unable to inspect architectures: $candidate"
-    case "$architectures" in
-      "arm64 x86_64"|"x86_64 arm64")
-        ;;
-      *)
-        fail "Mach-O file is not exactly universal2: $candidate ($architectures)"
-        ;;
-    esac
+    [[ "$architectures" == "arm64" ]] \
+      || fail "Mach-O file is not arm64-only: $candidate ($architectures)"
   done < <(find "$APP_BUNDLE" -type f -print0)
 
   [[ "$macho_count" -gt 0 ]] || fail "No Mach-O files found in app bundle"
@@ -106,8 +104,12 @@ verify_universal_macho_files() {
 
 require_file "$ROOT_DIR/rfmapping_gui.py"
 require_file "$ICON_MASTER"
+require_file "$RUNTIME_REQUIREMENTS"
+require_file "$SUPPORT_DOCUMENTATION"
+require_file "$PYINSTALLER_HOOKS/hook-tkinterdnd2.py"
 [[ -d "$DATA_SOURCE" ]] || fail "Data directory not found: $DATA_SOURCE"
 [[ -x "$PLIST_BUDDY" ]] || fail "PlistBuddy not found: $PLIST_BUDDY"
+[[ "$(uname -m)" == "arm64" ]] || fail "Python macOS builds require an Apple silicon host"
 
 if [[ "$PYTHON_BIN" != */* ]]; then
   PYTHON_BIN="$(command -v "$PYTHON_BIN" || true)"
@@ -117,18 +119,31 @@ if [[ -z "$PYTHON_BIN" || ! -x "$PYTHON_BIN" ]]; then
   fail "Python not found: $PYTHON_BIN"
 fi
 
+PYTHON_MACHINE="$("$PYTHON_BIN" -c 'import platform; print(platform.machine())')"
+[[ "$PYTHON_MACHINE" == "arm64" ]] \
+  || fail "Python must run natively as arm64; got $PYTHON_MACHINE"
+PYTHON_VERSION_TAG="$("$PYTHON_BIN" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+[[ "$PYTHON_VERSION_TAG" == "3.14" ]] \
+  || fail "Python 3.14 is required; got $PYTHON_VERSION_TAG"
+
 if [[ -z "$BUILD_VENV" ]]; then
-  PYTHON_VERSION_TAG="$("$PYTHON_BIN" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
-  BUILD_VENV="$HOME/Library/Caches/rf-map-viewer-pyinstaller-$PYTHON_VERSION_TAG"
+  BUILD_VENV="$HOME/Library/Caches/rf-map-viewer-pyinstaller-$PYTHON_VERSION_TAG-arm64"
 fi
 
 if [[ ! -x "$BUILD_VENV/bin/python" ]]; then
   "$PYTHON_BIN" -m venv "$BUILD_VENV"
 fi
 
-if ! "$BUILD_VENV/bin/python" -c "import PyInstaller; raise SystemExit(PyInstaller.__version__ != '$PYINSTALLER_VERSION')"; then
-  "$BUILD_VENV/bin/python" -m pip install --disable-pip-version-check "pyinstaller==$PYINSTALLER_VERSION"
-fi
+BUILD_PYTHON_TARGET="$("$BUILD_VENV/bin/python" -c 'import platform, sys; print(f"{sys.version_info.major}.{sys.version_info.minor}-{platform.machine()}")')"
+[[ "$BUILD_PYTHON_TARGET" == "3.14-arm64" ]] \
+  || fail "Build virtual environment must use Python 3.14 arm64; got $BUILD_PYTHON_TARGET"
+
+"$BUILD_VENV/bin/python" -m pip install \
+  --disable-pip-version-check \
+  "pyinstaller==$PYINSTALLER_VERSION" \
+  --requirement "$RUNTIME_REQUIREMENTS"
+"$BUILD_VENV/bin/python" -c \
+  'import tkinterdnd2; print("runtime dependency:", tkinterdnd2.__file__)'
 
 rm -rf "$APP_BUNDLE" "$WORK_DIR"
 rm -f "$ARCHIVE_PATH"
@@ -158,14 +173,16 @@ iconutil -c icns "$ICONSET_DIR" -o "$ICON_ICNS"
   --clean \
   --windowed \
   --onedir \
-  --target-architecture universal2 \
+  --target-architecture arm64 \
   --name "$APP_NAME" \
   --osx-bundle-identifier "$BUNDLE_ID" \
   --icon "$ICON_ICNS" \
   --distpath "$DIST_DIR" \
   --workpath "$WORK_DIR/build" \
   --specpath "$WORK_DIR" \
+  --additional-hooks-dir "$PYINSTALLER_HOOKS" \
   --add-data "$ROOT_DIR/data:data" \
+  --add-data "$SUPPORT_DOCUMENTATION:." \
   "$ROOT_DIR/rfmapping_gui.py"
 
 "$PLIST_BUDDY" -c "Set :CFBundleDisplayName $APP_NAME" "$INFO_PLIST"
@@ -174,6 +191,8 @@ iconutil -c icns "$ICONSET_DIR" -o "$ICON_ICNS"
 "$PLIST_BUDDY" -c "Add :CFBundleVersion string $APP_BUILD" "$INFO_PLIST"
 "$PLIST_BUDDY" -c "Delete :LSMultipleInstancesProhibited" "$INFO_PLIST" 2>/dev/null || true
 "$PLIST_BUDDY" -c "Add :LSMultipleInstancesProhibited bool true" "$INFO_PLIST"
+"$PLIST_BUDDY" -c "Delete :LSMinimumSystemVersion" "$INFO_PLIST" 2>/dev/null || true
+"$PLIST_BUDDY" -c "Add :LSMinimumSystemVersion string 14.0" "$INFO_PLIST"
 "$PLIST_BUDDY" -c "Delete :CFBundleDocumentTypes" "$INFO_PLIST" 2>/dev/null || true
 "$PLIST_BUDDY" -c "Add :CFBundleDocumentTypes array" "$INFO_PLIST"
 "$PLIST_BUDDY" -c "Add :CFBundleDocumentTypes:0 dict" "$INFO_PLIST"
@@ -192,6 +211,7 @@ verify_plist_value CFBundleIdentifier "$BUNDLE_ID"
 verify_plist_value CFBundleShortVersionString "$APP_VERSION"
 verify_plist_value CFBundleVersion "$APP_BUILD"
 verify_plist_value LSMultipleInstancesProhibited true
+verify_plist_value LSMinimumSystemVersion 14.0
 verify_plist_value CFBundleDocumentTypes:0:CFBundleTypeRole Viewer
 verify_plist_value CFBundleDocumentTypes:0:LSHandlerRank Alternate
 verify_plist_value CFBundleDocumentTypes:0:LSItemContentTypes:0 public.json
@@ -199,6 +219,7 @@ verify_plist_value CFBundleDocumentTypes:0:CFBundleTypeExtensions:0 json
 
 require_nonempty_file "$APP_BINARY"
 require_nonempty_file "$APP_RESOURCES/RFMappingViewer.icns"
+require_nonempty_file "$APP_RESOURCES/README.md"
 [[ -d "$APP_RESOURCES/data" ]] || fail "Bundled data directory is missing"
 SOURCE_JSON_COUNT="$(find "$DATA_SOURCE" -type f -name '*.json' | wc -l | tr -d '[:space:]')"
 BUNDLED_JSON_COUNT="$(find "$APP_RESOURCES/data" -type f -name '*.json' | wc -l | tr -d '[:space:]')"
@@ -207,7 +228,10 @@ BUNDLED_JSON_COUNT="$(find "$APP_RESOURCES/data" -type f -name '*.json' | wc -l 
   || fail "Bundled JSON resource count does not match source"
 diff -qr -x '.DS_Store' -x '._*' "$DATA_SOURCE" "$APP_RESOURCES/data" >/dev/null \
   || fail "Bundled data does not match $DATA_SOURCE"
-verify_universal_macho_files
+verify_arm64_macho_files
+
+"$APP_BINARY" --self-test "$DATA_SOURCE/demo_rf_map.json"
+"$APP_BINARY" --self-test-dnd
 
 clean_bundle_metadata "$APP_BUNDLE"
 SIGN_ARGUMENTS=(--force --deep --sign "$SIGNING_IDENTITY")
@@ -226,5 +250,5 @@ verify_archive_metadata "$ARCHIVE_PATH"
 cleanup_staged_bundle
 trap - EXIT
 
-echo "Packaged Python universal2 app and removed the staged bundle: $APP_BUNDLE"
+echo "Packaged Python Apple silicon app and removed the staged bundle: $APP_BUNDLE"
 echo "Created archive: $ARCHIVE_PATH"
