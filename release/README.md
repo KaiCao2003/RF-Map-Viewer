@@ -7,8 +7,8 @@ target-specific completion work within that feature generation.
 
 The Free-Moving viewer introduces the next `1.10` feature generation and is
 currently an alpha. Its canonical release version is
-`1.10.0-alpha.1`. Python packaging represents the same release as
-`1.10.0a1`, while the macOS marketing version remains the Apple-compatible
+`1.10.0-alpha.2`. Python packaging represents the same release as
+`1.10.0a2`, while the macOS marketing version remains the Apple-compatible
 three-integer `1.10.0`.
 
 Platform identity never becomes a fourth version component. It belongs in the
@@ -17,7 +17,7 @@ component tag and artifact name:
 | Component | Release | Tag | Channel |
 | --- | --- | --- | --- |
 | Python stable | `1.9.2` | `python-v1.9.2` | stable |
-| Python Free-Moving | `1.10.0-alpha.1` | `python-v1.10.0-alpha.1` | alpha |
+| Python Free-Moving | `1.10.0-alpha.2` | `python-v1.10.0-alpha.2` | alpha |
 | Swift | `1.9.0` | `swift-v1.9.0` | stable |
 | Web | `1.9.0` | `web-v1.9.0` | stable |
 
@@ -41,7 +41,7 @@ Pushing one exact component tag invokes only that component's release job.
 Manual workflow dispatch builds all four candidates without publishing a tag
 or GitHub Release. Python alpha releases are marked as GitHub prereleases.
 
-The alpha is written as `1.10.0-alpha.1`, not `1.10.0.1`: SemVer represents
+The alpha is written as `1.10.0-alpha.2`, not `1.10.0.2`: SemVer represents
 preview status after a hyphen. Python package metadata uses the PEP 440 spelling
-`1.10.0a1`, and the macOS bundle uses marketing version `1.10.0` plus build
-`110001`; all three identify the same alpha release.
+`1.10.0a2`, and the macOS bundle uses marketing version `1.10.0` plus build
+`110002`; all three identify the same alpha release.
