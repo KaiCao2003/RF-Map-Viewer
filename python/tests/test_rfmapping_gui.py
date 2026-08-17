@@ -233,8 +233,8 @@ class ProbeGeometryTests(unittest.TestCase):
 
             geometry = gui.load_probe_geometry("ProbeA", positions, channels)
 
-            self.assertEqual(geometry.positions_path, positions)
-            self.assertEqual(geometry.channels_path, channels)
+            self.assertEqual(geometry.positions_path, positions.resolve())
+            self.assertEqual(geometry.channels_path, channels.resolve())
             self.assertEqual(
                 [(unit.unit_id, unit.x_um, unit.y_um) for unit in geometry.units],
                 [(42, 10.0, 20.0), (99, 200.0, 300.0)],
