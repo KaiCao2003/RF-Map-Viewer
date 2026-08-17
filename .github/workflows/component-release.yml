@@ -216,7 +216,7 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
             --prerelease \
-            --notes "Free-Moving RF Viewer preview (alpha)." \
+            --notes "Free-Moving RF Viewer preview (alpha): adds an interactive head-centric 3D RF sphere while retaining the 2D map." \
             --generate-notes \
             --title "Free-Moving RF Viewer ${{ needs.validate-versions.outputs.python_fm_release }}"
 

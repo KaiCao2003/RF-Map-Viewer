@@ -24,18 +24,18 @@
       "tag": "python-v1.9.2"
     },
     "python_freemoving": {
-      "release_version": "1.10.0-alpha.1",
+      "release_version": "1.10.0-alpha.2",
       "marketing_version": "1.10.0",
-      "prerelease": "alpha.1",
-      "package_version": "1.10.0a1",
-      "build": "110001",
+      "prerelease": "alpha.2",
+      "package_version": "1.10.0a2",
+      "build": "110002",
       "channel": "alpha",
       "feature_generation_offset": 1,
       "edition": "FreeMovingAlpha",
       "artifact_flavor": "freemoving",
-      "artifact": "Free_Moving_RF_Viewer-python-1.10.0-alpha.1-freemoving-macos-arm64.zip",
-      "checksum": "SHA256SUMS-python-1.10.0-alpha.1-freemoving.txt",
-      "tag": "python-v1.10.0-alpha.1"
+      "artifact": "Free_Moving_RF_Viewer-python-1.10.0-alpha.2-freemoving-macos-arm64.zip",
+      "checksum": "SHA256SUMS-python-1.10.0-alpha.2-freemoving.txt",
+      "tag": "python-v1.10.0-alpha.2"
     },
     "swift": {
       "release_version": "1.9.0",

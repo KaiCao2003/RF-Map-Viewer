@@ -39,7 +39,7 @@ class ComponentVersionTests(unittest.TestCase):
         verifier = ROOT / "release/verify_versions.py"
         for tag in (
             "python-v1.9.2",
-            "python-v1.10.0-alpha.1",
+            "python-v1.10.0-alpha.2",
             "swift-v1.9.0",
             "web-v1.9.0",
         ):
@@ -50,7 +50,7 @@ class ComponentVersionTests(unittest.TestCase):
                 text=True,
             )
         rejected = subprocess.run(
-            [sys.executable, str(verifier), "--tag", "python-v1.10.0.1"],
+            [sys.executable, str(verifier), "--tag", "python-v1.10.0.2"],
             check=False,
             capture_output=True,
             text=True,

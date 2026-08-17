@@ -3,7 +3,7 @@
 This directory contains two separately versioned applications:
 
 - `rfmapping_gui.py`: the full stable RF Map Viewer `1.9.2`;
-- `rfmapping_fm_gui.py`: the Free-Moving RF Viewer `1.10.0-alpha.1`.
+- `rfmapping_fm_gui.py`: the Free-Moving RF Viewer `1.10.0-alpha.2`.
 
 They have distinct app names, bundle identifiers, release artifacts, and tags,
 so the alpha can be installed and released without replacing the stable app.
@@ -25,12 +25,12 @@ Its macOS identity is `RF Map Viewer.app`, bundle ID
 script/build_python_stable_macos_app.sh
 ```
 
-## Free-Moving alpha 1.10.0-alpha.1
+## Free-Moving alpha 1.10.0-alpha.2
 
 > **freemoving rf viewer alpha**
 
 This Python/Tk application is a read-only viewer for the HDF5 `.rfmap` files
-written by `RFmapping_core_fm.m`. Version **1.10.0-alpha.1** is intentionally a
+written by `RFmapping_core_fm.m`. Version **1.10.0-alpha.2** is intentionally a
 separate alpha application: it does not open legacy RF JSON, tuning curves,
 probe files, or head-direction companions.
 
@@ -38,6 +38,8 @@ probe files, or head-direction companions.
 
 - one unit at a time from `/rf/rate_hz`;
 - head-centric azimuth `[-180, 180)` and elevation `[-90, 90]`;
+- switchable 2D equirectangular and interactive 3D spherical RF views;
+- drag-to-rotate 3D navigation with a deterministic front-view reset;
 - a continuously adjustable half-open response window;
 - time-weighted mean firing rate in Hz;
 - exposure and effective-trial QA maps;
@@ -80,9 +82,9 @@ build host.
 
 - App: `Free-Moving RF Viewer.app`
 - Bundle ID: `org.local.rfmapping.viewer.freemoving`
-- Release: `1.10.0-alpha.1`
-- Apple version/build: `1.10.0` / `110001`
-- Python package version: `1.10.0a1`
+- Release: `1.10.0-alpha.2`
+- Apple version/build: `1.10.0` / `110002`
+- Python package version: `1.10.0a2`
 - Edition: `FreeMovingAlpha`
 - Minimum system: macOS 14.0, Apple silicon
 

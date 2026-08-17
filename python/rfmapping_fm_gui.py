@@ -50,7 +50,7 @@ except ModuleNotFoundError:
 
 
 APP_VERSION = "1.10.0"
-APP_PRERELEASE = "alpha.1"
+APP_PRERELEASE = "alpha.2"
 APP_RELEASE_VERSION = f"{APP_VERSION}-{APP_PRERELEASE}"
 APP_EDITION = "FreeMovingAlpha"
 APP_DISPLAY_VERSION = f"{APP_RELEASE_VERSION} · Free-moving alpha"
@@ -61,6 +61,9 @@ METRIC_EXPOSURE = "Exposure (s)"
 METRIC_EFFECTIVE_TRIALS = "Effective trials"
 METRICS = (METRIC_RATE, METRIC_EXPOSURE, METRIC_EFFECTIVE_TRIALS)
 PALETTES = ("Viridis", "Inferno", "Gray")
+VIEW_2D = "2D map"
+VIEW_3D = "3D sphere"
+VIEWS = (VIEW_2D, VIEW_3D)
 
 _PALETTE_STOPS: dict[str, tuple[tuple[float, tuple[int, int, int]], ...]] = {
     "Viridis": (
@@ -127,6 +130,154 @@ def _nearest_edge_index(edges_sec: np.ndarray, target_sec: float) -> int:
     return int(np.argmin(np.abs(np.asarray(edges_sec) - target_sec)))
 
 
+def _view_basis(yaw_deg: float, pitch_deg: float) -> tuple[np.ndarray, ...]:
+    """Return right, up, and forward axes for a head-centric sphere view."""
+    yaw = math.radians(float(yaw_deg))
+    pitch = math.radians(float(pitch_deg))
+    sin_yaw, cos_yaw = math.sin(yaw), math.cos(yaw)
+    sin_pitch, cos_pitch = math.sin(pitch), math.cos(pitch)
+    right = np.array((cos_yaw, 0.0, -sin_yaw), dtype=np.float64)
+    up = np.array(
+        (-sin_pitch * sin_yaw, cos_pitch, -sin_pitch * cos_yaw),
+        dtype=np.float64,
+    )
+    forward = np.array(
+        (cos_pitch * sin_yaw, sin_pitch, cos_pitch * cos_yaw),
+        dtype=np.float64,
+    )
+    return right, up, forward
+
+
+def sphere_direction_from_normalized(
+    x: np.ndarray | float,
+    y: np.ndarray | float,
+    yaw_deg: float,
+    pitch_deg: float,
+) -> np.ndarray:
+    """Map orthographic sphere coordinates to head ``right, up, forward``."""
+    x_values, y_values = np.broadcast_arrays(
+        np.asarray(x, dtype=np.float64), np.asarray(y, dtype=np.float64)
+    )
+    radius_squared = x_values * x_values + y_values * y_values
+    visible = radius_squared <= 1.0
+    depth = np.sqrt(np.clip(1.0 - radius_squared, 0.0, 1.0))
+    right, up, forward = _view_basis(yaw_deg, pitch_deg)
+    direction = (
+        x_values[..., None] * right
+        + y_values[..., None] * up
+        + depth[..., None] * forward
+    )
+    return np.where(visible[..., None], direction, np.nan)
+
+
+def head_angles_from_sphere_point(
+    x: float, y: float, yaw_deg: float, pitch_deg: float
+) -> tuple[float, float] | None:
+    """Return head-centric azimuth/elevation for one visible sphere point."""
+    direction = sphere_direction_from_normalized(x, y, yaw_deg, pitch_deg)
+    if not np.all(np.isfinite(direction)):
+        return None
+    azimuth = math.degrees(math.atan2(float(direction[0]), float(direction[2])))
+    elevation = math.degrees(math.asin(float(np.clip(direction[1], -1.0, 1.0))))
+    return azimuth, elevation
+
+
+def project_head_angles_to_sphere(
+    azimuth_deg: np.ndarray | float,
+    elevation_deg: np.ndarray | float,
+    yaw_deg: float,
+    pitch_deg: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Project head-centric directions into the current orthographic view."""
+    azimuth, elevation = np.broadcast_arrays(
+        np.radians(np.asarray(azimuth_deg, dtype=np.float64)),
+        np.radians(np.asarray(elevation_deg, dtype=np.float64)),
+    )
+    cos_elevation = np.cos(elevation)
+    direction = np.stack(
+        (
+            cos_elevation * np.sin(azimuth),
+            np.sin(elevation),
+            cos_elevation * np.cos(azimuth),
+        ),
+        axis=-1,
+    )
+    right, up, forward = _view_basis(yaw_deg, pitch_deg)
+    return direction @ right, direction @ up, direction @ forward
+
+
+def _nearest_center_indices(
+    centers: np.ndarray, values: np.ndarray, *, circular: bool
+) -> np.ndarray:
+    center_values = np.asarray(centers, dtype=np.float64)
+    if center_values.ndim != 1 or center_values.size == 0:
+        raise ValueError("Axis centers must be a non-empty one-dimensional array")
+    if np.any(np.diff(center_values) <= 0):
+        raise ValueError("Axis centers must be strictly increasing")
+
+    target = np.asarray(values, dtype=np.float64)
+    if circular:
+        target = np.mod(target - center_values[0], 360.0) + center_values[0]
+        extended = np.concatenate(
+            ((center_values[-1] - 360.0,), center_values, (center_values[0] + 360.0,))
+        )
+        mapping = np.concatenate(
+            ((center_values.size - 1,), np.arange(center_values.size), (0,))
+        )
+    else:
+        extended = center_values
+        mapping = np.arange(center_values.size)
+
+    right_index = np.searchsorted(extended, target, side="left")
+    right_index = np.clip(right_index, 0, extended.size - 1)
+    left_index = np.clip(right_index - 1, 0, extended.size - 1)
+    choose_right = np.abs(extended[right_index] - target) < np.abs(
+        target - extended[left_index]
+    )
+    selected = np.where(choose_right, right_index, left_index)
+    return mapping[selected]
+
+
+def render_spherical_texture(
+    rgb: np.ndarray,
+    azimuth_centers_deg: np.ndarray,
+    elevation_centers_deg: np.ndarray,
+    diameter: int,
+    yaw_deg: float,
+    pitch_deg: float,
+) -> np.ndarray:
+    """Render an azimuth/elevation color map onto a rotatable opaque sphere."""
+    colors = np.asarray(rgb, dtype=np.uint8)
+    if colors.shape != (
+        len(elevation_centers_deg),
+        len(azimuth_centers_deg),
+        3,
+    ):
+        raise ValueError("RGB map shape does not match elevation/azimuth axes")
+    if diameter < 3:
+        raise ValueError("Sphere diameter must be at least 3 pixels")
+
+    coordinate = (np.arange(diameter, dtype=np.float64) + 0.5) * (2.0 / diameter) - 1.0
+    x_values, y_values = np.meshgrid(coordinate, -coordinate)
+    direction = sphere_direction_from_normalized(
+        x_values, y_values, yaw_deg, pitch_deg
+    )
+    visible = np.all(np.isfinite(direction), axis=-1)
+    azimuth = np.degrees(np.arctan2(direction[..., 0], direction[..., 2]))
+    elevation = np.degrees(np.arcsin(np.clip(direction[..., 1], -1.0, 1.0)))
+    azimuth_index = _nearest_center_indices(
+        azimuth_centers_deg, np.where(visible, azimuth, 0.0), circular=True
+    )
+    elevation_index = _nearest_center_indices(
+        elevation_centers_deg, np.where(visible, elevation, 0.0), circular=False
+    )
+
+    rgba = np.zeros((diameter, diameter, 4), dtype=np.uint8)
+    rgba[..., :3] = colors[elevation_index, azimuth_index]
+    rgba[..., 3] = np.where(visible, 255, 0).astype(np.uint8)
+    return rgba
+
+
 if DND_AVAILABLE:
     _RootBase = TkinterDnD.Tk
 elif TK_AVAILABLE:
@@ -157,6 +308,10 @@ class FreeMovingRFViewer(_RootBase):
         self._display_matrix: np.ndarray | None = None
         self._display_low = 0.0
         self._display_high = 1.0
+        self._sphere_yaw_deg = 0.0
+        self._sphere_pitch_deg = 0.0
+        self._sphere_bounds = (0.0, 0.0, 0.0, 0.0)
+        self._sphere_drag: tuple[float, float, float, float] | None = None
         self._closed = False
         self._updating_time = False
         self._executor = ThreadPoolExecutor(
@@ -168,6 +323,7 @@ class FreeMovingRFViewer(_RootBase):
 
         self.metric_var = tk.StringVar(value=METRIC_RATE)
         self.palette_var = tk.StringVar(value="Viridis")
+        self.view_var = tk.StringVar(value=VIEW_2D)
         self.minimum_exposure_var = tk.StringVar(value="0")
         self.file_var = tk.StringVar(value="Drop or open a free-moving .rfmap")
         self.document_var = tk.StringVar(value="No document loaded")
@@ -299,8 +455,30 @@ class FreeMovingRFViewer(_RootBase):
         self.next_unit_button.pack(side="left")
 
         ttk.Label(sidebar, text="Display", style="Section.TLabel").pack(anchor="w")
-        ttk.Label(sidebar, text="Metric", style="Muted.TLabel").pack(
+        ttk.Label(sidebar, text="View", style="Muted.TLabel").pack(
             anchor="w", pady=(7, 2)
+        )
+        view_row = ttk.Frame(sidebar, style="Panel.TFrame")
+        view_row.pack(fill="x")
+        self.view_combo = ttk.Combobox(
+            view_row,
+            state="readonly",
+            values=VIEWS,
+            textvariable=self.view_var,
+        )
+        self.view_combo.pack(side="left", fill="x", expand=True)
+        self.view_combo.bind("<<ComboboxSelected>>", self._view_changed)
+        self.reset_view_button = ttk.Button(
+            view_row,
+            text="Reset",
+            style="Tool.TButton",
+            command=self._reset_sphere_view,
+            state="disabled",
+        )
+        self.reset_view_button.pack(side="left", padx=(7, 0))
+
+        ttk.Label(sidebar, text="Metric", style="Muted.TLabel").pack(
+            anchor="w", pady=(8, 2)
         )
         self.metric_combo = ttk.Combobox(
             sidebar,
@@ -396,6 +574,10 @@ class FreeMovingRFViewer(_RootBase):
         self.heat_canvas.bind("<Configure>", lambda _event: self.schedule_render())
         self.heat_canvas.bind("<Motion>", self._heat_hover)
         self.heat_canvas.bind("<Leave>", lambda _event: self.hover_var.set(""))
+        self.heat_canvas.bind("<ButtonPress-1>", self._heat_press)
+        self.heat_canvas.bind("<B1-Motion>", self._heat_drag)
+        self.heat_canvas.bind("<ButtonRelease-1>", self._heat_release)
+        self.heat_canvas.bind("<Double-Button-1>", self._reset_sphere_view)
         self.timeline_canvas.bind("<Configure>", lambda _event: self._render_timeline())
         self.timeline_canvas.bind("<Button-1>", self._timeline_drag)
         self.timeline_canvas.bind("<B1-Motion>", self._timeline_drag)
@@ -407,6 +589,54 @@ class FreeMovingRFViewer(_RootBase):
             self.createcommand("::tk::mac::OpenDocument", self._mac_open_document)
         except Exception:
             pass
+
+    def _view_changed(self, _event: Any = None) -> None:
+        is_sphere = self.view_var.get() == VIEW_3D
+        self.reset_view_button.configure(state="normal" if is_sphere else "disabled")
+        self.heat_canvas.configure(cursor="fleur" if is_sphere else "crosshair")
+        if is_sphere:
+            self.hover_var.set("Drag the sphere to rotate it; double-click to reset.")
+        self.schedule_render()
+
+    def _reset_sphere_view(self, _event: Any = None) -> str | None:
+        if self.view_var.get() != VIEW_3D:
+            return None
+        self._sphere_yaw_deg = 0.0
+        self._sphere_pitch_deg = 0.0
+        self._sphere_drag = None
+        self.schedule_render()
+        return "break"
+
+    def _heat_press(self, event: Any) -> str | None:
+        if self.view_var.get() != VIEW_3D:
+            return None
+        self._sphere_drag = (
+            float(event.x),
+            float(event.y),
+            self._sphere_yaw_deg,
+            self._sphere_pitch_deg,
+        )
+        return "break"
+
+    def _heat_drag(self, event: Any) -> str | None:
+        if self.view_var.get() != VIEW_3D or self._sphere_drag is None:
+            return None
+        start_x, start_y, start_yaw, start_pitch = self._sphere_drag
+        self._sphere_yaw_deg = (
+            start_yaw - (float(event.x) - start_x) * 0.35 + 180.0
+        ) % 360.0 - 180.0
+        self._sphere_pitch_deg = min(
+            89.0,
+            max(-89.0, start_pitch + (float(event.y) - start_y) * 0.35),
+        )
+        self.schedule_render()
+        return "break"
+
+    def _heat_release(self, _event: Any) -> str | None:
+        if self.view_var.get() != VIEW_3D:
+            return None
+        self._sphere_drag = None
+        return "break"
 
     def choose_document(self) -> None:
         selected = filedialog.askopenfilename(
@@ -656,8 +886,20 @@ class FreeMovingRFViewer(_RootBase):
         low, high = finite_display_range(matrix)
         self._display_low, self._display_high = low, high
         rgb = colorize_matrix(matrix, self.palette_var.get(), low, high)
-        rgb = np.flipud(rgb)
+        if self.view_var.get() == VIEW_3D:
+            self._render_sphere_map(rgb, low, high, unit)
+        else:
+            self._render_2d_map(np.flipud(rgb), low, high, unit)
+        self._render_timeline()
+        visible_bin_count = np.count_nonzero(np.isfinite(matrix))
+        self.status_var.set(
+            f"Unit {self.unit_map.unit_id} · {visible_bin_count:,} visible bins"
+        )
 
+    def _render_2d_map(
+        self, rgb: np.ndarray, low: float, high: float, unit: str
+    ) -> None:
+        assert self.dataset is not None and self.unit_map is not None
         canvas_width = max(300, self.heat_canvas.winfo_width())
         canvas_height = max(220, self.heat_canvas.winfo_height())
         left, right, top, bottom = 62, 82, 26, 54
@@ -672,6 +914,7 @@ class FreeMovingRFViewer(_RootBase):
         y0 = top + (available_height - plot_height) / 2
         x1, y1 = x0 + plot_width, y0 + plot_height
         self._plot_bounds = (x0, y0, x1, y1)
+        self._sphere_bounds = (0.0, 0.0, 0.0, 0.0)
 
         image = Image.fromarray(rgb).resize(
             (max(1, plot_width), max(1, plot_height)),
@@ -742,11 +985,98 @@ class FreeMovingRFViewer(_RootBase):
             font=("TkDefaultFont", 12, "bold"),
         )
         self._draw_legend(x1 + 22, y0, max(80, plot_height), low, high, unit)
-        self._render_timeline()
-        visible_bin_count = np.count_nonzero(np.isfinite(matrix))
-        self.status_var.set(
-            f"Unit {self.unit_map.unit_id} · {visible_bin_count:,} visible bins"
+
+    def _render_sphere_map(
+        self, rgb: np.ndarray, low: float, high: float, unit: str
+    ) -> None:
+        assert self.dataset is not None and self.unit_map is not None
+        canvas = self.heat_canvas
+        canvas_width = max(300, canvas.winfo_width())
+        canvas_height = max(220, canvas.winfo_height())
+        left, right, top, bottom = 24, 92, 34, 44
+        available_width = max(3, canvas_width - left - right)
+        available_height = max(3, canvas_height - top - bottom)
+        diameter = max(3, int(min(available_width, available_height)))
+        x0 = left + (available_width - diameter) / 2
+        y0 = top + (available_height - diameter) / 2
+        x1, y1 = x0 + diameter, y0 + diameter
+        center_x, center_y = (x0 + x1) / 2, (y0 + y1) / 2
+        radius = diameter / 2
+        self._sphere_bounds = (x0, y0, x1, y1)
+        self._plot_bounds = (0.0, 0.0, 0.0, 0.0)
+
+        rgba = render_spherical_texture(
+            rgb,
+            self.dataset.azimuth_centers_deg,
+            self.dataset.elevation_centers_deg,
+            diameter,
+            self._sphere_yaw_deg,
+            self._sphere_pitch_deg,
         )
+        self._heat_photo = ImageTk.PhotoImage(Image.fromarray(rgba))
+        canvas.delete("all")
+        canvas.create_image(x0, y0, anchor="nw", image=self._heat_photo)
+        self._draw_sphere_grid(center_x, center_y, radius)
+        canvas.create_oval(x0, y0, x1, y1, outline="#a2adbb", width=2)
+        canvas.create_text(
+            x0,
+            14,
+            anchor="w",
+            text=f"Unit {self.unit_map.unit_id} · {self.metric_var.get()} · 3D sphere",
+            fill="#f2f4f7",
+            font=("TkDefaultFont", 12, "bold"),
+        )
+        canvas.create_text(
+            center_x,
+            y1 + 25,
+            text=(
+                f"center az {self._sphere_yaw_deg:.1f}° · "
+                f"el {self._sphere_pitch_deg:.1f}° · drag to rotate"
+            ),
+            fill="#aeb7c4",
+            font=("TkDefaultFont", 10),
+        )
+        self._draw_legend(x1 + 20, y0, max(80, diameter), low, high, unit)
+
+    def _draw_sphere_grid(self, center_x: float, center_y: float, radius: float) -> None:
+        canvas = self.heat_canvas
+
+        def draw_curve(azimuth: np.ndarray, elevation: np.ndarray) -> None:
+            x, y, depth = project_head_angles_to_sphere(
+                azimuth,
+                elevation,
+                self._sphere_yaw_deg,
+                self._sphere_pitch_deg,
+            )
+            points: list[float] = []
+            for x_value, y_value, depth_value in zip(x, y, depth, strict=True):
+                if depth_value >= 0.0:
+                    points.extend(
+                        (
+                            center_x + float(x_value) * radius,
+                            center_y - float(y_value) * radius,
+                        )
+                    )
+                elif len(points) >= 4:
+                    canvas.create_line(
+                        *points, fill="#657080", width=1, smooth=True
+                    )
+                    points = []
+                else:
+                    points = []
+            if len(points) >= 4:
+                canvas.create_line(*points, fill="#657080", width=1, smooth=True)
+
+        elevation_line = np.linspace(-90.0, 90.0, 181)
+        for azimuth_value in np.arange(-180.0, 180.0, 45.0):
+            draw_curve(
+                np.full_like(elevation_line, azimuth_value), elevation_line
+            )
+        azimuth_line = np.linspace(-180.0, 180.0, 361)
+        for elevation_value in (-60.0, -30.0, 0.0, 30.0, 60.0):
+            draw_curve(
+                azimuth_line, np.full_like(azimuth_line, elevation_value)
+            )
 
     def _draw_legend(
         self, x: float, y: float, height: int, low: float, high: float, unit: str
@@ -835,6 +1165,9 @@ class FreeMovingRFViewer(_RootBase):
     def _heat_hover(self, event: Any) -> None:
         if self.dataset is None or self._display_matrix is None:
             return
+        if self.view_var.get() == VIEW_3D:
+            self._sphere_hover(event)
+            return
         x0, y0, x1, y1 = self._plot_bounds
         if not (x0 <= event.x < x1 and y0 <= event.y < y1):
             self.hover_var.set("")
@@ -855,6 +1188,48 @@ class FreeMovingRFViewer(_RootBase):
         exposure = self.dataset.exposure_sec[el_index, az_index]
         self.hover_var.set(
             f"az {self.dataset.azimuth_centers_deg[az_index]:.1f}° · "
+            f"el {self.dataset.elevation_centers_deg[el_index]:.1f}° · "
+            f"value {value_text} · exposure {exposure:.4g} s"
+        )
+
+    def _sphere_hover(self, event: Any) -> None:
+        assert self.dataset is not None and self._display_matrix is not None
+        x0, y0, x1, y1 = self._sphere_bounds
+        radius = (x1 - x0) / 2
+        if radius <= 0:
+            self.hover_var.set("")
+            return
+        x_normalized = (float(event.x) - (x0 + x1) / 2) / radius
+        y_normalized = ((y0 + y1) / 2 - float(event.y)) / radius
+        angles = head_angles_from_sphere_point(
+            x_normalized,
+            y_normalized,
+            self._sphere_yaw_deg,
+            self._sphere_pitch_deg,
+        )
+        if angles is None:
+            self.hover_var.set("Drag the sphere to rotate it; double-click to reset.")
+            return
+        azimuth, elevation = angles
+        az_index = int(
+            _nearest_center_indices(
+                self.dataset.azimuth_centers_deg,
+                np.asarray(azimuth),
+                circular=True,
+            )
+        )
+        el_index = int(
+            _nearest_center_indices(
+                self.dataset.elevation_centers_deg,
+                np.asarray(elevation),
+                circular=False,
+            )
+        )
+        value = float(self._display_matrix[el_index, az_index])
+        value_text = "no data" if not math.isfinite(value) else f"{value:.4g}"
+        exposure = self.dataset.exposure_sec[el_index, az_index]
+        self.hover_var.set(
+            f"3D · az {self.dataset.azimuth_centers_deg[az_index]:.1f}° · "
             f"el {self.dataset.elevation_centers_deg[el_index]:.1f}° · "
             f"value {value_text} · exposure {exposure:.4g} s"
         )
@@ -890,6 +1265,7 @@ def self_test(path: str | Path) -> dict[str, object]:
         "firstUnitId": unit.unit_id,
         "logicalShape": list(dataset.logical_rate_shape),
         "finiteDisplayBins": int(np.count_nonzero(np.isfinite(matrix))),
+        "views": list(VIEWS),
     }
 
 
