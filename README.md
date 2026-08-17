@@ -26,6 +26,22 @@ names, not in a fourth version component. See
 [`release/README.md`](release/README.md) for the canonical mapping and tag
 policy.
 
+## Downloads
+
+The current component releases are published independently so each viewer can
+advance without inventing a platform-specific fourth version number.
+
+| Viewer | Channel | Download | Release notes |
+| --- | --- | --- | --- |
+| Python full viewer `1.9.2` | Stable | [macOS Apple-silicon ZIP](https://github.com/KaiCao2003/RF-Map-Viewer/releases/download/python-v1.9.2/RF_Map_Viewer-python-1.9.2-full-macos-arm64.zip) | [`python-v1.9.2`](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/python-v1.9.2) |
+| Python Free-Moving `1.10.0-alpha.1` | Alpha preview | [macOS Apple-silicon ZIP](https://github.com/KaiCao2003/RF-Map-Viewer/releases/download/python-v1.10.0-alpha.1/Free_Moving_RF_Viewer-python-1.10.0-alpha.1-freemoving-macos-arm64.zip) | [`python-v1.10.0-alpha.1`](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/python-v1.10.0-alpha.1) |
+| Swift `1.9.0` | Stable | [macOS Apple-silicon ZIP](https://github.com/KaiCao2003/RF-Map-Viewer/releases/download/swift-v1.9.0/RF_Map_Viewer-1.9.0-swift-macos-arm64.zip) | [`swift-v1.9.0`](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/swift-v1.9.0) |
+| Web `1.9.0` | Stable | [deployment source archive](https://github.com/KaiCao2003/RF-Map-Viewer/releases/download/web-v1.9.0/RF_Map_Viewer-1.9.0-web.tar.gz) | [`web-v1.9.0`](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/web-v1.9.0) |
+
+Each Release also includes a SHA-256 checksum file. The Free-Moving build is a
+preview and is deliberately marked as a GitHub prerelease. Browse every
+published version on the [Releases page](https://github.com/KaiCao2003/RF-Map-Viewer/releases).
+
 ## Python free-moving alpha
 
 Python **1.10.0-alpha.1** is the **freemoving rf viewer alpha**. It accepts
