@@ -2044,11 +2044,13 @@ def load_probe_geometry(
         units.append(ProbeUnitPosition(unit_id, x_um, y_um, unit_index))
 
     channels: list[ProbeChannel] = []
-    validated_channels_path = channels_path
-    if channels_path is not None:
+    validated_channels_path = (
+        _resolve_existing_file(channels_path) if channels_path is not None else None
+    )
+    if validated_channels_path is not None:
         try:
             _fields, channel_rows = _read_probe_csv(
-                channels_path,
+                validated_channels_path,
                 (
                     "channel_index",
                     "channel_id",
