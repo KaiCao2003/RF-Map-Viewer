@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rfmapping-viewer-web"
+version = "1.9.0"
+description = "FastAPI backend for the RF Mapping Web viewer"
+requires-python = ">=3.11"
+dependencies = [
+  "cffi>=2,<3",
+  "fastapi>=0.116,<1",
+  "httpx>=0.28,<1",
+  "ijson>=3.4,<4",
+  "numpy>=2,<3",
+  "Pillow>=10,<13",
+  "pypdf>=5,<7",
+  "uvicorn[standard]>=0.35,<1",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8,<10"]
+
+[project.scripts]
+rfmapping-web = "rfmapping_web.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["backend"]
+include = ["rfmapping_web*"]
+
+[tool.pytest.ini_options]
+testpaths = ["backend/tests"]
+pythonpath = ["backend"]
