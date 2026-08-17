@@ -30,7 +30,9 @@ def literal_assignment(path: Path, name: str) -> object:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("root", type=Path)
-    parser.add_argument("version")
+    parser.add_argument("marketing_version")
+    parser.add_argument("prerelease")
+    parser.add_argument("package_version")
     parser.add_argument("edition")
     args = parser.parse_args()
 
@@ -43,10 +45,17 @@ def main() -> int:
             raise FileNotFoundError(f"required release input is missing: {required}")
 
     source_version = literal_assignment(gui_path, "APP_VERSION")
+    source_prerelease = literal_assignment(gui_path, "APP_PRERELEASE")
     source_edition = literal_assignment(gui_path, "APP_EDITION")
-    if source_version != args.version:
+    if source_version != args.marketing_version:
         raise ValueError(
-            f"rfmapping_fm_gui.py APP_VERSION is {source_version!r}; expected {args.version!r}"
+            "rfmapping_fm_gui.py APP_VERSION is "
+            f"{source_version!r}; expected {args.marketing_version!r}"
+        )
+    if source_prerelease != args.prerelease:
+        raise ValueError(
+            "rfmapping_fm_gui.py APP_PRERELEASE is "
+            f"{source_prerelease!r}; expected {args.prerelease!r}"
         )
     if source_edition != args.edition:
         raise ValueError(
@@ -55,9 +64,10 @@ def main() -> int:
 
     with pyproject_path.open("rb") as stream:
         project = tomllib.load(stream)["project"]
-    if project.get("version") != args.version:
+    if project.get("version") != args.package_version:
         raise ValueError(
-            f"pyproject.toml version is {project.get('version')!r}; expected {args.version!r}"
+            "pyproject.toml version is "
+            f"{project.get('version')!r}; expected {args.package_version!r}"
         )
     dependencies = project.get("dependencies", [])
     if not any(re.fullmatch(r"h5py>=3\.16,<4", item) for item in dependencies):
@@ -79,7 +89,8 @@ def main() -> int:
     if "--self-test-dnd" not in gui_source:
         raise ValueError("rfmapping_fm_gui.py must expose the frozen TkDND smoke test")
 
-    print(f"release metadata verified: Python {args.version} {args.edition}")
+    release_version = f"{args.marketing_version}-{args.prerelease}"
+    print(f"release metadata verified: Python {release_version} {args.edition}")
     return 0
 
 

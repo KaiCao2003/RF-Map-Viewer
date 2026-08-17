@@ -1,8 +1,11 @@
-# Web Viewer
+# Web Viewer 1.9.0
 
 The Web implementation contains a FastAPI backend in `backend/` and a
 React/Vite frontend in `frontend/`. The backend owns its figure renderer and
 does not import the analysis repository or the Python/Tk implementation.
+Its `1.9.0` version places it in the same stable feature generation as the
+Python `1.9.x` reference; `web` remains an artifact/tag identity rather than a
+version suffix.
 
 ## Input files
 
@@ -40,6 +43,13 @@ the existing deployed `rfmapping_web/` plus `web/dist` layout.
 The three inline authentication settings above are disposable development
 values. Production reads its mode-600 access-gate environment file as described
 in the deployment guide.
+
+After the backend and frontend tests pass and `frontend/dist` has been built,
+create the versioned GitHub Release payload with:
+
+```sh
+deploy/build_release_archive.sh
+```
 
 ## Deployment
 

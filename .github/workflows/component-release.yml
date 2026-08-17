@@ -1,0 +1,260 @@
+name: Build component releases
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    tags:
+      - "python-v*"
+      - "swift-v*"
+      - "web-v*"
+
+permissions:
+  contents: read
+
+jobs:
+  validate-versions:
+    name: Validate component versions
+    runs-on: ubuntu-24.04
+    outputs:
+      python_stable_release: ${{ steps.versions.outputs.python_stable_release }}
+      python_stable_tag: ${{ steps.versions.outputs.python_stable_tag }}
+      python_stable_artifact: ${{ steps.versions.outputs.python_stable_artifact }}
+      python_stable_checksum: ${{ steps.versions.outputs.python_stable_checksum }}
+      python_fm_release: ${{ steps.versions.outputs.python_fm_release }}
+      python_fm_tag: ${{ steps.versions.outputs.python_fm_tag }}
+      python_fm_artifact: ${{ steps.versions.outputs.python_fm_artifact }}
+      python_fm_checksum: ${{ steps.versions.outputs.python_fm_checksum }}
+      swift_release: ${{ steps.versions.outputs.swift_release }}
+      swift_tag: ${{ steps.versions.outputs.swift_tag }}
+      swift_artifact: ${{ steps.versions.outputs.swift_artifact }}
+      web_release: ${{ steps.versions.outputs.web_release }}
+      web_tag: ${{ steps.versions.outputs.web_tag }}
+      web_artifact: ${{ steps.versions.outputs.web_artifact }}
+      web_checksum: ${{ steps.versions.outputs.web_checksum }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Verify canonical manifest and source declarations
+        id: versions
+        shell: bash
+        run: |
+          python3 -m unittest discover -s release -p 'test_*.py'
+          args=(--github-output "$GITHUB_OUTPUT")
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            args+=(--tag "$GITHUB_REF_NAME")
+          fi
+          python3 release/verify_versions.py "${args[@]}"
+
+  build-python-stable:
+    name: Build Python stable
+    if: github.event_name == 'workflow_dispatch' || github.ref_name == needs.validate-versions.outputs.python_stable_tag
+    needs: validate-versions
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+          architecture: arm64
+          cache: pip
+          cache-dependency-path: python/requirements.txt
+      - name: Test stable Python viewer
+        working-directory: python
+        run: |
+          python -m pip install --disable-pip-version-check -r requirements.txt
+          PYTHONDONTWRITEBYTECODE=1 python -m pytest -q
+      - name: Build stable Python macOS archive
+        working-directory: python
+        run: RF_MAPPING_PYTHON_BIN="$(command -v python)" script/build_python_stable_macos_app.sh
+      - uses: actions/upload-artifact@v6
+        with:
+          name: python-stable-${{ needs.validate-versions.outputs.python_stable_release }}
+          path: |
+            python/dist/python/${{ needs.validate-versions.outputs.python_stable_artifact }}
+            python/dist/python/${{ needs.validate-versions.outputs.python_stable_checksum }}
+          if-no-files-found: error
+          compression-level: 0
+
+  build-python-freemoving:
+    name: Build Python Free-Moving alpha
+    if: github.event_name == 'workflow_dispatch' || github.ref_name == needs.validate-versions.outputs.python_fm_tag
+    needs: validate-versions
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+          architecture: arm64
+          cache: pip
+          cache-dependency-path: python/pyproject.toml
+      - name: Test Python viewer
+        working-directory: python
+        run: |
+          python -m pip install --disable-pip-version-check -e '.[test]'
+          PYTHONDONTWRITEBYTECODE=1 python -m pytest -q
+      - name: Build Python macOS archive
+        working-directory: python
+        run: RF_MAPPING_PYTHON_BIN="$(command -v python)" script/build_python_macos_app.sh
+      - uses: actions/upload-artifact@v6
+        with:
+          name: python-freemoving-${{ needs.validate-versions.outputs.python_fm_release }}
+          path: |
+            python/dist/python/${{ needs.validate-versions.outputs.python_fm_artifact }}
+            python/dist/python/${{ needs.validate-versions.outputs.python_fm_checksum }}
+          if-no-files-found: error
+          compression-level: 0
+
+  build-swift:
+    name: Build Swift stable
+    if: github.event_name == 'workflow_dispatch' || github.ref_name == needs.validate-versions.outputs.swift_tag
+    needs: validate-versions
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v6
+      - name: Test Swift viewer
+        working-directory: swift
+        run: swift test -c release
+      - name: Build Swift macOS archive
+        working-directory: swift
+        run: script/build_macos_app.sh
+      - uses: actions/upload-artifact@v6
+        with:
+          name: swift-${{ needs.validate-versions.outputs.swift_release }}
+          path: swift/dist/${{ needs.validate-versions.outputs.swift_artifact }}
+          if-no-files-found: error
+          compression-level: 0
+
+  build-web:
+    name: Build Web stable
+    if: github.event_name == 'workflow_dispatch' || github.ref_name == needs.validate-versions.outputs.web_tag
+    needs: validate-versions
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: web/pyproject.toml
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/frontend/package-lock.json
+      - name: Test Web backend
+        working-directory: web
+        run: |
+          python -m pip install --disable-pip-version-check -e '.[test]'
+          PYTHONDONTWRITEBYTECODE=1 python -m pytest -q
+      - name: Test and build Web frontend
+        working-directory: web/frontend
+        run: |
+          npm ci --no-audit --no-fund
+          npm test
+          npm run build
+      - name: Build Web release archive
+        working-directory: web
+        run: deploy/build_release_archive.sh
+      - uses: actions/upload-artifact@v6
+        with:
+          name: web-${{ needs.validate-versions.outputs.web_release }}
+          path: |
+            web/dist/${{ needs.validate-versions.outputs.web_artifact }}
+            web/dist/${{ needs.validate-versions.outputs.web_checksum }}
+          if-no-files-found: error
+          compression-level: 0
+
+  publish-python-stable:
+    name: Publish Python stable release
+    if: github.ref_name == needs.validate-versions.outputs.python_stable_tag
+    needs: [validate-versions, build-python-stable]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v6
+        with:
+          name: python-stable-${{ needs.validate-versions.outputs.python_stable_release }}
+          path: release-assets
+      - name: Create immutable Python stable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            release-assets/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --generate-notes \
+            --title "RF Map Viewer Python ${{ needs.validate-versions.outputs.python_stable_release }}"
+
+  publish-python-freemoving:
+    name: Publish Python alpha prerelease
+    if: github.ref_name == needs.validate-versions.outputs.python_fm_tag
+    needs: [validate-versions, build-python-freemoving]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v6
+        with:
+          name: python-freemoving-${{ needs.validate-versions.outputs.python_fm_release }}
+          path: release-assets
+      - name: Create immutable Python prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            release-assets/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --prerelease \
+            --notes "Free-Moving RF Viewer preview (alpha)." \
+            --generate-notes \
+            --title "Free-Moving RF Viewer ${{ needs.validate-versions.outputs.python_fm_release }}"
+
+  publish-swift:
+    name: Publish Swift release
+    if: github.ref_name == needs.validate-versions.outputs.swift_tag
+    needs: [validate-versions, build-swift]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v6
+        with:
+          name: swift-${{ needs.validate-versions.outputs.swift_release }}
+          path: release-assets
+      - name: Create immutable Swift release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            release-assets/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --generate-notes \
+            --title "RF Map Viewer Swift ${{ needs.validate-versions.outputs.swift_release }}"
+
+  publish-web:
+    name: Publish Web release
+    if: github.ref_name == needs.validate-versions.outputs.web_tag
+    needs: [validate-versions, build-web]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v6
+        with:
+          name: web-${{ needs.validate-versions.outputs.web_release }}
+          path: release-assets
+      - name: Create immutable Web release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            release-assets/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --generate-notes \
+            --title "RF Map Viewer Web ${{ needs.validate-versions.outputs.web_release }}"
