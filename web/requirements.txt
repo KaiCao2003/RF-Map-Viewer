@@ -1,0 +1,9 @@
+fastapi>=0.116,<1
+uvicorn[standard]>=0.35,<1
+ijson>=3.4,<4
+cffi>=2,<3
+numpy>=2,<3
+Pillow>=10,<13
+httpx>=0.28,<1
+pytest>=8,<10
+pypdf>=5,<7
