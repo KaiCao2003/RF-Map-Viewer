@@ -348,7 +348,7 @@ def test_health_and_lazy_browse_are_root_confined(
         ]
         assert health.json() == {
             "status": "ok",
-            "version": "1.9.0-web",
+            "version": "1.9.0",
             "rfRoot": str(settings.rf_root),
             "rfRootAvailable": True,
             "outputRoot": str(settings.output_root),

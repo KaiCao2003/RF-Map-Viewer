@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Free-moving RF viewer preview for ``rfmapping_fm_hdf5_v1`` files."""
+"""Free-moving RF viewer alpha for ``rfmapping_fm_hdf5_v1`` files."""
 
 from __future__ import annotations
 
@@ -49,9 +49,11 @@ except ModuleNotFoundError:
     DND_AVAILABLE = False
 
 
-APP_VERSION = "1.10.0.1"
-APP_EDITION = "FreeMovingPreview"
-APP_DISPLAY_VERSION = f"{APP_VERSION} · Free-moving preview"
+APP_VERSION = "1.10.0"
+APP_PRERELEASE = "alpha.1"
+APP_RELEASE_VERSION = f"{APP_VERSION}-{APP_PRERELEASE}"
+APP_EDITION = "FreeMovingAlpha"
+APP_DISPLAY_VERSION = f"{APP_RELEASE_VERSION} · Free-moving alpha"
 DND_SMOKE_ARGUMENT = "--self-test-dnd"
 
 METRIC_RATE = "Mean firing rate (Hz)"
@@ -197,7 +199,7 @@ class FreeMovingRFViewer(_RootBase):
             font=("TkDefaultFont", 20, "bold"),
         )
         style.configure(
-            "Preview.TLabel",
+            "Alpha.TLabel",
             background="#2d2154",
             foreground="#d9c7ff",
             padding=(9, 4),
@@ -230,7 +232,7 @@ class FreeMovingRFViewer(_RootBase):
         ttk.Label(header, text="Free-Moving RF Viewer", style="Title.TLabel").pack(
             side="left"
         )
-        ttk.Label(header, text="PREVIEW", style="Preview.TLabel").pack(
+        ttk.Label(header, text="ALPHA", style="Alpha.TLabel").pack(
             side="left", padx=(12, 0)
         )
         ttk.Button(
@@ -882,7 +884,7 @@ def self_test(path: str | Path) -> dict[str, object]:
     )
     return {
         "format": "rfmapping_fm_hdf5_v1",
-        "version": APP_VERSION,
+        "version": APP_RELEASE_VERSION,
         "edition": APP_EDITION,
         "unitCount": dataset.unit_count,
         "firstUnitId": unit.unit_id,

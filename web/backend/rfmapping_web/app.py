@@ -45,7 +45,7 @@ from .middleware import DirectAccessMiddleware
 from .paths import PathAccessError, list_directory, resolve_under
 
 
-WEB_VERSION = "1.9.0-web"
+WEB_VERSION = "1.9.0"
 
 
 class StrictRequest(BaseModel):

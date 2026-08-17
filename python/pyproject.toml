@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rfmapping-freemoving-viewer-python"
-version = "1.10.0.1"
-description = "Native Python/Tk preview viewer for free-moving RF maps"
+version = "1.10.0a1"
+description = "Native Python/Tk alpha viewer for free-moving RF maps"
 requires-python = ">=3.11"
 dependencies = [
   "h5py>=3.16,<4",
