@@ -1,244 +1,75 @@
-# RF Map Viewer
+# RF Mapping Viewers
 
-RF Map Viewer is a desktop application for exploring receptive-field spike-count
-data stored as JSON. It provides rectangular and polar RF maps, delay and RGB
-views, time-bin timelines, response normalization, head-direction tuning
-curves, interactive selection, and synchronized multi-window viewing. The
-native Swift 2.1 and Python/Tk 1.8 releases share the same scientific display
-semantics. Both release builds are native Apple silicon applications.
+This repository contains the display and export applications for RF mapping
+data. It is self-contained: none of its runtime paths import the sibling
+`../rfmapping` analysis repository.
 
-Python/Tk pairing navigates the sorted union of unit IDs; a unit absent from one
-file is shown as **N/A**, and differing lists are flagged as potentially
-different sessions. Swift window synchronization is available only when loaded
-documents have identical ordered `unitPool` arrays; differing lists disable
-synchronization.
-
-The repository contains two implementations of the same viewer:
-
-- A native Swift/SwiftUI application for Apple silicon Macs running macOS 15
-  Sequoia or later.
-- A Python/Tk application packaged for Apple silicon Macs running macOS 14 or
-  later.
-
-## Download
-
-Release builds publish these artifacts to the corresponding GitHub Release:
-
-| Platform | Release asset | Notes |
+| Implementation | Directory | Primary entry point |
 | --- | --- | --- |
-| macOS 15+, Apple silicon | `RF_Map_Viewer-macos-arm64.zip` | Native Swift 2.1 arm64 application |
-| macOS 14+, Apple silicon | `RF_Map_Viewer-python-macos-arm64.zip` | Python/Tk 1.8 arm64 application |
+| Python/Tk stable | `python/` | `python/rfmapping_gui.py` |
+| Python/Tk Free-Moving alpha | `python/` | `python/rfmapping_fm_gui.py` |
+| SwiftUI | `swift/` | `swift/Package.swift` |
+| Web | `web/` | FastAPI under `web/backend/`; React under `web/frontend/` |
 
-On macOS, extract the archive and replace the existing **RF Map Viewer.app** in
-Applications. Delete older extracted copies instead of keeping them elsewhere:
-Finder can list every copy that claims JSON files in the **Open With** menu.
+Scientific RF detection, trial reconstruction, notebooks, and Matlab-related
+sources remain in `../rfmapping`. The two repositories communicate only
+through versioned file contracts, principally the RF JSON described in
+[`contracts/rf-json.md`](contracts/rf-json.md).
 
-## Try the synthetic example
+## Component versions
 
-Open [`data/demo_rf_map.json`](data/demo_rf_map.json) from the application. This
-small dataset is fully synthetic and includes two artificial units, angular and
-radial positions, ten time bins, and presentation counts. It is designed to make
-the RF, polar, delay/RGB, normalized-response, and timeline controls easy to
-explore; it does not contain experimental or participant data.
+The full Python viewer is the stable feature reference at `1.9.2`. Swift and
+Web implement the same `1.9` feature generation and are versioned `1.9.0`.
+The Free-Moving Python viewer begins the next generation as
+**`1.10.0-alpha.1`**. Component identity belongs in release tags and artifact
+names, not in a fourth version component. See
+[`release/README.md`](release/README.md) for the canonical mapping and tag
+policy.
 
-The viewer expects these JSON fields:
+## Python free-moving alpha
 
-- `unitsSpikeCounts`: a non-negative numeric array arranged as
-  `unit × y × x × time bin`.
-- `unitsSpikeCountsSize`: the four corresponding dimensions.
-- `unitPool`: one displayed identifier per unit.
-- `xPositions` and `yPositions`: the spatial coordinates.
-- `timeBinEdges`: strictly increasing edges in seconds, with one more edge than
-  the number of time bins.
-- `stimulusPresentationCounts` (optional): a non-negative integer `y × x`
-  array used by normalized response modes.
+Python **1.10.0-alpha.1** is the **freemoving rf viewer alpha**. It accepts
+only HDF5 `.rfmap` files with `format=rfmapping_fm_hdf5_v1`, displays the
+head-centric elevation/azimuth firing-rate result, and exposes exposure and
+calibration QA. Legacy JSON, tuning-curve, head-direction, and probe companions
+are intentionally outside this alpha app. The stable Python viewer remains
+available separately at `1.9.2`; Swift and Web remain on the `1.9` generation.
 
-## Head-direction tuning curves
+## Legacy file compatibility
 
-Both macOS viewers can place a head-direction tuning curve beside or below the
-RF map.
-For an RF document under a dated session such as `YYMMDD_2`, automatic loading
-searches that day's sessions in numeric order for the same probe at:
+The unchanged Swift and Web implementations retain these aliases:
 
-```text
-YYMMDD_N/data/tuning_curves/ProbeA/tuning_curves.json
-```
+| Data | Preferred extension | Existing extension |
+| --- | --- | --- |
+| RF map (JSON) | `.rfmap` | `.json` |
+| Tuning curve (JSON) | `.tc` | `.json` |
+| Spike positions (CSV) | `.probe` | `.csv` |
 
-Use `ProbeB` for Probe B recordings. If no file is found, either macOS viewer
-can use **File > Attach Tuning Curves…**; both empty states also provide an
-attach button. Python/Tk additionally opens the picker when its empty tuning
-canvas is clicked and accepts one dropped
-`tuning_curves.json` file. Schema 2 stores the observation counts and occupancy
-needed to aggregate firing rates correctly:
+When both companion names exist, `tuning_curves.tc` and `positions.probe` take
+precedence over `tuning_curves.json` and `positions.csv`. Probe channel geometry
+continues to use `channels.csv`. An RF map is the primary document; tuning and
+probe files are opened as companions of a loaded RF map.
 
-```json
-{
-  "schema_version": 2,
-  "metadata": {
-    "timestamp_reference": "motive_frame_time_from_gated_exposure_pulse_centers",
-    "angle_convention_note": "0 degrees up; positive counter-clockwise"
-  },
-  "angle_bin_edges_deg": [0.0, 2.0, 4.0],
-  "occupancy_time_s": [1.2, 1.0],
-  "units": [
-    {
-      "unit_id": 123,
-      "spike_counts": [4, 2],
-      "firing_rate_hz": [3.3333333333, 2.0],
-      "hd_class": 2
-    }
-  ]
-}
-```
+## Remote validation
 
-The abbreviated arrays above illustrate the shape only. A real file has 181
-edges spanning 0–360°, 180 occupancy values, and 180 counts/rates per unit.
-The generator detects the short Motive **Gated Exposure Time** pulses in the raw
-ADC stream and uses each pulse center, `(rise + fall) / 2`, as the timestamp of
-one matched tracking frame. It does not synthesize time as `frame / 120`, take
-another midpoint between exposures, or extrapolate unobserved endpoint frames.
-Frame/pulse counts must match by default. A boundary mismatch fails closed
-unless the notebook is given an explicit, session-specific first/last-frame
-policy; the applied policy and any dropped frame IDs are written into TTL QC.
-When schema-2 metadata is present, the **Info** control in the HD header exposes
-this timestamp reference together with the timebase, direction convention,
-classification thresholds, and trigger-QC values; the plot does not invent
-defaults for provenance that the file did not record.
-
-For every displayed direction bin, firing rate is `sum(counts) /
-sum(occupancy seconds)`; rates are never averaged when occupancy is available.
-A zero-occupancy group is missing data, not 0 Hz. Circular Gaussian smoothing
-is applied separately to counts and occupancy before division, and its default
-width remains 18° regardless of the displayed bin count.
-
-By default each cell uses an explicit 0-to-own-peak Hz scale. Enable **Compare
-cells** in Settings to use one shared 0-to-file-peak Hz scale. Polar curves are
-outline-only with one labelled radial Hz axis; decorative rings and area fills
-are intentionally omitted. In polar plots, 0° is at 12 o'clock and positive
-angles run counter-clockwise. Line plots unwrap the same convention onto
-−180…180° and always start at 0 Hz. HD class 1 is shown as a yellow `1`
-(exactly one of the Rayleigh or shuffle tests is significant); class 2 is a
-green `2` (both are significant). Class 0 and unavailable labels are hidden.
-
-Legacy `{clusterID: [180 rates]}` files remain readable. Because they do not
-contain occupancy, grouped legacy rates are averaged and the UI marks their
-timing/occupancy provenance as unavailable.
-
-Tuning-curve files never add units to navigation. Unit navigation continues to
-use the RF units permitted by the viewer's current navigation and pairing
-rules; a missing curve is shown explicitly for the selected RF unit.
-
-## Optional probe positions (Python/Tk)
-
-The Python/Tk viewer can display four-shank probe geometry in its unit sidebar
-and filter the unit picker spatially. For JSON names ending in `_A.json` or
-`_B.json`, it looks beside the recording data for:
-
-```text
-<data-root>/spike_position/ProbeA/positions.csv
-<data-root>/waveform/ProbeA/channels.csv
-```
-
-Use `ProbeB` for a `_B.json` document. Set `RF_MAPPING_PROBE_DATA_ROOT` to
-`<data-root>` when the JSON lives elsewhere, or choose **File > Attach Probe
-Geometry…**, click the empty probe area, or drop `positions.csv` onto it. Unit
-positions are joined to JSON units by `unit_id`; CSV row order is not used.
-
-Clicking a channel selects a centered 160 × 75 µm neighborhood. Dragging
-selects an arbitrary region, and Escape clears the spatial filter. The unit
-picker and previous/next navigation only include units inside the active
-region. In Python/Tk, discovered JSON choices in the File menu open in a new
-window, the main-area Display controls can be collapsed, the Probe canvas folds
-toward the left edge, and the HD canvas folds toward the right edge or downward
-when stacked. Folded optional views remain attached and are not redrawn. The
-Swift viewer currently has no probe-geometry panel; its HD panel can still
-collapse toward the right or downward.
-
-## Settings
-
-Open **Settings…** from the macOS application menu with `⌘,`; Python/Tk also
-exposes it under **View**.
-
-The implementations currently differ. Python/Tk uses **General**, **RF Map**,
-and **Tuning Curve** tabs. General controls visibility and automatic loading
-for tuning curves and probe geometry; RF Map stores its display defaults;
-Tuning Curve controls plot style, arrangement, displayed bins, fixed-angle
-smoothing, and per-cell or shared scaling. **Save** applies and persists the
-values, closes the dialog, and broadcasts them only when Python window pairing
-is enabled.
-
-Swift Settings contains the HD tuning controls only. Changes apply immediately
-and persist in `UserDefaults`; RF-map controls remain in each document window,
-and Swift has no probe-geometry setting. These HD preferences are shared by all
-Swift windows.
-
-Available navigation and view shortcuts appear beside their menu commands
-instead of in the plotting workspace; for example, **Navigate > Increase Time
-Resolution** uses `⇧.`. Python/Tk also provides **Help > Keyboard Shortcuts**.
-**Help > Support Documentation** opens the online project guide in Swift and
-the bundled local README in Python/Tk.
-
-## Build from source
-
-### Native macOS application
-
-The Swift package requires macOS 15 or later and the Apple development command
-line tools. Build the Apple silicon application and release archive with:
+Project code is run on `hhw9l84` with `~/.virtualenvs/rfmapping`:
 
 ```sh
-script/build_macos_app.sh
+ssh hhw9l84 'cd ~/Developer/rfmapping_gui/python && \
+  PYTHONDONTWRITEBYTECODE=1 ~/.virtualenvs/rfmapping/bin/python -m pytest -q \
+    --ignore=tests/test_rfmapping_gui_tk.py'
+
+ssh hhw9l84 'cd ~/Developer/rfmapping_gui/web && \
+  PYTHONDONTWRITEBYTECODE=1 ~/.virtualenvs/rfmapping/bin/python -m pytest -q'
+
+ssh hhw9l84 'cd ~/Developer/rfmapping_gui/web/frontend && \
+  npm ci --no-audit --no-fund && npm test && npm run build'
 ```
 
-The application is created at `dist/RF Map Viewer.app`, and the distributable
-archive is created at `dist/RF_Map_Viewer-macos-arm64.zip`.
+The remote host is Linux and has no display, so it validates the Python HDF5
+model, aggregation, release scripts, and non-GUI smoke path. A real Tk launch
+or signed Python bundle requires a Tk-enabled Apple-silicon Mac; the Python
+bundle has a macOS 14.0 deployment minimum.
 
-For development, build and test the Swift package with:
-
-```sh
-swift build
-swift test
-```
-
-### Python macOS application
-
-The macOS packaging script runs natively on Apple silicon with Python 3.14 and
-PyInstaller. It installs the pinned runtime dependencies into its build virtual
-environment. Build the application and archive with:
-
-```sh
-script/build_python_macos_app.sh
-```
-
-The archive is created at
-`dist/python/RF_Map_Viewer-python-macos-arm64.zip`. The temporary app at
-`dist/python/RF Map Viewer.app` is unregistered and removed after packaging so
-Finder does not discover the build copy as another JSON **Open With** entry.
-
-Both macOS build scripts code-sign and verify the app bundle. By default they
-use ad-hoc signing (`-`). Set `RF_MAPPING_CODESIGN_IDENTITY` or
-`CODE_SIGN_IDENTITY` to use a named identity with the hardened runtime and a
-timestamp. The scripts do not notarize the app.
-
-### Python dependencies and tests
-
-Install the pinned runtime dependencies before running
-the Python tests:
-
-```sh
-python -m pip install -r requirements-python-runtime.txt
-python -m unittest discover -s tests -p 'test_rfmapping_gui.py'
-```
-
-The Tk integration tests require a graphical desktop session:
-
-```sh
-python -m unittest discover -s tests -p 'test_rfmapping_gui_tk.py'
-```
-
-## Automated releases
-
-The workflow in [`.github/workflows/release.yml`](.github/workflows/release.yml)
-builds the Swift 2.1 and Python/Tk 1.8 releases on a GitHub-hosted Apple silicon
-macOS runner. Both executables and every bundled Mach-O dependency are
-arm64-only; no Intel, Universal, or Windows artifact is built or published.
-Release archives belong on the GitHub Release, not in the source tree.
+See the implementation READMEs for target-specific install, build, and release
+commands.

@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "reference": {
+    "component": "python_stable",
+    "version": "1.9.2",
+    "stable_series": "1.9"
+  },
+  "policy": {
+    "feature_generation_step": "minor",
+    "platform_identity_location": "tag-and-artifact-name"
+  },
+  "components": {
+    "python_stable": {
+      "release_version": "1.9.2",
+      "marketing_version": "1.9.2",
+      "package_version": "1.9.2",
+      "build": "10902",
+      "channel": "stable",
+      "feature_generation_offset": 0,
+      "edition": "Full",
+      "artifact_flavor": "full",
+      "artifact": "RF_Map_Viewer-python-1.9.2-full-macos-arm64.zip",
+      "checksum": "SHA256SUMS-python-1.9.2-full.txt",
+      "tag": "python-v1.9.2"
+    },
+    "python_freemoving": {
+      "release_version": "1.10.0-alpha.1",
+      "marketing_version": "1.10.0",
+      "prerelease": "alpha.1",
+      "package_version": "1.10.0a1",
+      "build": "110001",
+      "channel": "alpha",
+      "feature_generation_offset": 1,
+      "edition": "FreeMovingAlpha",
+      "artifact_flavor": "freemoving",
+      "artifact": "Free_Moving_RF_Viewer-python-1.10.0-alpha.1-freemoving-macos-arm64.zip",
+      "checksum": "SHA256SUMS-python-1.10.0-alpha.1-freemoving.txt",
+      "tag": "python-v1.10.0-alpha.1"
+    },
+    "swift": {
+      "release_version": "1.9.0",
+      "marketing_version": "1.9.0",
+      "build": "10900",
+      "channel": "stable",
+      "feature_generation_offset": 0,
+      "artifact": "RF_Map_Viewer-1.9.0-swift-macos-arm64.zip",
+      "tag": "swift-v1.9.0"
+    },
+    "web": {
+      "release_version": "1.9.0",
+      "package_version": "1.9.0",
+      "channel": "stable",
+      "feature_generation_offset": 0,
+      "artifact_flavor": "web",
+      "artifact": "RF_Map_Viewer-1.9.0-web.tar.gz",
+      "checksum": "SHA256SUMS-web-1.9.0.txt",
+      "tag": "web-v1.9.0"
+    }
+  }
+}

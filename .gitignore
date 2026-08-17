@@ -1,32 +1,14 @@
-# macOS and editor metadata
 .DS_Store
-._*
-.idea/
-.vscode/
-*.swp
-
-# Swift Package Manager and Xcode
-.build/
-.swiftpm/
-DerivedData/
-*.xcuserstate
-xcuserdata/
-
-# Python
 __pycache__/
-*.py[cod]
-.pytest_cache/
-.coverage
+*.pyc
 .venv/
-venv/
-
-# Packaging output
+.pytest_cache/
+*.egg-info/
 build/
-dist/
-*.spec
-packaging/windows/Output/
-*.app/
-*.dmg
-*.exe
-*.msi
-*.zip
+.build/
+DerivedData/
+python/dist/
+swift/dist/
+web/frontend/node_modules/
+web/frontend/dist/
+python/.__codex_hd_stage__/
