@@ -21,6 +21,10 @@ component tag and artifact name:
 | Swift | `1.9.0` | `swift-v1.9.0` | stable |
 | Web | `1.9.0` | `web-v1.9.0` | stable |
 
+Published downloads and checksums are available from the repository
+[Releases page](https://github.com/KaiCao2003/RF-Map-Viewer/releases). The root
+[`README.md`](../README.md#downloads) links directly to each component archive.
+
 Each active component records a `feature_generation_offset` from the Python
 stable reference. The current Swift/Web offset is `0`; a viewer verified to be
 one complete generation behind would use offset `-1` and therefore the `1.8.x`
