@@ -7,6 +7,7 @@ import h5py
 import numpy as np
 import pytest
 
+from rfmapping_fm_gui import self_test
 from rfmapping_viewer.fm_dataset import (
     aggregate_rate_hz,
     load_free_moving_rfmap,
@@ -119,3 +120,14 @@ def test_rejects_wrong_format_and_incomplete_file(tmp_path: Path) -> None:
         file.attrs["complete"] = np.uint8(0)
     with pytest.raises(ValueError, match="not marked complete"):
         load_free_moving_rfmap(path)
+
+
+def test_headless_app_self_test_exercises_the_3d_sphere_renderer(tmp_path: Path) -> None:
+    path = tmp_path / "free-moving.rfmap"
+    write_fm_rfmap(path)
+
+    result = self_test(path)
+
+    assert result["version"] == "1.10.0-alpha.2"
+    assert result["views"] == ["2D map", "3D sphere"]
+    assert result["threeDSpherePixels"] > 3000

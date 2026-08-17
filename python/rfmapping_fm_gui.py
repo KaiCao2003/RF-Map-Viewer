@@ -1257,6 +1257,15 @@ def self_test(path: str | Path) -> dict[str, object]:
         stop,
         dataset.exposure_sec,
     )
+    low, high = finite_display_range(matrix)
+    sphere = render_spherical_texture(
+        colorize_matrix(matrix, "Viridis", low, high),
+        dataset.azimuth_centers_deg,
+        dataset.elevation_centers_deg,
+        65,
+        0.0,
+        0.0,
+    )
     return {
         "format": "rfmapping_fm_hdf5_v1",
         "version": APP_RELEASE_VERSION,
@@ -1266,6 +1275,7 @@ def self_test(path: str | Path) -> dict[str, object]:
         "logicalShape": list(dataset.logical_rate_shape),
         "finiteDisplayBins": int(np.count_nonzero(np.isfinite(matrix))),
         "views": list(VIEWS),
+        "threeDSpherePixels": int(np.count_nonzero(sphere[..., 3])),
     }
 
 
