@@ -1,0 +1,38 @@
+[Unit]
+Description=RF Mapping Web App
+Documentation=file:/mnt/ssd4.1/Apps/rfmapping/current/deploy/README.md
+
+[Service]
+Type=simple
+WorkingDirectory=/mnt/ssd4.1/Apps/rfmapping/current
+EnvironmentFile=/mnt/ssd4.1/Apps/rfmapping/shared/rfmapping-web.env
+EnvironmentFile=/home/kai/.config/lab-access-gate/pi-first-name.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUNBUFFERED=1
+Environment=TMPDIR=/mnt/ssd4.1/Apps/rfmapping/tmp/runtime
+
+ExecStartPre=/usr/bin/test -x /home/kai/.virtualenvs/rfmapping/bin/python
+ExecStartPre=/usr/bin/test -r /mnt/ssd4.1/Apps/rfmapping/current/web/dist/index.html
+ExecStartPre=/usr/bin/test -d /mnt/ssd4.1/Apps/rfmapping/cache
+ExecStartPre=/usr/bin/test -d /mnt/ssd4.1/Apps/rfmapping/exports
+ExecStartPre=/usr/bin/test -w /mnt/ssd4.1/Apps/rfmapping/exports
+ExecStart=/home/kai/.virtualenvs/rfmapping/bin/python -m uvicorn rfmapping_web.app:app --host 127.0.0.1 --port 3005 --proxy-headers --forwarded-allow-ips=127.0.0.1
+
+Restart=on-failure
+RestartSec=3s
+TimeoutStartSec=60s
+TimeoutStopSec=30s
+KillSignal=SIGINT
+UMask=0027
+
+# This is a user unit so releases can restart without sudo. hhw9l84's user
+# manager cannot apply mount-namespace directives. Dataset routes remain
+# read-only; figure publication is confined to the separately configured export
+# root, existing directories, known extensions, and explicit overwrite requests.
+NoNewPrivileges=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=default.target
