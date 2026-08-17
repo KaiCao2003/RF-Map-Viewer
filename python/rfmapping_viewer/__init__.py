@@ -1,5 +1,5 @@
-"""Implementation-local support code for the free-moving RF viewer."""
+"""Implementation-local support package shared by the independent viewers."""
 
-from .fm_dataset import FreeMovingRFMap, FreeMovingUnitMap, load_free_moving_rfmap
-
-__all__ = ["FreeMovingRFMap", "FreeMovingUnitMap", "load_free_moving_rfmap"]
+# Import concrete modules explicitly. Keeping the package root empty prevents
+# the stable JSON viewer from loading the Free-Moving HDF5 stack at startup.
+__all__: list[str] = []

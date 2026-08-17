@@ -1,10 +1,31 @@
 import json
 from pathlib import Path
+import subprocess
+import sys
 from types import SimpleNamespace
 
 import rfmapping_gui as gui
 from rfmapping_viewer.hd_tuning import discover_hd_tuning_path, load_hd_tuning
 from rfmapping_viewer.rf_dataset import load_rf_maps
+
+
+def test_stable_support_modules_do_not_import_freemoving_hdf5() -> None:
+    script = """
+import importlib.abc
+import sys
+
+class BlockH5py(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path, target=None):
+        if fullname == "h5py" or fullname.startswith("h5py."):
+            raise ModuleNotFoundError("h5py is intentionally absent from the stable viewer")
+        return None
+
+sys.meta_path.insert(0, BlockH5py())
+import rfmapping_viewer.figure_export
+import rfmapping_viewer.hd_tuning
+import rfmapping_viewer.rf_dataset
+"""
+    subprocess.run([sys.executable, "-c", script], check=True)
 
 
 def _rf_payload() -> dict[str, object]:
