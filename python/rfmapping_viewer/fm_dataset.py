@@ -13,17 +13,28 @@ import json
 import math
 import os
 import stat
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Mapping
+from typing import Any
 
 import h5py
 import numpy as np
 from numpy.typing import NDArray
 
-
-FORMAT_NAME = "rfmapping_fm_hdf5_v1"
+STIMULUS_SQUARE = "Square"
+STIMULUS_BAR = "Bar"
+STIMULUS_KINDS = (STIMULUS_SQUARE, STIMULUS_BAR)
+SQUARE_FORMAT_NAME = "rfmapping_fm_hdf5_v1"
+BAR_FORMAT_NAME = "rfmapping_fm_bar_hdf5_v1"
+BAR_STIMULUS_GEOMETRY = "vertical_bar_full_source_height"
+FORMAT_NAME_BY_STIMULUS_KIND = MappingProxyType(
+    {
+        STIMULUS_SQUARE: SQUARE_FORMAT_NAME,
+        STIMULUS_BAR: BAR_FORMAT_NAME,
+    }
+)
 LOGICAL_DIMENSION_ORDER = "unit,elevation,azimuth,time"
 
 
@@ -116,6 +127,10 @@ class FreeMovingUnitMap:
 class FreeMovingRFMap:
     path: Path
     identity: FileIdentity
+    stimulus_kind: str
+    format_name: str
+    stimulus_geometry: str | None
+    bar_widths_present_deg: tuple[float, ...]
     unit_ids: NDArray[np.int64]
     elevation_centers_deg: NDArray[np.float64]
     azimuth_centers_deg: NDArray[np.float64]
@@ -172,12 +187,13 @@ class FreeMovingRFMap:
             raise RuntimeError(
                 f"Unit slice has stored shape {raw.shape}; expected {expected}"
             )
-        rate_hz = np.transpose(raw, (2, 1, 0))
+        rate_hz = np.transpose(raw, (2, 1, 0)).copy()
         if np.any(np.isinf(rate_hz)):
             raise ValueError("/rf/rate_hz contains infinite values")
         finite = np.isfinite(rate_hz)
         if np.any(rate_hz[finite] < 0):
             raise ValueError("/rf/rate_hz contains negative firing rates")
+        rate_hz[self.exposure_sec == 0.0, :] = 0.0
         rate_hz.setflags(write=False)
         return FreeMovingUnitMap(
             unit_index=unit_index,
@@ -186,7 +202,19 @@ class FreeMovingRFMap:
         )
 
 
-def load_free_moving_rfmap(path: str | Path) -> FreeMovingRFMap:
+def _expected_format_name(stimulus_kind: str) -> str:
+    try:
+        return FORMAT_NAME_BY_STIMULUS_KIND[stimulus_kind]
+    except KeyError as exc:
+        choices = ", ".join(STIMULUS_KINDS)
+        raise ValueError(f"stimulus_kind must be one of: {choices}") from exc
+
+
+def load_free_moving_rfmap(
+    path: str | Path,
+    stimulus_kind: str,
+) -> FreeMovingRFMap:
+    expected_format_name = _expected_format_name(stimulus_kind)
     source = Path(path).expanduser().resolve(strict=True)
     if source.suffix.lower() != ".rfmap":
         raise ValueError("Free-moving RF input must use the .rfmap extension")
@@ -204,9 +232,68 @@ def load_free_moving_rfmap(path: str | Path) -> FreeMovingRFMap:
             if attribute not in file.attrs:
                 raise ValueError(f"Required RF root attribute is missing: {attribute}")
         format_name = _text(file.attrs.get("format"), "root format attribute")
-        if format_name != FORMAT_NAME:
+        if format_name != expected_format_name:
+            actual_kind = next(
+                (
+                    kind
+                    for kind, known_format in FORMAT_NAME_BY_STIMULUS_KIND.items()
+                    if known_format == format_name
+                ),
+                None,
+            )
+            if actual_kind is not None:
+                raise ValueError(
+                    f"You selected {stimulus_kind}, but this is a {actual_kind} "
+                    f"RF map ({format_name}). Choose {actual_kind} before loading it."
+                )
             raise ValueError(
-                f"Unsupported RF format {format_name!r}; expected {FORMAT_NAME!r}"
+                f"Unsupported RF format {format_name!r}; selected {stimulus_kind} "
+                f"requires {expected_format_name!r}"
+            )
+
+        stimulus_geometry: str | None = None
+        bar_widths_present_deg: tuple[float, ...] = ()
+        if stimulus_kind == STIMULUS_BAR:
+            for attribute in (
+                "stimulus_geometry",
+                "bar_width_handling",
+                "bar_widths_present_deg",
+            ):
+                if attribute not in file.attrs:
+                    raise ValueError(
+                        f"Required Bar RF root attribute is missing: {attribute}"
+                    )
+            stimulus_geometry = _text(
+                file.attrs["stimulus_geometry"],
+                "root stimulus_geometry attribute",
+            )
+            if stimulus_geometry != BAR_STIMULUS_GEOMETRY:
+                raise ValueError(
+                    f"Unsupported Bar stimulus geometry {stimulus_geometry!r}; "
+                    f"expected {BAR_STIMULUS_GEOMETRY!r}"
+                )
+            bar_width_handling = _text(
+                file.attrs["bar_width_handling"],
+                "root bar_width_handling attribute",
+            )
+            if bar_width_handling != "pooled; each trial uses its recorded Square_Size":
+                raise ValueError(
+                    f"Unsupported Bar width handling {bar_width_handling!r}"
+                )
+            bar_width_values = np.asarray(
+                file.attrs["bar_widths_present_deg"], dtype=np.float64
+            ).reshape(-1)
+            if (
+                bar_width_values.size == 0
+                or not np.all(np.isfinite(bar_width_values))
+                or np.any(bar_width_values <= 0)
+                or np.unique(bar_width_values).size != bar_width_values.size
+            ):
+                raise ValueError(
+                    "root bar_widths_present_deg must contain unique positive values"
+                )
+            bar_widths_present_deg = tuple(
+                float(value) for value in np.sort(bar_width_values)
             )
         dimension_order = _text(
             file.attrs.get("logical_dimension_order"),
@@ -246,6 +333,9 @@ def load_free_moving_rfmap(path: str | Path) -> FreeMovingRFMap:
             raise ValueError(
                 "/rf/effective_trial_count finite values must be non-negative"
             )
+        effective_trials = np.array(effective_trials, copy=True)
+        effective_trials[exposure == 0.0] = 0.0
+        effective_trials.setflags(write=False)
 
         if "/rf/rate_hz" not in file:
             raise ValueError("Required RF dataset is missing: /rf/rate_hz")
@@ -306,6 +396,7 @@ def load_free_moving_rfmap(path: str | Path) -> FreeMovingRFMap:
             "motive_csv_path",
             "camera_pulse_data_path",
             "camera_pulse_timestamps_path",
+            "camera_frame_times_path",
             "trial_boundaries_path",
             "stimulus_mat_path",
             "spike_time_path",
@@ -323,6 +414,10 @@ def load_free_moving_rfmap(path: str | Path) -> FreeMovingRFMap:
     return FreeMovingRFMap(
         path=source,
         identity=identity,
+        stimulus_kind=stimulus_kind,
+        format_name=format_name,
+        stimulus_geometry=stimulus_geometry,
+        bar_widths_present_deg=bar_widths_present_deg,
         unit_ids=unit_ids,
         elevation_centers_deg=elevation,
         azimuth_centers_deg=azimuth,
@@ -366,6 +461,7 @@ def aggregate_rate_hz(
     denominator = np.sum(np.where(valid, weights, 0.0), axis=2)
     result = np.full(values.shape[:2], np.nan, dtype=np.float64)
     np.divide(numerator, denominator, out=result, where=denominator > 0)
+    result[exposure == 0.0] = 0.0
     result[exposure < minimum_exposure_sec] = np.nan
     result.setflags(write=False)
     return result
@@ -380,7 +476,9 @@ def spatial_mean_timeline_hz(
     exposure = np.asarray(exposure_sec, dtype=np.float64)
     if values.ndim != 3 or exposure.shape != values.shape[:2]:
         raise ValueError("rate_hz and exposure_sec shapes are inconsistent")
-    spatial_mask = exposure >= minimum_exposure_sec
+    spatial_mask = exposure > 0.0
+    if minimum_exposure_sec > 0.0:
+        spatial_mask &= exposure >= minimum_exposure_sec
     valid = np.isfinite(values) & spatial_mask[..., None]
     numerator = np.sum(np.where(valid, values, 0.0), axis=(0, 1))
     denominator = np.sum(valid, axis=(0, 1))
@@ -391,8 +489,14 @@ def spatial_mean_timeline_hz(
 
 
 __all__ = [
-    "FORMAT_NAME",
+    "BAR_FORMAT_NAME",
+    "BAR_STIMULUS_GEOMETRY",
+    "FORMAT_NAME_BY_STIMULUS_KIND",
     "LOGICAL_DIMENSION_ORDER",
+    "SQUARE_FORMAT_NAME",
+    "STIMULUS_BAR",
+    "STIMULUS_KINDS",
+    "STIMULUS_SQUARE",
     "FileIdentity",
     "FreeMovingRFMap",
     "FreeMovingUnitMap",
