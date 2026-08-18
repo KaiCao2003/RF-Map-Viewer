@@ -21,7 +21,7 @@ through versioned file contracts, principally the RF JSON described in
 The Python viewer is the stable feature reference at `1.9.3`. Swift and Web
 implement the same `1.9` feature generation and are versioned `1.9.0`.
 The Free-Moving Python viewer begins the next generation as
-**`1.10.0-alpha.2`**. Component identity belongs in release tags and artifact
+**`1.10.0-alpha.3`**. Component identity belongs in release tags and artifact
 names, not in a fourth version component. See
 [`release/README.md`](release/README.md) for the canonical mapping and tag
 policy.
@@ -34,7 +34,7 @@ advance without inventing a platform-specific fourth version number.
 | Viewer | Channel | Download | Release notes |
 | --- | --- | --- | --- |
 | Python RF Map Viewer `1.9.3` | Stable | [macOS Apple-silicon ZIP](https://github.com/KaiCao2003/RF-Map-Viewer/releases/download/python-v1.9.3/RF_Map_Viewer-python-1.9.3-full-macos-arm64.zip) | [`python-v1.9.3`](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/python-v1.9.3) |
-| Python Free-Moving `1.10.0-alpha.2` | Alpha preview | [macOS Apple-silicon ZIP](https://github.com/KaiCao2003/RF-Map-Viewer/releases/download/python-v1.10.0-alpha.2/Free_Moving_RF_Viewer-python-1.10.0-alpha.2-freemoving-macos-arm64.zip) | [`python-v1.10.0-alpha.2`](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/python-v1.10.0-alpha.2) |
+| Python Free-Moving `1.10.0-alpha.3` | Alpha preview | [macOS Apple-silicon ZIP](https://github.com/KaiCao2003/RF-Map-Viewer/releases/download/python-v1.10.0-alpha.3/Free_Moving_RF_Viewer-python-1.10.0-alpha.3-freemoving-macos-arm64.zip) | [`python-v1.10.0-alpha.3`](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/python-v1.10.0-alpha.3) |
 | Swift `1.9.0` | Stable | [macOS Apple-silicon ZIP](https://github.com/KaiCao2003/RF-Map-Viewer/releases/download/swift-v1.9.0/RF_Map_Viewer-1.9.0-swift-macos-arm64.zip) | [`swift-v1.9.0`](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/swift-v1.9.0) |
 | Web `1.9.0` | Stable | [deployment source archive](https://github.com/KaiCao2003/RF-Map-Viewer/releases/download/web-v1.9.0/RF_Map_Viewer-1.9.0-web.tar.gz) | [`web-v1.9.0`](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/web-v1.9.0) |
 
@@ -44,14 +44,19 @@ published version on the [Releases page](https://github.com/KaiCao2003/RF-Map-Vi
 
 ## Python free-moving alpha
 
-Python **1.10.0-alpha.2** is the **freemoving rf viewer alpha**. It accepts
-only HDF5 `.rfmap` files with `format=rfmapping_fm_hdf5_v1`, displays the
-head-centric elevation/azimuth firing-rate result in both a 2D equirectangular
-map and an interactive 3D sphere, and exposes exposure and calibration QA.
-Drag the sphere to rotate the viewing direction or double-click to reset it.
-Legacy JSON, tuning-curve, head-direction, and probe companions are
-intentionally outside this alpha app. The stable Python viewer remains
-available separately at `1.9.3`; Swift and Web remain on the `1.9` generation.
+Python **1.10.0-alpha.3** is the **freemoving rf viewer alpha**. Before opening
+a file, the user explicitly chooses **Square** or **Bar**. The viewer accepts
+the matching HDF5 contract (`rfmapping_fm_hdf5_v1` for Square or
+`rfmapping_fm_bar_hdf5_v1` for the latest full-height vertical Bar analysis)
+and rejects a mismatched choice. Both formats display the head-centric
+elevation/azimuth firing-rate result in a 2D equirectangular map and an
+interactive 3D sphere, with exposure and calibration QA. Bar files also show
+the recorded widths pooled by the analysis. A singleton-elevation 2D map uses
+the legacy `30:7` visual footprint; the physical 3D sphere is unchanged. Drag
+the sphere to rotate the viewing direction or double-click to reset it. Legacy
+JSON, tuning-curve, head-direction, and probe companions are intentionally
+outside this alpha app. The stable Python viewer remains available separately
+at `1.9.3`; Swift and Web remain on the `1.9` generation.
 
 ## Legacy file compatibility
 

@@ -40,7 +40,8 @@ CHECKSUM_PATH="$DIST_DIR/$CHECKSUM_NAME"
 INFO_PLIST="$APP_BUNDLE/Contents/Info.plist"
 DATA_SOURCE="$ROOT_DIR/data"
 SUPPORT_DOCUMENTATION="$ROOT_DIR/README.md"
-SMOKE_RF="$WORK_DIR/release_smoke_fm.rfmap"
+SMOKE_SQUARE_RF="$WORK_DIR/release_smoke_fm_square.rfmap"
+SMOKE_BAR_RF="$WORK_DIR/release_smoke_fm_bar.rfmap"
 SMOKE_FIXTURE_GENERATOR="$SCRIPT_DIR/create_fm_smoke_fixture.py"
 PYINSTALLER_HOOKS="$ROOT_DIR/packaging/pyinstaller-hooks"
 METADATA_AUDITOR="$SCRIPT_DIR/verify_python_release_metadata.py"
@@ -403,8 +404,12 @@ fi
 verify_arm64_macho_files
 
 # These smoke tests run the frozen executable, not the build interpreter.
-"$BUILD_VENV/bin/python" "$SMOKE_FIXTURE_GENERATOR" "$SMOKE_RF"
-"$APP_BINARY" --self-test "$SMOKE_RF"
+"$BUILD_VENV/bin/python" "$SMOKE_FIXTURE_GENERATOR" \
+  --stimulus square "$SMOKE_SQUARE_RF"
+"$BUILD_VENV/bin/python" "$SMOKE_FIXTURE_GENERATOR" \
+  --stimulus bar "$SMOKE_BAR_RF"
+"$APP_BINARY" --stimulus square --self-test "$SMOKE_SQUARE_RF"
+"$APP_BINARY" --stimulus bar --self-test "$SMOKE_BAR_RF"
 "$APP_BINARY" --self-test-dnd
 
 clean_bundle_metadata "$APP_BUNDLE"

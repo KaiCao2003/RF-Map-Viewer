@@ -39,7 +39,7 @@ class ComponentVersionTests(unittest.TestCase):
         verifier = ROOT / "release/verify_versions.py"
         for tag in (
             "python-v1.9.3",
-            "python-v1.10.0-alpha.2",
+            "python-v1.10.0-alpha.3",
             "swift-v1.9.0",
             "web-v1.9.0",
         ):
