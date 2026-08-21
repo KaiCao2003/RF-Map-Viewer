@@ -30,6 +30,12 @@ def base_payload(*, with_presentations: bool = True) -> dict:
     return payload
 
 
+class AppIdentityTests(unittest.TestCase):
+    def test_display_version_omits_internal_edition(self) -> None:
+        self.assertEqual(gui.APP_DISPLAY_VERSION, gui.APP_VERSION)
+        self.assertNotIn(gui.APP_EDITION, gui.APP_DISPLAY_VERSION)
+
+
 class RFMappingRateTests(unittest.TestCase):
     def load(self, payload: dict) -> gui.RFMappingData:
         directory, path = write_payload(payload)

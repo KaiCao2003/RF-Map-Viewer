@@ -56,13 +56,13 @@ pass_test "stable release helpers pass syntax validation"
   [[ "$RF_MAPPING_APP_NAME" == "RF Map Viewer" ]]
   [[ "$RF_MAPPING_EXECUTABLE_NAME" == "RF Map Viewer" ]]
   [[ "$RF_MAPPING_BUNDLE_ID" == "org.local.rfmapping.viewer" ]]
-  [[ "$RF_MAPPING_APP_VERSION" == "1.9.2" ]]
-  [[ "$RF_MAPPING_PACKAGE_VERSION" == "1.9.2" ]]
-  [[ "$RF_MAPPING_APP_BUILD" == "10902" ]]
+  [[ "$RF_MAPPING_APP_VERSION" == "1.9.3" ]]
+  [[ "$RF_MAPPING_PACKAGE_VERSION" == "1.9.3" ]]
+  [[ "$RF_MAPPING_APP_BUILD" == "10903" ]]
   [[ "$RF_MAPPING_RELEASE_EDITION" == "Full" ]]
   [[ "$RF_MAPPING_RELEASE_FLAVOR" == "full" ]]
 ) || fail_test "canonical stable Python metadata is incomplete or unexpected"
-pass_test "canonical metadata identifies Python stable 1.9.2 build 10902"
+pass_test "canonical metadata identifies Python stable 1.9.3 build 10903"
 
 for marker in \
   'source "$SCRIPT_DIR/python_stable_macos_release.env"' \
@@ -78,13 +78,13 @@ pass_test "stable builder targets the full viewer and retains its file contracts
 
 # shellcheck source=../build_python_stable_macos_app.sh
 source "$BUILD_SCRIPT"
-[[ "$ARCHIVE_NAME" == "RF_Map_Viewer-python-1.9.2-full-macos-arm64.zip" ]] \
+[[ "$ARCHIVE_NAME" == "RF_Map_Viewer-python-1.9.3-full-macos-arm64.zip" ]] \
   || fail_test "stable archive name does not encode component, version, and flavor"
-[[ "$CHECKSUM_NAME" == "SHA256SUMS-python-1.9.2-full.txt" ]] \
+[[ "$CHECKSUM_NAME" == "SHA256SUMS-python-1.9.3-full.txt" ]] \
   || fail_test "stable checksum name does not encode component, version, and flavor"
 pass_test "stable artifacts are independently named from the Free-Moving alpha"
 
-python3 "$METADATA_AUDITOR" "$ROOT_DIR" 1.9.2 Full >/dev/null \
+python3 "$METADATA_AUDITOR" "$ROOT_DIR" 1.9.3 Full >/dev/null \
   || fail_test "stable metadata auditor rejected the repository source"
 FIXTURE_ROOT="$(/usr/bin/mktemp -d /tmp/rfmapping-stable-release-test.XXXXXX)"
 /bin/mkdir -p "$FIXTURE_ROOT/source"
@@ -94,7 +94,7 @@ printf '%s\n' \
   'APP_EDITION = "FreeMovingAlpha"' \
   'DND_SMOKE_ARGUMENT = "--self-test-dnd"' \
   >"$FIXTURE_ROOT/source/rfmapping_gui.py"
-if python3 "$METADATA_AUDITOR" "$FIXTURE_ROOT/source" 1.9.2 Full >/dev/null 2>&1; then
+if python3 "$METADATA_AUDITOR" "$FIXTURE_ROOT/source" 1.9.3 Full >/dev/null 2>&1; then
   fail_test "stable metadata auditor accepted Free-Moving alpha identity"
 fi
 pass_test "stable metadata auditor rejects cross-edition source"
