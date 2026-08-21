@@ -47,6 +47,47 @@ def test_load_lookup_and_half_open_sum(tmp_path: Path) -> None:
     assert not maps[0].spike_counts.flags.writeable
 
 
+def test_accepts_scalar_positions_for_singleton_spatial_axes(
+    tmp_path: Path,
+) -> None:
+    vertical = load_rf_maps(_write_dataset(tmp_path, yPositions=0))
+    np.testing.assert_array_equal(vertical[0].y_positions, [0.0])
+
+    horizontal = load_rf_maps(
+        _write_dataset(
+            tmp_path,
+            unitsSpikeCounts=[
+                [[[1, 2]], [[3, 4]]],
+                [[[5, 6]], [[7, 8]]],
+            ],
+            unitsSpikeCountsSize=[2, 2, 1, 2],
+            xPositions=0,
+            yPositions=[-10, 10],
+            stimulusPresentationCounts=[[2], [4]],
+        )
+    )
+    np.testing.assert_array_equal(horizontal[0].x_positions, [0.0])
+    assert horizontal[0].shape == (2, 1, 2)
+
+
+def test_rejects_scalar_position_for_non_singleton_spatial_axis(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(
+        ValueError, match="xPositions must be a one-dimensional array"
+    ):
+        load_rf_maps(_write_dataset(tmp_path, xPositions=0))
+
+
+@pytest.mark.parametrize("value", [True, float("nan"), float("inf")])
+def test_rejects_invalid_scalar_singleton_position(
+    tmp_path: Path,
+    value: object,
+) -> None:
+    with pytest.raises(ValueError, match="yPositions"):
+        load_rf_maps(_write_dataset(tmp_path, yPositions=value))
+
+
 def test_zero_spike_bin_count_uses_native_grid_and_half_open_window(
     tmp_path: Path,
 ) -> None:
