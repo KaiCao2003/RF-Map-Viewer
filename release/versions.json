@@ -2,7 +2,7 @@
   "schema_version": 1,
   "reference": {
     "component": "python_stable",
-    "version": "1.9.2",
+    "version": "1.9.3",
     "stable_series": "1.9"
   },
   "policy": {
@@ -11,17 +11,17 @@
   },
   "components": {
     "python_stable": {
-      "release_version": "1.9.2",
-      "marketing_version": "1.9.2",
-      "package_version": "1.9.2",
-      "build": "10902",
+      "release_version": "1.9.3",
+      "marketing_version": "1.9.3",
+      "package_version": "1.9.3",
+      "build": "10903",
       "channel": "stable",
       "feature_generation_offset": 0,
       "edition": "Full",
       "artifact_flavor": "full",
-      "artifact": "RF_Map_Viewer-python-1.9.2-full-macos-arm64.zip",
-      "checksum": "SHA256SUMS-python-1.9.2-full.txt",
-      "tag": "python-v1.9.2"
+      "artifact": "RF_Map_Viewer-python-1.9.3-full-macos-arm64.zip",
+      "checksum": "SHA256SUMS-python-1.9.3-full.txt",
+      "tag": "python-v1.9.3"
     },
     "python_freemoving": {
       "release_version": "1.10.0-alpha.2",

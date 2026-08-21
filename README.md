@@ -18,8 +18,8 @@ through versioned file contracts, principally the RF JSON described in
 
 ## Component versions
 
-The full Python viewer is the stable feature reference at `1.9.2`. Swift and
-Web implement the same `1.9` feature generation and are versioned `1.9.0`.
+The Python viewer is the stable feature reference at `1.9.3`. Swift and Web
+implement the same `1.9` feature generation and are versioned `1.9.0`.
 The Free-Moving Python viewer begins the next generation as
 **`1.10.0-alpha.2`**. Component identity belongs in release tags and artifact
 names, not in a fourth version component. See
@@ -33,7 +33,7 @@ advance without inventing a platform-specific fourth version number.
 
 | Viewer | Channel | Download | Release notes |
 | --- | --- | --- | --- |
-| Python full viewer `1.9.2` | Stable | [macOS Apple-silicon ZIP](https://github.com/KaiCao2003/RF-Map-Viewer/releases/download/python-v1.9.2/RF_Map_Viewer-python-1.9.2-full-macos-arm64.zip) | [`python-v1.9.2`](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/python-v1.9.2) |
+| Python RF Map Viewer `1.9.3` | Stable | [macOS Apple-silicon ZIP](https://github.com/KaiCao2003/RF-Map-Viewer/releases/download/python-v1.9.3/RF_Map_Viewer-python-1.9.3-full-macos-arm64.zip) | [`python-v1.9.3`](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/python-v1.9.3) |
 | Python Free-Moving `1.10.0-alpha.2` | Alpha preview | [macOS Apple-silicon ZIP](https://github.com/KaiCao2003/RF-Map-Viewer/releases/download/python-v1.10.0-alpha.2/Free_Moving_RF_Viewer-python-1.10.0-alpha.2-freemoving-macos-arm64.zip) | [`python-v1.10.0-alpha.2`](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/python-v1.10.0-alpha.2) |
 | Swift `1.9.0` | Stable | [macOS Apple-silicon ZIP](https://github.com/KaiCao2003/RF-Map-Viewer/releases/download/swift-v1.9.0/RF_Map_Viewer-1.9.0-swift-macos-arm64.zip) | [`swift-v1.9.0`](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/swift-v1.9.0) |
 | Web `1.9.0` | Stable | [deployment source archive](https://github.com/KaiCao2003/RF-Map-Viewer/releases/download/web-v1.9.0/RF_Map_Viewer-1.9.0-web.tar.gz) | [`web-v1.9.0`](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/web-v1.9.0) |
@@ -51,7 +51,7 @@ map and an interactive 3D sphere, and exposes exposure and calibration QA.
 Drag the sphere to rotate the viewing direction or double-click to reset it.
 Legacy JSON, tuning-curve, head-direction, and probe companions are
 intentionally outside this alpha app. The stable Python viewer remains
-available separately at `1.9.2`; Swift and Web remain on the `1.9` generation.
+available separately at `1.9.3`; Swift and Web remain on the `1.9` generation.
 
 ## Legacy file compatibility
 

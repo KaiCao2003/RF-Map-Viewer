@@ -2,24 +2,29 @@
 
 This directory contains two separately versioned applications:
 
-- `rfmapping_gui.py`: the full stable RF Map Viewer `1.9.2`;
+- `rfmapping_gui.py`: the stable RF Map Viewer `1.9.3`;
 - `rfmapping_fm_gui.py`: the Free-Moving RF Viewer `1.10.0-alpha.2`.
 
 They have distinct app names, bundle identifiers, release artifacts, and tags,
 so the alpha can be installed and released without replacing the stable app.
 
-## Stable full viewer 1.9.2
+## Stable viewer 1.9.3
 
 The stable viewer opens the established RF JSON/`.rfmap` contract and its
-tuning-curve and probe companions. Run it from source with:
+tuning-curve and probe companions.
+
+Version 1.9.3 accepts MATLAB `jsonencode` numeric scalars as one-element
+`xPositions` or `yPositions` arrays when the declared spatial axis size is
+one. Multi-position axes remain strictly validated as arrays.
+
+Run it from source with:
 
 ```sh
 ~/.virtualenvs/rfmapping/bin/python rfmapping_gui.py /path/to/result.rfmap
 ```
 
 Its macOS identity is `RF Map Viewer.app`, bundle ID
-`org.local.rfmapping.viewer`, version/build `1.9.2` / `10902`, and edition
-`Full`. Build its independent release archive with:
+`org.local.rfmapping.viewer`, and version/build `1.9.3` / `10903`. Build it with:
 
 ```sh
 script/build_python_stable_macos_app.sh

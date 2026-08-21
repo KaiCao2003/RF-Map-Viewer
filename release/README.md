@@ -16,7 +16,7 @@ component tag and artifact name:
 
 | Component | Release | Tag | Channel |
 | --- | --- | --- | --- |
-| Python stable | `1.9.2` | `python-v1.9.2` | stable |
+| Python stable | `1.9.3` | `python-v1.9.3` | stable |
 | Python Free-Moving | `1.10.0-alpha.2` | `python-v1.10.0-alpha.2` | alpha |
 | Swift | `1.9.0` | `swift-v1.9.0` | stable |
 | Web | `1.9.0` | `web-v1.9.0` | stable |

@@ -65,6 +65,23 @@ def _flat_list(value: Any, label: str) -> list[Any]:
     return value
 
 
+def _spatial_axis_values(
+    value: Any,
+    label: str,
+    expected_length: int,
+) -> list[Any]:
+    """Normalize MATLAB's scalar encoding for a singleton spatial axis."""
+
+    if not isinstance(value, list):
+        if (
+            expected_length == 1
+            and isinstance(value, Real)
+            and not isinstance(value, bool)
+        ):
+            return [value]
+    return _flat_list(value, label)
+
+
 def _counts_are_numeric(value: Any) -> bool:
     if isinstance(value, list):
         return all(_counts_are_numeric(child) for child in value)
@@ -377,14 +394,14 @@ def load_rf_maps(path: str | Path) -> RFMapList:
     x_positions = _readonly_array(
         [
             _number(value, "xPositions value")
-            for value in _flat_list(raw["xPositions"], "xPositions")
+            for value in _spatial_axis_values(raw["xPositions"], "xPositions", n_x)
         ],
         dtype=float,
     )
     y_positions = _readonly_array(
         [
             _number(value, "yPositions value")
-            for value in _flat_list(raw["yPositions"], "yPositions")
+            for value in _spatial_axis_values(raw["yPositions"], "yPositions", n_y)
         ],
         dtype=float,
     )
