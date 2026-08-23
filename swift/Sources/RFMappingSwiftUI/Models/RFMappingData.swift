@@ -1,7 +1,7 @@
 import CryptoKit
 import Foundation
 
-private enum PresentationCountsPayload {
+private enum OccupancyTimePayload {
     case matrix([[Double]])
     case vector([Double])
     case scalar(Double)
@@ -29,7 +29,12 @@ private struct RFMappingPayload: Decodable {
     let xPositions: [Double]
     let yPositions: [Double]
     let timeBinEdges: [Double]
-    let stimulusPresentationCounts: PresentationCountsPayload?
+    let occupancyTimeSec: OccupancyTimePayload
+    let occupancyTimeSecSize: [Int]
+    let responseUnits: String
+    let responseNormalization: String
+    let spikeCountDefinition: String
+    let occupancyTimeDefinition: String
     let metadata: [String: RFMapJSONValue]
 
     private enum CodingKeys: String, CodingKey {
@@ -39,14 +44,45 @@ private struct RFMappingPayload: Decodable {
         case xPositions
         case yPositions
         case timeBinEdges
-        case stimulusPresentationCounts
+        case occupancyTimeSec
+        case occupancyTimeSecSize
+        case responseUnits
+        case responseNormalization
+        case spikeCountDefinition
+        case occupancyTimeDefinition
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        let requiredKeys: [(CodingKeys, String)] = [
+            (.unitsSpikeCounts, "unitsSpikeCounts"),
+            (.unitsSpikeCountsSize, "unitsSpikeCountsSize"),
+            (.unitPool, "unitPool"),
+            (.xPositions, "xPositions"),
+            (.yPositions, "yPositions"),
+            (.timeBinEdges, "timeBinEdges"),
+            (.occupancyTimeSec, "occupancyTimeSec"),
+            (.occupancyTimeSecSize, "occupancyTimeSecSize"),
+            (.responseUnits, "responseUnits"),
+            (.responseNormalization, "responseNormalization"),
+            (.spikeCountDefinition, "spikeCountDefinition"),
+            (.occupancyTimeDefinition, "occupancyTimeDefinition"),
+        ]
+        let missingKeys = requiredKeys.compactMap { entry in
+            container.contains(entry.0) ? nil : entry.1
+        }
+        guard missingKeys.isEmpty else {
+            throw RFMappingError.invalidData(
+                "Unsupported old RF map; missing current schema keys: "
+                    + missingKeys.joined(separator: ", ")
+            )
+        }
         unitsSpikeCounts = try container.decode([[[[Double]]]].self, forKey: .unitsSpikeCounts)
         unitsSpikeCountsSize = try container.decode([Int].self, forKey: .unitsSpikeCountsSize)
-        unitPool = try container.decode([Int].self, forKey: .unitPool)
+        unitPool = try Self.decodeUnitPool(
+            from: container,
+            declaredSize: unitsSpikeCountsSize.first
+        )
         xPositions = try Self.decodeSpatialAxis(
             from: container,
             forKey: .xPositions,
@@ -64,20 +100,12 @@ private struct RFMappingPayload: Decodable {
             label: "yPositions"
         )
         timeBinEdges = try container.decode([Double].self, forKey: .timeBinEdges)
-
-        if !container.contains(.stimulusPresentationCounts) {
-            stimulusPresentationCounts = nil
-        } else if try container.decodeNil(forKey: .stimulusPresentationCounts) {
-            stimulusPresentationCounts = nil
-        } else if let matrix = try? container.decode([[Double]].self, forKey: .stimulusPresentationCounts) {
-            stimulusPresentationCounts = .matrix(matrix)
-        } else if let vector = try? container.decode([Double].self, forKey: .stimulusPresentationCounts) {
-            stimulusPresentationCounts = .vector(vector)
-        } else if let scalar = try? container.decode(Double.self, forKey: .stimulusPresentationCounts) {
-            stimulusPresentationCounts = .scalar(scalar)
-        } else {
-            throw RFMappingError.invalidData("stimulusPresentationCounts must be a y-by-x numeric array.")
-        }
+        occupancyTimeSec = try Self.decodeOccupancyTime(from: container)
+        occupancyTimeSecSize = try container.decode([Int].self, forKey: .occupancyTimeSecSize)
+        responseUnits = try container.decode(String.self, forKey: .responseUnits)
+        responseNormalization = try container.decode(String.self, forKey: .responseNormalization)
+        spikeCountDefinition = try container.decode(String.self, forKey: .spikeCountDefinition)
+        occupancyTimeDefinition = try container.decode(String.self, forKey: .occupancyTimeDefinition)
 
         let arbitraryContainer = try decoder.container(
             keyedBy: RFMappingArbitraryCodingKey.self
@@ -91,6 +119,34 @@ private struct RFMappingPayload: Decodable {
             )
         }
         metadata = decodedMetadata
+    }
+
+    private static func decodeOccupancyTime(
+        from container: KeyedDecodingContainer<CodingKeys>
+    ) throws -> OccupancyTimePayload {
+        guard container.contains(.occupancyTimeSec) else {
+            throw RFMappingError.invalidData(
+                "occupancyTimeSec is required by the current RF map schema."
+            )
+        }
+        let isNull = try container.decodeNil(forKey: .occupancyTimeSec)
+        guard !isNull else {
+            throw RFMappingError.invalidData(
+                "occupancyTimeSec cannot be null in the current RF map schema."
+            )
+        }
+        if let matrix = try? container.decode([[Double]].self, forKey: .occupancyTimeSec) {
+            return .matrix(matrix)
+        }
+        if let vector = try? container.decode([Double].self, forKey: .occupancyTimeSec) {
+            return .vector(vector)
+        }
+        if let scalar = try? container.decode(Double.self, forKey: .occupancyTimeSec) {
+            return .scalar(scalar)
+        }
+        throw RFMappingError.invalidData(
+            "occupancyTimeSec must be a y-by-x numeric array."
+        )
     }
 
     private static func decodeSpatialAxis(
@@ -114,12 +170,45 @@ private struct RFMappingPayload: Decodable {
             "\(label) must be a numeric array, or a numeric scalar for a declared singleton spatial dimension."
         )
     }
+
+    private static func decodeUnitPool(
+        from container: KeyedDecodingContainer<CodingKeys>,
+        declaredSize: Int?
+    ) throws -> [Int] {
+        if let values = try? container.decode([Int].self, forKey: .unitPool) {
+            return values
+        }
+        if let scalar = try? container.decode(Int.self, forKey: .unitPool) {
+            guard declaredSize == 1 else {
+                throw RFMappingError.invalidData(
+                    "A scalar unitPool value is valid only when the declared unit dimension is 1."
+                )
+            }
+            return [scalar]
+        }
+        throw RFMappingError.invalidData(
+            "unitPool must be an integer array, or an integer scalar for a declared singleton unit dimension."
+        )
+    }
+}
+
+struct RFSpatialObservations: Sendable {
+    let count: Double
+    let occupancyTimeSeconds: Double
+    let sourcePixelCount: Int
 }
 
 /// Instances are constructed completely on one worker and then transferred to
 /// the main actor. Mutable derived caches remain main-actor confined by the
 /// store; no instance is read concurrently while decoding.
 final class RFMappingData: @unchecked Sendable {
+    static let expectedResponseUnits = "spike_count"
+    static let expectedResponseNormalization = "none"
+    static let expectedSpikeCountDefinition =
+        "each_qualifying_trial_contributes_once_per_final_spatial_bin"
+    static let expectedOccupancyTimeDefinition =
+        "sum_of_qualifying_trial_durations_per_final_spatial_bin"
+
     /// Prefix subtraction is lossless only while non-negative integer counts
     /// stay within Double's exact-integer range. Other cells retain the
     /// original compensated slice summation path.
@@ -144,7 +233,11 @@ final class RFMappingData: @unchecked Sendable {
     let xPositions: [Double]
     let yPositions: [Double]
     let timeBinEdges: [Double]
-    let presentationCounts: [[Double]]?
+    let occupancyTimeSeconds: [[Double]]
+    let responseUnits: String
+    let responseNormalization: String
+    let spikeCountDefinition: String
+    let occupancyTimeDefinition: String
     /// Per-unit object model in the source `unitPool` order.
     let rfMaps: RFMapList
     /// All non-structural top-level JSON fields.
@@ -219,8 +312,8 @@ final class RFMappingData: @unchecked Sendable {
                 "unitPool length does not match the decoded unit count."
             )
         }
-        let normalizedPresentationCounts = try Self.normalizePresentationCounts(
-            payload.stimulusPresentationCounts,
+        let normalizedOccupancyTime = try Self.normalizeOccupancyTime(
+            payload.occupancyTimeSec,
             nY: nY,
             nX: nX
         )
@@ -234,7 +327,7 @@ final class RFMappingData: @unchecked Sendable {
                 xPositions: payload.xPositions,
                 yPositions: payload.yPositions,
                 timeBinEdgesSeconds: payload.timeBinEdges,
-                presentationCounts: normalizedPresentationCounts,
+                occupancyTimeSeconds: normalizedOccupancyTime,
                 metadata: sourceMetadata,
                 sourceURL: url
             )
@@ -244,19 +337,15 @@ final class RFMappingData: @unchecked Sendable {
         xPositions = payload.xPositions
         yPositions = payload.yPositions
         timeBinEdges = payload.timeBinEdges
-        presentationCounts = normalizedPresentationCounts
+        occupancyTimeSeconds = normalizedOccupancyTime
+        responseUnits = payload.responseUnits
+        responseNormalization = payload.responseNormalization
+        spikeCountDefinition = payload.spikeCountDefinition
+        occupancyTimeDefinition = payload.occupancyTimeDefinition
         rfMaps = try RFMapList(perUnitMaps)
         metadata = sourceMetadata
 
-        try validate()
-    }
-
-    var hasPresentationCounts: Bool {
-        presentationCounts != nil
-    }
-
-    func supports(_ valueMode: ResponseValueMode) -> Bool {
-        !valueMode.requiresPresentationCounts || presentationCounts != nil
+        try validate(occupancyTimeSecSize: payload.occupancyTimeSecSize)
     }
 
     func displayYIndices(flipY: Bool) -> [Int] {
@@ -309,6 +398,7 @@ final class RFMappingData: @unchecked Sendable {
         var maxTotal = 0.0
         var maxPeak = 0.0
         var maxBinCount = 0.0
+        var maxFiringRate: Double?
         var totalSpikes = 0.0
         var bestY = 0
         var bestX = 0
@@ -351,10 +441,15 @@ final class RFMappingData: @unchecked Sendable {
                     binTotals[binIndex] += count
                     maxBinCount = max(maxBinCount, count)
                 }
-                if cellTotal > maxTotal {
-                    maxTotal = cellTotal
-                    bestY = yIndex
-                    bestX = xIndex
+                maxTotal = max(maxTotal, cellTotal)
+                let occupancy = occupancyTimeSeconds[yIndex][xIndex]
+                if occupancy > 0 {
+                    let firingRate = cellTotal / occupancy
+                    if maxFiringRate == nil || firingRate > (maxFiringRate ?? -.infinity) {
+                        maxFiringRate = firingRate
+                        bestY = yIndex
+                        bestX = xIndex
+                    }
                 }
                 maxPeak = max(maxPeak, cellPeak)
                 totalSpikes += cellTotal
@@ -383,6 +478,7 @@ final class RFMappingData: @unchecked Sendable {
             maxTotal: maxTotal,
             maxPeak: maxPeak,
             maxBinCount: maxBinCount,
+            maxFiringRate: maxFiringRate,
             totalSpikes: totalSpikes,
             bestY: bestY,
             bestX: bestX
@@ -455,21 +551,13 @@ final class RFMappingData: @unchecked Sendable {
             start: low,
             end: high
         )
-        if valueMode == .spikeCount {
-            return count
-        }
-        guard let presentationCounts else {
-            throw RFMappingError.presentationCountsRequired(valueMode)
-        }
-        let presentations = presentationCounts[yIndex][xIndex]
-        guard presentations > 0 else { return nil }
+        let occupancy = occupancyTimeSeconds[yIndex][xIndex]
+        guard occupancy > 0 else { return nil }
         switch valueMode {
         case .spikeCount:
             return count
-        case .spikesPerPresentation:
-            return count / presentations
         case .meanFiringRate:
-            return count / (presentations * timeSpanSeconds(start: low, end: high))
+            return count / occupancy
         }
     }
 
@@ -481,10 +569,6 @@ final class RFMappingData: @unchecked Sendable {
     ) throws -> OptionalMatrix {
         let low = max(0, min(nBins - 1, min(start, end)))
         let high = max(0, min(nBins - 1, max(start, end)))
-        if valueMode != .spikeCount, presentationCounts == nil {
-            throw RFMappingError.presentationCountsRequired(valueMode)
-        }
-        let duration = timeSpanSeconds(start: low, end: high)
         let prefix = prefixValues(for: unitIndex)
         let stride = nBins + 1
         let unit = rfMaps[unitIndex].spikeCounts
@@ -498,14 +582,52 @@ final class RFMappingData: @unchecked Sendable {
                     high: high,
                     hist: unit[yIndex][xIndex]
                 )
-                if valueMode == .spikeCount { return count }
-                guard let presentationCounts else { return nil }
-                let presentations = presentationCounts[yIndex][xIndex]
-                guard presentations > 0 else { return nil }
-                let divisor = presentations * (valueMode == .meanFiringRate ? duration : 1.0)
-                return count / divisor
+                let occupancy = occupancyTimeSeconds[yIndex][xIndex]
+                guard occupancy > 0 else { return nil }
+                switch valueMode {
+                case .spikeCount:
+                    return count
+                case .meanFiringRate:
+                    return count / occupancy
+                }
             }
         }
+    }
+
+    func spatialObservations(
+        unitIndex: Int,
+        yGroup: AxisGroup,
+        xGroup: AxisGroup,
+        start: Int,
+        end: Int
+    ) -> RFSpatialObservations {
+        let yStart = max(0, min(nY - 1, min(yGroup.start, yGroup.end)))
+        let yEnd = max(0, min(nY - 1, max(yGroup.start, yGroup.end)))
+        let xStart = max(0, min(nX - 1, min(xGroup.start, xGroup.end)))
+        let xEnd = max(0, min(nX - 1, max(xGroup.start, xGroup.end)))
+        var counts: [Double] = []
+        var occupancies: [Double] = []
+        counts.reserveCapacity((yEnd - yStart + 1) * (xEnd - xStart + 1))
+        occupancies.reserveCapacity(counts.capacity)
+        for yIndex in yStart...yEnd {
+            for xIndex in xStart...xEnd {
+                let occupancy = occupancyTimeSeconds[yIndex][xIndex]
+                guard occupancy > 0 else { continue }
+                counts.append(rangeCount(
+                    unitIndex: unitIndex,
+                    yIndex: yIndex,
+                    xIndex: xIndex,
+                    start: start,
+                    end: end
+                ))
+                occupancies.append(occupancy)
+            }
+        }
+        return RFSpatialObservations(
+            count: compensatedSum(counts),
+            occupancyTimeSeconds: compensatedSum(occupancies),
+            sourcePixelCount: counts.count
+        )
     }
 
     private func prefixRangeCount(
@@ -568,12 +690,11 @@ final class RFMappingData: @unchecked Sendable {
         return prefix
     }
 
-    private static func normalizePresentationCounts(
-        _ payload: PresentationCountsPayload?,
+    private static func normalizeOccupancyTime(
+        _ payload: OccupancyTimePayload,
         nY: Int,
         nX: Int
-    ) throws -> [[Double]]? {
-        guard let payload else { return nil }
+    ) throws -> [[Double]] {
         switch payload {
         case .matrix(let matrix):
             return matrix
@@ -584,16 +705,20 @@ final class RFMappingData: @unchecked Sendable {
             if nX == 1, vector.count == nY {
                 return vector.map { [$0] }
             }
-            throw RFMappingError.invalidData("stimulusPresentationCounts singleton dimensions do not match the y-by-x shape.")
+            throw RFMappingError.invalidData(
+                "occupancyTimeSec singleton dimensions do not match the y-by-x shape."
+            )
         case .scalar(let value):
             guard nY == 1, nX == 1 else {
-                throw RFMappingError.invalidData("A scalar stimulusPresentationCounts value is valid only for a 1-by-1 map.")
+                throw RFMappingError.invalidData(
+                    "A scalar occupancyTimeSec value is valid only for a 1-by-1 map."
+                )
             }
             return [[value]]
         }
     }
 
-    private func validate() throws {
+    private func validate(occupancyTimeSecSize: [Int]) throws {
         guard [nUnits, nY, nX, nBins].allSatisfy({ $0 > 0 }) else {
             throw RFMappingError.invalidData("unitsSpikeCountsSize values must all be positive.")
         }
@@ -616,23 +741,58 @@ final class RFMappingData: @unchecked Sendable {
             throw RFMappingError.invalidData("timeBinEdges must be strictly increasing.")
         }
 
-        if let presentationCounts {
-            guard presentationCounts.count == nY else {
-                throw RFMappingError.invalidData("stimulusPresentationCounts y dimension does not match unitsSpikeCountsSize.")
+        guard occupancyTimeSecSize == [nY, nX] else {
+            throw RFMappingError.invalidData(
+                "occupancyTimeSecSize must equal the y-by-x dimensions [\(nY), \(nX)]."
+            )
+        }
+        guard occupancyTimeSeconds.count == nY else {
+            throw RFMappingError.invalidData(
+                "occupancyTimeSec y dimension does not match unitsSpikeCountsSize."
+            )
+        }
+        for (yIndex, row) in occupancyTimeSeconds.enumerated() {
+            guard row.count == nX else {
+                throw RFMappingError.invalidData(
+                    "occupancyTimeSec row \(yIndex) x dimension does not match unitsSpikeCountsSize."
+                )
             }
-            for (yIndex, row) in presentationCounts.enumerated() {
-                guard row.count == nX else {
-                    throw RFMappingError.invalidData("stimulusPresentationCounts row \(yIndex) x dimension does not match unitsSpikeCountsSize.")
-                }
-                for (xIndex, value) in row.enumerated() {
-                    guard value.isFinite, value >= 0, abs(value - value.rounded()) <= 1e-9 else {
-                        throw RFMappingError.invalidData("stimulusPresentationCounts values must be finite, non-negative integers (y \(yIndex), x \(xIndex)).")
-                    }
+            for (xIndex, value) in row.enumerated() {
+                guard value.isFinite, value >= 0 else {
+                    throw RFMappingError.invalidData(
+                        "occupancyTimeSec values must be finite and non-negative "
+                            + "(y \(yIndex), x \(xIndex))."
+                    )
                 }
             }
         }
+        guard occupancyTimeSeconds.joined().contains(where: { $0 > 0 }) else {
+            throw RFMappingError.invalidData(
+                "occupancyTimeSec must contain at least one positive value."
+            )
+        }
+        guard responseUnits == Self.expectedResponseUnits else {
+            throw RFMappingError.invalidData(
+                "responseUnits must be '\(Self.expectedResponseUnits)'."
+            )
+        }
+        guard responseNormalization == Self.expectedResponseNormalization else {
+            throw RFMappingError.invalidData(
+                "responseNormalization must be '\(Self.expectedResponseNormalization)'."
+            )
+        }
+        guard spikeCountDefinition == Self.expectedSpikeCountDefinition else {
+            throw RFMappingError.invalidData(
+                "spikeCountDefinition must be '\(Self.expectedSpikeCountDefinition)'."
+            )
+        }
+        guard occupancyTimeDefinition == Self.expectedOccupancyTimeDefinition else {
+            throw RFMappingError.invalidData(
+                "occupancyTimeDefinition must be '\(Self.expectedOccupancyTimeDefinition)'."
+            )
+        }
 
-        // Per-unit rectangularity, count values, and zero-presentation cells
+        // Per-unit rectangularity, count values, and zero-occupancy cells
         // were validated once while constructing `rfMaps` above. Repeating
         // those full-volume scans here would double load time for large files.
     }
@@ -640,14 +800,11 @@ final class RFMappingData: @unchecked Sendable {
 
 enum RFMappingError: LocalizedError {
     case invalidData(String)
-    case presentationCountsRequired(ResponseValueMode)
 
     var errorDescription: String? {
         switch self {
         case .invalidData(let message):
             message
-        case .presentationCountsRequired(let mode):
-            "\(mode.rawValue) requires stimulusPresentationCounts metadata. Regenerate this legacy JSON with presentation-count metadata."
         }
     }
 }

@@ -59,7 +59,7 @@ M15_POSITIONS = M15_DATA / "spike_position/ProbeA/positions.csv"
 
 M14_DATA = RF_ROOT / "Kai/#Recording/m14/260615/260615_3/data"
 M14_RF = M14_DATA / (
-    "rfmapping/good/-100_200_1ms/ProbeA/regular_unitsSpikeCounts_260615_3.json"
+    "rfmapping/good/-100_200_1ms/ProbeA/regular_unitsSpikeCounts_260615_3.rfmap"
 )
 M14_CHANNELS = M14_DATA / "waveform/ProbeA/channels.csv"
 M14_POSITIONS = M14_DATA / "spike_position/ProbeA/positions.csv"
@@ -102,7 +102,7 @@ EXPECTED_M15_RF_BYTES = 18_465_726
 EXPECTED_M15_RF_SHAPE = [146, 7, 30, 300]
 EXPECTED_M15_COLUMNAR_HD_BYTES = 946_358
 EXPECTED_M15_HD_UNITS = 147
-EXPECTED_WEB_VERSION = "1.9.1"
+EXPECTED_WEB_VERSION = "1.9.5"
 
 EXPECTED_M14_RF_BYTES = 35_783_459
 EXPECTED_M14_RF_SHAPE = [220, 9, 30, 300]
@@ -110,6 +110,15 @@ EXPECTED_M14_RF_SHAPE = [220, 9, 30, 300]
 EXPECTED_M18_RF_BYTES = 40_412_516
 EXPECTED_M18_RF_SHAPE = [192, 7, 30, 500]
 EXPECTED_M18_UNPOSITIONED_UNITS = {50, 118}
+
+RF_OCCUPANCY_CONTRACT_FIELDS = (
+    "responseUnits",
+    "responseNormalization",
+    "spikeCountDefinition",
+    "occupancyTimeSec",
+    "occupancyTimeSecSize",
+    "occupancyTimeDefinition",
+)
 
 HD_RAW_BINS = 180
 TUNING_TOP_LEVEL_KEYS = (
@@ -278,6 +287,11 @@ def rf_metadata(path: Path) -> dict[str, Any]:
                 "xPositions": mapped_json_value(mapped, "xPositions"),
                 "yPositions": mapped_json_value(mapped, "yPositions"),
                 "timeBinEdges": mapped_json_value(mapped, "timeBinEdges"),
+                "occupancyContractFields": [
+                    key
+                    for key in RF_OCCUPANCY_CONTRACT_FIELDS
+                    if mapped.find(f'"{key}":'.encode("utf-8")) >= 0
+                ],
             }
 
 
@@ -316,9 +330,11 @@ def validate_rf_file(
         float(left) >= float(right) for left, right in zip(time_edges, time_edges[1:])
     ):
         fail(f"{label} timeBinEdges are not strictly increasing")
+    if "occupancyTimeSec" in metadata["occupancyContractFields"]:
+        fail(f"{label} is no longer an occupancy-free rejection fixture")
     note(
-        f"PASS {label}: {size:,} bytes, shape {expected_shape}, "
-        f"all {n_bins} Timeline bins"
+        f"PASS {label} legacy rejection fixture: {size:,} bytes, shape "
+        f"{expected_shape}, missing occupancyTimeSec"
     )
     return metadata
 
@@ -506,6 +522,14 @@ def validate_frontend_assets(*, require_bundle: bool) -> None:
     )
     if view_tab_values != MAIN_TABS:
         fail(f"ViewTab must be exactly {MAIN_TABS}, found {view_tab_values}")
+    if (
+        'DEFAULT_VALUE_MODE: ValueMode = "Mean firing rate (Hz)"' not in types_text
+        or "occupancyTimeSec" not in types_text
+        or "Spikes / presentation" in source_text
+    ):
+        fail(
+            "frontend source does not enforce the occupancy-aware firing-rate default"
+        )
     if re.search(r"selectedTab\s*={2,3}\s*[\"'](?:probe|hd)[\"']", source_text):
         fail("Probe or HD is still mounted as a mutually exclusive selectedTab")
 
@@ -731,13 +755,34 @@ class ApiClient:
         return value
 
     def expect_error(
-        self, path: str, *, status: int, timeout: int = 60
+        self,
+        path: str,
+        *,
+        status: int,
+        payload: dict[str, Any] | None = None,
+        timeout: int = 60,
     ) -> dict[str, Any]:
         url = f"{self.base_url}/{path.lstrip('/')}"
+        data = None
         headers = {"Accept": "application/json"}
         if self.host_header:
             headers["Host"] = self.host_header
-        request = urllib.request.Request(url, headers=headers)
+        if payload is not None:
+            data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+            csrf_token = next(
+                (
+                    cookie.value
+                    for cookie in self.cookie_jar
+                    if cookie.name == "rfmapping_csrf"
+                ),
+                "",
+            )
+            if not csrf_token:
+                fail("API request is missing the RFmapping CSRF cookie")
+            headers["X-CSRF-Token"] = csrf_token
+            headers["Sec-Fetch-Site"] = "same-origin"
+        request = urllib.request.Request(url, data=data, headers=headers)
         try:
             response = self.opener.open(request, timeout=timeout)
         except urllib.error.HTTPError as exc:
@@ -894,6 +939,25 @@ def open_dataset(
     return metadata
 
 
+def validate_legacy_rf_rejected(
+    client: ApiClient, path: Path, label: str
+) -> None:
+    payload = client.expect_error(
+        "api/datasets/open",
+        status=422,
+        payload={"path": str(path)},
+        timeout=3600,
+    )
+    detail = payload.get("detail")
+    if (
+        not isinstance(detail, str)
+        or "Missing JSON keys" not in detail
+        or "occupancyTimeSec" not in detail
+    ):
+        fail(f"{label} returned the wrong legacy RF rejection: {detail!r}")
+    note(f"PASS {label}: occupancy-free RF rejected with HTTP 422")
+
+
 def validate_unsupported_tuning_rejected(
     client: ApiClient, dataset_id: str, label: str
 ) -> None:
@@ -910,115 +974,25 @@ def validate_remote_m17(client: ApiClient) -> None:
     validate_remote_listing(client, M17_HD, "tuning-json")
     validate_remote_listing(client, M17_POSITIONS, "positions-csv")
 
-    integrated = open_dataset(client, M17_PROBE_RF, EXPECTED_M17_PROBE_SHAPE)
-    capabilities = integrated.get("capabilities")
-    if (
-        not isinstance(capabilities, dict)
-        or capabilities.get("probe") is not True
-        or capabilities.get("hd") is not True
-    ):
-        fail(f"m17 260729_2 did not discover Probe and same-day HD: {capabilities}")
-    dataset_id = integrated["id"]
-    probe = client.json(f"api/datasets/{dataset_id}/probe", timeout=120)
-    validate_probe_payload(
-        probe, expected_channels=384, expected_units=620, label="m17 260729_2 /probe"
-    )
-    validate_unsupported_tuning_rejected(client, dataset_id, "m17 260729_2")
-    validate_full_timeline_payload(
-        client, dataset_id, 0, EXPECTED_M17_PROBE_SHAPE, "m17 260729_2"
-    )
-    note("PASS m17 integrated API: RF + 384/620 Probe; legacy tuning rejected")
-
-    rotation = open_dataset(client, M17_ROTATION_RF, EXPECTED_M17_ROTATION_SHAPE)
-    rotation_capabilities = rotation.get("capabilities")
-    if (
-        not isinstance(rotation_capabilities, dict)
-        or rotation_capabilities.get("probe") is not False
-        or rotation_capabilities.get("hd") is not True
-    ):
-        fail(
-            f"m17 260729_4 must report missing Probe and discovered HD: {rotation_capabilities}"
-        )
-    validate_unsupported_tuning_rejected(client, rotation["id"], "m17 260729_4")
-    note("PASS m17 rotation API: 596 RF units, missing Probe, legacy tuning rejected")
+    validate_legacy_rf_rejected(client, M17_PROBE_RF, "m17 260729_2")
+    validate_legacy_rf_rejected(client, M17_ROTATION_RF, "m17 260729_4")
 
 
-def validate_remote_m15(client: ApiClient, m15_hd: dict[str, Any]) -> None:
-    metadata = open_dataset(client, M15_RF, EXPECTED_M15_RF_SHAPE)
-    capabilities = metadata.get("capabilities")
-    if (
-        not isinstance(capabilities, dict)
-        or capabilities.get("probe") is not True
-        or capabilities.get("hd") is not True
-    ):
-        fail(f"m15 columnar sample did not discover Probe and HD: {capabilities}")
-    dataset_id = metadata["id"]
-    probe = client.json(f"api/datasets/{dataset_id}/probe", timeout=120)
-    validate_probe_payload(
-        probe, expected_channels=384, expected_units=146, label="m15 260630_3 /probe"
-    )
-    collection = client.json(f"api/datasets/{dataset_id}/hd", timeout=120)
-    rows = validate_hd_collection(
-        collection, source=M15_HD, expected_units=EXPECTED_M15_HD_UNITS
-    )
-    rf_units = set(metadata.get("unitPool", []))
-    if len(rf_units & set(rows)) != 146 or not rf_units.issubset(rows):
-        fail("m15 columnar RF/HD overlap must remain 146 of 146 RF units")
-
-    zero_index = m15_hd["unit_id"].index(0)
-    cluster = client.json(f"api/datasets/{dataset_id}/hd/0", timeout=120)
-    if (
-        cluster.get("available") is not True
-        or cluster.get("sourcePath") != str(M15_HD)
-        or "schemaVersion" in cluster
-        or cluster.get("metadata") != m15_hd["metadata"]
-        or cluster.get("hdClass") != m15_hd["unit_data"]["hd_class"][zero_index]
-    ):
-        fail("m15 columnar cluster metadata/class does not match the source JSON")
-    _numeric_lists_equal(
-        cluster.get("occupancyTimeS"), m15_hd["occupancy_time_s"], "m15 occupancy"
-    )
-    _numeric_lists_equal(
-        cluster.get("spikeCounts"),
-        m15_hd["spike_counts"][zero_index],
-        "m15 cluster 0 counts",
-    )
-    _numeric_lists_equal(
-        cluster.get("rates"),
-        m15_hd["firing_rate_hz"][zero_index],
-        "m15 cluster 0 rates",
-    )
-    note(
-        "PASS m15 columnar API: metadata/class + 180 occupancy/count/rate bins, overlap 146/146"
-    )
+def validate_remote_m15(client: ApiClient) -> None:
+    validate_remote_listing(client, M15_RF, "rf-json")
+    validate_remote_listing(client, M15_HD, "tuning-json")
+    validate_remote_listing(client, M15_POSITIONS, "positions-csv")
+    validate_legacy_rf_rejected(client, M15_RF, "m15 260630_3")
 
 
 def validate_remote_m14(client: ApiClient) -> None:
-    metadata = open_dataset(client, M14_RF, EXPECTED_M14_RF_SHAPE)
-    capabilities = metadata.get("capabilities")
-    if not isinstance(capabilities, dict) or capabilities.get("probe") is not True:
-        fail("m14 API did not discover the real ProbeA geometry")
-    probe = client.json(f"api/datasets/{metadata['id']}/probe", timeout=120)
-    validate_probe_payload(
-        probe, expected_channels=384, expected_units=220, label="m14 260615_3 /probe"
-    )
-    note("PASS m14 API: RF plus ProbeA with 384 channels and 220 units")
+    validate_remote_listing(client, M14_RF, "rf-json")
+    validate_legacy_rf_rejected(client, M14_RF, "m14 260615_3")
 
 
 def validate_remote_m18(client: ApiClient) -> None:
-    metadata = open_dataset(client, M18_RF, EXPECTED_M18_RF_SHAPE)
-    capabilities = metadata.get("capabilities")
-    if not isinstance(capabilities, dict) or capabilities.get("probe") is not True:
-        fail("m18 API did not discover the real ProbeA geometry")
-    probe = client.json(f"api/datasets/{metadata['id']}/probe", timeout=120)
-    validate_probe_payload(
-        probe,
-        expected_channels=384,
-        expected_units=192,
-        expected_unpositioned_units=EXPECTED_M18_UNPOSITIONED_UNITS,
-        label="m18 260812_3 /probe",
-    )
-    note("PASS m18 API: 384-channel background plus NaN positions for clusters 50/118")
+    validate_remote_listing(client, M18_RF, "rf-json")
+    validate_legacy_rf_rejected(client, M18_RF, "m18 260812_3")
 
 
 def validate_api(base_url: str, host_header: str | None) -> None:
@@ -1031,10 +1005,8 @@ def validate_api(base_url: str, host_header: str | None) -> None:
         or health.get("rfRoot") != str(RF_ROOT)
     ):
         fail(f"unexpected health response: {health}")
-    load_legacy_hd()
-    m15_hd = load_m15_hd()
     validate_remote_m17(client)
-    validate_remote_m15(client, m15_hd)
+    validate_remote_m15(client)
     validate_remote_m14(client)
     validate_remote_m18(client)
 

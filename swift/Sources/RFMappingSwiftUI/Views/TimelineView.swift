@@ -791,7 +791,7 @@ private func drawTimelineLegend(
     context.stroke(blueLine, with: .color(.blue), lineWidth: 2)
     let totalLabel = layout.renderState.valueMode == .spikeCount
         ? "All positions (sum)"
-        : "All positions (weighted mean)"
+        : "All positions (pooled count / occupancy)"
     context.draw(
         Text(totalLabel).font(.system(size: 8)).foregroundStyle(.blue),
         at: CGPoint(x: layout.chartRect.minX + 21, y: y),

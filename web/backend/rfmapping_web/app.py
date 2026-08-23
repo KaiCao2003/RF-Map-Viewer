@@ -45,7 +45,7 @@ from .middleware import DirectAccessMiddleware
 from .paths import PathAccessError, list_directory, resolve_under
 
 
-WEB_VERSION = "1.9.1"
+WEB_VERSION = "1.9.5"
 
 
 class StrictRequest(BaseModel):
@@ -59,9 +59,8 @@ class OpenDatasetRequest(StrictRequest):
 class DisplayedCsvExportRequest(StrictRequest):
     clusterId: int
     valueMode: Literal[
-        "Spike count",
-        "Spikes / presentation",
         "Mean firing rate (Hz)",
+        "Spike count",
     ]
     rfStartMs: float = Field(allow_inf_nan=False)
     rfEndMs: float = Field(allow_inf_nan=False)

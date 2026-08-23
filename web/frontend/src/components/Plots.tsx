@@ -1005,7 +1005,7 @@ export function TimelinePlot({
     context.stroke();
     drawText(
       context,
-      state.valueMode === "Spike count" ? "All positions (sum)" : "All positions (weighted mean)",
+      state.valueMode === "Spike count" ? "All positions (sum)" : "All positions (pooled rate)",
       chartX + 21,
       legendY,
       { color: "#2563eb", font: canvasFont(11), baseline: "middle" },

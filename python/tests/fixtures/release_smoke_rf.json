@@ -12,6 +12,11 @@
   "xPositions": [-5.0, 5.0],
   "yPositions": 0.0,
   "timeBinEdges": [-0.1, 0.0, 0.1, 0.2],
-  "stimulusPresentationCounts": [[2, 2]],
+  "responseUnits": "spike_count",
+  "responseNormalization": "none",
+  "spikeCountDefinition": "each_qualifying_trial_contributes_once_per_final_spatial_bin",
+  "occupancyTimeSec": [0.2, 0.4],
+  "occupancyTimeSecSize": [1, 2],
+  "occupancyTimeDefinition": "sum_of_qualifying_trial_durations_per_final_spatial_bin",
   "fixture": "synthetic release smoke test; no experimental data"
 }

@@ -30,12 +30,22 @@ import rfmapping_viewer.rf_dataset
 
 def _rf_payload() -> dict[str, object]:
     return {
-        "unitsSpikeCounts": [[[[1.0]]]],
+        "unitsSpikeCounts": [[[[1]]]],
         "unitsSpikeCountsSize": [1, 1, 1, 1],
-        "unitPool": [42],
+        "unitPool": 42,
         "xPositions": [0.0],
         "yPositions": [0.0],
         "timeBinEdges": [0.0, 0.1],
+        "responseUnits": "spike_count",
+        "responseNormalization": "none",
+        "spikeCountDefinition": (
+            "each_qualifying_trial_contributes_once_per_final_spatial_bin"
+        ),
+        "occupancyTimeSec": 0.1,
+        "occupancyTimeSecSize": [1, 1],
+        "occupancyTimeDefinition": (
+            "sum_of_qualifying_trial_durations_per_final_spatial_bin"
+        ),
     }
 
 

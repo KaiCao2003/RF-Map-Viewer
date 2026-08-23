@@ -2,22 +2,22 @@ import Foundation
 import UniformTypeIdentifiers
 
 extension UTType {
-    /// RF mapping payload. `.rfmap` contains the same JSON schema accepted by
-    /// the legacy `.json` representation.
+    /// Current-schema RF mapping payload. `.rfmap` and `.json` are filename
+    /// aliases; the extension does not relax schema validation.
     static let rfMapping = UTType(
         exportedAs: "org.local.rfmapping.rfmap",
         conformingTo: .json
     )
 
-    /// Head-direction tuning curve payload. `.tc` contains the same JSON
-    /// schema accepted by the legacy `.json` representation.
+    /// Head-direction tuning curve payload. `.tc` and `.json` are filename
+    /// aliases for the same schema.
     static let rfTuningCurve = UTType(
         exportedAs: "org.local.rfmapping.tc",
         conformingTo: .json
     )
 
-    /// Probe unit-position payload. `.probe` contains the same CSV schema
-    /// accepted by the legacy `.csv` representation.
+    /// Probe unit-position payload. `.probe` and `.csv` are filename aliases
+    /// for the same schema.
     static let rfProbe = UTType(
         exportedAs: "org.local.rfmapping.probe",
         conformingTo: .commaSeparatedText

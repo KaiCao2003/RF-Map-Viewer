@@ -5,8 +5,8 @@ APP_NAME="RF Map Viewer"
 PRODUCT_NAME="RFMappingSwiftUI"
 EXECUTABLE_NAME="$PRODUCT_NAME"
 BUNDLE_ID="org.local.rfmapping.viewer.swift"
-APP_VERSION="1.9.1"
-APP_BUILD="10901"
+APP_VERSION="1.9.5"
+APP_BUILD="10905"
 MIN_SYSTEM_VERSION="15.0"
 
 # Compatibility marker for the Python bundle lifecycle regression test. The

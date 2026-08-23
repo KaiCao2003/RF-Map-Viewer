@@ -135,7 +135,7 @@ final class RFMappingStore {
     private(set) var unitIndex = 0
     private(set) var selectedUnitID: Int?
     private(set) var pairedUnitIDs: [Int]?
-    var valueMode: ResponseValueMode = .spikeCount
+    var valueMode: ResponseValueMode = .meanFiringRate
     var binIndex = 0
     var rangeStartMS = 0.0
     var rangeEndMS = 1.0
@@ -253,7 +253,7 @@ final class RFMappingStore {
         return """
         \(data.url.path)
         \(data.nUnits) units  \(data.nY) y x \(data.nX) x  \(data.nBins) bins
-        Firing-rate metadata: \(data.hasPresentationCounts ? "yes" : "no")
+        Occupancy: \(data.nY) y x \(data.nX) x seconds; firing rate = count / occupancy
         """
     }
 
@@ -287,19 +287,18 @@ final class RFMappingStore {
             return selectedUnitID.map { "Cluster \($0): N/A in this file" } ?? ""
         }
         let metrics = data.metrics(for: unitIndex)
+        guard let strongestRate = metrics.maxFiringRate else {
+            return "Summed RF counts: \(String(format: "%.0f", metrics.totalSpikes))\nNo occupied RF cells"
+        }
         let delay = metrics.delayMS[metrics.bestY][metrics.bestX]
         let delayText = delay.map { String(format: "%.1f ms", $0) } ?? "n/a"
-        return "Total spikes: \(String(format: "%.0f", metrics.totalSpikes))\nBest count cell: yIdx \(metrics.bestY + 1), xIdx \(metrics.bestX + 1)\nCount-peak delay: \(delayText)"
+        return "Summed RF counts: \(String(format: "%.0f", metrics.totalSpikes))\nStrongest rate cell: yIdx \(metrics.bestY + 1), xIdx \(metrics.bestX + 1) (\(ResponseValueMode.meanFiringRate.format(strongestRate)) Hz)\nRate-cell count-peak delay: \(delayText)"
     }
 
     var displayedCellText: String {
         guard let cell = hoverCell ?? selectedCell else { return "" }
         let prefix = hoverCell == nil ? "" : "Hover\n"
         return prefix + cellMetricsText(cell, displayBin: hoverDisplayBin)
-    }
-
-    var supportsNormalizedValues: Bool {
-        data?.hasPresentationCounts == true
     }
 
     var hasTimeSelection: Bool {
@@ -409,7 +408,7 @@ final class RFMappingStore {
         xBins = loaded.nX
         yBins = loaded.nY
         timeResolutionMS = baseBinMS()
-        valueMode = loaded.supports(valueMode) ? valueMode : .spikeCount
+        valueMode = ResponseValueMode.allCases.contains(valueMode) ? valueMode : .meanFiringRate
         selectedCell = nil
         clearHover()
         timelineRangeAnchor = nil
@@ -432,7 +431,9 @@ final class RFMappingStore {
         let state = viewerSyncState.merging(state, fields: fields)
 
         selectUnitID(state.unitID, resetInteraction: false)
-        valueMode = data.supports(state.valueMode) ? state.valueMode : .spikeCount
+        valueMode = ResponseValueMode.allCases.contains(state.valueMode)
+            ? state.valueMode
+            : .meanFiringRate
         timeResolutionMS = finiteOr(state.timeResolutionMS, fallback: baseBinMS())
         xBins = state.xBins
         yBins = state.yBins
@@ -520,12 +521,7 @@ final class RFMappingStore {
     }
 
     func setValueMode(_ mode: ResponseValueMode) {
-        guard let data else { return }
-        guard data.supports(mode) else {
-            valueMode = .spikeCount
-            errorMessage = "This legacy JSON contains pooled spike counts but no stimulusPresentationCounts. True per-presentation values and firing rates require regenerated JSON metadata."
-            return
-        }
+        guard data != nil else { return }
         valueMode = mode
         clearHover()
     }
@@ -599,7 +595,7 @@ final class RFMappingStore {
         yBins = max(1, min(data.nY, yBins))
         smoothRadius = max(0, min(3, smoothRadius))
         responseFloor = max(0.0, responseFloor)
-        if !data.supports(valueMode) { valueMode = .spikeCount }
+        if !ResponseValueMode.allCases.contains(valueMode) { valueMode = .meanFiringRate }
 
         let base = baseBinMS()
         let requested = max(base, min(totalTimeMS(), timeResolutionMS))
@@ -642,7 +638,12 @@ final class RFMappingStore {
     }
 
     func ensureSelectedCell() {
-        guard selectedCell == nil, let data, hasSelectedUnit else { return }
+        guard selectedCell == nil,
+              let data,
+              hasSelectedUnit,
+              data.metrics(for: unitIndex).maxFiringRate != nil else {
+            return
+        }
         let metrics = data.metrics(for: unitIndex)
         selectedCell = normalizedCell(CellRef(
             yStart: metrics.bestY,
@@ -979,24 +980,12 @@ final class RFMappingStore {
         if let currentMatrixCache, currentMatrixCache.key == key {
             return currentMatrixCache.value
         }
-        let matrix: OptionalMatrix
-        if valueMode == .spikeCount,
-           let selectedRFMap,
-           let summed = try? selectedRFMap.sumBetweenSeconds(
-               data.timeBinEdges[range.start],
-               data.timeBinEdges[range.end + 1]
-           ) {
-            matrix = summed.spikeCounts.map { row in
-                row.map { histogram in histogram.first }
-            }
-        } else {
-            matrix = (try? data.responseMatrix(
-                unitIndex: unitIndex,
-                start: range.start,
-                end: range.end,
-                valueMode: valueMode
-            )) ?? []
-        }
+        let matrix = (try? data.responseMatrix(
+            unitIndex: unitIndex,
+            start: range.start,
+            end: range.end,
+            valueMode: valueMode
+        )) ?? []
         currentMatrixCache = (key, matrix)
         return matrix
     }
@@ -1058,7 +1047,11 @@ final class RFMappingStore {
             smoothRadius: smoothRadius
         )
         if let cached = spatialPlot(for: key) { return cached }
-        let prepared = preparePlotMatrix(currentMatrix(), smooth: true)
+        let prepared = prepareResponsePlotMatrix(
+            sourceStart: range.start,
+            sourceEnd: range.end,
+            smooth: true
+        )
         let valueRange = finiteMinMax(prepared.0)
         let plot = HeatmapPlot(
             matrix: prepared.0,
@@ -1129,13 +1122,11 @@ final class RFMappingStore {
             return rgbPlotCache.value
         }
 
-        let fullWindowResponse = (try? data.responseMatrix(
-            unitIndex: unitIndex,
-            start: 0,
-            end: data.nBins - 1,
-            valueMode: valueMode
-        )) ?? []
-        let totalPrepared = preparePlotMatrix(fullWindowResponse)
+        let totalPrepared = prepareResponsePlotMatrix(
+            sourceStart: 0,
+            sourceEnd: data.nBins - 1,
+            smooth: true
+        )
         let delayPrepared = preparePlotMatrix(delayMatrixForTimeGroups(floor: 0.0))
         let entropyPrepared = preparePlotMatrix(optionalMatrix(data.metrics(for: unitIndex).entropy))
         let responseRange = finiteMinMax(totalPrepared.0)
@@ -1220,14 +1211,13 @@ final class RFMappingStore {
         matrices.reserveCapacity(groups.count)
         var sharedHigh = 0.0
         for group in groups {
-            let raw = (try? data.responseMatrix(
-                unitIndex: unitIndex,
-                start: group.start,
-                end: group.end,
-                valueMode: valueMode
-            )) ?? []
-            var prepared = reduceMatrixXY(raw, yGroups: yGroups, xGroups: xGroups)
-            prepared = smoothMatrix(prepared, radius: smoothRadius)
+            let prepared = responsePlotMatrix(
+                sourceStart: group.start,
+                sourceEnd: group.end,
+                yGroups: yGroups,
+                xGroups: xGroups,
+                smoothingRadius: smoothRadius
+            )
             for row in prepared {
                 for value in row {
                     if let value, value.isFinite { sharedHigh = max(sharedHigh, value) }
@@ -1256,16 +1246,12 @@ final class RFMappingStore {
             let totals = data.metrics(for: unitIndex).binTotals
             return groups.map { compensatedSum(totals[$0.start...$0.end]) }
         }
-        guard let presentations = data.presentationCounts else {
+        let occupancyTotal = compensatedSum(
+            data.occupancyTimeSeconds.flatMap { row in row.filter { $0 > 0 } }
+        )
+        guard occupancyTotal > 0 else {
             return Array(repeating: 0.0, count: groups.count)
         }
-        var presentationValues: [Double] = []
-        presentationValues.reserveCapacity(data.nY * data.nX)
-        for row in presentations {
-            for value in row where value > 0 { presentationValues.append(value) }
-        }
-        let presentationTotal = compensatedSum(presentationValues)
-        guard presentationTotal > 0 else { return Array(repeating: 0.0, count: groups.count) }
         return groups.map { group in
             var cellCounts: [Double] = []
             cellCounts.reserveCapacity(data.nY * data.nX)
@@ -1281,11 +1267,7 @@ final class RFMappingStore {
                 }
             }
             let count = compensatedSum(cellCounts)
-            var value = count / presentationTotal
-            if valueMode == .meanFiringRate {
-                value /= data.timeSpanSeconds(start: group.start, end: group.end)
-            }
-            return value
+            return count / occupancyTotal
         }
     }
 
@@ -1307,6 +1289,90 @@ final class RFMappingStore {
         var groups = axisGroupsForTarget(sourceCount: data.nY, targetCount: yBins)
         if flipY { groups.reverse() }
         return groups
+    }
+
+    private func prepareResponsePlotMatrix(
+        sourceStart: Int,
+        sourceEnd: Int,
+        smooth: Bool
+    ) -> (OptionalMatrix, [AxisGroup], [AxisGroup]) {
+        let xGroups = xGroups()
+        let yGroups = displayYGroups()
+        let matrix = responsePlotMatrix(
+            sourceStart: sourceStart,
+            sourceEnd: sourceEnd,
+            yGroups: yGroups,
+            xGroups: xGroups,
+            smoothingRadius: smooth ? smoothRadius : 0
+        )
+        return (matrix, xGroups, yGroups)
+    }
+
+    /// Pools source counts and occupancy independently before normalization.
+    /// This keeps sparsely occupied source positions from receiving the same
+    /// weight as well-observed positions when display bins are merged or
+    /// smoothed.
+    private func responsePlotMatrix(
+        sourceStart: Int,
+        sourceEnd: Int,
+        yGroups: [AxisGroup],
+        xGroups: [AxisGroup],
+        smoothingRadius: Int
+    ) -> OptionalMatrix {
+        guard let data, hasSelectedUnit, !xGroups.isEmpty, !yGroups.isEmpty else {
+            return []
+        }
+        let observations = yGroups.map { yGroup in
+            xGroups.map { xGroup in
+                data.spatialObservations(
+                    unitIndex: unitIndex,
+                    yGroup: yGroup,
+                    xGroup: xGroup,
+                    start: sourceStart,
+                    end: sourceEnd
+                )
+            }
+        }
+        let valid = observations.map { row in
+            row.map { $0.sourcePixelCount > 0 && $0.occupancyTimeSeconds > 0 }
+        }
+
+        if valueMode == .spikeCount {
+            var matrix: OptionalMatrix = observations.map { row in
+                row.map { value in
+                    guard value.sourcePixelCount > 0 else { return nil }
+                    return value.count / Double(value.sourcePixelCount)
+                }
+            }
+            matrix = smoothMatrix(matrix, radius: smoothingRadius)
+            return matrix.enumerated().map { yIndex, row in
+                row.enumerated().map { xIndex, value in
+                    valid[yIndex][xIndex] ? value : nil
+                }
+            }
+        }
+
+        var pooledCounts: OptionalMatrix = observations.map { row in
+            row.map { value in value.sourcePixelCount > 0 ? value.count : nil }
+        }
+        var pooledOccupancy: OptionalMatrix = observations.map { row in
+            row.map { value in
+                value.sourcePixelCount > 0 ? value.occupancyTimeSeconds : nil
+            }
+        }
+        pooledCounts = smoothMatrix(pooledCounts, radius: smoothingRadius)
+        pooledOccupancy = smoothMatrix(pooledOccupancy, radius: smoothingRadius)
+        return pooledCounts.enumerated().map { yIndex, row in
+            row.enumerated().map { xIndex, count in
+                guard valid[yIndex][xIndex],
+                      let count,
+                      let occupancy = pooledOccupancy[yIndex][xIndex],
+                      occupancy > 0 else {
+                    return nil
+                }
+                return count / occupancy
+            }
+        }
     }
 
     func preparePlotMatrix(_ matrix: OptionalMatrix, smooth: Bool = true) -> (OptionalMatrix, [AxisGroup], [AxisGroup]) {
@@ -1335,27 +1401,23 @@ final class RFMappingStore {
 
     func groupResponseValue(_ cell: CellRef, sourceStart: Int, sourceEnd: Int) -> Double? {
         guard let data, hasSelectedUnit else { return nil }
-        var values: [Double] = []
-        for yIndex in cell.yStart...cell.yEnd {
-            for xIndex in cell.xStart...cell.xEnd {
-                do {
-                    if let value = try data.responseValue(
-                        unitIndex: unitIndex,
-                        yIndex: yIndex,
-                        xIndex: xIndex,
-                        start: sourceStart,
-                        end: sourceEnd,
-                        valueMode: valueMode
-                    ), value.isFinite {
-                        values.append(value)
-                    }
-                } catch {
-                    return nil
-                }
-            }
+        let observations = data.spatialObservations(
+            unitIndex: unitIndex,
+            yGroup: AxisGroup(start: cell.yStart, end: cell.yEnd),
+            xGroup: AxisGroup(start: cell.xStart, end: cell.xEnd),
+            start: sourceStart,
+            end: sourceEnd
+        )
+        guard observations.sourcePixelCount > 0,
+              observations.occupancyTimeSeconds > 0 else {
+            return nil
         }
-        guard !values.isEmpty else { return nil }
-        return compensatedSum(values) / Double(values.count)
+        switch valueMode {
+        case .spikeCount:
+            return observations.count / Double(observations.sourcePixelCount)
+        case .meanFiringRate:
+            return observations.count / observations.occupancyTimeSeconds
+        }
     }
 
     func groupResponseValues(_ cell: CellRef) -> [Double?] {
@@ -1563,7 +1625,7 @@ final class RFMappingStore {
         let header = [
             "unit_index", "cluster_id", "y_index_0based", "y_index_matlab", "y_position",
             "x_index_0based", "x_index_matlab", "x_position", "value", "value_mode",
-            "value_unit", "presentation_count_min", "presentation_count_max", "mode",
+            "value_unit", "occupancy_time_sec_min", "occupancy_time_sec_max", "mode",
             "display_y_index_0based", "source_y_start_0based", "source_y_end_0based",
             "source_y_start_matlab", "source_y_end_matlab", "y_position_start", "y_position_end",
             "display_x_index_0based", "source_x_start_0based", "source_x_end_0based",
@@ -1575,12 +1637,10 @@ final class RFMappingStore {
         var rows = [csvRow(header)]
         for (displayY, yGroup) in yGroups.enumerated() {
             for (displayX, xGroup) in xGroups.enumerated() {
-                var presentationValues: [Double] = []
-                if let counts = data.presentationCounts {
-                    for yIndex in yGroup.start...yGroup.end {
-                        for xIndex in xGroup.start...xGroup.end {
-                            presentationValues.append(counts[yIndex][xIndex])
-                        }
+                var occupancyValues: [Double] = []
+                for yIndex in yGroup.start...yGroup.end {
+                    for xIndex in xGroup.start...xGroup.end {
+                        occupancyValues.append(data.occupancyTimeSeconds[yIndex][xIndex])
                     }
                 }
                 let value: String
@@ -1590,8 +1650,8 @@ final class RFMappingStore {
                 } else {
                     value = ""
                 }
-                let presentationMinimum = presentationValues.min().map { String($0) } ?? ""
-                let presentationMaximum = presentationValues.max().map { String($0) } ?? ""
+                let occupancyMinimum = occupancyValues.min().map { String($0) } ?? ""
+                let occupancyMaximum = occupancyValues.max().map { String($0) } ?? ""
                 var fields = [
                     String(unitIndex), String(data.clusterID(for: unitIndex)),
                     String(yGroup.start), String(yGroup.start + 1),
@@ -1599,7 +1659,7 @@ final class RFMappingStore {
                     String(xGroup.start), String(xGroup.start + 1),
                     String((data.xPositions[xGroup.start] + data.xPositions[xGroup.end]) / 2.0),
                     value, valueMode.rawValue, valueMode.unit,
-                    presentationMinimum, presentationMaximum,
+                    occupancyMinimum, occupancyMaximum,
                     currentMatrixLabel(), String(displayY), String(yGroup.start), String(yGroup.end),
                     String(yGroup.start + 1), String(yGroup.end + 1),
                     String(data.yPositions[yGroup.start]), String(data.yPositions[yGroup.end])

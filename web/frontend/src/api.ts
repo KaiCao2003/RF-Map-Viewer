@@ -152,34 +152,31 @@ async function checked(response: Response): Promise<Response> {
 
 function normalizeMeta(payload: unknown): DatasetMeta {
   const source = record(payload);
-  const shapeValues = numbers(first(source, "shape", "unitsSpikeCountsSize", "units_spike_counts_size"));
+  const shapeValues = numbers(source.shape);
   if (shapeValues.length !== 4) throw new ApiError("Dataset metadata has an invalid four-dimensional shape.");
   const shape = shapeValues.map((item) => Math.trunc(item)) as [number, number, number, number];
-  const capabilitiesSource = record(first(source, "capabilities"));
-  const presentationRaw = first(
-    source,
-    "presentationCounts",
-    "presentation_counts",
-    "stimulusPresentationCounts",
-    "stimulus_presentation_counts",
-  );
-  const presentationCounts = Array.isArray(presentationRaw)
-    ? presentationRaw.map((row) => (Array.isArray(row) ? row.map(Number) : [Number(row)]))
-    : null;
+  const capabilitiesSource = record(source.capabilities);
+  const occupancyRaw = source.occupancyTimeSec;
+  const occupancyTimeSec = Array.isArray(occupancyRaw)
+    ? occupancyRaw.map((row) => (Array.isArray(row) ? row.map(Number) : []))
+    : [];
   const meta: DatasetMeta = {
-    id: String(first(source, "id", "datasetId", "dataset_id") ?? ""),
-    name: String(first(source, "name", "filename") ?? "RF dataset"),
-    sourcePath: String(first(source, "sourcePath", "source_path", "path") ?? ""),
+    id: String(source.id ?? ""),
+    name: String(source.name ?? "RF dataset"),
+    sourcePath: String(source.sourcePath ?? ""),
     shape,
-    unitPool: numbers(first(source, "unitPool", "unit_pool")),
-    xPositions: numbers(first(source, "xPositions", "x_positions")),
-    yPositions: numbers(first(source, "yPositions", "y_positions")),
-    timeBinEdges: numbers(first(source, "timeBinEdges", "time_bin_edges")),
-    presentationCounts,
+    unitPool: numbers(source.unitPool),
+    xPositions: numbers(source.xPositions),
+    yPositions: numbers(source.yPositions),
+    timeBinEdges: numbers(source.timeBinEdges),
+    occupancyTimeSec,
+    isVerticalBar: typeof source.isVerticalBar === "boolean" ? source.isVerticalBar : undefined,
+    responseUnits: source.responseUnits as "spike_count",
+    responseNormalization: source.responseNormalization as "none",
     capabilities: {
-      probe: Boolean(first(capabilitiesSource, "probe", "hasProbe", "has_probe")),
-      hd: Boolean(first(capabilitiesSource, "hd", "hasHd", "has_hd")),
-      normalized: Boolean(first(capabilitiesSource, "normalized", "hasNormalized", "has_normalized")),
+      probe: capabilitiesSource.probe === true,
+      hd: capabilitiesSource.hd === true,
+      occupancy: capabilitiesSource.occupancy === true,
     },
   };
   if (!meta.id || meta.unitPool.length !== shape[0]) {
@@ -188,9 +185,15 @@ function normalizeMeta(payload: unknown): DatasetMeta {
   if (
     meta.xPositions.length !== shape[2] ||
     meta.yPositions.length !== shape[1] ||
-    meta.timeBinEdges.length !== shape[3] + 1
+    meta.timeBinEdges.length !== shape[3] + 1 ||
+    meta.occupancyTimeSec.length !== shape[1] ||
+    meta.occupancyTimeSec.some((row) => row.length !== shape[2]) ||
+    meta.occupancyTimeSec.some((row) => row.some((value) => !Number.isFinite(value) || value < 0)) ||
+    meta.responseUnits !== "spike_count" ||
+    meta.responseNormalization !== "none" ||
+    !meta.capabilities.occupancy
   ) {
-    throw new ApiError("Dataset axes do not match its declared shape.");
+    throw new ApiError("Dataset metadata does not match the required occupancy-normalized RF contract.");
   }
   return meta;
 }

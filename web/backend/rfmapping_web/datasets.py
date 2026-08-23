@@ -38,12 +38,42 @@ METADATA_FIELDS = {
     "unitPool",
     "xPositions",
     "yPositions",
+    "VSTimeWindow",
+    "timeWindowMs",
+    "timeBinWidthMs",
     "timeBinEdges",
-    "stimulusPresentationCounts",
+    "isVerticalBar",
+    "responseUnits",
+    "responseNormalization",
+    "spikeCountDefinition",
+    "occupancyTimeSec",
+    "occupancyTimeSecSize",
+    "occupancyTimeDefinition",
 }
-REQUIRED_FIELDS = METADATA_FIELDS - {"stimulusPresentationCounts"}
-REQUIRED_TOP_LEVEL = REQUIRED_FIELDS | {"unitsSpikeCounts"}
-CACHE_SCHEMA_VERSION = 1
+REQUIRED_TOP_LEVEL = {
+    "unitsSpikeCounts",
+    "unitsSpikeCountsSize",
+    "unitPool",
+    "xPositions",
+    "yPositions",
+    "timeBinEdges",
+    "responseUnits",
+    "responseNormalization",
+    "spikeCountDefinition",
+    "occupancyTimeSec",
+    "occupancyTimeSecSize",
+    "occupancyTimeDefinition",
+}
+CACHE_SCHEMA_VERSION = 2
+
+EXPECTED_RESPONSE_UNITS = "spike_count"
+EXPECTED_RESPONSE_NORMALIZATION = "none"
+EXPECTED_SPIKE_COUNT_DEFINITION = (
+    "each_qualifying_trial_contributes_once_per_final_spatial_bin"
+)
+EXPECTED_OCCUPANCY_DEFINITION = (
+    "sum_of_qualifying_trial_durations_per_final_spatial_bin"
+)
 
 
 def _source_signature(path: Path) -> dict[str, int | str]:
@@ -154,11 +184,27 @@ def _coordinate_axis(value: Any, label: str, expected_length: int) -> list[float
     return [_number(item, f"{label} value") for item in source]
 
 
-def _presentation_matrix(value: Any, n_y: int, n_x: int) -> list[list[float]]:
+def _matlab_vector(
+    value: Any, label: str, expected_length: int, *, integer: bool = False
+) -> list[float] | list[int]:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if expected_length != 1:
+            raise DatasetValidationError(
+                f"{label} may be scalar only when its declared dimension is 1"
+            )
+        source = [value]
+    else:
+        source = _flat_list(value, label)
+    if integer:
+        return [_integer(item, f"{label} value") for item in source]
+    return [_number(item, f"{label} value") for item in source]
+
+
+def _occupancy_matrix(value: Any, n_y: int, n_x: int) -> list[list[float]]:
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         if n_y != 1 or n_x != 1:
             raise DatasetValidationError(
-                "stimulusPresentationCounts must be a y-by-x array"
+                "occupancyTimeSec must be a y-by-x array"
             )
         rows: list[list[Any]] = [[value]]
     elif isinstance(value, list):
@@ -169,30 +215,28 @@ def _presentation_matrix(value: Any, n_y: int, n_x: int) -> list[list[float]]:
                 rows = [[item] for item in value]
             else:
                 raise DatasetValidationError(
-                    "stimulusPresentationCounts dimensions do not match unitsSpikeCountsSize"
+                    "occupancyTimeSec dimensions do not match unitsSpikeCountsSize"
                 )
         elif all(isinstance(item, list) for item in value):
             rows = value
         else:
             raise DatasetValidationError(
-                "stimulusPresentationCounts must be a rectangular y-by-x array"
+                "occupancyTimeSec must be a rectangular y-by-x array"
             )
     else:
-        raise DatasetValidationError("stimulusPresentationCounts must be a y-by-x array")
+        raise DatasetValidationError("occupancyTimeSec must be a y-by-x array")
     if len(rows) != n_y or any(len(row) != n_x for row in rows):
         raise DatasetValidationError(
-            "stimulusPresentationCounts dimensions do not match unitsSpikeCountsSize"
+            "occupancyTimeSec dimensions do not match unitsSpikeCountsSize"
         )
     normalized: list[list[float]] = []
     for y_index, row in enumerate(rows):
         normalized_row: list[float] = []
         for x_index, item in enumerate(row):
-            parsed = _number(
-                item, f"stimulusPresentationCounts[{y_index}][{x_index}]"
-            )
-            if parsed < 0 or not parsed.is_integer():
+            parsed = _number(item, f"occupancyTimeSec[{y_index}][{x_index}]")
+            if parsed < 0:
                 raise DatasetValidationError(
-                    "stimulusPresentationCounts values must be non-negative integers"
+                    "occupancyTimeSec values must be non-negative"
                 )
             normalized_row.append(parsed)
         normalized.append(normalized_row)
@@ -208,10 +252,7 @@ def _normalize_metadata(raw: dict[str, Any]) -> dict[str, Any]:
         raise DatasetValidationError("unitsSpikeCountsSize values must be positive")
     n_units, n_y, n_x, n_bins = shape
 
-    unit_pool = [
-        _integer(value, "unitPool value")
-        for value in _flat_list(raw["unitPool"], "unitPool")
-    ]
+    unit_pool = _matlab_vector(raw["unitPool"], "unitPool", n_units, integer=True)
     x_positions = _coordinate_axis(raw["xPositions"], "xPositions", n_x)
     y_positions = _coordinate_axis(raw["yPositions"], "yPositions", n_y)
     time_bin_edges = [
@@ -230,10 +271,75 @@ def _normalize_metadata(raw: dict[str, Any]) -> dict[str, Any]:
         raise DatasetValidationError("timeBinEdges must contain nBins + 1 edges")
     if any(left >= right for left, right in zip(time_bin_edges, time_bin_edges[1:])):
         raise DatasetValidationError("timeBinEdges must be strictly increasing")
-    presentation_counts = None
-    if "stimulusPresentationCounts" in raw:
-        presentation_counts = _presentation_matrix(
-            raw["stimulusPresentationCounts"], n_y, n_x
+
+    vs_time_window: list[float] | None = None
+    if "VSTimeWindow" in raw:
+        vs_time_window = [
+            _number(value, "VSTimeWindow value")
+            for value in _flat_list(raw["VSTimeWindow"], "VSTimeWindow")
+        ]
+        if len(vs_time_window) != 2:
+            raise DatasetValidationError("VSTimeWindow must contain two values")
+        if not math.isclose(
+            vs_time_window[0], time_bin_edges[0], abs_tol=1e-12
+        ) or not math.isclose(
+            vs_time_window[1], time_bin_edges[-1], abs_tol=1e-12
+        ):
+            raise DatasetValidationError(
+                "VSTimeWindow must match the first and last timeBinEdges"
+            )
+    if "timeWindowMs" in raw:
+        time_window_ms = [
+            _number(value, "timeWindowMs value")
+            for value in _flat_list(raw["timeWindowMs"], "timeWindowMs")
+        ]
+        if len(time_window_ms) != 2:
+            raise DatasetValidationError("timeWindowMs must contain two values")
+        reference_window = vs_time_window or [time_bin_edges[0], time_bin_edges[-1]]
+        for seconds, milliseconds in zip(reference_window, time_window_ms):
+            if not math.isclose(milliseconds, seconds * 1000.0, abs_tol=1e-9):
+                raise DatasetValidationError(
+                    "timeWindowMs must match the time-bin bounds in milliseconds"
+                )
+    if "timeBinWidthMs" in raw:
+        time_bin_width_ms = _number(raw["timeBinWidthMs"], "timeBinWidthMs")
+        if time_bin_width_ms <= 0 or any(
+            not math.isclose(
+                (right - left) * 1000.0,
+                time_bin_width_ms,
+                rel_tol=1e-9,
+                abs_tol=1e-9,
+            )
+            for left, right in zip(time_bin_edges, time_bin_edges[1:])
+        ):
+            raise DatasetValidationError(
+                "timeBinEdges must use the declared uniform timeBinWidthMs"
+            )
+
+    if "isVerticalBar" in raw and type(raw["isVerticalBar"]) is not bool:
+        raise DatasetValidationError("isVerticalBar must be boolean")
+    fixed_strings = {
+        "responseUnits": EXPECTED_RESPONSE_UNITS,
+        "responseNormalization": EXPECTED_RESPONSE_NORMALIZATION,
+        "spikeCountDefinition": EXPECTED_SPIKE_COUNT_DEFINITION,
+        "occupancyTimeDefinition": EXPECTED_OCCUPANCY_DEFINITION,
+    }
+    for field, expected in fixed_strings.items():
+        if raw[field] != expected:
+            raise DatasetValidationError(f"{field} must be {expected!r}")
+
+    occupancy_size = [
+        _integer(value, "occupancyTimeSecSize value")
+        for value in _flat_list(raw["occupancyTimeSecSize"], "occupancyTimeSecSize")
+    ]
+    if occupancy_size != [n_y, n_x]:
+        raise DatasetValidationError(
+            "occupancyTimeSecSize must equal the y-by-x unitsSpikeCountsSize dimensions"
+        )
+    occupancy_time_sec = _occupancy_matrix(raw["occupancyTimeSec"], n_y, n_x)
+    if not any(value > 0 for row in occupancy_time_sec for value in row):
+        raise DatasetValidationError(
+            "occupancyTimeSec must contain at least one positive value"
         )
     return {
         "shape": shape,
@@ -241,7 +347,12 @@ def _normalize_metadata(raw: dict[str, Any]) -> dict[str, Any]:
         "xPositions": x_positions,
         "yPositions": y_positions,
         "timeBinEdges": time_bin_edges,
-        "presentationCounts": presentation_counts,
+        "occupancyTimeSec": occupancy_time_sec,
+        "isVerticalBar": raw.get("isVerticalBar"),
+        "responseUnits": raw["responseUnits"],
+        "responseNormalization": raw["responseNormalization"],
+        "spikeCountDefinition": raw["spikeCountDefinition"],
+        "occupancyTimeDefinition": raw["occupancyTimeDefinition"],
     }
 
 
@@ -254,6 +365,8 @@ def _write_counts_stream(
     n_units, n_y, n_x, n_bins = shape
     temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
     unit_count = 0
+    occupancy = np.asarray(metadata["occupancyTimeSec"], dtype=np.float64)
+    zero_occupancy_mask = occupancy == 0
     try:
         with temporary.open("wb") as output:
             try:
@@ -285,13 +398,14 @@ def _write_counts_stream(
                             raise DatasetValidationError(
                                 f"Unit {unit_index} contains non-finite or negative counts"
                             )
-                        presentations = metadata["presentationCounts"]
-                        if presentations is not None:
-                            zero_mask = np.asarray(presentations, dtype=np.float64) == 0
-                            if np.any(array[zero_mask, :] != 0):
-                                raise DatasetValidationError(
-                                    "stimulusPresentationCounts is zero where spike counts are nonzero"
-                                )
+                        if np.any(array != np.floor(array)):
+                            raise DatasetValidationError(
+                                f"Unit {unit_index} contains non-integer spike counts"
+                            )
+                        if np.any(array[zero_occupancy_mask, :] != 0):
+                            raise DatasetValidationError(
+                                "occupancyTimeSec is zero where spike counts are nonzero"
+                            )
                         output.write(array.tobytes(order="C"))
                         unit_count += 1
             except (JSONError, OSError, TypeError) as exc:
@@ -511,7 +625,7 @@ class DatasetStore:
     @staticmethod
     def response_metadata(record: DatasetRecord) -> dict[str, Any]:
         metadata = record.cache.metadata
-        return {
+        response = {
             "id": record.dataset_id,
             "name": record.source.name,
             "sourcePath": record.public_source_path,
@@ -520,13 +634,18 @@ class DatasetStore:
             "xPositions": metadata["xPositions"],
             "yPositions": metadata["yPositions"],
             "timeBinEdges": metadata["timeBinEdges"],
-            "presentationCounts": metadata["presentationCounts"],
+            "occupancyTimeSec": metadata["occupancyTimeSec"],
+            "responseUnits": metadata["responseUnits"],
+            "responseNormalization": metadata["responseNormalization"],
             "capabilities": {
                 "probe": record.companions.has_probe,
                 "hd": record.companions.has_hd,
-                "normalized": metadata["presentationCounts"] is not None,
+                "occupancy": True,
             },
         }
+        if metadata["isVerticalBar"] is not None:
+            response["isVerticalBar"] = metadata["isVerticalBar"]
+        return response
 
     def unit_bytes(self, record: DatasetRecord, cluster_id: int) -> tuple[bytes, list[int]]:
         with self._lock:
