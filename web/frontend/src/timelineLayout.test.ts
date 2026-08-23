@@ -27,6 +27,14 @@ describe("timeline layout math", () => {
     expect(layout.gridHeight).toBeGreaterThanOrEqual(120);
   });
 
+  it("keeps singleton-y timeline maps at the legacy 30-by-7 aspect", () => {
+    const layout = timelineGridLayout({ width: 1024, count: 100, xCount: 120, yCount: 1 });
+
+    expect(layout.gridWidth / layout.gridHeight).toBeCloseTo(30 / 7, 12);
+    expect(layout.cellWidth * 120).toBeCloseTo(layout.gridWidth, 12);
+    expect(layout.cellHeight).toBeCloseTo(layout.gridHeight, 12);
+  });
+
   it("falls back to one column on narrow viewports", () => {
     expect(timelineGridLayout({ width: 480, count: 20, xCount: 11, yCount: 3 }).columns).toBe(1);
   });

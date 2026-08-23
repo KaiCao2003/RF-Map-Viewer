@@ -1272,6 +1272,60 @@ def test_singleton_presentation_counts_are_normalized(app, settings: Settings) -
     assert response.json()["presentationCounts"] == [[3.0]]
 
 
+@pytest.mark.parametrize(
+    ("x_positions", "y_positions", "expected_x", "expected_y"),
+    [
+        (list(range(120)), 0, [float(value) for value in range(120)], [0.0]),
+        (0, [-3, 3], [0.0], [-3.0, 3.0]),
+    ],
+)
+def test_scalar_singleton_spatial_axes_are_normalized(
+    app,
+    settings: Settings,
+    x_positions,
+    y_positions,
+    expected_x: list[float],
+    expected_y: list[float],
+) -> None:
+    n_x = len(expected_x)
+    n_y = len(expected_y)
+    payload = {
+        "unitsSpikeCounts": np.arange(n_y * n_x * 2, dtype=float)
+        .reshape(1, n_y, n_x, 2)
+        .tolist(),
+        "unitsSpikeCountsSize": [1, n_y, n_x, 2],
+        "unitPool": [7],
+        "xPositions": x_positions,
+        "yPositions": y_positions,
+        "timeBinEdges": [0, 0.1, 0.2],
+    }
+    source = write_json(settings.rf_root / "singleton-axis.rfmap", payload)
+
+    with authenticated_client(app) as client:
+        response = client.post("/api/datasets/open", json={"path": str(source)})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["xPositions"] == expected_x
+    assert response.json()["yPositions"] == expected_y
+
+
+@pytest.mark.parametrize("axis", ["xPositions", "yPositions"])
+def test_scalar_spatial_axis_is_rejected_for_non_singleton_dimension(
+    app,
+    settings: Settings,
+    axis: str,
+) -> None:
+    payload = sample_payload()
+    payload[axis] = 0
+    source = write_json(settings.rf_root / f"invalid-{axis}.rfmap", payload)
+
+    with authenticated_client(app) as client:
+        response = client.post("/api/datasets/open", json={"path": str(source)})
+
+    assert response.status_code == 422
+    assert "scalar only" in response.json()["detail"]
+
+
 def test_source_change_requires_reopen(app, settings: Settings) -> None:
     source = write_json(settings.rf_root / "rf.json")
     with authenticated_client(app) as client:

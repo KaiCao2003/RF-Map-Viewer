@@ -48,6 +48,8 @@ SVG_RENDERING_CONTRACT = (
 EXPORT_MANIFEST_NAME = "manifest.json"
 EXPORT_MANIFEST_VERSION = 1
 EXPORT_PRODUCER = "rfmapping.python.figure-export"
+SINGLETON_Y_REFERENCE_COLUMNS = 30
+SINGLETON_Y_REFERENCE_ROWS = 7
 
 
 class FigureExportError(RuntimeError):
@@ -490,20 +492,28 @@ def _draw_cartesian_map(
             ]
             for row in scalar
         ]
-    # RF coordinates use the same spatial increment on both axes.  Preserve
-    # square cells just like the live Tk viewer instead of stretching a 30 x 7
-    # map to whatever aspect ratio its page panel happens to have.
-    cell_size = min((right - left) / columns, (bottom - top) / rows)
-    grid_width = cell_size * columns
-    grid_height = cell_size * rows
+    # Multi-row RF coordinates preserve square cells. A singleton y axis has
+    # no physical height increment, so match the live viewer's legacy 30:7
+    # footprint instead of exporting an unreadable horizontal strip.
+    if rows == 1:
+        target_aspect = SINGLETON_Y_REFERENCE_COLUMNS / SINGLETON_Y_REFERENCE_ROWS
+        grid_width = min(right - left, (bottom - top) * target_aspect)
+        grid_height = grid_width / target_aspect
+        cell_width = grid_width / columns
+        cell_height = grid_height
+    else:
+        cell_width = min((right - left) / columns, (bottom - top) / rows)
+        cell_height = cell_width
+        grid_width = cell_width * columns
+        grid_height = cell_height * rows
     grid_left = (left + right - grid_width) / 2.0
     grid_top = (top + bottom - grid_height) / 2.0
     for y_index, row in enumerate(colors):
-        y0 = round(grid_top + cell_size * y_index)
-        y1 = round(grid_top + cell_size * (y_index + 1))
+        y0 = round(grid_top + cell_height * y_index)
+        y1 = round(grid_top + cell_height * (y_index + 1))
         for x_index, color in enumerate(row):
-            x0 = round(grid_left + cell_size * x_index)
-            x1 = round(grid_left + cell_size * (x_index + 1))
+            x0 = round(grid_left + cell_width * x_index)
+            x1 = round(grid_left + cell_width * (x_index + 1))
             draw.rectangle((x0, y0, x1, y1), fill=color)
     draw.rectangle(
         (
@@ -574,7 +584,8 @@ def _draw_polar_map(
     )
     if inner_blank_rows < 0.0:
         raise FigureExportValidationError("inner_blank_rows must be non-negative")
-    radial_units = inner_blank_rows + rows
+    ring_span = float(SINGLETON_Y_REFERENCE_ROWS if rows == 1 else 1)
+    radial_units = inner_blank_rows + rows * ring_span
     clockwise = _boolean_option(spec.options, "clockwise", default=True)
     total_degrees = _finite_float(
         spec.options.get("total_degrees", 360.0), label="total_degrees"
@@ -591,7 +602,11 @@ def _draw_polar_map(
     # Draw outer rings first; smaller rings overwrite their interior and leave
     # true annular wedges without requiring masking or numpy.
     for ring_index in reversed(range(rows)):
-        radius = outer_radius * (inner_blank_rows + ring_index + 1) / radial_units
+        radius = (
+            outer_radius
+            * (inner_blank_rows + (ring_index + 1) * ring_span)
+            / radial_units
+        )
         ring_box = (
             round(center_x - radius),
             round(center_y - radius),
