@@ -140,6 +140,20 @@ def _flat_list(value: Any, label: str) -> list[Any]:
     return value
 
 
+def _coordinate_axis(value: Any, label: str, expected_length: int) -> list[float]:
+    """Normalize MATLAB's scalar JSON encoding for a singleton spatial axis."""
+
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if expected_length != 1:
+            raise DatasetValidationError(
+                f"{label} may be scalar only when its spatial dimension is 1"
+            )
+        source = [value]
+    else:
+        source = _flat_list(value, label)
+    return [_number(item, f"{label} value") for item in source]
+
+
 def _presentation_matrix(value: Any, n_y: int, n_x: int) -> list[list[float]]:
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         if n_y != 1 or n_x != 1:
@@ -198,14 +212,8 @@ def _normalize_metadata(raw: dict[str, Any]) -> dict[str, Any]:
         _integer(value, "unitPool value")
         for value in _flat_list(raw["unitPool"], "unitPool")
     ]
-    x_positions = [
-        _number(value, "xPositions value")
-        for value in _flat_list(raw["xPositions"], "xPositions")
-    ]
-    y_positions = [
-        _number(value, "yPositions value")
-        for value in _flat_list(raw["yPositions"], "yPositions")
-    ]
+    x_positions = _coordinate_axis(raw["xPositions"], "xPositions", n_x)
+    y_positions = _coordinate_axis(raw["yPositions"], "yPositions", n_y)
     time_bin_edges = [
         _number(value, "timeBinEdges value")
         for value in _flat_list(raw["timeBinEdges"], "timeBinEdges")
