@@ -14,6 +14,7 @@ from rfmapping_fm_gui import (
     head_angles_from_sphere_point,
     project_head_angles_to_sphere,
     render_spherical_texture,
+    spatial_display_aspect,
     sphere_direction_from_normalized,
 )
 
@@ -33,6 +34,14 @@ def test_display_range_is_robust_and_nonempty() -> None:
     assert low == 0.0
     assert 1.0 < high < 1000.0
     assert finite_display_range(np.array([[np.nan]])) == (0.0, 1.0)
+
+
+def test_singleton_y_uses_legacy_30_by_7_visual_aspect() -> None:
+    assert spatial_display_aspect(120, 1) == pytest.approx(30.0 / 7.0)
+
+
+def test_multirow_2d_map_aspect_is_unchanged() -> None:
+    assert spatial_display_aspect(120, 7) == pytest.approx(120.0 / 7.0)
 
 
 def test_colorize_rejects_invalid_palette_and_range() -> None:
