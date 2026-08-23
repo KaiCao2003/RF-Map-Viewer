@@ -62,7 +62,8 @@ struct TimelineMiniLayout {
     let bin: Int
     let x0: CGFloat
     let y0: CGFloat
-    let cell: CGFloat
+    let cellWidth: CGFloat
+    let cellHeight: CGFloat
     let gridWidth: CGFloat
     let gridHeight: CGFloat
     let xGroups: [AxisGroup]
@@ -73,7 +74,9 @@ struct TimelineMiniLayout {
 
     var polarLayout: PolarLayout? {
         guard spatialFormat == .polar, !xGroups.isEmpty, !yGroups.isEmpty else { return nil }
-        let radiusUnits = CGFloat(innerBlankRows + yGroups.count + polarPadRows)
+        let ringSpan = polarRingSpan(rowCount: yGroups.count)
+        let radiusUnits = CGFloat(innerBlankRows + polarPadRows)
+            + CGFloat(yGroups.count) * ringSpan
         let scale = min(gridWidth, gridHeight) / max(2.0, 2.0 * radiusUnits)
         return PolarLayout(
             center: CGPoint(x: x0 + gridWidth / 2.0, y: y0 + gridHeight / 2.0),
@@ -81,7 +84,8 @@ struct TimelineMiniLayout {
             totalDegrees: totalDegrees,
             xGroups: xGroups,
             yGroups: yGroups,
-            ringRows: polarRingRows
+            ringRows: polarRingRows,
+            ringSpan: ringSpan
         )
     }
 
@@ -93,8 +97,8 @@ struct TimelineMiniLayout {
               y0 <= point.y, point.y < y0 + gridHeight else {
             return nil
         }
-        let groupIndex = Int((point.x - x0) / cell)
-        let displayY = Int((point.y - y0) / cell)
+        let groupIndex = Int((point.x - x0) / cellWidth)
+        let displayY = Int((point.y - y0) / cellHeight)
         guard xGroups.indices.contains(groupIndex), yGroups.indices.contains(displayY) else {
             return nil
         }
@@ -367,7 +371,8 @@ private func makeTimelineLayout(
                 bin: bin,
                 x0: x0,
                 y0: y0,
-                cell: miniSpec.cell,
+                cellWidth: miniSpec.cellWidth,
+                cellHeight: miniSpec.cellHeight,
                 gridWidth: miniSpec.gridWidth,
                 gridHeight: miniSpec.gridHeight,
                 xGroups: xGroups,
@@ -460,7 +465,8 @@ private struct TimelineMiniSpec {
     let cols: Int
     let gapX: CGFloat
     let slotWidth: CGFloat
-    let cell: CGFloat
+    let cellWidth: CGFloat
+    let cellHeight: CGFloat
     let gridWidth: CGFloat
     let gridHeight: CGFloat
     let labelGap: CGFloat
@@ -496,7 +502,8 @@ private func timelineMiniSpec(
         let availableHeight = max(4, height - miniTop - 2)
         var bestColumns = 1
         var bestRows = count
-        var bestCell: CGFloat = 0
+        var bestCellWidth: CGFloat = 0
+        var bestCellHeight: CGFloat = 0
         var bestSlotWidth: CGFloat = availableWidth
         var bestGridWidth: CGFloat = 1
         var bestGridHeight: CGFloat = 1
@@ -514,26 +521,42 @@ private func timelineMiniSpec(
                     / CGFloat(candidateRows)
             )
             let usableHeight = max(0.25, rowHeight - labelGap - labelHeight)
-            let cell: CGFloat
+            let cellWidth: CGFloat
+            let cellHeight: CGFloat
             let gridWidth: CGFloat
             let gridHeight: CGFloat
             if spatialFormat == .polar {
                 let diameter = max(0.25, min(slotWidth, usableHeight))
-                cell = diameter / CGFloat(max(xCount, yCount))
+                cellWidth = diameter / CGFloat(max(xCount, yCount))
+                cellHeight = cellWidth
                 gridWidth = diameter
                 gridHeight = diameter
+            } else if yCount == 1 {
+                let dimensions = spatialGridDimensions(
+                    availableWidth: slotWidth,
+                    availableHeight: usableHeight,
+                    columns: xCount,
+                    rows: yCount,
+                    minimumCellWidth: 0.001
+                )
+                cellWidth = dimensions.cellWidth
+                cellHeight = dimensions.cellHeight
+                gridWidth = dimensions.gridWidth
+                gridHeight = dimensions.gridHeight
             } else {
-                cell = max(
+                cellWidth = max(
                     0.001,
                     min(slotWidth / CGFloat(xCount), usableHeight / CGFloat(yCount))
                 )
-                gridWidth = cell * CGFloat(xCount)
-                gridHeight = cell * CGFloat(yCount)
+                cellHeight = cellWidth
+                gridWidth = cellWidth * CGFloat(xCount)
+                gridHeight = cellWidth * CGFloat(yCount)
             }
-            if cell > bestCell {
+            if cellWidth > bestCellWidth {
                 bestColumns = candidateColumns
                 bestRows = candidateRows
-                bestCell = cell
+                bestCellWidth = cellWidth
+                bestCellHeight = cellHeight
                 bestSlotWidth = slotWidth
                 bestGridWidth = gridWidth
                 bestGridHeight = gridHeight
@@ -549,7 +572,8 @@ private func timelineMiniSpec(
             cols: bestColumns,
             gapX: gapX,
             slotWidth: bestSlotWidth,
-            cell: bestCell,
+            cellWidth: bestCellWidth,
+            cellHeight: bestCellHeight,
             gridWidth: bestGridWidth,
             gridHeight: bestGridHeight,
             labelGap: labelGap,
@@ -561,31 +585,52 @@ private func timelineMiniSpec(
     let densityScale = min(1.0, max(0.35, sqrt(50.0 / Double(count))))
     let targetGridHeight = max(18.0, baseGridHeight * CGFloat(densityScale))
     let targetCell = targetGridHeight / CGFloat(yCount)
-    let targetGridWidth = spatialFormat == .polar
-        ? targetGridHeight
-        : targetCell * CGFloat(xCount)
+    let targetGridWidth: CGFloat
+    if spatialFormat == .polar {
+        targetGridWidth = targetGridHeight
+    } else if yCount == 1 {
+        let aspect = CGFloat(singletonYReferenceColumns) / CGFloat(singletonYReferenceRows)
+        targetGridWidth = max(
+            targetGridHeight * aspect,
+            2.0 * CGFloat(xCount)
+        )
+    } else {
+        targetGridWidth = targetCell * CGFloat(xCount)
+    }
     let maxColumns = max(1, Int((availableWidth + gapX) / max(1.0, targetGridWidth + gapX)))
     let cols = min(count, maxColumns)
     let slotWidth = max(1.0, (availableWidth - CGFloat(cols - 1) * gapX) / CGFloat(cols))
-    let cell: CGFloat
+    let cellWidth: CGFloat
+    let cellHeight: CGFloat
     let gridWidth: CGFloat
     let gridHeight: CGFloat
     if spatialFormat == .polar {
         let diameter = max(18.0, min(targetGridHeight, slotWidth))
-        cell = diameter / CGFloat(max(xCount, yCount))
+        cellWidth = diameter / CGFloat(max(xCount, yCount))
+        cellHeight = cellWidth
         gridWidth = diameter
         gridHeight = diameter
+    } else if yCount == 1 {
+        let aspect = CGFloat(singletonYReferenceColumns) / CGFloat(singletonYReferenceRows)
+        var fittedGridWidth = min(targetGridWidth, slotWidth)
+        cellWidth = max(2.0, fittedGridWidth / CGFloat(xCount))
+        fittedGridWidth = cellWidth * CGFloat(xCount)
+        gridWidth = fittedGridWidth
+        gridHeight = fittedGridWidth / aspect
+        cellHeight = gridHeight
     } else {
-        cell = max(2.0, min(targetCell, slotWidth / CGFloat(xCount)))
-        gridWidth = cell * CGFloat(xCount)
-        gridHeight = cell * CGFloat(yCount)
+        cellWidth = max(2.0, min(targetCell, slotWidth / CGFloat(xCount)))
+        cellHeight = cellWidth
+        gridWidth = cellWidth * CGFloat(xCount)
+        gridHeight = cellWidth * CGFloat(yCount)
     }
     return TimelineMiniSpec(
         left: left,
         cols: cols,
         gapX: gapX,
         slotWidth: slotWidth,
-        cell: cell,
+        cellWidth: cellWidth,
+        cellHeight: cellHeight,
         gridWidth: gridWidth,
         gridHeight: gridHeight,
         labelGap: labelGap,
@@ -848,12 +893,15 @@ private func drawTimelineMiniMapCells(
                         - polar.totalDegrees * Double($0) / Double(polar.xGroups.count))
             }
             for (ringIndex, displayY) in polar.ringRows.enumerated() {
+                let rInner = CGFloat(innerBlankRows)
+                    + CGFloat(ringIndex) * polar.ringSpan
+                let rOuter = rInner + polar.ringSpan
                 for groupIndex in polar.xGroups.indices {
                     let path = polarCellPath(
                         center: polar.center,
                         scale: polar.scale,
-                        rInner: Double(innerBlankRows + ringIndex),
-                        rOuter: Double(innerBlankRows + ringIndex + 1),
+                        rInner: Double(rInner),
+                        rOuter: Double(rOuter),
                         thetaStart: thetaEdges[groupIndex],
                         thetaEnd: thetaEdges[groupIndex + 1],
                         arcSegments: polarArcSampleCount(
@@ -878,10 +926,10 @@ private func drawTimelineMiniMapCells(
             for displayY in matrix.indices {
                 for groupIndex in matrix[displayY].indices {
                     let rect = CGRect(
-                        x: mini.x0 + CGFloat(groupIndex) * mini.cell,
-                        y: mini.y0 + CGFloat(displayY) * mini.cell,
-                        width: mini.cell,
-                        height: mini.cell
+                        x: mini.x0 + CGFloat(groupIndex) * mini.cellWidth,
+                        y: mini.y0 + CGFloat(displayY) * mini.cellHeight,
+                        width: mini.cellWidth,
+                        height: mini.cellHeight
                     )
                     context.fill(
                         Path(rect),
@@ -913,7 +961,10 @@ private func drawTimelineMiniMapFrames(
         let lineWidth: CGFloat = inSelectedRange ? 2 : 1
         let framePath: Path
         if let polar = mini.polarLayout {
-            let outer = CGFloat(innerBlankRows + polar.yGroups.count) * polar.scale
+            let outer = (
+                CGFloat(innerBlankRows)
+                    + CGFloat(polar.yGroups.count) * polar.ringSpan
+            ) * polar.scale
             framePath = Path(ellipseIn: CGRect(
                 x: polar.center.x - outer,
                 y: polar.center.y - outer,
@@ -956,10 +1007,10 @@ private func drawTimelineHover(
         return
     }
     let hoverRect = CGRect(
-        x: mini.x0 + CGFloat(xIndex) * mini.cell,
-        y: mini.y0 + CGFloat(yIndex) * mini.cell,
-        width: mini.cell,
-        height: mini.cell
+        x: mini.x0 + CGFloat(xIndex) * mini.cellWidth,
+        y: mini.y0 + CGFloat(yIndex) * mini.cellHeight,
+        width: mini.cellWidth,
+        height: mini.cellHeight
     ).insetBy(dx: 1, dy: 1)
     context.stroke(Path(hoverRect), with: .color(.orange), lineWidth: 3)
 }

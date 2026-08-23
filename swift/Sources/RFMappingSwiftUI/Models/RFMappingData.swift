@@ -47,8 +47,22 @@ private struct RFMappingPayload: Decodable {
         unitsSpikeCounts = try container.decode([[[[Double]]]].self, forKey: .unitsSpikeCounts)
         unitsSpikeCountsSize = try container.decode([Int].self, forKey: .unitsSpikeCountsSize)
         unitPool = try container.decode([Int].self, forKey: .unitPool)
-        xPositions = try container.decode([Double].self, forKey: .xPositions)
-        yPositions = try container.decode([Double].self, forKey: .yPositions)
+        xPositions = try Self.decodeSpatialAxis(
+            from: container,
+            forKey: .xPositions,
+            declaredSize: unitsSpikeCountsSize.indices.contains(2)
+                ? unitsSpikeCountsSize[2]
+                : nil,
+            label: "xPositions"
+        )
+        yPositions = try Self.decodeSpatialAxis(
+            from: container,
+            forKey: .yPositions,
+            declaredSize: unitsSpikeCountsSize.indices.contains(1)
+                ? unitsSpikeCountsSize[1]
+                : nil,
+            label: "yPositions"
+        )
         timeBinEdges = try container.decode([Double].self, forKey: .timeBinEdges)
 
         if !container.contains(.stimulusPresentationCounts) {
@@ -77,6 +91,28 @@ private struct RFMappingPayload: Decodable {
             )
         }
         metadata = decodedMetadata
+    }
+
+    private static func decodeSpatialAxis(
+        from container: KeyedDecodingContainer<CodingKeys>,
+        forKey key: CodingKeys,
+        declaredSize: Int?,
+        label: String
+    ) throws -> [Double] {
+        if let values = try? container.decode([Double].self, forKey: key) {
+            return values
+        }
+        if let scalar = try? container.decode(Double.self, forKey: key) {
+            guard declaredSize == 1 else {
+                throw RFMappingError.invalidData(
+                    "A scalar \(label) value is valid only when its declared spatial dimension is 1."
+                )
+            }
+            return [scalar]
+        }
+        throw RFMappingError.invalidData(
+            "\(label) must be a numeric array, or a numeric scalar for a declared singleton spatial dimension."
+        )
     }
 }
 
