@@ -97,7 +97,12 @@ struct RFMap: Sendable {
         "xPositions",
         "yPositions",
         "timeBinEdges",
-        "stimulusPresentationCounts",
+        "occupancyTimeSec",
+        "occupancyTimeSecSize",
+        "responseUnits",
+        "responseNormalization",
+        "spikeCountDefinition",
+        "occupancyTimeDefinition",
     ]
 
     let unitIndex: Int
@@ -106,7 +111,7 @@ struct RFMap: Sendable {
     let xPositions: [Double]
     let yPositions: [Double]
     let timeBinEdgesSeconds: [Double]
-    let presentationCounts: [[Double]]?
+    let occupancyTimeSeconds: [[Double]]
     let metadata: [String: RFMapJSONValue]
     let sourceURL: URL
 
@@ -133,7 +138,7 @@ struct RFMap: Sendable {
         xPositions: [Double],
         yPositions: [Double],
         timeBinEdgesSeconds: [Double],
-        presentationCounts: [[Double]]?,
+        occupancyTimeSeconds: [[Double]],
         metadata: [String: RFMapJSONValue] = [:],
         sourceURL: URL
     ) throws {
@@ -142,7 +147,7 @@ struct RFMap: Sendable {
             xPositions: xPositions,
             yPositions: yPositions,
             timeBinEdgesSeconds: timeBinEdgesSeconds,
-            presentationCounts: presentationCounts,
+            occupancyTimeSeconds: occupancyTimeSeconds,
             allowZeroWidthSingleBin: false
         )
         self.unitIndex = unitIndex
@@ -151,7 +156,7 @@ struct RFMap: Sendable {
         self.xPositions = xPositions
         self.yPositions = yPositions
         self.timeBinEdgesSeconds = timeBinEdgesSeconds
-        self.presentationCounts = presentationCounts
+        self.occupancyTimeSeconds = occupancyTimeSeconds
         self.metadata = metadata
         self.sourceURL = sourceURL.standardizedFileURL
     }
@@ -168,7 +173,7 @@ struct RFMap: Sendable {
         xPositions = source.xPositions
         yPositions = source.yPositions
         self.timeBinEdgesSeconds = timeBinEdgesSeconds
-        presentationCounts = source.presentationCounts
+        occupancyTimeSeconds = source.occupancyTimeSeconds
         self.metadata = metadata
         sourceURL = source.sourceURL
     }
@@ -433,7 +438,7 @@ struct RFMap: Sendable {
         xPositions: [Double],
         yPositions: [Double],
         timeBinEdgesSeconds: [Double],
-        presentationCounts: [[Double]]?,
+        occupancyTimeSeconds: [[Double]],
         allowZeroWidthSingleBin: Bool
     ) throws {
         let nY = spikeCounts.count
@@ -470,32 +475,32 @@ struct RFMap: Sendable {
                         "spikeCounts cell (\(yIndex), \(xIndex)) has the wrong time dimension."
                     )
                 }
-                guard histogram.allSatisfy({ $0.isFinite && $0 >= 0 }) else {
-                    throw RFMapError.invalidData("spikeCounts values must be finite and non-negative.")
+                guard histogram.allSatisfy({
+                    $0.isFinite && $0 >= 0 && $0 == $0.rounded()
+                }) else {
+                    throw RFMapError.invalidData(
+                        "spikeCounts values must be finite non-negative integers."
+                    )
                 }
             }
         }
-        if let presentationCounts {
-            guard presentationCounts.count == nY,
-                  presentationCounts.allSatisfy({ $0.count == nX }) else {
-                throw RFMapError.invalidData("presentationCounts must match the y-by-x dimensions.")
-            }
-            for yIndex in 0..<nY {
-                for xIndex in 0..<nX {
-                    let presentations = presentationCounts[yIndex][xIndex]
-                    guard presentations.isFinite,
-                          presentations >= 0,
-                          presentations == presentations.rounded() else {
-                        throw RFMapError.invalidData(
-                            "presentationCounts values must be finite, non-negative integers."
-                        )
-                    }
-                    if presentations == 0,
-                       spikeCounts[yIndex][xIndex].contains(where: { $0 != 0 }) {
-                        throw RFMapError.invalidData(
-                            "presentationCounts is zero where spikeCounts is nonzero."
-                        )
-                    }
+        guard occupancyTimeSeconds.count == nY,
+              occupancyTimeSeconds.allSatisfy({ $0.count == nX }) else {
+            throw RFMapError.invalidData("occupancyTimeSec must match the y-by-x dimensions.")
+        }
+        for yIndex in 0..<nY {
+            for xIndex in 0..<nX {
+                let occupancy = occupancyTimeSeconds[yIndex][xIndex]
+                guard occupancy.isFinite, occupancy >= 0 else {
+                    throw RFMapError.invalidData(
+                        "occupancyTimeSec values must be finite and non-negative."
+                    )
+                }
+                if occupancy == 0,
+                   spikeCounts[yIndex][xIndex].contains(where: { $0 != 0 }) {
+                    throw RFMapError.invalidData(
+                        "occupancyTimeSec is zero where spikeCounts is nonzero."
+                    )
                 }
             }
         }

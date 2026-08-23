@@ -27,18 +27,40 @@ def write_payload(payload: dict) -> tuple[tempfile.TemporaryDirectory, Path]:
     return directory, path
 
 
-def base_payload(*, with_presentations: bool = True) -> dict:
-    payload = {
+def current_rf_payload(
+    payload: dict,
+    occupancy_time_s: list[list[float]] | float | None = None,
+) -> dict:
+    n_y, n_x = payload["unitsSpikeCountsSize"][1:3]
+    if occupancy_time_s is None:
+        occupancy_time_s = [
+            [1.0 for _x in range(n_x)]
+            for _y in range(n_y)
+        ]
+    payload.update(
+        responseUnits="spike_count",
+        responseNormalization="none",
+        spikeCountDefinition=(
+            "each_qualifying_trial_contributes_once_per_final_spatial_bin"
+        ),
+        occupancyTimeSec=occupancy_time_s,
+        occupancyTimeSecSize=[n_y, n_x],
+        occupancyTimeDefinition=(
+            "sum_of_qualifying_trial_durations_per_final_spatial_bin"
+        ),
+    )
+    return payload
+
+
+def base_payload() -> dict:
+    return current_rf_payload({
         "unitsSpikeCounts": [[[[10, 20, 30], [5, 10, 15]]]],
         "unitsSpikeCountsSize": [1, 1, 2, 3],
         "unitPool": [42],
         "xPositions": [-1, 1],
         "yPositions": [0],
         "timeBinEdges": [-0.1, 0.0, 0.05, 0.2],
-    }
-    if with_presentations:
-        payload["stimulusPresentationCounts"] = [[10, 5]]
-    return payload
+    }, [[1.0, 0.75]])
 
 
 class RFMappingRateTests(unittest.TestCase):
@@ -47,25 +69,21 @@ class RFMappingRateTests(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         return gui.RFMappingData(path)
 
-    def test_count_per_presentation_and_rate_use_exact_edges(self) -> None:
+    def test_count_and_rate_use_occupancy_seconds(self) -> None:
         data = self.load(base_payload())
 
         self.assertEqual(data.response_value(0, 0, 0, 0, 0, gui.VALUE_MODE_COUNT), 10)
-        self.assertEqual(
-            data.response_value(0, 0, 0, 0, 1, gui.VALUE_MODE_PER_PRESENTATION),
-            3,
-        )
         self.assertAlmostEqual(
             data.response_value(0, 0, 0, 0, 0, gui.VALUE_MODE_RATE),
             10.0,
         )
         self.assertAlmostEqual(
             data.response_value(0, 0, 0, 1, 1, gui.VALUE_MODE_RATE),
-            40.0,
+            20.0,
         )
         self.assertAlmostEqual(
             data.response_value(0, 0, 0, 0, 1, gui.VALUE_MODE_RATE),
-            20.0,
+            30.0,
         )
         self.assertAlmostEqual(
             data.response_value(0, 0, 1, 0, 1, gui.VALUE_MODE_RATE),
@@ -78,16 +96,15 @@ class RFMappingRateTests(unittest.TestCase):
         new_matrix = data.response_matrix(0, 1, 2, gui.VALUE_MODE_COUNT)
         self.assertEqual(new_matrix, old_matrix)
 
-    def test_spatial_groups_pool_counts_and_unequal_presentations(self) -> None:
-        payload = {
+    def test_spatial_groups_pool_counts_and_unequal_occupancy(self) -> None:
+        payload = current_rf_payload({
             "unitsSpikeCounts": [[[[100, 0], [0, 9]]]],
             "unitsSpikeCountsSize": [1, 1, 2, 2],
             "unitPool": [42],
             "xPositions": [-1, 1],
             "yPositions": [0],
             "timeBinEdges": [0, 0.1, 0.2],
-            "stimulusPresentationCounts": [[100, 1]],
-        }
+        }, [[100.0, 1.0]])
         data = self.load(payload)
 
         self.assertAlmostEqual(
@@ -97,20 +114,9 @@ class RFMappingRateTests(unittest.TestCase):
                 (0, 1),
                 0,
                 1,
-                gui.VALUE_MODE_PER_PRESENTATION,
-            ),
-            109 / 101,
-        )
-        self.assertAlmostEqual(
-            data.spatial_group_response_value(
-                0,
-                (0, 0),
-                (0, 1),
-                0,
-                1,
                 gui.VALUE_MODE_RATE,
             ),
-            109 / 101 / 0.2,
+            109 / 101,
         )
         self.assertEqual(
             data.spatial_group_response_value(
@@ -125,15 +131,14 @@ class RFMappingRateTests(unittest.TestCase):
         )
 
     def test_grouped_delay_and_entropy_use_the_pooled_full_histogram(self) -> None:
-        payload = {
+        payload = current_rf_payload({
             "unitsSpikeCounts": [[[[100, 0], [0, 9]]]],
             "unitsSpikeCountsSize": [1, 1, 2, 2],
             "unitPool": [42],
             "xPositions": [-1, 1],
             "yPositions": [0],
             "timeBinEdges": [0, 0.1, 0.2],
-            "stimulusPresentationCounts": [[100, 1]],
-        }
+        }, [[100.0, 1.0]])
         data = self.load(payload)
         metrics = data.spatial_group_temporal_metrics(
             0,
@@ -183,14 +188,14 @@ class RFMappingRateTests(unittest.TestCase):
         self.assertGreater(smoothed_entropy[0][1], 0.0)
 
     def test_delay_peak_uses_exact_interval_count_rate_while_counts_stay_summed(self) -> None:
-        payload = {
+        payload = current_rf_payload({
             "unitsSpikeCounts": [[[[5, 5, 12]]]],
             "unitsSpikeCountsSize": [1, 1, 1, 3],
             "unitPool": [42],
             "xPositions": [0],
             "yPositions": [0],
             "timeBinEdges": [0.0, 0.1, 0.2, 0.5],
-        }
+        })
         data = self.load(payload)
         groups = [(0, 1), (2, 2)]
 
@@ -204,15 +209,14 @@ class RFMappingRateTests(unittest.TestCase):
         self.assertEqual(metrics.delay_ms, 100.0)
 
     def test_normalized_spatial_smoothing_smooths_counts_and_exposure(self) -> None:
-        payload = {
+        payload = current_rf_payload({
             "unitsSpikeCounts": [[[[100], [9]]]],
             "unitsSpikeCountsSize": [1, 1, 2, 1],
             "unitPool": [42],
             "xPositions": [-1, 1],
             "yPositions": [0],
             "timeBinEdges": [0, 0.1],
-            "stimulusPresentationCounts": [[100, 1]],
-        }
+        }, [[100.0, 1.0]])
         data = self.load(payload)
         viewer = SimpleNamespace(
             data=data,
@@ -230,15 +234,32 @@ class RFMappingRateTests(unittest.TestCase):
             smooth=True,
         )
 
-        self.assertAlmostEqual(matrix[0][0], ((4 * 100 + 2 * 9) / (4 * 100 + 2 * 1)) / 0.1)
-        self.assertAlmostEqual(matrix[0][1], ((4 * 9 + 2 * 100) / (4 * 1 + 2 * 100)) / 0.1)
-        self.assertNotAlmostEqual(matrix[0][0], (4 * 10 + 2 * 90) / 6)
+        self.assertAlmostEqual(matrix[0][0], (4 * 100 + 2 * 9) / (4 * 100 + 2 * 1))
+        self.assertAlmostEqual(matrix[0][1], (4 * 9 + 2 * 100) / (4 * 1 + 2 * 100))
+        self.assertNotAlmostEqual(matrix[0][0], (4 * 1 + 2 * 9) / 6)
 
     def test_best_cell_does_not_force_full_metrics(self) -> None:
         data = self.load(base_payload())
         self.assertEqual(data.best_cell(0), (0, 0))
         self.assertEqual(data._metrics_cache, {})
         self.assertEqual(data.best_cell(0), (0, 0))
+
+    def test_best_cell_uses_occupancy_normalized_strength(self) -> None:
+        payload = current_rf_payload(
+            {
+                "unitsSpikeCounts": [[[[100], [9]]]],
+                "unitsSpikeCountsSize": [1, 1, 2, 1],
+                "unitPool": [42],
+                "xPositions": [-1, 1],
+                "yPositions": [0],
+                "timeBinEdges": [0, 0.1],
+            },
+            [[100.0, 1.0]],
+        )
+        data = self.load(payload)
+
+        self.assertEqual(data.best_cell(0), (0, 1))
+        self.assertEqual(data.metrics(0).best_x, 1)
 
     def test_reversed_range_is_normalized_without_losing_bins(self) -> None:
         data = self.load(base_payload())
@@ -247,34 +268,24 @@ class RFMappingRateTests(unittest.TestCase):
         self.assertEqual(forward, reverse)
         self.assertAlmostEqual(data.time_span_seconds(2, 0), 0.3)
 
-    def test_legacy_json_remains_count_only(self) -> None:
-        payload = base_payload(with_presentations=False)
-        payload["unitsSpikeCounts"][0][0][1] = [0, 0, 0]
-        data = self.load(payload)
-        self.assertTrue(data.supports_value_mode(gui.VALUE_MODE_COUNT))
-        self.assertFalse(data.supports_value_mode(gui.VALUE_MODE_RATE))
-        self.assertEqual(
-            data.response_value(0, 0, 1, 0, 2, gui.VALUE_MODE_COUNT),
-            0.0,
-        )
-        self.assertEqual(
-            data.spatial_group_response_value(
-                0,
-                (0, 0),
-                (0, 1),
-                0,
-                2,
-                gui.VALUE_MODE_COUNT,
-            ),
-            30.0,
-        )
-        with self.assertRaisesRegex(ValueError, "stimulusPresentationCounts"):
-            data.response_matrix(0, 0, 0, gui.VALUE_MODE_RATE)
+    def test_legacy_json_without_occupancy_is_rejected(self) -> None:
+        payload = base_payload()
+        for key in (
+            "responseUnits",
+            "responseNormalization",
+            "spikeCountDefinition",
+            "occupancyTimeSec",
+            "occupancyTimeSecSize",
+            "occupancyTimeDefinition",
+        ):
+            payload.pop(key)
+        with self.assertRaisesRegex(ValueError, "Unsupported legacy RF map"):
+            self.load(payload)
 
-    def test_zero_presentations_with_zero_counts_is_no_data(self) -> None:
+    def test_zero_occupancy_with_zero_counts_is_no_data(self) -> None:
         payload = base_payload()
         payload["unitsSpikeCounts"][0][0][1] = [0, 0, 0]
-        payload["stimulusPresentationCounts"][0][1] = 0
+        payload["occupancyTimeSec"][0][1] = 0
         data = self.load(payload)
         self.assertIsNone(data.response_value(0, 0, 1, 0, 2, gui.VALUE_MODE_RATE))
         self.assertIsNone(data.response_value(0, 0, 1, 0, 2, gui.VALUE_MODE_COUNT))
@@ -305,10 +316,10 @@ class RFMappingRateTests(unittest.TestCase):
             1,
         )
 
-    def test_zero_exposure_count_stays_missing_after_display_smoothing(self) -> None:
+    def test_zero_occupancy_stays_missing_after_display_smoothing(self) -> None:
         payload = base_payload()
         payload["unitsSpikeCounts"][0][0][1] = [0, 0, 0]
-        payload["stimulusPresentationCounts"][0][1] = 0
+        payload["occupancyTimeSec"][0][1] = 0
         data = self.load(payload)
         viewer = SimpleNamespace(
             data=data,
@@ -336,38 +347,37 @@ class RFMappingRateTests(unittest.TestCase):
             [[60.0, None, 30.0]],
         )
 
-    def test_zero_presentations_with_nonzero_counts_is_rejected(self) -> None:
+    def test_zero_occupancy_with_nonzero_counts_is_rejected(self) -> None:
         payload = base_payload()
-        payload["stimulusPresentationCounts"][0][0] = 0
-        with self.assertRaisesRegex(ValueError, "zero where spike counts are nonzero"):
+        payload["occupancyTimeSec"][0][0] = 0
+        with self.assertRaisesRegex(ValueError, "zero where unitsSpikeCounts is nonzero"):
             self.load(payload)
 
-    def test_presentation_metadata_shape_and_values_are_validated(self) -> None:
+    def test_occupancy_metadata_shape_and_values_are_validated(self) -> None:
         bad_shape = base_payload()
-        bad_shape["stimulusPresentationCounts"] = [[10]]
-        with self.assertRaisesRegex(ValueError, "x dimension"):
+        bad_shape["occupancyTimeSec"] = [[1.0]]
+        with self.assertRaisesRegex(ValueError, "dimensions do not match"):
             self.load(bad_shape)
 
-        fractional = base_payload()
-        fractional["stimulusPresentationCounts"] = [[10.5, 5]]
-        with self.assertRaisesRegex(ValueError, "non-negative integers"):
-            self.load(fractional)
+        negative = base_payload()
+        negative["occupancyTimeSec"] = [[-0.5, 0.75]]
+        with self.assertRaisesRegex(ValueError, "non-negative"):
+            self.load(negative)
 
-    def test_matlab_singleton_presentation_dimensions_are_restored(self) -> None:
+    def test_matlab_singleton_occupancy_dimensions_are_restored(self) -> None:
         one_row = base_payload()
-        one_row["stimulusPresentationCounts"] = [10, 5]
-        self.assertEqual(self.load(one_row).presentation_counts, [[10.0, 5.0]])
+        one_row["occupancyTimeSec"] = [1.0, 0.75]
+        self.assertEqual(self.load(one_row).occupancy_time_s, [[1.0, 0.75]])
 
-        scalar = {
+        scalar = current_rf_payload({
             "unitsSpikeCounts": [[[[1, 2]]]],
             "unitsSpikeCountsSize": [1, 1, 1, 2],
-            "unitPool": [1],
+            "unitPool": 1,
             "xPositions": [0],
             "yPositions": [0],
             "timeBinEdges": [0, 0.1, 0.2],
-            "stimulusPresentationCounts": 3,
-        }
-        self.assertEqual(self.load(scalar).presentation_counts, [[3.0]])
+        }, 0.3)
+        self.assertEqual(self.load(scalar).occupancy_time_s, [[0.3]])
 
     def test_count_values_must_be_json_numbers(self) -> None:
         payload = base_payload()
@@ -1292,14 +1302,14 @@ class RFPlotRangeTests(unittest.TestCase):
         )
 
     def test_timeline_selection_cannot_change_current_rf_matrix(self) -> None:
-        payload = {
+        payload = current_rf_payload({
             "unitsSpikeCounts": [[[[1, 10, 100, 1000]]]],
             "unitsSpikeCountsSize": [1, 1, 1, 4],
             "unitPool": [42],
             "xPositions": [0],
             "yPositions": [0],
             "timeBinEdges": [-0.1, 0.0, 0.01, 0.02, 0.03],
-        }
+        })
         directory, path = write_payload(payload)
         self.addCleanup(directory.cleanup)
         data = gui.RFMappingData(path)

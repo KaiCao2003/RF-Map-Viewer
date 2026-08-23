@@ -52,7 +52,7 @@ import type {
   ValueMode,
   ViewState,
 } from "./types";
-import { PALETTES, POLAR_RADIUS_MODES, VALUE_MODES } from "./types";
+import { DEFAULT_VALUE_MODE, PALETTES, POLAR_RADIUS_MODES, VALUE_MODES } from "./types";
 
 const RECENT_JSON_KEY = "rfmapping-recent-json-v1";
 const HD_LAYOUT_KEY = "rfmapping-hd-layout-v1";
@@ -85,7 +85,6 @@ interface ExportDialogState {
 
 function valueModeSlug(valueMode: ValueMode): string {
   if (valueMode === "Spike count") return "spike_count";
-  if (valueMode === "Spikes / presentation") return "spikes_per_presentation";
   return "mean_firing_rate_hz";
 }
 
@@ -97,7 +96,7 @@ function initialViewState(meta: DatasetMeta): ViewState {
   const activeBounds = timeBounds(meta, groups[0]);
   return {
     clusterId: meta.unitPool[0],
-    valueMode: "Spike count",
+    valueMode: DEFAULT_VALUE_MODE,
     activeTimeCenterMs: (activeBounds[0] + activeBounds[1]) / 2,
     timelineStartMs: meta.timeBinEdges[0] * 1000,
     timelineEndMs: meta.timeBinEdges.at(-1)! * 1000,
@@ -226,7 +225,7 @@ export default function App() {
       if (!current) return initial;
       return {
         ...initial,
-        valueMode: current.valueMode !== "Spike count" && !next.presentationCounts ? "Spike count" : current.valueMode,
+        valueMode: VALUE_MODES.includes(current.valueMode) ? current.valueMode : DEFAULT_VALUE_MODE,
         smoothRadius: current.smoothRadius,
         flipY: current.flipY,
         palette: current.palette,
@@ -693,7 +692,7 @@ export default function App() {
           <p className="data-summary">
             <span title={meta.sourcePath}>{meta.sourcePath}</span>
             <span>{meta.shape[0]} units&nbsp;&nbsp;{meta.shape[1]} y x {meta.shape[2]} x&nbsp;&nbsp;{meta.shape[3]} bins</span>
-            <span>Firing-rate metadata: {meta.presentationCounts ? "yes" : "no"}</span>
+            <span>Occupancy map: {meta.capabilities.occupancy ? "yes" : "no"}</span>
           </p>
 
           <hr />
@@ -771,8 +770,8 @@ export default function App() {
               {noProbeMatches && <><strong>No units in region</strong><span>Clear the Probe filter to restore all units.</span></>}
               {unitStatus === "error" && <span>Unit data failed to load.</span>}
               {metrics && !noProbeMatches && <>
-                <span>Total spikes: {metrics.totalSpikes.toFixed(0)}</span>
-                <span>Best count cell: yIdx {metrics.bestY + 1}, xIdx {metrics.bestX + 1}</span>
+                <span>Summed RF counts: {metrics.totalSpikes.toFixed(0)}</span>
+                <span>Strongest rate cell: yIdx {metrics.bestY + 1}, xIdx {metrics.bestX + 1} ({formatResponse(metrics.bestRateHz, "Mean firing rate (Hz)")} Hz)</span>
                 <span>Count-rate peak delay: {bestDelay == null ? "n/a" : `${formatNumber(bestDelay, 1)} ms`}</span>
               </>}
             </div>
@@ -828,7 +827,7 @@ export default function App() {
 
         <section className="plot-controls">
           <div className="plot-control-row top-row">
-            <label><span>Value</span><select value={viewState.valueMode} onChange={(event) => updateState({ valueMode: event.target.value as ValueMode })}>{VALUE_MODES.map((mode) => <option key={mode} disabled={mode !== "Spike count" && !meta.presentationCounts}>{mode}</option>)}</select></label>
+            <label><span>Value</span><select value={viewState.valueMode} onChange={(event) => updateState({ valueMode: VALUE_MODES.includes(event.target.value as ValueMode) ? event.target.value as ValueMode : DEFAULT_VALUE_MODE })}>{VALUE_MODES.map((mode) => <option key={mode}>{mode}</option>)}</select></label>
             <label><span>Time resolution (ms)</span><input type="number" min={baseBinMs(meta)} max={axisEndMs - axisStartMs} step={baseBinMs(meta)} value={formatNumber(viewState.timeResolutionMs, 6)} onChange={(event) => changeResolution(Number(event.target.value))} /></label>
           </div>
           <div className="plot-control-row bottom-row">

@@ -24,6 +24,14 @@ from numpy.typing import NDArray
 
 
 _EDGE_ATOL_S = 1e-12
+_RESPONSE_UNITS = "spike_count"
+_RESPONSE_NORMALIZATION = "none"
+_SPIKE_COUNT_DEFINITION = (
+    "each_qualifying_trial_contributes_once_per_final_spatial_bin"
+)
+_OCCUPANCY_TIME_DEFINITION = (
+    "sum_of_qualifying_trial_durations_per_final_spatial_bin"
+)
 _STRUCTURAL_JSON_FIELDS = {
     "unitsSpikeCounts",
     "unitsSpikeCountsSize",
@@ -31,7 +39,8 @@ _STRUCTURAL_JSON_FIELDS = {
     "xPositions",
     "yPositions",
     "timeBinEdges",
-    "stimulusPresentationCounts",
+    "occupancyTimeSec",
+    "occupancyTimeSecSize",
 }
 
 
@@ -65,12 +74,12 @@ def _flat_list(value: Any, label: str) -> list[Any]:
     return value
 
 
-def _spatial_axis_values(
+def _axis_values(
     value: Any,
     label: str,
     expected_length: int,
 ) -> list[Any]:
-    """Normalize MATLAB's scalar encoding for a singleton spatial axis."""
+    """Normalize MATLAB's scalar encoding for a singleton declared axis."""
 
     if not isinstance(value, list):
         if (
@@ -88,10 +97,10 @@ def _counts_are_numeric(value: Any) -> bool:
     return isinstance(value, Real) and not isinstance(value, bool)
 
 
-def _presentation_matrix(value: Any, n_y: int, n_x: int) -> NDArray[np.float64]:
+def _occupancy_matrix(value: Any, n_y: int, n_x: int) -> NDArray[np.float64]:
     if isinstance(value, Real) and not isinstance(value, bool):
         if n_y != 1 or n_x != 1:
-            raise ValueError("stimulusPresentationCounts must be a y-by-x array")
+            raise ValueError("occupancyTimeSec must be a y-by-x array")
         rows: list[list[Any]] = [[value]]
     elif isinstance(value, list):
         if all(not isinstance(item, list) for item in value):
@@ -101,21 +110,21 @@ def _presentation_matrix(value: Any, n_y: int, n_x: int) -> NDArray[np.float64]:
                 rows = [[item] for item in value]
             else:
                 raise ValueError(
-                    "stimulusPresentationCounts dimensions do not match "
+                    "occupancyTimeSec dimensions do not match "
                     "unitsSpikeCountsSize"
                 )
         elif all(isinstance(item, list) for item in value):
             rows = value
         else:
             raise ValueError(
-                "stimulusPresentationCounts must be a rectangular y-by-x array"
+                "occupancyTimeSec must be a rectangular y-by-x array"
             )
     else:
-        raise ValueError("stimulusPresentationCounts must be a y-by-x array")
+        raise ValueError("occupancyTimeSec must be a y-by-x array")
 
     if len(rows) != n_y or any(len(row) != n_x for row in rows):
         raise ValueError(
-            "stimulusPresentationCounts x dimension or row count is invalid; "
+            "occupancyTimeSec x dimension or row count is invalid; "
             "dimensions do not match "
             "unitsSpikeCountsSize"
         )
@@ -125,12 +134,10 @@ def _presentation_matrix(value: Any, n_y: int, n_x: int) -> NDArray[np.float64]:
         for x_index, item in enumerate(row):
             parsed = _number(
                 item,
-                f"stimulusPresentationCounts[{y_index}][{x_index}]",
+                f"occupancyTimeSec[{y_index}][{x_index}]",
             )
-            if parsed < 0 or not parsed.is_integer():
-                raise ValueError(
-                    "stimulusPresentationCounts values must be non-negative integers"
-                )
+            if parsed < 0:
+                raise ValueError("occupancyTimeSec values must be non-negative")
             result[y_index, x_index] = parsed
     result.setflags(write=False)
     return result
@@ -155,7 +162,7 @@ class RFMap:
     x_positions: NDArray[np.float64]
     y_positions: NDArray[np.float64]
     time_bin_edges_s: NDArray[np.float64]
-    presentation_counts: NDArray[np.float64] | None
+    occupancy_time_s: NDArray[np.float64]
     metadata: Mapping[str, Any]
     source_path: Path
 
@@ -219,7 +226,7 @@ class RFMap:
             x_positions=self.x_positions,
             y_positions=self.y_positions,
             time_bin_edges_s=edges,
-            presentation_counts=self.presentation_counts,
+            occupancy_time_s=self.occupancy_time_s,
             metadata=self.metadata,
             source_path=self.source_path,
         )
@@ -234,7 +241,7 @@ class RFMap:
         The count is deliberately evaluated on the native ``(y, x)`` grid,
         before display rebinning or smoothing.  It therefore stays a stable
         data-quality property of this RF map for the requested half-open time
-        window.  A source bin with zero presentations is unavailable and is
+        window.  A source bin with zero occupancy is unavailable and is
         counted even though the validated data contract also requires its
         spike count to be zero.
         """
@@ -248,11 +255,7 @@ class RFMap:
         if stop < start:
             raise ValueError("later_s must resolve at or after earlier_s")
         counts = self.spike_counts[..., start:stop].sum(axis=-1)
-        unavailable = (
-            self.presentation_counts <= 0
-            if self.presentation_counts is not None
-            else np.zeros(counts.shape, dtype=bool)
-        )
+        unavailable = self.occupancy_time_s <= 0
         return int(np.count_nonzero((counts == 0) | unavailable))
 
 
@@ -315,7 +318,7 @@ def _make_rf_map(
     x_positions: Any,
     y_positions: Any,
     time_bin_edges_s: Any,
-    presentation_counts: NDArray[np.float64] | None,
+    occupancy_time_s: NDArray[np.float64],
     metadata: Mapping[str, Any],
     source_path: str | Path,
 ) -> RFMap:
@@ -326,7 +329,7 @@ def _make_rf_map(
         x_positions=_readonly_array(x_positions, dtype=float),
         y_positions=_readonly_array(y_positions, dtype=float),
         time_bin_edges_s=_readonly_array(time_bin_edges_s, dtype=float),
-        presentation_counts=presentation_counts,
+        occupancy_time_s=occupancy_time_s,
         metadata=MappingProxyType(deepcopy(dict(metadata))),
         source_path=Path(source_path),
     )
@@ -345,6 +348,12 @@ def load_rf_maps(path: str | Path) -> RFMapList:
         raise ValueError("RF mapping JSON must contain an object at the top level")
 
     required = {
+        "occupancyTimeDefinition",
+        "occupancyTimeSec",
+        "occupancyTimeSecSize",
+        "responseNormalization",
+        "responseUnits",
+        "spikeCountDefinition",
         "unitsSpikeCounts",
         "unitsSpikeCountsSize",
         "unitPool",
@@ -354,7 +363,23 @@ def load_rf_maps(path: str | Path) -> RFMapList:
     }
     missing = sorted(required.difference(raw))
     if missing:
-        raise ValueError(f"Missing JSON keys: {', '.join(missing)}")
+        raise ValueError(
+            "Unsupported legacy RF map; missing current schema keys: "
+            + ", ".join(missing)
+        )
+
+    expected_contract = {
+        "responseUnits": _RESPONSE_UNITS,
+        "responseNormalization": _RESPONSE_NORMALIZATION,
+        "spikeCountDefinition": _SPIKE_COUNT_DEFINITION,
+        "occupancyTimeDefinition": _OCCUPANCY_TIME_DEFINITION,
+    }
+    for key, expected in expected_contract.items():
+        if raw[key] != expected:
+            raise ValueError(
+                f"Unsupported RF map schema: {key} must be {expected!r}; "
+                f"got {raw[key]!r}"
+            )
 
     size_values = _flat_list(raw["unitsSpikeCountsSize"], "unitsSpikeCountsSize")
     if len(size_values) != 4:
@@ -378,13 +403,19 @@ def load_rf_maps(path: str | Path) -> RFMapList:
         raise ValueError(
             f"unitsSpikeCounts has shape {spike_counts.shape}, expected {shape}"
         )
-    if not np.all(np.isfinite(spike_counts)) or np.any(spike_counts < 0):
-        raise ValueError("unitsSpikeCounts values must be finite and non-negative")
+    if (
+        not np.all(np.isfinite(spike_counts))
+        or np.any(spike_counts < 0)
+        or np.any(spike_counts != np.floor(spike_counts))
+    ):
+        raise ValueError(
+            "unitsSpikeCounts values must be finite non-negative integer spike counts"
+        )
     spike_counts.setflags(write=False)
 
     unit_pool = tuple(
         _integer(value, "unitPool value")
-        for value in _flat_list(raw["unitPool"], "unitPool")
+        for value in _axis_values(raw["unitPool"], "unitPool", n_units)
     )
     if len(unit_pool) != n_units:
         raise ValueError("unitPool length does not match unit count")
@@ -394,14 +425,14 @@ def load_rf_maps(path: str | Path) -> RFMapList:
     x_positions = _readonly_array(
         [
             _number(value, "xPositions value")
-            for value in _spatial_axis_values(raw["xPositions"], "xPositions", n_x)
+            for value in _axis_values(raw["xPositions"], "xPositions", n_x)
         ],
         dtype=float,
     )
     y_positions = _readonly_array(
         [
             _number(value, "yPositions value")
-            for value in _spatial_axis_values(raw["yPositions"], "yPositions", n_y)
+            for value in _axis_values(raw["yPositions"], "yPositions", n_y)
         ],
         dtype=float,
     )
@@ -421,17 +452,27 @@ def load_rf_maps(path: str | Path) -> RFMapList:
     if not np.all(np.diff(time_edges) > 0):
         raise ValueError("timeBinEdges must be strictly increasing")
 
-    presentation_counts = None
-    if "stimulusPresentationCounts" in raw:
-        presentation_counts = _presentation_matrix(
-            raw["stimulusPresentationCounts"],
-            n_y,
-            n_x,
+    occupancy_size_values = _flat_list(
+        raw["occupancyTimeSecSize"], "occupancyTimeSecSize"
+    )
+    if len(occupancy_size_values) != 2:
+        raise ValueError("occupancyTimeSecSize must contain two values")
+    occupancy_shape = tuple(
+        _integer(value, "occupancyTimeSecSize value")
+        for value in occupancy_size_values
+    )
+    if occupancy_shape != (n_y, n_x):
+        raise ValueError(
+            "occupancyTimeSecSize must match the y-by-x dimensions in "
+            "unitsSpikeCountsSize"
         )
-        if np.any(spike_counts[:, presentation_counts == 0, :] != 0):
-            raise ValueError(
-                "stimulusPresentationCounts is zero where spike counts are nonzero"
-            )
+    occupancy_time_s = _occupancy_matrix(raw["occupancyTimeSec"], n_y, n_x)
+    if not np.any(occupancy_time_s > 0):
+        raise ValueError("occupancyTimeSec must contain at least one positive value")
+    if np.any(spike_counts[:, occupancy_time_s == 0, :] != 0):
+        raise ValueError(
+            "occupancyTimeSec is zero where unitsSpikeCounts is nonzero"
+        )
 
     metadata = {
         key: deepcopy(value)
@@ -447,7 +488,7 @@ def load_rf_maps(path: str | Path) -> RFMapList:
                 x_positions=x_positions,
                 y_positions=y_positions,
                 time_bin_edges_s=time_edges,
-                presentation_counts=presentation_counts,
+                occupancy_time_s=occupancy_time_s,
                 metadata=metadata,
                 source_path=source_path,
             )

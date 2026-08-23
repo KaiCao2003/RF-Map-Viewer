@@ -2,8 +2,9 @@
 
 Python is the feature reference for this repository. The supported stable
 feature generation is `1.9.x`; an implementation one complete feature
-generation behind uses `1.8.x`. Patch numbers describe compatible fixes or
-target-specific completion work within that feature generation.
+generation behind uses `1.8.x`. Patch numbers identify coordinated or
+target-specific releases within that feature generation; supported input
+contracts are stated explicitly rather than inferred from the patch number.
 
 The Free-Moving viewer introduces the next `1.10` feature generation and is
 currently an alpha. Its canonical release version is
@@ -17,14 +18,20 @@ component tag and artifact name:
 
 | Component | Release | Tag | Channel |
 | --- | --- | --- | --- |
-| Python stable | `1.9.4` | `python-v1.9.4` | stable |
+| Python stable | `1.9.5` | `python-v1.9.5` | stable |
 | Python Free-Moving | `1.10.0-alpha.3` | `python-v1.10.0-alpha.3` | alpha |
-| Swift | `1.9.1` | `swift-v1.9.1` | stable |
-| Web | `1.9.1` | `web-v1.9.1` | stable |
+| Swift | `1.9.5` | `swift-v1.9.5` | stable |
+| Web | `1.9.5` | `web-v1.9.5` | stable |
 
 Published downloads and checksums are available from the repository
 [Releases page](https://github.com/KaiCao2003/RF-Map-Viewer/releases). The root
 [`README.md`](../README.md#downloads) links directly to each component archive.
+
+Stable 1.9.5 is a coordinated schema release for the current regular
+`RFmapping_core.m` output. Python, Swift, and Web require raw spike counts plus
+the spatial `occupancyTimeSec` matrix, normalize firing rate as
+count/occupancy, and start in firing-rate mode. Earlier occupancy-free or
+already-normalized RF payloads are intentionally outside this release.
 
 Each active component records a `feature_generation_offset` from the Python
 stable reference. The current Swift/Web offset is `0`; a viewer verified to be

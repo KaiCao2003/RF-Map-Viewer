@@ -16,11 +16,9 @@ from .paths import is_within
 
 
 VALUE_MODE_COUNT = "Spike count"
-VALUE_MODE_PER_PRESENTATION = "Spikes / presentation"
 VALUE_MODE_RATE = "Mean firing rate (Hz)"
 VALUE_MODES = {
     VALUE_MODE_COUNT,
-    VALUE_MODE_PER_PRESENTATION,
     VALUE_MODE_RATE,
 }
 PALETTES = {"Gray", "Viridis", "Inferno"}
@@ -37,8 +35,8 @@ CSV_HEADERS = (
     "value",
     "value_mode",
     "value_unit",
-    "presentation_count_min",
-    "presentation_count_max",
+    "occupancy_time_sec_min",
+    "occupancy_time_sec_max",
     "mode",
     "display_y_index_0based",
     "source_y_start_0based",
@@ -102,8 +100,6 @@ def _format_ms(value: float) -> str:
 def _value_mode_unit(value_mode: str) -> str:
     if value_mode == VALUE_MODE_COUNT:
         return "spikes"
-    if value_mode == VALUE_MODE_PER_PRESENTATION:
-        return "spikes/presentation"
     if value_mode == VALUE_MODE_RATE:
         return "Hz"
     raise ExportValidationError(f"Unknown value mode: {value_mode}")
@@ -112,8 +108,6 @@ def _value_mode_unit(value_mode: str) -> str:
 def _value_mode_slug(value_mode: str) -> str:
     if value_mode == VALUE_MODE_COUNT:
         return "spike_count"
-    if value_mode == VALUE_MODE_PER_PRESENTATION:
-        return "spikes_per_presentation"
     if value_mode == VALUE_MODE_RATE:
         return "mean_firing_rate_hz"
     raise ExportValidationError(f"Unknown value mode: {value_mode}")
@@ -199,6 +193,27 @@ def _reduce_matrix(
     return reduced
 
 
+def _sum_matrix(
+    matrix: list[list[float | None]],
+    y_groups: list[tuple[int, int]],
+    x_groups: list[tuple[int, int]],
+) -> list[list[float | None]]:
+    pooled: list[list[float | None]] = []
+    for y_start, y_end in y_groups:
+        output_row: list[float | None] = []
+        for x_start, x_end in x_groups:
+            values = [
+                float(matrix[y_index][x_index])
+                for y_index in range(y_start, y_end + 1)
+                for x_index in range(x_start, x_end + 1)
+                if matrix[y_index][x_index] is not None
+                and math.isfinite(float(matrix[y_index][x_index]))
+            ]
+            output_row.append(sum(values) if values else None)
+        pooled.append(output_row)
+    return pooled
+
+
 def _smooth_matrix(
     matrix: list[list[float | None]], radius: int
 ) -> list[list[float | None]]:
@@ -237,6 +252,22 @@ def _smooth_matrix(
     return current
 
 
+def _smooth_preserving_missing(
+    matrix: list[list[float | None]], radius: int
+) -> list[list[float | None]]:
+    """Apply the shared kernel without filling zero-occupancy display cells."""
+
+    current = [row[:] for row in matrix]
+    for _pass in range(max(0, int(radius))):
+        smoothed = _smooth_matrix(current, 1)
+        for y_index, row in enumerate(current):
+            for x_index, center in enumerate(row):
+                if center is None or not math.isfinite(float(center)):
+                    smoothed[y_index][x_index] = None
+        current = smoothed
+    return current
+
+
 def _response_matrix(
     counts: np.ndarray,
     metadata: dict[str, Any],
@@ -247,12 +278,7 @@ def _response_matrix(
     if value_mode not in VALUE_MODES:
         raise ExportValidationError(f"Unknown value mode: {value_mode}")
     _n_units, n_y, n_x, _n_bins = metadata["shape"]
-    presentations = metadata["presentationCounts"]
-    if value_mode != VALUE_MODE_COUNT and presentations is None:
-        raise ExportValidationError(
-            f"{value_mode} requires stimulusPresentationCounts metadata in the JSON file."
-        )
-    duration = metadata["timeBinEdges"][end + 1] - metadata["timeBinEdges"][start]
+    occupancy = metadata["occupancyTimeSec"]
     result: list[list[float | None]] = []
     for y_index in range(n_y):
         row: list[float | None] = []
@@ -260,16 +286,60 @@ def _response_matrix(
             count = float(
                 sum(float(value) for value in counts[y_index, x_index, start : end + 1])
             )
-            if value_mode == VALUE_MODE_COUNT:
-                row.append(count)
-                continue
-            presentation_count = presentations[y_index][x_index]
-            if presentation_count <= 0:
+            occupancy_seconds = float(occupancy[y_index][x_index])
+            if occupancy_seconds <= 0:
                 row.append(None)
-            elif value_mode == VALUE_MODE_PER_PRESENTATION:
-                row.append(count / presentation_count)
+            elif value_mode == VALUE_MODE_COUNT:
+                row.append(count)
             else:
-                row.append(count / (presentation_count * duration))
+                row.append(count / occupancy_seconds)
+        result.append(row)
+    return result
+
+
+def _prepared_response_matrix(
+    counts: np.ndarray,
+    metadata: dict[str, Any],
+    start: int,
+    end: int,
+    value_mode: str,
+    y_groups: list[tuple[int, int]],
+    x_groups: list[tuple[int, int]],
+    smooth_radius: int,
+) -> list[list[float | None]]:
+    """Mirror the interactive count/occupancy spatial reduction pipeline."""
+
+    raw_counts = _response_matrix(
+        counts, metadata, start, end, VALUE_MODE_COUNT
+    )
+    if value_mode == VALUE_MODE_COUNT:
+        grouped_counts = _reduce_matrix(raw_counts, y_groups, x_groups)
+        return _smooth_preserving_missing(grouped_counts, smooth_radius)
+    if value_mode != VALUE_MODE_RATE:
+        raise ExportValidationError(f"Unknown value mode: {value_mode}")
+
+    occupancy = [
+        [float(value) if float(value) > 0 else None for value in row]
+        for row in metadata["occupancyTimeSec"]
+    ]
+    grouped_counts = _sum_matrix(raw_counts, y_groups, x_groups)
+    grouped_occupancy = _sum_matrix(occupancy, y_groups, x_groups)
+    smoothed_counts = _smooth_preserving_missing(grouped_counts, smooth_radius)
+    smoothed_occupancy = _smooth_preserving_missing(
+        grouped_occupancy, smooth_radius
+    )
+    result: list[list[float | None]] = []
+    for y_index, count_row in enumerate(smoothed_counts):
+        row: list[float | None] = []
+        for x_index, count in enumerate(count_row):
+            occupancy_seconds = smoothed_occupancy[y_index][x_index]
+            row.append(
+                None
+                if count is None
+                or occupancy_seconds is None
+                or occupancy_seconds <= 0
+                else count / occupancy_seconds
+            )
         result.append(row)
     return result
 
@@ -298,10 +368,6 @@ def _displayed_csv_rows(
     )
     range_start_ms = edges_ms[source_start]
     range_end_ms = edges_ms[source_end + 1]
-    raw_matrix = _response_matrix(
-        counts, metadata, source_start, source_end, options.value_mode
-    )
-
     x_bins = max(1, min(n_x, int(options.x_bins)))
     y_bins = max(1, min(n_y, int(options.y_bins)))
     smooth_radius = max(0, min(3, int(options.smooth_radius)))
@@ -309,8 +375,15 @@ def _displayed_csv_rows(
     y_groups = _axis_groups(n_y, y_bins)
     if options.flip_y:
         y_groups.reverse()
-    matrix = _smooth_matrix(
-        _reduce_matrix(raw_matrix, y_groups, x_groups), smooth_radius
+    matrix = _prepared_response_matrix(
+        counts,
+        metadata,
+        source_start,
+        source_end,
+        options.value_mode,
+        y_groups,
+        x_groups,
+        smooth_radius,
     )
 
     display_time_groups, time_group_size, base_bin_ms = _time_groups(
@@ -336,19 +409,15 @@ def _displayed_csv_rows(
         f"{options.value_mode}: {_format_ms(range_start_ms)} "
         f"to {_format_ms(range_end_ms)} ms"
     )
-    presentation_counts = metadata["presentationCounts"]
+    occupancy = metadata["occupancyTimeSec"]
     rows: list[list[Any]] = []
     for display_y, (y_start, y_end) in enumerate(y_groups):
         for display_x, (x_start, x_end) in enumerate(x_groups):
-            grouped_presentations = (
-                [
-                    presentation_counts[y_index][x_index]
-                    for y_index in range(y_start, y_end + 1)
-                    for x_index in range(x_start, x_end + 1)
-                ]
-                if presentation_counts is not None
-                else []
-            )
+            grouped_occupancy = [
+                occupancy[y_index][x_index]
+                for y_index in range(y_start, y_end + 1)
+                for x_index in range(x_start, x_end + 1)
+            ]
             rows.append(
                 [
                     unit_index,
@@ -364,8 +433,8 @@ def _displayed_csv_rows(
                     matrix[display_y][display_x],
                     options.value_mode,
                     _value_mode_unit(options.value_mode),
-                    min(grouped_presentations) if grouped_presentations else "",
-                    max(grouped_presentations) if grouped_presentations else "",
+                    min(grouped_occupancy),
+                    max(grouped_occupancy),
                     mode,
                     display_y,
                     y_start,

@@ -10,14 +10,14 @@ final class FigureExportTests: XCTestCase {
         let counts = unitIDs.enumerated().map { index, _ in
             [[[Double(index + 1), Double(index + 2)]]]
         }
-        let payload: [String: Any] = [
+        let payload = currentRFSchemaPayload([
             "unitsSpikeCounts": counts,
             "unitsSpikeCountsSize": [unitIDs.count, 1, 1, 2],
             "unitPool": unitIDs,
             "xPositions": [0.0],
             "yPositions": [0.0],
             "timeBinEdges": [0.0, 0.1, 0.2],
-        ]
+        ], occupancyTimeSec: 0.2, occupancyTimeSecSize: [1, 1])
         return try RFMappingData(
             data: JSONSerialization.data(withJSONObject: payload),
             url: URL(fileURLWithPath: "/tmp/260101_1/ProbeA-rf.json")
@@ -55,14 +55,14 @@ final class FigureExportTests: XCTestCase {
 
     private func makeDenseTimelineData(binCount: Int = 80) throws -> RFMappingData {
         let histogram = (0..<binCount).map { Double(($0 % 7) + 1) }
-        let payload: [String: Any] = [
+        let payload = currentRFSchemaPayload([
             "unitsSpikeCounts": [[[histogram]]],
             "unitsSpikeCountsSize": [1, 1, 1, binCount],
             "unitPool": [22],
             "xPositions": [0.0],
             "yPositions": [0.0],
             "timeBinEdges": (0...binCount).map { Double($0) / 1_000 },
-        ]
+        ], occupancyTimeSec: Double(binCount) / 1_000, occupancyTimeSecSize: [1, 1])
         return try RFMappingData(
             data: JSONSerialization.data(withJSONObject: payload),
             url: URL(fileURLWithPath: "/tmp/260101_1/ProbeA-dense-rf.json")

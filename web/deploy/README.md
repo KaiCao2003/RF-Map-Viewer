@@ -20,9 +20,10 @@ exporter manifest, exact directory contents, and every page checksum; it uses a
 kernel atomic exchange where available or a journaled, crash-recoverable CIFS
 fallback. It never changes a source RF/HD/Probe artifact.
 
-Source browsing and attachment support the current `.rfmap`, `.tc`, and
-`.probe` aliases as well as legacy RF/HD `.json` and probe-position `.csv`
-files. When both companion names exist in the same discovery location,
+Source browsing accepts the current RF payload under either `.rfmap` or
+`.json`; it does not accept the earlier occupancy-free schema under either
+name. Companion attachment supports `.tc`/HD `.json` and `.probe`/position
+`.csv` filename aliases. When both companion names exist in the same discovery location,
 `tuning_curves.tc` and `positions.probe` take precedence over their legacy
 counterparts.
 
@@ -170,19 +171,26 @@ with unlisted contents is rejected rather than deleted.
 ## Real-data acceptance checklist
 
 The validation is read-only with respect to source data. It fingerprints all
-12 RF, Probe, unsupported legacy-HD, and M15 tuning source files before and
+15 RF, Probe, legacy-HD, and M15 tuning source files before and
 after the run.
 API parsing creates only local SSD caches; this acceptance path does not export,
 upload, copy, or modify a source artifact.
 
-The only supported tuning source contract is columnar. Its top level is exactly
-`metadata`, `angle_bin_edges_deg`, `occupancy_samples`, `occupancy_time_s`,
-`unit_id`, `spike_counts`, `firing_rate_hz`, and `unit_data`. Every matrix row
-and every `unit_data` column is aligned by the same `unit_id` index.
-`unit_data` contains exactly `hd_class`, `rate_mvl`, `spike_angle_mrl`,
-`rayleigh_score`, `rayleigh_p`, `rayleigh_significant`, `shuffle_p`, and
-`shuffle_significant`. `schema_version`, row-oriented `units`, and the old
-`{cluster_id: rates}` mapping are rejected.
+The fixed M14–M18 RF artifacts predate the 1.9.5 occupancy contract. They are
+retained only as immutable rejection fixtures: static validation confirms that
+they still omit `occupancyTimeSec` and the fixed count-semantics fields, and
+live validation requires `POST /api/datasets/open` to reject each one with HTTP
+422. They must not be used to claim that a 1.9.5 RF file opened successfully.
+No newly generated authoritative occupancy-aware RF artifact is currently part
+of this deployment suite.
+
+Companion files still receive read-only static validation. The only supported
+tuning source contract is columnar. Its top level is exactly `metadata`,
+`angle_bin_edges_deg`, `occupancy_samples`, `occupancy_time_s`, `unit_id`,
+`spike_counts`, `firing_rate_hz`, and `unit_data`. Every matrix row and every
+`unit_data` column is aligned by the same `unit_id` index. `unit_data` contains
+exactly `hd_class`, `rate_mvl`, `spike_angle_mrl`, `rayleigh_score`,
+`rayleigh_p`, `rayleigh_significant`, `shuffle_p`, and `shuffle_significant`.
 
 1. Before service activation, validate the known artifacts and frontend source
    contract:
@@ -191,24 +199,10 @@ and every `unit_data` column is aligned by the same `unit_id` index.
    ./deploy/validate_real_data.sh --files-only
    ```
 
-2. After activation, validate direct private access and the three server-side
-   remote chooser filters (`rf-json`, `tuning-json`, and `positions-csv`). The
-   live API checks all of these real relationships:
-
-   - m17 `260729_2`: RF + 384-channel/620-unit ProbeA; the automatically
-     discovered old `{cluster_id: rates}` tuning JSON must be rejected with
-     HTTP 422.
-   - m17 `260729_4`: 596-unit rotation RF, no Probe positions, and the same
-     explicit rejection of the old tuning JSON.
-   - m15 `260630_3`: RF + ProbeA + automatic discovery of the same-day
-     `260630_1` tuning JSON. The source must expose exactly the eight supported
-     top-level fields and all 180 occupancy/count/rate bins; any previous
-     `schema_version` + `units` file fails acceptance.
-   - m14 `260615_3`: RF + ProbeA with 384 channels and 220 positioned units.
-
-   The m17 binary unit request deliberately supplies a 0..200 ms RF display
-   range and still requires the full 500-bin payload, proving that RF display
-   range does not truncate Timeline data:
+2. After activation, validate direct private access and the server-side remote
+   chooser filters. The live gate lists the known RF paths and explicitly
+   requires HTTP 422 for all five occupancy-free RF payloads (m17 `260729_2`,
+   m17 `260729_4`, m15 `260630_3`, m14 `260615_3`, and m18 `260812_3`):
 
    ```sh
    ./deploy/validate_real_data.sh
@@ -221,7 +215,7 @@ and every `unit_data` column is aligned by the same `unit_id` index.
    curl -fsS http://127.0.0.1:3005/rfmapping/api/health
    ```
 
-   The health response must report `1.9.1`.
+   The health response must report `1.9.5`.
 
 4. If the optional Nginx include is active, validate it separately:
 
@@ -232,19 +226,18 @@ and every `unit_data` column is aligned by the same `unit_id` index.
    sudo nginx -T | grep -A35 -F 'location ^~ /rfmapping/'
    ```
 
-The fixed acceptance artifacts are:
+The fixed rejection/static-regression artifacts are:
 
-- Legacy-rejection fixture: m17 `260729_2`, RF shape `[620, 7, 30, 500]`,
-  ProbeA 384/620, and the unsupported same-day `260729_1`
-  `{cluster_id: rates}` tuning JSON.
-- Cross-session legacy-rejection fixture: m17 `260729_4`
+- Occupancy-free RF rejection fixture: m17 `260729_2`, shape
+  `[620, 7, 30, 500]`, with ProbeA 384/620 static geometry.
+- Occupancy-free rotation rejection fixture: m17 `260729_4`
   `rotation_30_unitsSpikeCounts_260729_4.json`, 139,143,404 bytes and shape
-  `[596, 7, 30, 500]`, with all 500 Timeline bins.
-- Columnar migration fixture: m15 `260630_3` RF shape `[146, 7, 30, 300]`,
-  ProbeA 384/146, and the same-day `260630_1` `tuning_curves.json` with 147 HD
-  units. The validator requires the new eight-field columnar source.
-- Probe regression: m14 `260615_3` RF shape `[220, 9, 30, 300]`, paired with
-  ProbeA `channels.csv` and `positions.csv`, 384 channels and 220 units.
+  `[596, 7, 30, 500]`.
+- Occupancy-free m15 RF rejection fixture: shape `[146, 7, 30, 300]`, plus
+  ProbeA 384/146 and the same-day columnar tuning file with 147 HD units for
+  static companion validation only.
+- Occupancy-free m14 and m18 RF rejection fixtures, with their ProbeA CSVs
+  retained as static geometry regressions.
 
 Inspect failures with
 `journalctl --user -u rfmapping-web.service -n 200 --no-pager`.

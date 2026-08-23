@@ -29,14 +29,17 @@ final class PlotLayoutTests: XCTestCase {
                 }
             }
         }
-        let payload: [String: Any] = [
+        let payload = currentRFSchemaPayload([
             "unitsSpikeCounts": [unit],
             "unitsSpikeCountsSize": [1, rows, columns, bins],
             "unitPool": [17],
             "xPositions": (0..<columns).map(Double.init),
             "yPositions": (0..<rows).map(Double.init),
             "timeBinEdges": (0...bins).map { Double($0) / 10.0 },
-        ]
+        ], occupancyTimeSec: Array(
+            repeating: Array(repeating: 0.1, count: columns),
+            count: rows
+        ), occupancyTimeSecSize: [rows, columns])
         return try RFMappingData(
             data: JSONSerialization.data(withJSONObject: payload),
             url: URL(fileURLWithPath: "/tmp/singleton-y-layout.rfmap")
