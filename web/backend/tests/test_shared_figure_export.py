@@ -230,6 +230,34 @@ def test_cartesian_maps_preserve_square_spatial_cells() -> None:
     assert max(y_values) < 330
 
 
+def test_cartesian_singleton_y_uses_legacy_30_by_7_visual_aspect() -> None:
+    image = Image.new("RGB", (420, 420), "white")
+    red = [255, 0, 0]
+    spec = PlotSpec(
+        PlotKind.RGB_CARTESIAN,
+        [[red] * 120],
+    )
+
+    figure_export_module._draw_cartesian_map(  # type: ignore[attr-defined]
+        ImageDraw.Draw(image),
+        (10, 10, 410, 410),
+        spec,
+        rgb=True,
+    )
+
+    red_pixels = [
+        (x, y)
+        for y in range(image.height)
+        for x in range(image.width)
+        if image.getpixel((x, y)) == (255, 0, 0)
+    ]
+    x_values = [point[0] for point in red_pixels]
+    y_values = [point[1] for point in red_pixels]
+    rendered_width = max(x_values) - min(x_values) + 1
+    rendered_height = max(y_values) - min(y_values) + 1
+    assert rendered_width / rendered_height == pytest.approx(30.0 / 7.0, rel=0.03)
+
+
 def test_polar_map_centers_gui_visual_angle_span_on_twelve_oclock() -> None:
     image = Image.new("RGB", (420, 420), "white")
     draw = ImageDraw.Draw(image)
@@ -398,6 +426,25 @@ def test_polar_map_can_preserve_the_gui_inner_blank_radius() -> None:
     image = PillowFigureRenderer((500, 400)).render_page(1, page)
 
     assert image.getpixel((250, 230)) == (248, 250, 252)
+
+
+def test_polar_singleton_y_spans_the_legacy_seven_row_radius() -> None:
+    image = Image.new("RGB", (420, 420), "white")
+    spec = PlotSpec(
+        PlotKind.RGB_POLAR,
+        [[[255, 0, 0]] * 120],
+        options={"inner_blank_rows": 4},
+    )
+
+    figure_export_module._draw_polar_map(  # type: ignore[attr-defined]
+        ImageDraw.Draw(image),
+        (10, 10, 410, 410),
+        spec,
+        rgb=True,
+    )
+
+    assert image.getpixel((270, 210)) == (248, 250, 252)
+    assert image.getpixel((290, 210)) == (255, 0, 0)
 
 
 @pytest.mark.parametrize("kind", [PlotKind.DELAY_CARTESIAN, PlotKind.DELAY_POLAR])

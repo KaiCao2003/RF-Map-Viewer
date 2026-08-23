@@ -2,20 +2,23 @@
 
 This directory contains two separately versioned applications:
 
-- `rfmapping_gui.py`: the stable RF Map Viewer `1.9.3`;
-- `rfmapping_fm_gui.py`: the Free-Moving RF Viewer `1.10.0-alpha.2`.
+- `rfmapping_gui.py`: the stable RF Map Viewer `1.9.4`;
+- `rfmapping_fm_gui.py`: the Free-Moving RF Viewer `1.10.0-alpha.3`.
 
 They have distinct app names, bundle identifiers, release artifacts, and tags,
 so the alpha can be installed and released without replacing the stable app.
 
-## Stable viewer 1.9.3
+## Stable viewer 1.9.4
 
 The stable viewer opens the established RF JSON/`.rfmap` contract and its
 tuning-curve and probe companions.
 
-Version 1.9.3 accepts MATLAB `jsonencode` numeric scalars as one-element
+Version 1.9.4 accepts MATLAB `jsonencode` numeric scalars as one-element
 `xPositions` or `yPositions` arrays when the declared spatial axis size is
-one. Multi-position axes remain strictly validated as arrays.
+one. A singleton-y RF map uses the legacy `30:7` Cartesian footprint and a
+seven-unit Polar ring across live plots, timeline thumbnails, hit testing, and
+figure exports. Multi-position axes remain strictly validated as arrays, and
+multirow plot geometry is unchanged.
 
 Run it from source with:
 
@@ -24,26 +27,31 @@ Run it from source with:
 ```
 
 Its macOS identity is `RF Map Viewer.app`, bundle ID
-`org.local.rfmapping.viewer`, and version/build `1.9.3` / `10903`. Build it with:
+`org.local.rfmapping.viewer`, and version/build `1.9.4` / `10904`. Build it with:
 
 ```sh
 script/build_python_stable_macos_app.sh
 ```
 
-## Free-Moving alpha 1.10.0-alpha.2
+## Free-Moving alpha 1.10.0-alpha.3
 
 > **freemoving rf viewer alpha**
 
 This Python/Tk application is a read-only viewer for the HDF5 `.rfmap` files
-written by `RFmapping_core_fm.m`. Version **1.10.0-alpha.2** is intentionally a
-separate alpha application: it does not open legacy RF JSON, tuning curves,
-probe files, or head-direction companions.
+written by `RFmapping_core_fm.m` and `rfmapping_core_fm_bar.m`. Version
+**1.10.0-alpha.3** is intentionally a separate alpha application: it does not
+open legacy RF JSON, tuning curves, probe files, or head-direction companions.
 
 ### What it shows
 
 - one unit at a time from `/rf/rate_hz`;
+- an explicit **Square / Bar** choice before any file is loaded;
+- strict matching of Square `rfmapping_fm_hdf5_v1` and vertical-Bar
+  `rfmapping_fm_bar_hdf5_v1` files;
 - head-centric azimuth `[-180, 180)` and elevation `[-90, 90]`;
 - switchable 2D equirectangular and interactive 3D spherical RF views;
+- a legacy `30:7` visual footprint for singleton-elevation 2D maps, without
+  changing the physical 3D sphere;
 - drag-to-rotate 3D navigation with a deterministic front-view reset;
 - a continuously adjustable half-open response window;
 - time-weighted mean firing rate in Hz;
@@ -51,7 +59,9 @@ probe files, or head-direction companions.
 - a spatial-mean response timeline; and
 - embedded cylinder, rigid-body, viewpoint, and input provenance.
 
-The loader validates `format=rfmapping_fm_hdf5_v1`,
+The Bar loader additionally validates
+`stimulus_geometry=vertical_bar_full_source_height`, pooled recorded bar
+widths, and the latest Bar format contract. Both loaders validate
 `logical_dimension_order=unit,elevation,azimuth,time`, the completion marker,
 the embedded `rf-calib-1.0` document, and MATLAB's reversed on-disk HDF5
 dimension order. Only the selected unit is read from the large rate dataset.
@@ -67,7 +77,9 @@ cd ~/Developer/rfmapping_gui/python
 ~/.virtualenvs/rfmapping/bin/python rfmapping_fm_gui.py /path/to/result.rfmap
 ```
 
-The app also accepts one `.rfmap` by Finder Open With or drag-and-drop.
+The app asks **Square or Bar** before opening a file selected from the picker,
+Finder Open With, or drag-and-drop. For an explicit noninteractive launch, pass
+`--stimulus square` or `--stimulus bar` with the path.
 
 ### Validate
 
@@ -76,7 +88,7 @@ cd ~/Developer/rfmapping_gui/python
 PYTHONDONTWRITEBYTECODE=1 ~/.virtualenvs/rfmapping/bin/python -m pytest -q \
   --ignore=tests/test_rfmapping_gui_tk.py
 PYTHONDONTWRITEBYTECODE=1 ~/.virtualenvs/rfmapping/bin/python \
-  rfmapping_fm_gui.py --self-test /path/to/result.rfmap
+  rfmapping_fm_gui.py --stimulus square --self-test /path/to/result.rfmap
 ```
 
 The remote Linux host validates the HDF5 model and non-GUI behavior. A complete
@@ -87,9 +99,9 @@ build host.
 
 - App: `Free-Moving RF Viewer.app`
 - Bundle ID: `org.local.rfmapping.viewer.freemoving`
-- Release: `1.10.0-alpha.2`
-- Apple version/build: `1.10.0` / `110002`
-- Python package version: `1.10.0a2`
+- Release: `1.10.0-alpha.3`
+- Apple version/build: `1.10.0` / `110003`
+- Python package version: `1.10.0a3`
 - Edition: `FreeMovingAlpha`
 - Minimum system: macOS 14.0, Apple silicon
 

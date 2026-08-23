@@ -38,10 +38,10 @@ class ComponentVersionTests(unittest.TestCase):
     def test_only_exact_component_tags_are_accepted(self) -> None:
         verifier = ROOT / "release/verify_versions.py"
         for tag in (
-            "python-v1.9.3",
-            "python-v1.10.0-alpha.2",
-            "swift-v1.9.0",
-            "web-v1.9.0",
+            "python-v1.9.4",
+            "python-v1.10.0-alpha.3",
+            "swift-v1.9.1",
+            "web-v1.9.1",
         ):
             subprocess.run(
                 [sys.executable, str(verifier), "--tag", tag],

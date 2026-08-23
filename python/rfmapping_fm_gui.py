@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Free-moving RF viewer alpha for ``rfmapping_fm_hdf5_v1`` files."""
+"""Free-moving RF viewer alpha for Square and Bar HDF5 ``.rfmap`` files."""
 
 from __future__ import annotations
 
@@ -15,6 +15,8 @@ import numpy as np
 from PIL import Image
 
 from rfmapping_viewer.fm_dataset import (
+    STIMULUS_BAR,
+    STIMULUS_SQUARE,
     FreeMovingRFMap,
     FreeMovingUnitMap,
     aggregate_rate_hz,
@@ -25,6 +27,7 @@ from rfmapping_viewer.fm_dataset import (
 try:
     import tkinter as tk
     from tkinter import filedialog, messagebox, ttk
+
     from PIL import ImageTk
 
     TK_AVAILABLE = True
@@ -50,7 +53,7 @@ except ModuleNotFoundError:
 
 
 APP_VERSION = "1.10.0"
-APP_PRERELEASE = "alpha.2"
+APP_PRERELEASE = "alpha.3"
 APP_RELEASE_VERSION = f"{APP_VERSION}-{APP_PRERELEASE}"
 APP_EDITION = "FreeMovingAlpha"
 APP_DISPLAY_VERSION = f"{APP_RELEASE_VERSION} · Free-moving alpha"
@@ -64,6 +67,12 @@ PALETTES = ("Viridis", "Inferno", "Gray")
 VIEW_2D = "2D map"
 VIEW_3D = "3D sphere"
 VIEWS = (VIEW_2D, VIEW_3D)
+SINGLETON_Y_REFERENCE_COLUMNS = 30
+SINGLETON_Y_REFERENCE_ROWS = 7
+STIMULUS_CLI_CHOICES = {
+    "square": STIMULUS_SQUARE,
+    "bar": STIMULUS_BAR,
+}
 
 _PALETTE_STOPS: dict[str, tuple[tuple[float, tuple[int, int, int]], ...]] = {
     "Viridis": (
@@ -98,6 +107,16 @@ def finite_display_range(
     if not math.isfinite(high) or high <= low:
         high = low + 1.0
     return low, high
+
+
+def spatial_display_aspect(columns: int, rows: int) -> float:
+    """Return the 2D map aspect, with a readable singleton-y footprint."""
+
+    if columns < 1 or rows < 1:
+        raise ValueError("Spatial grid dimensions must be positive")
+    if rows == 1:
+        return SINGLETON_Y_REFERENCE_COLUMNS / SINGLETON_Y_REFERENCE_ROWS
+    return columns / rows
 
 
 def colorize_matrix(
@@ -289,7 +308,11 @@ else:
 class FreeMovingRFViewer(_RootBase):
     """A single-purpose, read-only viewer for free-moving RF maps."""
 
-    def __init__(self, initial_path: str | Path | None = None) -> None:
+    def __init__(
+        self,
+        initial_path: str | Path | None = None,
+        initial_stimulus_kind: str | None = None,
+    ) -> None:
         super().__init__()
         self.title(f"Free-Moving RF Viewer {APP_DISPLAY_VERSION}")
         self.geometry("1320x860")
@@ -323,9 +346,11 @@ class FreeMovingRFViewer(_RootBase):
 
         self.metric_var = tk.StringVar(value=METRIC_RATE)
         self.palette_var = tk.StringVar(value="Viridis")
-        self.view_var = tk.StringVar(value=VIEW_2D)
+        self.view_var = tk.StringVar(value=VIEW_3D)
         self.minimum_exposure_var = tk.StringVar(value="0")
-        self.file_var = tk.StringVar(value="Drop or open a free-moving .rfmap")
+        self.file_var = tk.StringVar(
+            value="Choose Square or Bar, then open/drop a free-moving .rfmap"
+        )
         self.document_var = tk.StringVar(value="No document loaded")
         self.calibration_var = tk.StringVar(value="Calibration provenance appears here.")
         self.time_var = tk.StringVar(value="—")
@@ -339,7 +364,12 @@ class FreeMovingRFViewer(_RootBase):
         self.after(40, self._poll_unit_results)
 
         if initial_path is not None:
-            self.after_idle(lambda: self.open_document(initial_path))
+            if initial_stimulus_kind is None:
+                self.after_idle(lambda: self._open_external_document(initial_path))
+            else:
+                self.after_idle(
+                    lambda: self.open_document(initial_path, initial_stimulus_kind)
+                )
 
     def _configure_style(self) -> None:
         self.configure(background="#11151b")
@@ -393,7 +423,7 @@ class FreeMovingRFViewer(_RootBase):
         )
         ttk.Button(
             header,
-            text="Open .rfmap…",
+            text="Open Square / Bar…",
             style="Primary.TButton",
             command=self.choose_document,
         ).pack(side="right")
@@ -473,7 +503,7 @@ class FreeMovingRFViewer(_RootBase):
             text="Reset",
             style="Tool.TButton",
             command=self._reset_sphere_view,
-            state="disabled",
+            state="normal",
         )
         self.reset_view_button.pack(side="left", padx=(7, 0))
 
@@ -639,13 +669,82 @@ class FreeMovingRFViewer(_RootBase):
         return "break"
 
     def choose_document(self) -> None:
+        stimulus_kind = self._ask_stimulus_kind()
+        if stimulus_kind is None:
+            return
         selected = filedialog.askopenfilename(
             parent=self,
-            title="Open free-moving RF map",
+            title=f"Open {stimulus_kind} free-moving RF map",
             filetypes=(("Free-moving RF map", "*.rfmap"),),
         )
         if selected:
-            self.open_document(selected)
+            self.open_document(selected, stimulus_kind)
+
+    def _ask_stimulus_kind(self) -> str | None:
+        result: list[str] = []
+        dialog = tk.Toplevel(self)
+        dialog.title("Choose stimulus")
+        dialog.configure(background="#191f27")
+        dialog.resizable(False, False)
+        dialog.transient(self)
+
+        panel = ttk.Frame(dialog, style="Panel.TFrame", padding=(24, 20, 24, 22))
+        panel.pack(fill="both", expand=True)
+        ttk.Label(
+            panel,
+            text="Choose the stimulus before loading",
+            style="Section.TLabel",
+        ).pack(anchor="w")
+        ttk.Label(
+            panel,
+            text=(
+                "The viewer validates the selected RF format. "
+                "Square and Bar files are never guessed from the filename."
+            ),
+            style="Body.TLabel",
+            justify="left",
+            wraplength=390,
+        ).pack(anchor="w", pady=(7, 18))
+
+        button_row = ttk.Frame(panel, style="Panel.TFrame")
+        button_row.pack(fill="x")
+
+        def choose(stimulus_kind: str) -> None:
+            result.append(stimulus_kind)
+            dialog.destroy()
+
+        ttk.Button(
+            button_row,
+            text="Square",
+            style="Primary.TButton",
+            command=lambda: choose(STIMULUS_SQUARE),
+        ).pack(side="left", fill="x", expand=True, padx=(0, 6))
+        ttk.Button(
+            button_row,
+            text="Bar",
+            style="Primary.TButton",
+            command=lambda: choose(STIMULUS_BAR),
+        ).pack(side="left", fill="x", expand=True, padx=(6, 0))
+
+        dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+        dialog.bind("<Escape>", lambda _event: dialog.destroy())
+        dialog.update_idletasks()
+        x = self.winfo_rootx() + max(
+            0, (self.winfo_width() - dialog.winfo_width()) // 2
+        )
+        y = self.winfo_rooty() + max(
+            0, (self.winfo_height() - dialog.winfo_height()) // 3
+        )
+        dialog.geometry(f"+{x}+{y}")
+        dialog.grab_set()
+        dialog.focus_force()
+        self.wait_window(dialog)
+        return result[0] if result else None
+
+    def _open_external_document(self, path: str | Path) -> None:
+        stimulus_kind = self._ask_stimulus_kind()
+        if stimulus_kind is not None:
+            self.open_document(path, stimulus_kind)
 
     def _drop_document(self, event: Any) -> str:
         paths = self.tk.splitlist(event.data)
@@ -654,18 +753,18 @@ class FreeMovingRFViewer(_RootBase):
                 "Open failed", "Drop exactly one free-moving .rfmap file.", parent=self
             )
             return "break"
-        self.open_document(paths[0])
+        self._open_external_document(paths[0])
         return "break"
 
     def _mac_open_document(self, *paths: str) -> None:
         if paths:
-            self.open_document(paths[0])
+            self._open_external_document(paths[0])
 
-    def open_document(self, path: str | Path) -> None:
-        self.status_var.set("Reading free-moving RF metadata…")
+    def open_document(self, path: str | Path, stimulus_kind: str) -> None:
+        self.status_var.set(f"Reading {stimulus_kind} free-moving RF metadata…")
         self.update_idletasks()
         try:
-            dataset = load_free_moving_rfmap(path)
+            dataset = load_free_moving_rfmap(path, stimulus_kind)
         except Exception as exc:
             self.status_var.set("Open failed")
             messagebox.showerror("Open failed", str(exc), parent=self)
@@ -675,10 +774,17 @@ class FreeMovingRFViewer(_RootBase):
         self.unit_map = None
         self.unit_index = 0
         self.file_var.set(str(dataset.path))
+        stimulus_description = dataset.stimulus_kind
+        if dataset.stimulus_kind == STIMULUS_BAR:
+            widths = ", ".join(
+                f"{width:g}°" for width in dataset.bar_widths_present_deg
+            )
+            stimulus_description = f"Bar · widths {widths}"
         self.document_var.set(
+            f"{stimulus_description}\n"
             f"{dataset.unit_count:,} units\n"
             f"{dataset.elevation_count} elevation × {dataset.azimuth_count} azimuth\n"
-            f"{dataset.time_bin_count} time bins · HDF5 FM"
+            f"{dataset.time_bin_count} time bins · full sphere · ON RF only"
         )
         labels = [
             f"{index + 1} / {dataset.unit_count}  ·  unit {int(unit_id)}"
@@ -892,8 +998,10 @@ class FreeMovingRFViewer(_RootBase):
             self._render_2d_map(np.flipud(rgb), low, high, unit)
         self._render_timeline()
         visible_bin_count = np.count_nonzero(np.isfinite(matrix))
+        exposed_bin_count = np.count_nonzero(self.dataset.exposure_sec > 0.0)
         self.status_var.set(
-            f"Unit {self.unit_map.unit_id} · {visible_bin_count:,} visible bins"
+            f"Unit {self.unit_map.unit_id} · {visible_bin_count:,} sphere bins · "
+            f"{exposed_bin_count:,} with exposure"
         )
 
     def _render_2d_map(
@@ -905,7 +1013,10 @@ class FreeMovingRFViewer(_RootBase):
         left, right, top, bottom = 62, 82, 26, 54
         available_width = max(1, canvas_width - left - right)
         available_height = max(1, canvas_height - top - bottom)
-        ratio = self.dataset.azimuth_count / self.dataset.elevation_count
+        ratio = spatial_display_aspect(
+            self.dataset.azimuth_count,
+            self.dataset.elevation_count,
+        )
         plot_width = min(available_width, int(available_height * ratio))
         plot_height = min(available_height, int(plot_width / ratio))
         if plot_height < available_height and plot_width == available_width:
@@ -1242,8 +1353,8 @@ class FreeMovingRFViewer(_RootBase):
         self.destroy()
 
 
-def self_test(path: str | Path) -> dict[str, object]:
-    dataset = load_free_moving_rfmap(path)
+def self_test(path: str | Path, stimulus_kind: str) -> dict[str, object]:
+    dataset = load_free_moving_rfmap(path, stimulus_kind)
     unit = dataset.load_unit(0)
     start = min(_nearest_edge_index(dataset.time_edges_sec, 0.0), dataset.time_bin_count - 1)
     stop = max(
@@ -1267,7 +1378,8 @@ def self_test(path: str | Path) -> dict[str, object]:
         0.0,
     )
     return {
-        "format": "rfmapping_fm_hdf5_v1",
+        "format": dataset.format_name,
+        "stimulusKind": dataset.stimulus_kind,
         "version": APP_RELEASE_VERSION,
         "edition": APP_EDITION,
         "unitCount": dataset.unit_count,
@@ -1294,11 +1406,23 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("path", nargs="?", help="free-moving HDF5 .rfmap")
     parser.add_argument("--self-test", metavar="RFMAP")
+    parser.add_argument(
+        "--stimulus",
+        choices=tuple(STIMULUS_CLI_CHOICES),
+        help="explicit stimulus type for a path or --self-test",
+    )
     parser.add_argument(DND_SMOKE_ARGUMENT, action="store_true")
     args = parser.parse_args(argv)
 
     if args.self_test:
-        print(json.dumps(self_test(args.self_test), sort_keys=True))
+        if args.stimulus is None:
+            parser.error("--self-test requires --stimulus square or --stimulus bar")
+        print(
+            json.dumps(
+                self_test(args.self_test, STIMULUS_CLI_CHOICES[args.stimulus]),
+                sort_keys=True,
+            )
+        )
         return 0
     if args.self_test_dnd:
         dnd_self_test()
@@ -1306,7 +1430,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if not TK_AVAILABLE:
         parser.error("Tk is unavailable in this Python interpreter")
-    viewer = FreeMovingRFViewer(args.path)
+    initial_stimulus_kind = (
+        STIMULUS_CLI_CHOICES[args.stimulus]
+        if args.stimulus is not None
+        else None
+    )
+    viewer = FreeMovingRFViewer(args.path, initial_stimulus_kind)
     viewer.mainloop()
     return 0
 

@@ -1,3 +1,5 @@
+import { spatialGridDimensions } from "./spatialLayout";
+
 export interface TimelineGridLayout {
   left: number;
   right: number;
@@ -5,7 +7,10 @@ export interface TimelineGridLayout {
   columns: number;
   rows: number;
   slotWidth: number;
+  /** Compatibility alias for the horizontal cell size. */
   cell: number;
+  cellWidth: number;
+  cellHeight: number;
   gridWidth: number;
   gridHeight: number;
   labelGap: number;
@@ -40,18 +45,22 @@ export function timelineGridLayout(input: TimelineGridInput): TimelineGridLayout
   const responsiveMaximum = width >= 1180 ? 4 : width >= 820 ? 3 : width >= 560 ? 2 : 1;
   let columns = Math.min(count, MAX_COLUMNS, responsiveMaximum);
   let slotWidth = 1;
-  let cell = 1;
+  let cellWidth = 1;
+  let cellHeight = 1;
+  let gridWidth = 1;
   let gridHeight = 1;
 
   while (columns >= 1) {
     slotWidth = Math.max(1, (availableWidth - (columns - 1) * gapX) / columns);
-    cell = Math.min(TARGET_GRID_HEIGHT / yCount, slotWidth / xCount);
-    gridHeight = cell * yCount;
+    const dimensions = spatialGridDimensions(slotWidth, TARGET_GRID_HEIGHT, xCount, yCount);
+    cellWidth = dimensions.cellWidth;
+    cellHeight = dimensions.cellHeight;
+    gridWidth = dimensions.gridWidth;
+    gridHeight = dimensions.gridHeight;
     if (gridHeight >= MIN_READABLE_GRID_HEIGHT || columns === 1) break;
     columns -= 1;
   }
 
-  const gridWidth = cell * xCount;
   const rowHeight = gridHeight + labelGap + labelHeight + rowGap;
   return {
     left,
@@ -60,7 +69,9 @@ export function timelineGridLayout(input: TimelineGridInput): TimelineGridLayout
     columns,
     rows: Math.ceil(count / columns),
     slotWidth,
-    cell,
+    cell: cellWidth,
+    cellWidth,
+    cellHeight,
     gridWidth,
     gridHeight,
     labelGap,
