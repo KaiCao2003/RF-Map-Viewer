@@ -17,10 +17,10 @@ component tag and artifact name:
 
 | Component | Release | Tag | Channel |
 | --- | --- | --- | --- |
-| Python stable | `1.9.3` | `python-v1.9.3` | stable |
+| Python stable | `1.9.4` | `python-v1.9.4` | stable |
 | Python Free-Moving | `1.10.0-alpha.3` | `python-v1.10.0-alpha.3` | alpha |
-| Swift | `1.9.0` | `swift-v1.9.0` | stable |
-| Web | `1.9.0` | `web-v1.9.0` | stable |
+| Swift | `1.9.1` | `swift-v1.9.1` | stable |
+| Web | `1.9.1` | `web-v1.9.1` | stable |
 
 Published downloads and checksums are available from the repository
 [Releases page](https://github.com/KaiCao2003/RF-Map-Viewer/releases). The root

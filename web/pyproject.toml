@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rfmapping-viewer-web"
-version = "1.9.0"
+version = "1.9.1"
 description = "FastAPI backend for the RF Mapping Web viewer"
 requires-python = ">=3.11"
 dependencies = [
