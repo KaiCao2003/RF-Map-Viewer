@@ -38,9 +38,9 @@ advance without inventing a platform-specific fourth version number.
 | Swift `1.9.1` | Stable | [macOS Apple-silicon ZIP](https://github.com/KaiCao2003/RF-Map-Viewer/releases/download/swift-v1.9.1/RF_Map_Viewer-1.9.1-swift-macos-arm64.zip) | [`swift-v1.9.1`](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/swift-v1.9.1) |
 | Web `1.9.1` | Stable | [deployment source archive](https://github.com/KaiCao2003/RF-Map-Viewer/releases/download/web-v1.9.1/RF_Map_Viewer-1.9.1-web.tar.gz) | [`web-v1.9.1`](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/web-v1.9.1) |
 
-Each Release also includes a SHA-256 checksum file. The Free-Moving build is a
-preview and is deliberately marked as a GitHub prerelease. Browse every
-published version on the [Releases page](https://github.com/KaiCao2003/RF-Map-Viewer/releases).
+Python and Web releases also include a SHA-256 checksum file. The Free-Moving
+build is a preview and is deliberately marked as a GitHub prerelease. Browse
+every published version on the [Releases page](https://github.com/KaiCao2003/RF-Map-Viewer/releases).
 
 ## Python free-moving alpha
 

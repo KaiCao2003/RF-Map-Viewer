@@ -102,8 +102,8 @@ final class PlotLayoutTests: XCTestCase {
 
         XCTAssertEqual(layout.ringSpan, 7, accuracy: 1e-9)
         let pointInsideOuterPart = CGPoint(
-            x: layout.center.x + CGFloat(innerBlankRows + 6) * layout.scale,
-            y: layout.center.y
+            x: layout.center.x,
+            y: layout.center.y - CGFloat(innerBlankRows + 6) * layout.scale
         )
         let hit = try XCTUnwrap(polarCell(at: pointInsideOuterPart, layout: layout))
         XCTAssertEqual(hit.ring, 0)
@@ -114,8 +114,8 @@ final class PlotLayoutTests: XCTestCase {
         ))
         XCTAssertNil(polarCell(
             at: CGPoint(
-                x: layout.center.x + CGFloat(innerBlankRows + 8) * layout.scale,
-                y: layout.center.y
+                x: layout.center.x,
+                y: layout.center.y - CGFloat(innerBlankRows + 8) * layout.scale
             ),
             layout: layout
         ))
@@ -172,8 +172,8 @@ final class PlotLayoutTests: XCTestCase {
         let polarLayout = try XCTUnwrap(polarMini.polarLayout)
         XCTAssertEqual(polarLayout.ringSpan, 7, accuracy: 1e-9)
         XCTAssertNotNil(polarMini.cellRef(at: CGPoint(
-            x: polarLayout.center.x + CGFloat(innerBlankRows + 6) * polarLayout.scale,
-            y: polarLayout.center.y
+            x: polarLayout.center.x,
+            y: polarLayout.center.y - CGFloat(innerBlankRows + 6) * polarLayout.scale
         )))
     }
 }
