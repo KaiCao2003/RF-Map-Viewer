@@ -64,6 +64,8 @@ PALETTES = ("Viridis", "Inferno", "Gray")
 VIEW_2D = "2D map"
 VIEW_3D = "3D sphere"
 VIEWS = (VIEW_2D, VIEW_3D)
+SINGLETON_Y_REFERENCE_COLUMNS = 30
+SINGLETON_Y_REFERENCE_ROWS = 7
 
 _PALETTE_STOPS: dict[str, tuple[tuple[float, tuple[int, int, int]], ...]] = {
     "Viridis": (
@@ -98,6 +100,16 @@ def finite_display_range(
     if not math.isfinite(high) or high <= low:
         high = low + 1.0
     return low, high
+
+
+def spatial_display_aspect(columns: int, rows: int) -> float:
+    """Return the 2D map aspect, with a readable singleton-y footprint."""
+
+    if columns < 1 or rows < 1:
+        raise ValueError("Spatial grid dimensions must be positive")
+    if rows == 1:
+        return SINGLETON_Y_REFERENCE_COLUMNS / SINGLETON_Y_REFERENCE_ROWS
+    return columns / rows
 
 
 def colorize_matrix(
@@ -905,7 +917,10 @@ class FreeMovingRFViewer(_RootBase):
         left, right, top, bottom = 62, 82, 26, 54
         available_width = max(1, canvas_width - left - right)
         available_height = max(1, canvas_height - top - bottom)
-        ratio = self.dataset.azimuth_count / self.dataset.elevation_count
+        ratio = spatial_display_aspect(
+            self.dataset.azimuth_count,
+            self.dataset.elevation_count,
+        )
         plot_width = min(available_width, int(available_height * ratio))
         plot_height = min(available_height, int(plot_width / ratio))
         if plot_height < available_height and plot_width == available_width:
