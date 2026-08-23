@@ -106,7 +106,16 @@ def _write_fixture(tmp_path: Path) -> Path:
         "xPositions": [-12.0, 0.0, 12.0],
         "yPositions": [-6.0, 6.0],
         "timeBinEdges": [-0.1, 0.0, 0.1, 0.2, 0.3],
-        "stimulusPresentationCounts": [[2, 2, 2], [2, 2, 2]],
+        "responseUnits": "spike_count",
+        "responseNormalization": "none",
+        "spikeCountDefinition": (
+            "each_qualifying_trial_contributes_once_per_final_spatial_bin"
+        ),
+        "occupancyTimeSec": [[0.2, 0.2, 0.2], [0.2, 0.2, 0.2]],
+        "occupancyTimeSecSize": [2, 3],
+        "occupancyTimeDefinition": (
+            "sum_of_qualifying_trial_durations_per_final_spatial_bin"
+        ),
     }
     path = tmp_path / "unitsSpikeCounts_fixture.json"
     path.write_text(json.dumps(payload), encoding="utf-8")

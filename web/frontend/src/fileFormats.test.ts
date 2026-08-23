@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { acceptsRemoteFile, hasArtifactExtension } from "./fileFormats";
 
 describe("input file aliases", () => {
-  it("accepts current and legacy RF mapping names", () => {
+  it("accepts both filename extensions for the current RF payload", () => {
     expect(acceptsRemoteFile("/data/session.rfmap", "rf-json")).toBe(true);
     expect(acceptsRemoteFile("/data/session.JSON", "rf-json")).toBe(true);
     expect(acceptsRemoteFile("/data/tuning_curves.json", "rf-json")).toBe(false);

@@ -8,14 +8,14 @@ final class WindowPairingCoordinatorTests: XCTestCase {
         let counts = unitIDs.enumerated().map { index, _ in
             [[[Double(index + 1), Double(index + 2)]]]
         }
-        let object: [String: Any] = [
+        let object = currentRFSchemaPayload([
             "unitsSpikeCounts": counts,
             "unitsSpikeCountsSize": [unitIDs.count, 1, 1, 2],
             "unitPool": unitIDs,
             "xPositions": [0.0],
             "yPositions": [0.0],
             "timeBinEdges": [0.0, 0.1, 0.2],
-        ]
+        ], occupancyTimeSec: 0.2, occupancyTimeSecSize: [1, 1])
         return try RFMappingData(
             data: JSONSerialization.data(withJSONObject: object),
             url: URL(fileURLWithPath: "/tmp/\(name).json")
@@ -108,14 +108,14 @@ final class WindowPairingCoordinatorTests: XCTestCase {
     }
 
     func testStoreDefaultsRFPlotToZeroThroughTwoHundredMilliseconds() throws {
-        let object: [String: Any] = [
+        let object = currentRFSchemaPayload([
             "unitsSpikeCounts": [[[[1.0, 2.0, 3.0, 4.0]]]],
             "unitsSpikeCountsSize": [1, 1, 1, 4],
             "unitPool": [7],
             "xPositions": [0.0],
             "yPositions": [0.0],
             "timeBinEdges": [-0.1, 0.0, 0.1, 0.2, 0.3],
-        ]
+        ], occupancyTimeSec: 0.4, occupancyTimeSecSize: [1, 1])
         let data = try RFMappingData(
             data: JSONSerialization.data(withJSONObject: object),
             url: URL(fileURLWithPath: "/tmp/default-range.json")
@@ -124,6 +124,7 @@ final class WindowPairingCoordinatorTests: XCTestCase {
 
         XCTAssertEqual(store.plotRangeStartMS, 0.0, accuracy: 1e-9)
         XCTAssertEqual(store.plotRangeEndMS, 200.0, accuracy: 1e-9)
-        XCTAssertEqual(store.currentMatrix(), [[5.0]])
+        XCTAssertEqual(store.valueMode, .meanFiringRate)
+        XCTAssertEqual(store.currentMatrix(), [[12.5]])
     }
 }

@@ -19,19 +19,13 @@ struct CellRef: Hashable, Sendable {
 
 enum ResponseValueMode: String, CaseIterable, Identifiable, Hashable, Sendable {
     case spikeCount = "Spike count"
-    case spikesPerPresentation = "Spikes / presentation"
     case meanFiringRate = "Mean firing rate (Hz)"
 
     var id: String { rawValue }
 
-    var requiresPresentationCounts: Bool {
-        self != .spikeCount
-    }
-
     var unit: String {
         switch self {
         case .spikeCount: "spikes"
-        case .spikesPerPresentation: "spikes/presentation"
         case .meanFiringRate: "Hz"
         }
     }
@@ -39,7 +33,6 @@ enum ResponseValueMode: String, CaseIterable, Identifiable, Hashable, Sendable {
     var shortUnit: String {
         switch self {
         case .spikeCount: "spikes"
-        case .spikesPerPresentation: "sp/pres"
         case .meanFiringRate: "Hz"
         }
     }
@@ -49,7 +42,6 @@ enum ResponseValueMode: String, CaseIterable, Identifiable, Hashable, Sendable {
     var filenameSlug: String {
         switch self {
         case .spikeCount: "spike_count"
-        case .spikesPerPresentation: "spikes_per_presentation"
         case .meanFiringRate: "mean_firing_rate_hz"
         }
     }
@@ -113,7 +105,10 @@ struct UnitMetrics: Sendable {
     let maxTotal: Double
     let maxPeak: Double
     let maxBinCount: Double
+    /// Nil only when every spatial cell has zero occupancy.
+    let maxFiringRate: Double?
     let totalSpikes: Double
+    /// Full-window strongest occupancy-normalized response cell.
     let bestY: Int
     let bestX: Int
 }

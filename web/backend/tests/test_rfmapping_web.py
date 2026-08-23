@@ -32,8 +32,25 @@ from rfmapping_web.datasets import DatasetValidationError
 from rfmapping_web.exports import CSV_HEADERS
 
 
+def occupancy_contract(
+    occupancy: object, size: list[int]
+) -> dict[str, object]:
+    return {
+        "responseUnits": "spike_count",
+        "responseNormalization": "none",
+        "spikeCountDefinition": (
+            "each_qualifying_trial_contributes_once_per_final_spatial_bin"
+        ),
+        "occupancyTimeSec": occupancy,
+        "occupancyTimeSecSize": size,
+        "occupancyTimeDefinition": (
+            "sum_of_qualifying_trial_durations_per_final_spatial_bin"
+        ),
+    }
+
+
 def sample_payload() -> dict[str, object]:
-    counts = np.arange(24, dtype=float).reshape(2, 2, 2, 3)
+    counts = np.arange(24, dtype=int).reshape(2, 2, 2, 3)
     return {
         "unitsSpikeCounts": counts.tolist(),
         "unitsSpikeCountsSize": [2, 2, 2, 3],
@@ -41,7 +58,7 @@ def sample_payload() -> dict[str, object]:
         "xPositions": [-10, 10],
         "yPositions": [-5, 5],
         "timeBinEdges": [-0.1, 0.0, 0.1, 0.2],
-        "stimulusPresentationCounts": [[2, 3], [4, 5]],
+        **occupancy_contract([[0.2, 0.3], [0.4, 0.5]], [2, 2]),
     }
 
 
@@ -348,7 +365,7 @@ def test_health_and_lazy_browse_are_root_confined(
         ]
         assert health.json() == {
             "status": "ok",
-            "version": "1.9.1",
+            "version": "1.9.5",
             "rfRoot": str(settings.rf_root),
             "rfRootAvailable": True,
             "outputRoot": str(settings.output_root),
@@ -500,8 +517,10 @@ def test_open_metadata_binary_probe_and_hd(app, settings: Settings) -> None:
             "xPositions": [-10.0, 10.0],
             "yPositions": [-5.0, 5.0],
             "timeBinEdges": [-0.1, 0.0, 0.1, 0.2],
-            "presentationCounts": [[2.0, 3.0], [4.0, 5.0]],
-            "capabilities": {"probe": True, "hd": True, "normalized": True},
+            "occupancyTimeSec": [[0.2, 0.3], [0.4, 0.5]],
+            "responseUnits": "spike_count",
+            "responseNormalization": "none",
+            "capabilities": {"probe": True, "hd": True, "occupancy": True},
         }
         dataset_id = metadata["id"]
 
@@ -631,7 +650,7 @@ def test_current_extensions_open_and_win_companion_discovery(
         assert metadata["capabilities"] == {
             "probe": True,
             "hd": True,
-            "normalized": True,
+            "occupancy": True,
         }
         probe = client.get(f"/api/datasets/{metadata['id']}/probe")
         assert probe.status_code == 200, probe.text
@@ -1240,6 +1259,18 @@ def test_hd_api_returns_422_for_non_finite_or_overflowing_tuning_numbers(
             lambda payload: payload["unitsSpikeCounts"][0][0][0].__setitem__(0, True),
             "non-numeric",
         ),
+        (
+            lambda payload: payload["unitsSpikeCounts"][0][0][0].__setitem__(0, 0.5),
+            "non-integer",
+        ),
+        (
+            lambda payload: payload.__setitem__("responseUnits", "Hz"),
+            "responseUnits",
+        ),
+        (
+            lambda payload: payload.__setitem__("occupancyTimeSecSize", [1, 4]),
+            "occupancyTimeSecSize",
+        ),
     ],
 )
 def test_invalid_rf_json_is_rejected(
@@ -1255,7 +1286,7 @@ def test_invalid_rf_json_is_rejected(
     assert not list(settings.cache_root.glob("*.f64"))
 
 
-def test_singleton_presentation_counts_are_normalized(app, settings: Settings) -> None:
+def test_singleton_occupancy_scalar_is_normalized(app, settings: Settings) -> None:
     payload = {
         "unitsSpikeCounts": [[[[4, 5]]]],
         "unitsSpikeCountsSize": [1, 1, 1, 2],
@@ -1263,13 +1294,13 @@ def test_singleton_presentation_counts_are_normalized(app, settings: Settings) -
         "xPositions": [0],
         "yPositions": [0],
         "timeBinEdges": [0, 0.1, 0.2],
-        "stimulusPresentationCounts": 3,
+        **occupancy_contract(3, [1, 1]),
     }
     source = write_json(settings.rf_root / "singleton.json", payload)
     with authenticated_client(app) as client:
         response = client.post("/api/datasets/open", json={"path": str(source)})
     assert response.status_code == 200, response.text
-    assert response.json()["presentationCounts"] == [[3.0]]
+    assert response.json()["occupancyTimeSec"] == [[3.0]]
 
 
 @pytest.mark.parametrize(
@@ -1290,7 +1321,7 @@ def test_scalar_singleton_spatial_axes_are_normalized(
     n_x = len(expected_x)
     n_y = len(expected_y)
     payload = {
-        "unitsSpikeCounts": np.arange(n_y * n_x * 2, dtype=float)
+        "unitsSpikeCounts": np.arange(n_y * n_x * 2, dtype=int)
         .reshape(1, n_y, n_x, 2)
         .tolist(),
         "unitsSpikeCountsSize": [1, n_y, n_x, 2],
@@ -1298,6 +1329,7 @@ def test_scalar_singleton_spatial_axes_are_normalized(
         "xPositions": x_positions,
         "yPositions": y_positions,
         "timeBinEdges": [0, 0.1, 0.2],
+        **occupancy_contract([1.0] * (n_y * n_x), [n_y, n_x]),
     }
     source = write_json(settings.rf_root / "singleton-axis.rfmap", payload)
 
@@ -1307,6 +1339,9 @@ def test_scalar_singleton_spatial_axes_are_normalized(
     assert response.status_code == 200, response.text
     assert response.json()["xPositions"] == expected_x
     assert response.json()["yPositions"] == expected_y
+    assert response.json()["occupancyTimeSec"] == (
+        [[1.0] * n_x] if n_y == 1 else [[1.0] for _ in range(n_y)]
+    )
 
 
 @pytest.mark.parametrize("axis", ["xPositions", "yPositions"])
@@ -1392,8 +1427,8 @@ def test_displayed_csv_is_written_on_linux_with_exact_tk_schema(
             "value": "34.0",
             "value_mode": "Spike count",
             "value_unit": "spikes",
-            "presentation_count_min": "2.0",
-            "presentation_count_max": "5.0",
+            "occupancy_time_sec_min": "0.2",
+            "occupancy_time_sec_max": "0.5",
             "mode": "Spike count: -100 to 100 ms",
             "display_y_index_0based": "0",
             "source_y_start_0based": "0",
@@ -1455,7 +1490,7 @@ def test_csv_export_normalization_and_output_path_confinement(
             row = next(csv.DictReader(handle))
         assert row["value_mode"] == "Mean firing rate (Hz)"
         assert row["value_unit"] == "Hz"
-        assert float(row["value"]) == pytest.approx(50.854166666666664)
+        assert float(row["value"]) == pytest.approx(136.0 / 1.4)
 
         for output_path in (
             "../outside.csv",
@@ -1467,6 +1502,19 @@ def test_csv_export_normalization_and_output_path_confinement(
             )
             assert refused.status_code == 400, refused.text
         assert not (outside / "outside.csv").exists()
+
+
+def test_csv_export_rejects_removed_per_presentation_mode(
+    app, settings: Settings
+) -> None:
+    source = write_json(settings.rf_root / "rf.json")
+    with authenticated_client(app) as client:
+        metadata = _open(client, source)
+        response = client.post(
+            f"/api/datasets/{metadata['id']}/exports/displayed-csv",
+            json=_csv_export_payload(valueMode="Spikes / presentation"),
+        )
+    assert response.status_code == 422
 
 
 def test_csv_export_matches_tk_flip_and_weighted_smoothing(
@@ -1500,23 +1548,18 @@ def test_csv_export_matches_tk_flip_and_weighted_smoothing(
     assert all(row["smooth_radius"] == "1" for row in rows)
 
 
-def test_non_count_export_requires_presentation_metadata(
+def test_open_rejects_legacy_occupancy_free_schema(
     app, settings: Settings
 ) -> None:
     payload = sample_payload()
-    payload.pop("stimulusPresentationCounts")
-    source = write_json(settings.rf_root / "counts-only.json", payload)
+    for field in occupancy_contract([], []):
+        payload.pop(field)
+    payload["stimulusPresentationCounts"] = [[2, 3], [4, 5]]
+    source = write_json(settings.rf_root / "legacy-counts.json", payload)
     with authenticated_client(app) as client:
-        metadata = _open(client, source)
-        endpoint = f"/api/datasets/{metadata['id']}/exports/displayed-csv"
-        unavailable = client.post(
-            endpoint,
-            json=_csv_export_payload(valueMode="Spikes / presentation"),
-        )
-        assert unavailable.status_code == 422
-        assert "stimulusPresentationCounts" in unavailable.json()["detail"]
-        count = client.post(endpoint, json=_csv_export_payload())
-        assert count.status_code == 200, count.text
+        unavailable = client.post("/api/datasets/open", json={"path": str(source)})
+    assert unavailable.status_code == 422
+    assert "occupancyTimeSec" in unavailable.json()["detail"]
 
 
 def test_hd_image_save_writes_only_under_linux_output_root(
@@ -1622,6 +1665,15 @@ def test_figure_export_registry_covers_every_view_and_all_types_render(
         registry = registry_response.json()
         assert registry["specVersion"] == 1
         assert {entry["id"] for entry in registry["figureTypes"]} == expected
+        rf_definition = next(
+            entry for entry in registry["figureTypes"] if entry["id"] == "rf.cartesian"
+        )
+        assert rf_definition["settings"]["valueMode"] == {
+            "type": "string",
+            "default": "Mean firing rate (Hz)",
+            "description": "Displayed response normalization.",
+            "choices": ["Mean firing rate (Hz)", "Spike count"],
+        }
         assert registry["formats"] == ["pdf", "png"]
         assert registry["pageOrders"] == ["unit-major", "page-major"]
 
@@ -1655,7 +1707,7 @@ def test_figure_response_preparation_matches_live_pooled_observations() -> None:
     metadata = {
         "shape": [1, 2, 4, 2],
         "timeBinEdges": [0.0, 0.1, 0.3],
-        "presentationCounts": [[1, 9, 0, 2], [3, 1, 4, 0]],
+        "occupancyTimeSec": [[1, 9, 0, 2], [3, 1, 4, 0]],
     }
     base_settings = {
         "rfStartMs": 0.0,
@@ -1667,8 +1719,7 @@ def test_figure_response_preparation_matches_live_pooled_observations() -> None:
     }
     expected_by_mode = {
         "Spike count": [[5.0, 10.0]],
-        "Spikes / presentation": [[10.0 / 7.0, 10.0 / 3.0]],
-        "Mean firing rate (Hz)": [[100.0 / 21.0, 100.0 / 9.0]],
+        "Mean firing rate (Hz)": [[10.0 / 7.0, 10.0 / 3.0]],
     }
     for value_mode, expected in expected_by_mode.items():
         matrix, x_groups, y_groups, bounds = figure_exports_module._prepared_response(
@@ -1686,7 +1737,7 @@ def test_figure_response_preparation_matches_live_pooled_observations() -> None:
         {
             "shape": [1, 1, 2, 1],
             "timeBinEdges": [0.0, 0.1],
-            "presentationCounts": [[100, 1]],
+            "occupancyTimeSec": [[100, 1]],
         },
         {
             "rfStartMs": 0.0,
@@ -1700,13 +1751,13 @@ def test_figure_response_preparation_matches_live_pooled_observations() -> None:
     )
     np.testing.assert_allclose(
         smoothed,
-        [[10.398009950248756, 11.568627450980392]],
+        [[1.0398009950248756, 1.1568627450980392]],
     )
 
 
 def _temporal_parity_fixture() -> tuple[np.ndarray, dict[str, object]]:
     counts = np.full((4, 4, 3), 100.0, dtype=np.float64)
-    presentations = np.zeros((4, 4), dtype=np.int64)
+    occupancy = np.zeros((4, 4), dtype=np.float64)
     for y, x, exposure, histogram in (
         (0, 0, 9, [9, 0, 0]),
         (0, 2, 1, [0, 5, 0]),
@@ -1714,12 +1765,12 @@ def _temporal_parity_fixture() -> tuple[np.ndarray, dict[str, object]]:
         (2, 2, 2, [1, 2, 3]),
         (3, 3, 7, [5, 4, 3]),
     ):
-        presentations[y, x] = exposure
+        occupancy[y, x] = exposure
         counts[y, x, :] = histogram
     metadata: dict[str, object] = {
         "shape": [1, 4, 4, 3],
         "timeBinEdges": [0.0, 0.01, 0.02, 0.03],
-        "presentationCounts": presentations.tolist(),
+        "occupancyTimeSec": occupancy.tolist(),
         "xPositions": [0.0, 1.0, 2.0, 3.0],
         "yPositions": [0.0, 1.0, 2.0, 3.0],
     }
@@ -1734,7 +1785,7 @@ def test_figure_temporal_preparation_matches_live_slice_first_smoothing() -> Non
             metadata,
             {
                 "timeResolutionMs": 10.0,
-                "valueMode": "Spikes / presentation",
+                "valueMode": "Mean firing rate (Hz)",
                 "xBins": 2,
                 "yBins": 2,
                 "smoothRadius": 1,
@@ -1774,8 +1825,7 @@ def test_figure_temporal_preparation_matches_live_slice_first_smoothing() -> Non
     ("value_mode", "expected"),
     (
         ("Spike count", [3.0, 4.0, 0.0]),
-        ("Spikes / presentation", [0.6, 0.8, 0.0]),
-        ("Mean firing rate (Hz)", [60.0, 80.0, 0.0]),
+        ("Mean firing rate (Hz)", [0.6, 0.8, 0.0]),
     ),
 )
 def test_timeline_selected_curve_matches_live_group_response_modes(
@@ -2792,13 +2842,24 @@ def test_lru_eviction_invalidates_live_dataset_record(settings: Settings) -> Non
         )
 
 
-def test_zero_presentations_with_nonzero_counts_is_rejected(
+def test_zero_occupancy_with_nonzero_counts_is_rejected(
     app, settings: Settings
 ) -> None:
     payload = sample_payload()
-    payload["stimulusPresentationCounts"] = [[0, 3], [4, 5]]
-    source = write_json(settings.rf_root / "invalid-normalization.json", payload)
+    payload["occupancyTimeSec"] = [[0, 0.3], [0.4, 0.5]]
+    source = write_json(settings.rf_root / "invalid-occupancy.json", payload)
     with authenticated_client(app) as client:
         response = client.post("/api/datasets/open", json={"path": str(source)})
     assert response.status_code == 422
     assert "zero where spike counts are nonzero" in response.json()["detail"]
+
+
+def test_all_zero_rf_occupancy_is_rejected(app, settings: Settings) -> None:
+    payload = sample_payload()
+    payload["unitsSpikeCounts"] = np.zeros((2, 2, 2, 3), dtype=int).tolist()
+    payload["occupancyTimeSec"] = [[0, 0], [0, 0]]
+    source = write_json(settings.rf_root / "all-zero-occupancy.rfmap", payload)
+    with authenticated_client(app) as client:
+        response = client.post("/api/datasets/open", json={"path": str(source)})
+    assert response.status_code == 422
+    assert "at least one positive" in response.json()["detail"]

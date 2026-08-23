@@ -11,6 +11,25 @@ from unittest import mock
 import rfmapping_gui as gui
 
 
+def _current_rf_payload(payload: dict[str, object]) -> dict[str, object]:
+    size = payload["unitsSpikeCountsSize"]
+    assert isinstance(size, list)
+    n_y, n_x = int(size[1]), int(size[2])
+    payload.update(
+        responseUnits="spike_count",
+        responseNormalization="none",
+        spikeCountDefinition=(
+            "each_qualifying_trial_contributes_once_per_final_spatial_bin"
+        ),
+        occupancyTimeSec=[[1.0 for _x in range(n_x)] for _y in range(n_y)],
+        occupancyTimeSecSize=[n_y, n_x],
+        occupancyTimeDefinition=(
+            "sum_of_qualifying_trial_durations_per_final_spatial_bin"
+        ),
+    )
+    return payload
+
+
 def _tk_runtime_error() -> str | None:
     if not gui.TK_AVAILABLE:
         return "this Python was built without tkinter"
@@ -48,7 +67,7 @@ class TkViewerTests(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         n_bins = 30
-        payload = {
+        payload = _current_rf_payload({
             "unitsSpikeCounts": [
                 [
                     [[(unit + x + y + bin_idx) % 4 for bin_idx in range(n_bins)] for x in range(3)]
@@ -61,8 +80,7 @@ class TkViewerTests(unittest.TestCase):
             "xPositions": [-1, 0, 1],
             "yPositions": [-1, 1],
             "timeBinEdges": [index * 0.001 for index in range(n_bins + 1)],
-            "stimulusPresentationCounts": [[5, 5, 5], [5, 5, 5]],
-        }
+        })
         path = Path(self.directory.name) / "viewer.json"
         path.write_text(json.dumps(payload), encoding="utf-8")
         self.app = gui.RFMViewer(gui.RFMappingData(path))
@@ -113,7 +131,7 @@ class TkViewerTests(unittest.TestCase):
             settings._validated_settings()
 
     def test_zero_spike_filter_tracks_rf_window_and_can_restore_all_units(self) -> None:
-        payload = {
+        payload = _current_rf_payload({
             "unitsSpikeCounts": [
                 [[[1, 0], [1, 0], [1, 0]]],
                 [[[0, 1], [0, 1], [0, 1]]],
@@ -123,8 +141,7 @@ class TkViewerTests(unittest.TestCase):
             "xPositions": [-1, 0, 1],
             "yPositions": [0],
             "timeBinEdges": [0.0, 0.1, 0.2],
-            "stimulusPresentationCounts": [[1, 1, 1]],
-        }
+        })
         path = Path(self.directory.name) / "unit-filter.json"
         path.write_text(json.dumps(payload), encoding="utf-8")
         settings_value = replace(
@@ -165,15 +182,14 @@ class TkViewerTests(unittest.TestCase):
         self.assertEqual(self.app._unit_navigation_ids(), [10, 20])
 
     def test_all_filtered_is_nonfatal_and_blocks_empty_figure_composer(self) -> None:
-        payload = {
+        payload = _current_rf_payload({
             "unitsSpikeCounts": [[[[0], [0]]], [[[0], [0]]]],
             "unitsSpikeCountsSize": [2, 1, 2, 1],
             "unitPool": [10, 20],
             "xPositions": [-1, 1],
             "yPositions": [0],
             "timeBinEdges": [0.0, 0.1],
-            "stimulusPresentationCounts": [[1, 1]],
-        }
+        })
         path = Path(self.directory.name) / "all-filtered.json"
         path.write_text(json.dumps(payload), encoding="utf-8")
         settings_value = replace(
@@ -467,15 +483,14 @@ class TkViewerTests(unittest.TestCase):
         self.assertIn("matching unit lists", second.pair_status_label.cget("text"))
 
     def test_paired_filter_settings_reconcile_one_shared_visible_unit(self) -> None:
-        payload = {
+        payload = _current_rf_payload({
             "unitsSpikeCounts": [[[[1], [1]]], [[[0], [1]]]],
             "unitsSpikeCountsSize": [2, 1, 2, 1],
             "unitPool": [7, 8],
             "xPositions": [-1, 1],
             "yPositions": [0],
             "timeBinEdges": [0.0, 0.1],
-            "stimulusPresentationCounts": [[1, 1]],
-        }
+        })
         path = Path(self.directory.name) / "paired-filter.json"
         path.write_text(json.dumps(payload), encoding="utf-8")
         filter_off = replace(
@@ -533,7 +548,7 @@ class TkViewerTests(unittest.TestCase):
     def test_pairing_navigates_union_and_shows_na_for_missing_units(self) -> None:
         def write_units(name: str, unit_ids: list[int]) -> Path:
             n_bins = 30
-            payload = {
+            payload = _current_rf_payload({
                 "unitsSpikeCounts": [
                     [
                         [
@@ -549,8 +564,7 @@ class TkViewerTests(unittest.TestCase):
                 "xPositions": [-1, 0, 1],
                 "yPositions": [-1, 1],
                 "timeBinEdges": [index * 0.001 for index in range(n_bins + 1)],
-                "stimulusPresentationCounts": [[5, 5, 5], [5, 5, 5]],
-            }
+            })
             path = Path(self.directory.name) / name
             path.write_text(json.dumps(payload), encoding="utf-8")
             return path
@@ -665,7 +679,7 @@ class TkViewerTests(unittest.TestCase):
             first = next(csv.DictReader(file))
         self.assertEqual(first["value_mode"], gui.VALUE_MODE_RATE)
         self.assertEqual(first["value_unit"], "Hz")
-        self.assertEqual(first["presentation_count_min"], "5.0")
+        self.assertEqual(first["occupancy_time_sec_min"], "1.0")
         self.assertAlmostEqual(float(first["value"]), expected)
 
 

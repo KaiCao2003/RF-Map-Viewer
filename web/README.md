@@ -1,28 +1,36 @@
-# Web Viewer 1.9.1
+# Web Viewer 1.9.5
 
 The Web implementation contains a FastAPI backend in `backend/` and a
 React/Vite frontend in `frontend/`. The backend owns its figure renderer and
 does not import the analysis repository or the Python/Tk implementation.
-Its `1.9.1` version places it in the same stable feature generation as the
+Its `1.9.5` version places it in the same stable feature generation as the
 Python `1.9.x` reference; `web` remains an artifact/tag identity rather than a
 version suffix.
 
-Version 1.9.1 accepts MATLAB numeric scalars for declared singleton spatial
-axes. Singleton-y Cartesian maps keep a `30:7` footprint, and the sole Polar
-row spans seven radial units in RF, delay, RGB, timeline, selection, hit-test,
-and backend figure-export paths. Multirow geometry is unchanged.
+Version 1.9.5 implements the occupancy-aware RF contract. Mean firing rate is
+the default display and export value: selected raw counts are divided by
+`occupancyTimeSec` in seconds. Count remains available. Spatial reduction and
+smoothing combine count and occupancy separately before dividing, and the
+default strongest cell is selected by firing rate rather than raw count.
 
 ## Input files
 
-The viewer opens RF mapping JSON payloads saved as `.rfmap` and continues to
-open legacy `.json` files. HD tuning-curve JSON can be attached as `.tc` or as
+The viewer opens current RF mapping JSON payloads saved as `.rfmap` or `.json`.
+The filename extension does not change the RF schema. HD tuning-curve JSON can be attached as `.tc` or as
 the legacy `tuning_curves.json`; automatic discovery prefers
 `tuning_curves.tc`. Spike-position CSV can be attached as `.probe` or as the
 legacy `positions.csv`; automatic discovery prefers `positions.probe`.
 RF maps are primary documents; use the HD and Probe companion choosers after an
 RF map is open.
-These are filename aliases only: the payload schemas are unchanged, and input
-files remain read-only.
+RF payloads must include raw finite non-negative integer `unitsSpikeCounts`,
+the fixed count-semantics markers, and a finite non-negative
+`occupancyTimeSec` matrix whose declared size matches the spatial axes. A
+zero-occupancy cell must contain only zero counts, and at least one cell must
+have positive occupancy. Payloads from earlier
+versions that omit the occupancy contract or contain normalized response
+values are intentionally rejected. MATLAB singleton encodings are accepted
+for 1-by-1, 1-by-N, and N-by-1 occupancy matrices when the declared sizes make
+the shape unambiguous. Input files remain read-only.
 
 ## Install, test, and run
 

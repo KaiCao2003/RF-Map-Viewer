@@ -95,7 +95,7 @@ PROBE_POSITION_FILETYPES = (
     ("CSV document", "*.csv"),
     ("All files", "*.*"),
 )
-APP_VERSION = "1.9.4"
+APP_VERSION = "1.9.5"
 APP_EDITION = "Full"
 APP_DISPLAY_VERSION = APP_VERSION
 INNER_BLANK_ROWS = 4
@@ -118,9 +118,8 @@ HD_BIN_DIVISORS = tuple(
 TUNING_PLOT_MODES = ("Auto", "Polar", "Line")
 TUNING_LAYOUTS = ("Side by side", "Stacked")
 VALUE_MODE_COUNT = "Spike count"
-VALUE_MODE_PER_PRESENTATION = "Spikes / presentation"
 VALUE_MODE_RATE = "Mean firing rate (Hz)"
-VALUE_MODES = (VALUE_MODE_COUNT, VALUE_MODE_PER_PRESENTATION, VALUE_MODE_RATE)
+VALUE_MODES = (VALUE_MODE_COUNT, VALUE_MODE_RATE)
 PALETTES = ("Gray", "Viridis", "Inferno")
 POLAR_RADIUS_MODES = ("MATLAB row 1 inner", "Display bottom inner")
 AxisGroup = tuple[int, int]
@@ -779,7 +778,7 @@ class ViewerSettings:
     rf_filter_units_with_zero_bins: bool = True
     rf_zero_bin_threshold: int = 1
     rf_time_resolution_ms: float = 1.0
-    rf_value_mode: str = VALUE_MODE_COUNT
+    rf_value_mode: str = VALUE_MODE_RATE
     rf_x_bins: int = 0
     rf_y_bins: int = 0
     rf_smooth_radius: int = 0
@@ -2163,7 +2162,7 @@ def discover_probe_geometry(
 @dataclass(frozen=True)
 class SpatialGroupObservations:
     count: float
-    presentations: float | None
+    occupancy_time_s: float
     source_pixel_count: int
 
 
@@ -2357,11 +2356,7 @@ class RFMappingData:
         self.x_positions = first.x_positions.tolist()
         self.y_positions = first.y_positions.tolist()
         self.time_bin_edges = first.time_bin_edges_s.tolist()
-        self.presentation_counts = (
-            first.presentation_counts.tolist()
-            if first.presentation_counts is not None
-            else None
-        )
+        self.occupancy_time_s = first.occupancy_time_s.tolist()
         self._metrics_cache: dict[int, UnitMetrics] = {}
         self._best_cell_cache: dict[int, tuple[int, int]] = {}
         self._zero_spike_bin_count_cache: dict[tuple[int, int, int], int] = {}
@@ -2570,93 +2565,6 @@ class RFMappingData:
         self.probe_geometry()
         return self._probe_geometry_error
 
-    def _validate(self) -> None:
-        if any(size <= 0 for size in self.size):
-            raise ValueError(f"unitsSpikeCountsSize values must be positive, got {self.size!r}")
-        if len(self.counts) != self.n_units:
-            raise ValueError("unitsSpikeCounts first dimension does not match unitsSpikeCountsSize")
-        if len(self.unit_pool) != self.n_units:
-            raise ValueError("unitPool length does not match unit count")
-        if len(self.x_positions) != self.n_x:
-            raise ValueError("xPositions length does not match x dimension")
-        if len(self.y_positions) != self.n_y:
-            raise ValueError("yPositions length does not match y dimension")
-        if len(self.time_bin_edges) != self.n_bins + 1:
-            raise ValueError("timeBinEdges must contain nBins + 1 edges")
-        if not all(math.isfinite(value) for value in self.x_positions):
-            raise ValueError("xPositions must contain only finite values")
-        if not all(math.isfinite(value) for value in self.y_positions):
-            raise ValueError("yPositions must contain only finite values")
-        if not all(math.isfinite(value) for value in self.time_bin_edges):
-            raise ValueError("timeBinEdges must contain only finite values")
-        if not all(left < right for left, right in zip(self.time_bin_edges, self.time_bin_edges[1:])):
-            raise ValueError("timeBinEdges must be strictly increasing")
-
-        if self.presentation_counts is not None:
-            if not isinstance(self.presentation_counts, list):
-                raise ValueError("stimulusPresentationCounts must be a y-by-x array")
-            if len(self.presentation_counts) != self.n_y:
-                raise ValueError("stimulusPresentationCounts y dimension does not match unitsSpikeCountsSize")
-            for y_idx, row in enumerate(self.presentation_counts):
-                if not isinstance(row, list):
-                    raise ValueError(f"stimulusPresentationCounts row {y_idx} must be an array")
-                if len(row) != self.n_x:
-                    raise ValueError(
-                        f"stimulusPresentationCounts row {y_idx} x dimension does not match unitsSpikeCountsSize"
-                    )
-                for x_idx, value in enumerate(row):
-                    if (
-                        not isinstance(value, (int, float))
-                        or isinstance(value, bool)
-                        or not math.isfinite(value)
-                        or value < 0
-                        or abs(value - round(value)) > 1e-9
-                    ):
-                        raise ValueError(
-                            "stimulusPresentationCounts values must be finite, non-negative integers "
-                            f"(y {y_idx}, x {x_idx})"
-                        )
-
-        for unit_idx, unit in enumerate(self.counts):
-            if len(unit) != self.n_y:
-                raise ValueError(f"Unit {unit_idx} has wrong y dimension")
-            for y_idx, row in enumerate(unit):
-                if len(row) != self.n_x:
-                    raise ValueError(f"Unit {unit_idx}, y {y_idx} has wrong x dimension")
-                for x_idx, hist in enumerate(row):
-                    if len(hist) != self.n_bins:
-                        raise ValueError(
-                            f"Unit {unit_idx}, y {y_idx}, x {x_idx} has wrong bin dimension"
-                        )
-                    try:
-                        valid_hist = min(hist) >= 0 and all(map(math.isfinite, hist))
-                    except (TypeError, ValueError):
-                        valid_hist = False
-                    if not valid_hist:
-                        for bin_idx, value in enumerate(hist):
-                            if not isinstance(value, (int, float)) or isinstance(value, bool):
-                                raise ValueError(
-                                    f"Unit {unit_idx}, y {y_idx}, x {x_idx}, bin {bin_idx} is not numeric"
-                                )
-                            if not math.isfinite(value) or value < 0:
-                                raise ValueError(
-                                    f"Unit {unit_idx}, y {y_idx}, x {x_idx}, bin {bin_idx} "
-                                    "must be finite and non-negative"
-                                )
-
-        if self.presentation_counts is not None:
-            for y_idx, row in enumerate(self.presentation_counts):
-                for x_idx, presentations in enumerate(row):
-                    if presentations == 0 and any(
-                        float(self.counts[unit_idx][y_idx][x_idx][bin_idx]) != 0.0
-                        for unit_idx in range(self.n_units)
-                        for bin_idx in range(self.n_bins)
-                    ):
-                        raise ValueError(
-                            "stimulusPresentationCounts is zero where spike counts are nonzero "
-                            f"(y {y_idx}, x {x_idx})"
-                        )
-
     def display_y_indices(self, flip_y: bool = True) -> list[int]:
         if flip_y:
             return list(range(self.n_y - 1, -1, -1))
@@ -2701,6 +2609,7 @@ class RFMappingData:
         total_spikes = 0.0
         best_y = 0
         best_x = 0
+        best_rate = -1.0
 
         for y_idx in range(self.n_y):
             total_row: list[float] = []
@@ -2733,6 +2642,10 @@ class RFMappingData:
 
                 if cell_total > max_total:
                     max_total = cell_total
+                occupancy = self.occupancy_time_s[y_idx][x_idx]
+                cell_rate = cell_total / occupancy if occupancy > 0.0 else -1.0
+                if cell_rate > best_rate:
+                    best_rate = cell_rate
                     best_y = y_idx
                     best_x = x_idx
                 if cell_peak > max_peak:
@@ -2770,11 +2683,12 @@ class RFMappingData:
         return metrics
 
     def best_cell(self, unit_idx: int) -> tuple[int, int]:
-        """Return the strongest cell without computing delay/entropy metrics.
+        """Return the strongest occupancy-normalized cell without full metrics.
 
         RF navigation only needs a sensible default cell.  Keeping this path
         separate avoids calculating every cell's peak, delay, and entropy the
-        first time each unit is visited.
+        first time each unit is visited, while avoiding a bias toward cells
+        with longer stimulus occupancy.
         """
 
         cached = self._best_cell_cache.get(unit_idx)
@@ -2783,12 +2697,14 @@ class RFMappingData:
         unit = self.counts[unit_idx]
         best_y = 0
         best_x = 0
-        best_total = -1.0
+        best_rate = -1.0
         for y_idx, row in enumerate(unit):
             for x_idx, histogram in enumerate(row):
                 total = sum(float(value) for value in histogram)
-                if total > best_total:
-                    best_total = total
+                occupancy = self.occupancy_time_s[y_idx][x_idx]
+                rate = total / occupancy if occupancy > 0.0 else -1.0
+                if rate > best_rate:
+                    best_rate = rate
                     best_y = y_idx
                     best_x = x_idx
         result = (best_y, best_x)
@@ -2827,11 +2743,7 @@ class RFMappingData:
         raise ValueError(f"Unknown RF mode: {mode}")
 
     def supports_value_mode(self, value_mode: str) -> bool:
-        if value_mode == VALUE_MODE_COUNT:
-            return True
-        if value_mode in {VALUE_MODE_PER_PRESENTATION, VALUE_MODE_RATE}:
-            return self.presentation_counts is not None
-        return False
+        return value_mode in VALUE_MODES
 
     def time_span_seconds(self, start: int, end: int) -> float:
         requested_start, requested_end = min(start, end), max(start, end)
@@ -2852,30 +2764,15 @@ class RFMappingData:
         start = max(0, min(self.n_bins - 1, requested_start))
         end = max(0, min(self.n_bins - 1, requested_end))
         count = float(sum(self.counts[unit_idx][y_idx][x_idx][start : end + 1]))
-        if (
-            self.presentation_counts is not None
-            and self.presentation_counts[y_idx][x_idx] <= 0
-        ):
+        occupancy_time_s = self.occupancy_time_s[y_idx][x_idx]
+        if occupancy_time_s <= 0:
             return None
         if value_mode == VALUE_MODE_COUNT:
             return count
         if value_mode not in VALUE_MODES:
             raise ValueError(f"Unknown value mode: {value_mode}")
-        if not self.supports_value_mode(value_mode):
-            raise ValueError(
-                f"{value_mode} requires stimulusPresentationCounts metadata in the JSON file."
-            )
-        presentation_counts = self.presentation_counts
-        if presentation_counts is None:
-            raise ValueError("stimulusPresentationCounts metadata is unavailable")
-        presentations = presentation_counts[y_idx][x_idx]
-        if presentations <= 0:
-            return None
-        if value_mode == VALUE_MODE_PER_PRESENTATION:
-            return count / presentations
         if value_mode == VALUE_MODE_RATE:
-            duration = self.time_span_seconds(start, end)
-            return count / (presentations * duration)
+            return count / occupancy_time_s
         raise ValueError(f"Unknown value mode: {value_mode}")
 
     def response_matrix(
@@ -2890,12 +2787,10 @@ class RFMappingData:
         end = max(0, min(self.n_bins - 1, requested_end))
         count_matrix = self.aggregate_matrix(unit_idx, "Range sum", 0, start, end)
         if value_mode == VALUE_MODE_COUNT:
-            if self.presentation_counts is None:
-                return count_matrix
             return [
                 [
                     None
-                    if self.presentation_counts[y_idx][x_idx] <= 0
+                    if self.occupancy_time_s[y_idx][x_idx] <= 0
                     else count_matrix[y_idx][x_idx]
                     for x_idx in range(self.n_x)
                 ]
@@ -2903,23 +2798,11 @@ class RFMappingData:
             ]
         if value_mode not in VALUE_MODES:
             raise ValueError(f"Unknown value mode: {value_mode}")
-        if not self.supports_value_mode(value_mode):
-            raise ValueError(
-                f"{value_mode} requires stimulusPresentationCounts metadata in the JSON file."
-            )
-        presentation_counts = self.presentation_counts
-        if presentation_counts is None:
-            raise ValueError("stimulusPresentationCounts metadata is unavailable")
-        duration = self.time_span_seconds(start, end)
         return [
             [
                 None
-                if presentation_counts[y_idx][x_idx] <= 0
-                else count_matrix[y_idx][x_idx]
-                / (
-                    presentation_counts[y_idx][x_idx]
-                    * (duration if value_mode == VALUE_MODE_RATE else 1.0)
-                )
+                if self.occupancy_time_s[y_idx][x_idx] <= 0
+                else count_matrix[y_idx][x_idx] / self.occupancy_time_s[y_idx][x_idx]
                 for x_idx in range(self.n_x)
             ]
             for y_idx in range(self.n_y)
@@ -2935,10 +2818,10 @@ class RFMappingData:
     ) -> SpatialGroupObservations:
         """Pool raw observations for one displayed spatial cell.
 
-        ``stimulusPresentationCounts`` is exposure metadata for each source
-        position.  A displayed cell that combines positions therefore has one
-        pooled numerator and one pooled exposure; averaging already-normalized
-        source rates would give sparsely sampled positions too much weight.
+        ``occupancyTimeSec`` is exposure metadata for each source position. A
+        displayed cell that combines positions therefore has one pooled
+        numerator and one pooled exposure; averaging already-normalized source
+        rates would give briefly occupied positions too much weight.
         """
 
         y_start = max(0, min(self.n_y - 1, min(y_group)))
@@ -2952,24 +2835,19 @@ class RFMappingData:
             (y_idx, x_idx)
             for y_idx in range(y_start, y_end + 1)
             for x_idx in range(x_start, x_end + 1)
-            if self.presentation_counts is None
-            or self.presentation_counts[y_idx][x_idx] > 0
+            if self.occupancy_time_s[y_idx][x_idx] > 0
         ]
         counts = [
             float(sum(self.counts[unit_idx][y_idx][x_idx][start : end + 1]))
             for y_idx, x_idx in source_indices
         ]
-        presentations = (
-            sum(
-                float(self.presentation_counts[y_idx][x_idx])
-                for y_idx, x_idx in source_indices
-            )
-            if self.presentation_counts is not None
-            else None
+        occupancy_time_s = sum(
+            float(self.occupancy_time_s[y_idx][x_idx])
+            for y_idx, x_idx in source_indices
         )
         return SpatialGroupObservations(
             count=sum(counts),
-            presentations=presentations,
+            occupancy_time_s=occupancy_time_s,
             source_pixel_count=len(counts),
         )
 
@@ -2995,16 +2873,9 @@ class RFMappingData:
             return observations.count / observations.source_pixel_count
         if value_mode not in VALUE_MODES:
             raise ValueError(f"Unknown value mode: {value_mode}")
-        if observations.presentations is None:
-            raise ValueError(
-                f"{value_mode} requires stimulusPresentationCounts metadata in the JSON file."
-            )
-        if observations.presentations <= 0:
+        if observations.occupancy_time_s <= 0:
             return None
-        value = observations.count / observations.presentations
-        if value_mode == VALUE_MODE_RATE:
-            value /= self.time_span_seconds(start, end)
-        return value
+        return observations.count / observations.occupancy_time_s
 
     def spatial_group_response_matrix(
         self,
@@ -3045,8 +2916,7 @@ class RFMappingData:
                 float(self.counts[unit_idx][y_idx][x_idx][bin_idx])
                 for y_idx in range(y_start, y_end + 1)
                 for x_idx in range(x_start, x_end + 1)
-                if self.presentation_counts is None
-                or self.presentation_counts[y_idx][x_idx] > 0
+                if self.occupancy_time_s[y_idx][x_idx] > 0
             )
             for bin_idx in range(self.n_bins)
         ]
@@ -3056,19 +2926,17 @@ class RFMappingData:
         y_group: AxisGroup,
         x_group: AxisGroup,
     ) -> int:
-        """Return measured sources, retaining legacy behavior without metadata."""
+        """Return source bins with positive stimulus occupancy."""
 
         y_start = max(0, min(self.n_y - 1, min(y_group)))
         y_end = max(0, min(self.n_y - 1, max(y_group)))
         x_start = max(0, min(self.n_x - 1, min(x_group)))
         x_end = max(0, min(self.n_x - 1, max(x_group)))
-        if self.presentation_counts is None:
-            return (y_end - y_start + 1) * (x_end - x_start + 1)
         return sum(
             1
             for y_idx in range(y_start, y_end + 1)
             for x_idx in range(x_start, x_end + 1)
-            if self.presentation_counts[y_idx][x_idx] > 0
+            if self.occupancy_time_s[y_idx][x_idx] > 0
         )
 
     def spatial_group_temporal_metrics(
@@ -3468,8 +3336,6 @@ def format_ms(value: float) -> str:
 def value_mode_unit(value_mode: str) -> str:
     if value_mode == VALUE_MODE_COUNT:
         return "spikes"
-    if value_mode == VALUE_MODE_PER_PRESENTATION:
-        return "spikes/presentation"
     if value_mode == VALUE_MODE_RATE:
         return "Hz"
     raise ValueError(f"Unknown value mode: {value_mode}")
@@ -3478,8 +3344,6 @@ def value_mode_unit(value_mode: str) -> str:
 def value_mode_slug(value_mode: str) -> str:
     if value_mode == VALUE_MODE_COUNT:
         return "spike_count"
-    if value_mode == VALUE_MODE_PER_PRESENTATION:
-        return "spikes_per_presentation"
     if value_mode == VALUE_MODE_RATE:
         return "mean_firing_rate_hz"
     raise ValueError(f"Unknown value mode: {value_mode}")
@@ -3488,8 +3352,6 @@ def value_mode_slug(value_mode: str) -> str:
 def value_mode_suffix(value_mode: str) -> str:
     if value_mode == VALUE_MODE_COUNT:
         return " spikes"
-    if value_mode == VALUE_MODE_PER_PRESENTATION:
-        return " sp/pres"
     if value_mode == VALUE_MODE_RATE:
         return " Hz"
     raise ValueError(f"Unknown value mode: {value_mode}")
@@ -4553,7 +4415,7 @@ class RFMViewer(tk.Toplevel):
         self._last_supported_unit_id = data.unit_pool[0]
         value_mode = self.settings.rf_value_mode
         if not data.supports_value_mode(value_mode):
-            value_mode = VALUE_MODE_COUNT
+            value_mode = VALUE_MODE_RATE
         self.value_mode_var = tk.StringVar(value=value_mode)
         self.bin_var = tk.IntVar(value=0)
         self.range_start_var = tk.IntVar(value=0)
@@ -6211,7 +6073,7 @@ class RFMViewer(tk.Toplevel):
 
         value_mode = self.value_mode_var.get()
         if value_mode not in VALUE_MODES or not self.data.supports_value_mode(value_mode):
-            value_mode = VALUE_MODE_COUNT
+            value_mode = VALUE_MODE_RATE
         palette = self.palette_var.get()
         if palette not in PALETTES:
             palette = PALETTES[0]
@@ -6369,7 +6231,7 @@ class RFMViewer(tk.Toplevel):
                     value_mode not in VALUE_MODES
                     or not self.data.supports_value_mode(value_mode)
                 ):
-                    value_mode = VALUE_MODE_COUNT
+                    value_mode = VALUE_MODE_RATE
                 self.value_mode_var.set(value_mode)
             if "time_resolution" in fields:
                 self.time_res_ms_var.set(format_ms(state.time_resolution_ms))
@@ -6634,7 +6496,7 @@ class RFMViewer(tk.Toplevel):
             self.show_tuning_curve_var.set(settings.show_tuning_curve)
             value_mode = settings.rf_value_mode
             if not self.data.supports_value_mode(value_mode):
-                value_mode = VALUE_MODE_COUNT
+                value_mode = VALUE_MODE_RATE
             self.value_mode_var.set(value_mode)
             self.range_start_ms_var.set(format_ms(settings.rf_sum_start_ms))
             self.range_end_ms_var.set(format_ms(settings.rf_sum_end_ms))
@@ -8321,13 +8183,7 @@ class RFMViewer(tk.Toplevel):
     def _on_value_mode_changed(self, _event: object | None = None) -> None:
         value_mode = self.value_mode_var.get()
         if not self.data.supports_value_mode(value_mode):
-            self.value_mode_var.set(VALUE_MODE_COUNT)
-            messagebox.showinfo(
-                "Firing-rate metadata required",
-                "This legacy JSON contains pooled spike counts but does not include "
-                "stimulusPresentationCounts. A true per-presentation value or firing rate "
-                "cannot be recovered safely. Regenerate the JSON with presentation-count metadata.",
-            )
+            self.value_mode_var.set(VALUE_MODE_RATE)
             return
         self._update_all()
         self._publish_pairing_state_if_changed()
@@ -8992,9 +8848,9 @@ class RFMViewer(tk.Toplevel):
             [value.count if value.source_pixel_count > 0 else None for value in row]
             for row in observations
         ]
-        presentations: list[list[float | None]] = [
+        occupancies: list[list[float | None]] = [
             [
-                (value.presentations or 0.0)
+                value.occupancy_time_s
                 if value.source_pixel_count > 0
                 else None
                 for value in row
@@ -9003,8 +8859,7 @@ class RFMViewer(tk.Toplevel):
         ]
         if smooth:
             counts = smooth_matrix(counts, self._smooth_radius())
-            presentations = smooth_matrix(presentations, self._smooth_radius())
-        duration = self.data.time_span_seconds(source_start, source_end)
+            occupancies = smooth_matrix(occupancies, self._smooth_radius())
         matrix = [
             [
                 None
@@ -9014,12 +8869,10 @@ class RFMViewer(tk.Toplevel):
                     or exposure is None
                     or exposure <= 0
                 )
-                else count
-                / exposure
-                / (duration if value_mode == VALUE_MODE_RATE else 1.0)
+                else count / exposure
                 for x_idx, (count, exposure) in enumerate(zip(count_row, exposure_row))
             ]
-            for y_idx, (count_row, exposure_row) in enumerate(zip(counts, presentations))
+            for y_idx, (count_row, exposure_row) in enumerate(zip(counts, occupancies))
         ]
         return matrix, x_groups, y_groups
 
@@ -9216,15 +9069,8 @@ class RFMViewer(tk.Toplevel):
         delay_text = f"{delay:.1f} ms" if delay is not None else "n/a"
         peak_text = f"{peak_bin + 1} ({self._time_group_label(peak_bin)})" if peak_bin is not None else "n/a"
         group_note = (
-            (
-                "mean over exposed source pixels\n"
-                if value_mode == VALUE_MODE_COUNT
-                and self.data.presentation_counts is not None
-                else (
-                    ("mean" if value_mode == VALUE_MODE_COUNT else "pooled")
-                    + " over source pixels\n"
-                )
-            )
+            (("mean" if value_mode == VALUE_MODE_COUNT else "occupancy-pooled")
+             + " over source pixels\n")
             if (x_end != x_idx or y_end != y_start)
             else ""
         )
@@ -9585,10 +9431,8 @@ class RFMViewer(tk.Toplevel):
         self._draw_missing_hatch(canvas, x, legend_y, x + 13, legend_y + 13)
         if palette == "Delay":
             missing_label = "No detected peak"
-        elif self.data.presentation_counts is not None:
-            missing_label = "No presentations"
         else:
-            missing_label = "No data"
+            missing_label = "No occupancy"
         canvas.create_text(
             x + 20,
             legend_y + 6.5,
@@ -9967,11 +9811,7 @@ class RFMViewer(tk.Toplevel):
             legend_x + 24,
             missing_y + 8,
             anchor="w",
-            text=(
-                "No presentations"
-                if self.data.presentation_counts is not None
-                else "No data"
-            ),
+            text="No occupancy",
             fill="#6e6e73",
         )
         self._canvas_layouts["delay"] = {
@@ -10114,11 +9954,7 @@ class RFMViewer(tk.Toplevel):
             legend_x + 24,
             missing_y + 8,
             anchor="w",
-            text=(
-                "No presentations"
-                if self.data.presentation_counts is not None
-                else "No data"
-            ),
+            text="No occupancy",
             fill="#6e6e73",
         )
         self._canvas_layouts["delay"] = {
@@ -10143,13 +9979,13 @@ class RFMViewer(tk.Toplevel):
             metrics = self.data.metrics(unit_idx)
             return [float(sum(metrics.bin_totals[start : end + 1])) for start, end in time_groups]
 
-        presentation_total = sum(
-            count
-            for row in self.data.presentation_counts or []
-            for count in row
-            if count > 0
+        occupancy_total = sum(
+            duration
+            for row in self.data.occupancy_time_s
+            for duration in row
+            if duration > 0
         )
-        if presentation_total <= 0:
+        if occupancy_total <= 0:
             return [0.0 for _group in time_groups]
         unit = self.data.counts[unit_idx]
         values: list[float] = []
@@ -10159,10 +9995,7 @@ class RFMViewer(tk.Toplevel):
                 for y_idx in range(self.data.n_y)
                 for x_idx in range(self.data.n_x)
             )
-            value = count / presentation_total
-            if value_mode == VALUE_MODE_RATE:
-                value /= self.data.time_span_seconds(start, end)
-            values.append(value)
+            values.append(count / occupancy_total)
         return values
 
     def _ensure_timeline_preview_images(
@@ -11283,7 +11116,7 @@ class RFMViewer(tk.Toplevel):
         self.range_end_ms_var.set(format_ms(plot_end_ms))
         value_mode = self.settings.rf_value_mode
         self.value_mode_var.set(
-            value_mode if self.data.supports_value_mode(value_mode) else VALUE_MODE_COUNT
+            value_mode if self.data.supports_value_mode(value_mode) else VALUE_MODE_RATE
         )
         self.flip_y_var.set(self.settings.rf_flip_y)
         self.palette_var.set(self.settings.rf_palette)
@@ -11400,8 +11233,8 @@ class RFMViewer(tk.Toplevel):
                         "value",
                         "value_mode",
                         "value_unit",
-                        "presentation_count_min",
-                        "presentation_count_max",
+                        "occupancy_time_sec_min",
+                        "occupancy_time_sec_max",
                         "mode",
                         "display_y_index_0based",
                         "source_y_start_0based",
@@ -11433,15 +11266,11 @@ class RFMViewer(tk.Toplevel):
                 )
                 for display_y, (y_start, y_end) in enumerate(y_groups):
                     for display_x, (x_start, x_end) in enumerate(x_groups):
-                        presentation_counts = (
-                            [
-                                self.data.presentation_counts[y_idx][x_idx]
-                                for y_idx in range(y_start, y_end + 1)
-                                for x_idx in range(x_start, x_end + 1)
-                            ]
-                            if self.data.presentation_counts is not None
-                            else []
-                        )
+                        occupancy_times = [
+                            self.data.occupancy_time_s[y_idx][x_idx]
+                            for y_idx in range(y_start, y_end + 1)
+                            for x_idx in range(x_start, x_end + 1)
+                        ]
                         writer.writerow(
                             [
                                 self.unit_idx.get(),
@@ -11455,8 +11284,8 @@ class RFMViewer(tk.Toplevel):
                                 matrix[display_y][display_x],
                                 value_mode,
                                 value_mode_unit(value_mode),
-                                min(presentation_counts) if presentation_counts else "",
-                                max(presentation_counts) if presentation_counts else "",
+                                min(occupancy_times) if occupancy_times else "",
+                                max(occupancy_times) if occupancy_times else "",
                                 self._current_matrix_label(),
                                 display_y,
                                 y_start,
@@ -11762,9 +11591,9 @@ class GUIFigureDataProvider:
             [value.count if value.source_pixel_count > 0 else None for value in row]
             for row in observations
         ]
-        presentations: list[list[float | None]] = [
+        occupancies: list[list[float | None]] = [
             [
-                (value.presentations or 0.0)
+                value.occupancy_time_s
                 if value.source_pixel_count > 0
                 else None
                 for value in row
@@ -11772,8 +11601,7 @@ class GUIFigureDataProvider:
             for row in observations
         ]
         counts = smooth_matrix(counts, self.snapshot.smooth_radius)
-        presentations = smooth_matrix(presentations, self.snapshot.smooth_radius)
-        duration = self.data.time_span_seconds(source_start, source_end)
+        occupancies = smooth_matrix(occupancies, self.snapshot.smooth_radius)
         matrix = [
             [
                 None
@@ -11783,19 +11611,13 @@ class GUIFigureDataProvider:
                     or exposure is None
                     or exposure <= 0
                 )
-                else count
-                / exposure
-                / (
-                    duration
-                    if self.snapshot.value_mode == VALUE_MODE_RATE
-                    else 1.0
-                )
+                else count / exposure
                 for x_idx, (count, exposure) in enumerate(
                     zip(count_row, exposure_row)
                 )
             ]
             for y_idx, (count_row, exposure_row) in enumerate(
-                zip(counts, presentations)
+                zip(counts, occupancies)
             )
         ]
         return self._polarize_grouped(matrix, polar=polar)
@@ -11963,19 +11785,18 @@ class GUIFigureDataProvider:
                 float(sum(totals[start : end + 1]))
                 for start, end in self.snapshot.time_groups
             ]
-        presentations = self.data.presentation_counts or []
-        presentation_total = sum(
-            float(count) for row in presentations for count in row if count > 0
+        occupancy_total = sum(
+            float(duration)
+            for row in self.data.occupancy_time_s
+            for duration in row
+            if duration > 0
         )
-        if presentation_total <= 0:
+        if occupancy_total <= 0:
             return [0.0 for _group in self.snapshot.time_groups]
         unit = self.data.rf_map(unit_idx).spike_counts
         values: list[float] = []
         for start, end in self.snapshot.time_groups:
-            value = float(unit[..., start : end + 1].sum()) / presentation_total
-            if self.snapshot.value_mode == VALUE_MODE_RATE:
-                value /= self.data.time_span_seconds(start, end)
-            values.append(value)
+            values.append(float(unit[..., start : end + 1].sum()) / occupancy_total)
         return values
 
     def _selected_timeline(self, unit_idx: int) -> list[float] | None:
@@ -12170,7 +11991,8 @@ def _figure_snapshot_metadata(data: RFMappingData, snapshot: FigureViewerSnapsho
         "timelineActiveBin": snapshot.timeline_active_bin,
         "totalDegrees": snapshot.total_degrees,
         "selectedCell": list(snapshot.selected_cell) if snapshot.selected_cell is not None else None,
-        "presentationCountsAvailable": data.presentation_counts is not None,
+        "occupancyTimeSecAvailable": True,
+        "occupancyTimeSecSize": [data.n_y, data.n_x],
         "unitFilter": {
             "enabled": snapshot.unit_filter_enabled,
             "zeroSpikeSpatialBinThreshold": snapshot.zero_bin_threshold,
@@ -13257,24 +13079,18 @@ def run_self_test(path: Path) -> None:
     assert one_bin[y_idx][x_idx] == hist[0]
     assert range_sum[y_idx][x_idx] == sum(hist[: test_range_end + 1])
     count_response = data.response_matrix(unit_idx, 0, test_range_end, VALUE_MODE_COUNT)
-    if (
-        data.presentation_counts is not None
-        and data.presentation_counts[y_idx][x_idx] <= 0
-    ):
+    if data.occupancy_time_s[y_idx][x_idx] <= 0:
         assert count_response[y_idx][x_idx] is None
     else:
         assert count_response[y_idx][x_idx] == range_sum[y_idx][x_idx]
-    if data.presentation_counts is not None:
-        presentations = data.presentation_counts[y_idx][x_idx]
-        if presentations > 0:
-            expected_rate = sum(hist[: test_range_end + 1]) / (
-                presentations * (data.time_bin_edges[test_range_end + 1] - data.time_bin_edges[0])
-            )
-            firing_rate = data.response_value(
-                unit_idx, y_idx, x_idx, 0, test_range_end, VALUE_MODE_RATE
-            )
-            assert firing_rate is not None
-            assert abs(firing_rate - expected_rate) < 1e-9
+    occupancy_time_s = data.occupancy_time_s[y_idx][x_idx]
+    if occupancy_time_s > 0:
+        expected_rate = sum(hist[: test_range_end + 1]) / occupancy_time_s
+        firing_rate = data.response_value(
+            unit_idx, y_idx, x_idx, 0, test_range_end, VALUE_MODE_RATE
+        )
+        assert firing_rate is not None
+        assert abs(firing_rate - expected_rate) < 1e-9
     assert 0.0 <= metrics.entropy[y_idx][x_idx] <= 1.0
     inferred_total_deg = data.infer_total_deg()
     assert math.isfinite(inferred_total_deg) and inferred_total_deg > 0
@@ -13290,7 +13106,7 @@ def run_self_test(path: Path) -> None:
     print(
         "self-test passed:",
         f"{data.n_units} units, {data.n_y} y, {data.n_x} x, {data.n_bins} bins",
-        f"rate metadata: {'yes' if data.presentation_counts is not None else 'no'}",
+        "occupancy metadata: yes",
     )
 
 

@@ -18,8 +18,8 @@ through versioned file contracts, principally the RF JSON described in
 
 ## Component versions
 
-The Python viewer is the stable feature reference at `1.9.4`. Swift and Web
-implement the same `1.9` feature generation and are versioned `1.9.1`.
+Python, Swift, and Web implement the same stable feature generation and are
+versioned `1.9.5`.
 The Free-Moving Python viewer begins the next generation as
 **`1.10.0-alpha.3`**. Component identity belongs in release tags and artifact
 names, not in a fourth version component. See
@@ -33,10 +33,10 @@ advance without inventing a platform-specific fourth version number.
 
 | Viewer | Channel | Download | Release notes |
 | --- | --- | --- | --- |
-| Python RF Map Viewer `1.9.4` | Stable | [macOS Apple-silicon ZIP](https://github.com/KaiCao2003/RF-Map-Viewer/releases/download/python-v1.9.4/RF_Map_Viewer-python-1.9.4-full-macos-arm64.zip) | [`python-v1.9.4`](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/python-v1.9.4) |
+| Python RF Map Viewer `1.9.5` | Stable | [macOS Apple-silicon ZIP](https://github.com/KaiCao2003/RF-Map-Viewer/releases/download/python-v1.9.5/RF_Map_Viewer-python-1.9.5-full-macos-arm64.zip) | [`python-v1.9.5`](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/python-v1.9.5) |
 | Python Free-Moving `1.10.0-alpha.3` | Alpha preview | [macOS Apple-silicon ZIP](https://github.com/KaiCao2003/RF-Map-Viewer/releases/download/python-v1.10.0-alpha.3/Free_Moving_RF_Viewer-python-1.10.0-alpha.3-freemoving-macos-arm64.zip) | [`python-v1.10.0-alpha.3`](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/python-v1.10.0-alpha.3) |
-| Swift `1.9.1` | Stable | [macOS Apple-silicon ZIP](https://github.com/KaiCao2003/RF-Map-Viewer/releases/download/swift-v1.9.1/RF_Map_Viewer-1.9.1-swift-macos-arm64.zip) | [`swift-v1.9.1`](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/swift-v1.9.1) |
-| Web `1.9.1` | Stable | [deployment source archive](https://github.com/KaiCao2003/RF-Map-Viewer/releases/download/web-v1.9.1/RF_Map_Viewer-1.9.1-web.tar.gz) | [`web-v1.9.1`](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/web-v1.9.1) |
+| Swift `1.9.5` | Stable | [macOS Apple-silicon ZIP](https://github.com/KaiCao2003/RF-Map-Viewer/releases/download/swift-v1.9.5/RF_Map_Viewer-1.9.5-swift-macos-arm64.zip) | [`swift-v1.9.5`](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/swift-v1.9.5) |
+| Web `1.9.5` | Stable | [deployment source archive](https://github.com/KaiCao2003/RF-Map-Viewer/releases/download/web-v1.9.5/RF_Map_Viewer-1.9.5-web.tar.gz) | [`web-v1.9.5`](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/web-v1.9.5) |
 
 Python and Web releases also include a SHA-256 checksum file. The Free-Moving
 build is a preview and is deliberately marked as a GitHub prerelease. Browse
@@ -56,11 +56,17 @@ the legacy `30:7` visual footprint; the physical 3D sphere is unchanged. Drag
 the sphere to rotate the viewing direction or double-click to reset it. Legacy
 JSON, tuning-curve, head-direction, and probe companions are intentionally
 outside this alpha app. The stable Python viewer remains available separately
-at `1.9.4`; Swift and Web remain on the `1.9` generation.
+at `1.9.5`; Swift and Web use the same stable version.
 
-## Legacy file compatibility
+## Current RF format and filename aliases
 
-All stable implementations retain these aliases:
+Stable version 1.9.5 requires the current raw-count plus
+`occupancyTimeSec` RF schema written by `Utils/RFmapping_core.m`. Earlier RF
+payloads without occupancy metadata, including the previously normalized
+vertical-bar format, are intentionally unsupported. Firing rate is the default
+display value so unequal spatial occupancy does not bias the RF map.
+
+The current payload and companion documents retain these filename aliases:
 
 | Data | Preferred extension | Existing extension |
 | --- | --- | --- |
@@ -73,7 +79,7 @@ precedence over `tuning_curves.json` and `positions.csv`. Probe channel geometry
 continues to use `channels.csv`. An RF map is the primary document; tuning and
 probe files are opened as companions of a loaded RF map.
 
-Python `1.9.4`, Swift `1.9.1`, and Web `1.9.1` accept MATLAB numeric scalars
+Python, Swift, and Web `1.9.5` accept MATLAB numeric scalars
 for a declared singleton `xPositions` or `yPositions` axis. Singleton-y maps
 use a `30:7` Cartesian footprint and a seven-unit Polar ring; multirow data and
 all scientific indices remain unchanged.
