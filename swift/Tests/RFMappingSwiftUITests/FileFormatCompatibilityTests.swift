@@ -107,6 +107,92 @@ final class FileFormatCompatibilityTests: XCTestCase {
         XCTAssertEqual(decoded.counts, [[[[1.0]]]])
     }
 
+    func testMATLABSingletonYScalarAxisDecodesFromRFMapFile() throws {
+        let root = try temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("matlab-singleton-y.rfmap")
+        let payload = Data(#"""
+        {
+          "unitsSpikeCounts": [[[[1.0], [2.0]]]],
+          "unitsSpikeCountsSize": [1, 1, 2, 1],
+          "unitPool": [17],
+          "xPositions": [-3.0, 3.0],
+          "yPositions": 0.0,
+          "timeBinEdges": [0.0, 0.1]
+        }
+        """#.utf8)
+        try write(payload, to: url)
+
+        let decoded = try RFMappingData(url: url)
+
+        XCTAssertEqual(decoded.url.pathExtension, "rfmap")
+        XCTAssertEqual(decoded.size.1, 1)
+        XCTAssertEqual(decoded.size.2, 2)
+        XCTAssertEqual(decoded.xPositions, [-3, 3])
+        XCTAssertEqual(decoded.yPositions, [0])
+    }
+
+    func testMATLABSingletonXScalarAxisDecodesSymmetrically() throws {
+        let payload = Data(#"""
+        {
+          "unitsSpikeCounts": [[[[1.0]], [[2.0]]]],
+          "unitsSpikeCountsSize": [1, 2, 1, 1],
+          "unitPool": [17],
+          "xPositions": 0.0,
+          "yPositions": [-3.0, 3.0],
+          "timeBinEdges": [0.0, 0.1]
+        }
+        """#.utf8)
+
+        let decoded = try RFMappingData(
+            data: payload,
+            url: URL(fileURLWithPath: "/tmp/matlab-singleton-x.rfmap")
+        )
+
+        XCTAssertEqual(decoded.xPositions, [0])
+        XCTAssertEqual(decoded.yPositions, [-3, 3])
+    }
+
+    func testScalarSpatialAxisRequiresDeclaredSingletonDimension() {
+        let payload = Data(#"""
+        {
+          "unitsSpikeCounts": [[[[1.0]], [[2.0]]]],
+          "unitsSpikeCountsSize": [1, 2, 1, 1],
+          "unitPool": [17],
+          "xPositions": [0.0],
+          "yPositions": 0.0,
+          "timeBinEdges": [0.0, 0.1]
+        }
+        """#.utf8)
+
+        XCTAssertThrowsError(try RFMappingData(
+            data: payload,
+            url: URL(fileURLWithPath: "/tmp/invalid-scalar-y.rfmap")
+        )) { error in
+            XCTAssertTrue(error.localizedDescription.contains("declared spatial dimension is 1"))
+        }
+    }
+
+    func testBooleanSpatialAxisIsNotAcceptedAsNumericScalar() {
+        let payload = Data(#"""
+        {
+          "unitsSpikeCounts": [[[[1.0]]]],
+          "unitsSpikeCountsSize": [1, 1, 1, 1],
+          "unitPool": [17],
+          "xPositions": [0.0],
+          "yPositions": true,
+          "timeBinEdges": [0.0, 0.1]
+        }
+        """#.utf8)
+
+        XCTAssertThrowsError(try RFMappingData(
+            data: payload,
+            url: URL(fileURLWithPath: "/tmp/invalid-boolean-y.rfmap")
+        )) { error in
+            XCTAssertTrue(error.localizedDescription.contains("numeric scalar"))
+        }
+    }
+
     func testHDTuningJSONSchemaDecodesFromTCFile() throws {
         let root = try temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }

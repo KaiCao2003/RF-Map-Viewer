@@ -112,10 +112,10 @@ private func drawRGB(
                 )
             }
             let rect = CGRect(
-                x: layout.x0 + CGFloat(groupIndex) * layout.cell,
-                y: layout.y0 + CGFloat(displayY) * layout.cell,
-                width: layout.cell,
-                height: layout.cell
+                x: layout.x0 + CGFloat(groupIndex) * layout.cellWidth,
+                y: layout.y0 + CGFloat(displayY) * layout.cellHeight,
+                width: layout.cellWidth,
+                height: layout.cellHeight
             )
             context.fill(Path(rect), with: .color(fill))
         }
@@ -171,12 +171,14 @@ private func drawPolarRGB(
                 - layout.totalDegrees * Double($0) / Double(layout.xGroups.count))
     }
     for (ringIndex, displayRow) in layout.ringRows.enumerated() {
+        let rInner = CGFloat(innerBlankRows) + CGFloat(ringIndex) * layout.ringSpan
+        let rOuter = rInner + layout.ringSpan
         for col in layout.xGroups.indices {
             let path = polarCellPath(
                 center: layout.center,
                 scale: layout.scale,
-                rInner: Double(innerBlankRows + ringIndex),
-                rOuter: Double(innerBlankRows + ringIndex + 1),
+                rInner: Double(rInner),
+                rOuter: Double(rOuter),
                 thetaStart: thetaEdges[col],
                 thetaEnd: thetaEdges[col + 1]
             )
@@ -184,7 +186,9 @@ private func drawPolarRGB(
         }
     }
 
-    let outer = CGFloat(innerBlankRows + layout.yGroups.count) * layout.scale
+    let outer = (
+        CGFloat(innerBlankRows) + CGFloat(layout.yGroups.count) * layout.ringSpan
+    ) * layout.scale
     context.stroke(
         Path(ellipseIn: CGRect(
             x: layout.center.x - outer,
