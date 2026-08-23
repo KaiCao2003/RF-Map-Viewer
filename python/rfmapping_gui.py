@@ -95,11 +95,13 @@ PROBE_POSITION_FILETYPES = (
     ("CSV document", "*.csv"),
     ("All files", "*.*"),
 )
-APP_VERSION = "1.9.3"
+APP_VERSION = "1.9.4"
 APP_EDITION = "Full"
 APP_DISPLAY_VERSION = APP_VERSION
 INNER_BLANK_ROWS = 4
 POLAR_PAD_ROWS = 1
+SINGLETON_Y_REFERENCE_COLUMNS = 30
+SINGLETON_Y_REFERENCE_ROWS = 7
 STARTUP_EVENT_WAIT_MS = 350
 ASYNC_DOCUMENT_LOAD_BYTES = 8 * 1024 * 1024
 DEFAULT_RF_SUM_START_MS = 0.0
@@ -3501,6 +3503,47 @@ def format_response_value(value: float | None, value_mode: str) -> str:
     return f"{value:.2f}".rstrip("0").rstrip(".")
 
 
+def spatial_grid_dimensions(
+    available_width: float,
+    available_height: float,
+    columns: int,
+    rows: int,
+    *,
+    minimum_cell_width: float = 0.0,
+) -> tuple[float, float, float, float]:
+    """Fit a spatial grid and keep singleton-y maps near the legacy 30:7 shape.
+
+    Multi-row RF maps retain square cells.  A singleton y axis has no physical
+    height increment to preserve, so stretching only that display row avoids
+    turning vertical-bar datasets into an unreadable strip without changing
+    their data or hit-test groups.
+    """
+
+    columns = max(1, int(columns))
+    rows = max(1, int(rows))
+    width = max(0.0, float(available_width))
+    height = max(0.0, float(available_height))
+    if rows == 1:
+        aspect = SINGLETON_Y_REFERENCE_COLUMNS / SINGLETON_Y_REFERENCE_ROWS
+        grid_width = min(width, height * aspect)
+        cell_width = max(float(minimum_cell_width), grid_width / columns)
+        grid_width = cell_width * columns
+        grid_height = grid_width / aspect
+        return cell_width, grid_height, grid_width, grid_height
+
+    cell = max(
+        float(minimum_cell_width),
+        min(width / columns, height / rows),
+    )
+    return cell, cell, cell * columns, cell * rows
+
+
+def polar_ring_span(rows: int) -> float:
+    """Return the visual radial width of one scientific y row."""
+
+    return float(SINGLETON_Y_REFERENCE_ROWS if int(rows) == 1 else 1)
+
+
 def matrix_ppm_data(
     matrix: list[list[float | None]],
     width: int,
@@ -3548,7 +3591,10 @@ class SettingsValidationError(ValueError):
 
 
 def matrix_atlas_ppm_data(
-    tiles: list[tuple[list[list[float | None]], float, float, float]],
+    tiles: list[
+        tuple[list[list[float | None]], float, float, float]
+        | tuple[list[list[float | None]], float, float, float, float]
+    ],
     width: int,
     height: int,
     color_for_value: Callable[[float | None], str],
@@ -3560,25 +3606,34 @@ def matrix_atlas_ppm_data(
     color_cache: dict[str, bytes] = {}
     value_color_cache: dict[float | None, bytes] = {}
 
-    for matrix, origin_x, origin_y, cell_size in tiles:
+    for tile in tiles:
+        if len(tile) == 4:
+            matrix, origin_x, origin_y, cell_width = tile
+            cell_height = cell_width
+        else:
+            matrix, origin_x, origin_y, cell_width, cell_height = tile
         rows = len(matrix)
         cols = len(matrix[0]) if rows else 0
         if any(len(row) != cols for row in matrix):
             raise ValueError("Cannot rasterize a ragged matrix")
-        cell_size = float(cell_size)
-        if cell_size <= 0.0:
+        cell_width = float(cell_width)
+        cell_height = float(cell_height)
+        if cell_width <= 0.0 or cell_height <= 0.0:
             continue
         x_ranges: list[tuple[int, int]] = []
         for col_idx in range(cols):
-            x0 = max(0, min(width, int(round(origin_x + col_idx * cell_size))))
+            x0 = max(0, min(width, int(round(origin_x + col_idx * cell_width))))
             x1 = max(
                 x0,
-                min(width, int(round(origin_x + (col_idx + 1) * cell_size))),
+                min(width, int(round(origin_x + (col_idx + 1) * cell_width))),
             )
             x_ranges.append((x0, x1))
         for row_idx, row in enumerate(matrix):
-            y0 = max(0, min(height, int(round(origin_y + row_idx * cell_size))))
-            y1 = max(y0, min(height, int(round(origin_y + (row_idx + 1) * cell_size))))
+            y0 = max(0, min(height, int(round(origin_y + row_idx * cell_height))))
+            y1 = max(
+                y0,
+                min(height, int(round(origin_y + (row_idx + 1) * cell_height))),
+            )
             if y1 <= y0:
                 continue
             scanlines: list[tuple[int, bytes]] = []
@@ -3630,10 +3685,12 @@ def _polar_tile_pixel_runs(
     total_deg: float,
     rows: int,
     cols: int,
+    ring_span: float = 1.0,
 ) -> tuple[tuple[int, int, int, int, int], ...]:
     """Map one polar tile's scanlines to ring/column runs for reuse."""
 
-    radius_units = INNER_BLANK_ROWS + rows
+    ring_span = max(float(ring_span), 1e-9)
+    radius_units = INNER_BLANK_ROWS + rows * ring_span
     diameter = 2.0 * radius_units * scale
     center_x = origin_x_fraction + diameter / 2.0
     center_y = origin_y_fraction + diameter / 2.0
@@ -3653,7 +3710,7 @@ def _polar_tile_pixel_runs(
             radius = math.hypot(dx, dy)
             value: tuple[int, int] | None = None
             if INNER_BLANK_ROWS <= radius < radius_units:
-                ring_idx = int(radius - INNER_BLANK_ROWS)
+                ring_idx = int((radius - INNER_BLANK_ROWS) / ring_span)
                 if 0 <= ring_idx < rows:
                     theta_deg = math.degrees(math.atan2(dy, dx))
                     if total_deg >= 359.999:
@@ -3699,6 +3756,15 @@ def polar_matrix_atlas_ppm_data(
             float,
             list[int],
         ]
+        | tuple[
+            list[list[float | None]],
+            float,
+            float,
+            float,
+            float,
+            list[int],
+            float,
+        ]
     ],
     width: int,
     height: int,
@@ -3715,7 +3781,20 @@ def polar_matrix_atlas_ppm_data(
     color_cache: dict[str, bytes] = {}
     value_color_cache: dict[float | None, bytes] = {}
 
-    for matrix, origin_x, origin_y, scale, total_deg, ring_rows in tiles:
+    for tile in tiles:
+        if len(tile) == 6:
+            matrix, origin_x, origin_y, scale, total_deg, ring_rows = tile
+            ring_span = 1.0
+        else:
+            (
+                matrix,
+                origin_x,
+                origin_y,
+                scale,
+                total_deg,
+                ring_rows,
+                ring_span,
+            ) = tile
         rows = len(matrix)
         cols = len(matrix[0]) if rows else 0
         if rows == 0 or cols == 0:
@@ -3757,6 +3836,7 @@ def polar_matrix_atlas_ppm_data(
             float(total_deg),
             rows,
             cols,
+            float(ring_span),
         )
         for local_y, local_x0, local_x1, ring_idx, column in runs:
             pixel_y = origin_y_floor + local_y
@@ -9291,9 +9371,13 @@ class RFMViewer(tk.Toplevel):
         disp, x_groups, y_groups = self._prepare_plot_matrix(matrix)
         n_cols = len(x_groups)
         n_rows = len(y_groups)
-        cell = max(4.0, min(plot_w / n_cols, plot_h / n_rows))
-        grid_w = cell * n_cols
-        grid_h = cell * n_rows
+        cell_x, cell_y, grid_w, grid_h = spatial_grid_dimensions(
+            plot_w,
+            plot_h,
+            n_cols,
+            n_rows,
+            minimum_cell_width=4.0,
+        )
         x0 = margin_l + (plot_w - grid_w) / 2
         y0 = margin_t + (plot_h - grid_h) / 2
         if fixed_range is None:
@@ -9320,9 +9404,9 @@ class RFMViewer(tk.Toplevel):
             canvas.create_text(20, 44, anchor="w", text=unit_text, fill="#6e6e73")
 
         for display_y, row in enumerate(disp):
-            y = y0 + display_y * cell
+            y = y0 + display_y * cell_y
             for x_idx, value in enumerate(row):
-                x = x0 + x_idx * cell
+                x = x0 + x_idx * cell_x
                 if palette == "Delay":
                     fill = delay_color(value, low, high)
                 else:
@@ -9330,23 +9414,42 @@ class RFMViewer(tk.Toplevel):
                 canvas.create_rectangle(
                     x,
                     y,
-                    x + cell,
-                    y + cell,
+                    x + cell_x,
+                    y + cell_y,
                     fill=fill,
                     outline="#ffffff",
                     width=0,
                 )
                 if value is None or not math.isfinite(float(value)):
-                    self._draw_missing_hatch(canvas, x, y, x + cell, y + cell)
+                    self._draw_missing_hatch(canvas, x, y, x + cell_x, y + cell_y)
 
-        self._draw_selection_outline(canvas, x0, y0, cell, x_groups, y_groups)
-        self._draw_axes(canvas, x0, y0, cell, grid_w, grid_h, x_groups, y_groups)
+        self._draw_selection_outline(
+            canvas,
+            x0,
+            y0,
+            cell_x,
+            cell_y,
+            x_groups,
+            y_groups,
+        )
+        self._draw_axes(
+            canvas,
+            x0,
+            y0,
+            cell_x,
+            cell_y,
+            grid_w,
+            grid_h,
+            x_groups,
+            y_groups,
+        )
         self._draw_colorbar(canvas, x0 + grid_w + 36, y0, min(220, grid_h), low, high, palette, value_suffix)
         self._canvas_layouts[key] = {
             "geometry": "rectangle",
             "x0": x0,
             "y0": y0,
-            "cell": cell,
+            "cell": cell_x,
+            "cell_y": cell_y,
             "grid_w": grid_w,
             "grid_h": grid_h,
             "x_groups": x_groups,
@@ -9386,24 +9489,35 @@ class RFMViewer(tk.Toplevel):
                 )
             diagonal += 7.0
 
-    def _draw_axes(self, canvas: tk.Canvas, x0: float, y0: float, cell: float, grid_w: float, grid_h: float, x_groups: list[AxisGroup], y_groups: list[AxisGroup]) -> None:
+    def _draw_axes(
+        self,
+        canvas: tk.Canvas,
+        x0: float,
+        y0: float,
+        cell_x: float,
+        cell_y: float,
+        grid_w: float,
+        grid_h: float,
+        x_groups: list[AxisGroup],
+        y_groups: list[AxisGroup],
+    ) -> None:
         axis_color = "#475467"
         canvas.create_rectangle(x0, y0, x0 + grid_w, y0 + grid_h, outline="#1f2937", width=1)
         tick_step = max(1, len(x_groups) // 6)
         for group_idx in range(0, len(x_groups), tick_step):
             start, end = x_groups[group_idx]
-            x = x0 + (group_idx + 0.5) * cell
+            x = x0 + (group_idx + 0.5) * cell_x
             canvas.create_line(x, y0 + grid_h, x, y0 + grid_h + 5, fill=axis_color)
             pos = (self.data.x_positions[start] + self.data.x_positions[end]) / 2.0
             canvas.create_text(x, y0 + grid_h + 18, text=format_pos(pos), fill=axis_color, font=("TkDefaultFont", 10))
         if (len(x_groups) - 1) not in range(0, len(x_groups), tick_step):
             start, end = x_groups[-1]
-            x = x0 + (len(x_groups) - 0.5) * cell
+            x = x0 + (len(x_groups) - 0.5) * cell_x
             pos = (self.data.x_positions[start] + self.data.x_positions[end]) / 2.0
             canvas.create_text(x, y0 + grid_h + 18, text=format_pos(pos), fill=axis_color, font=("TkDefaultFont", 10))
 
         for display_y, (y_start, y_end) in enumerate(y_groups):
-            y = y0 + (display_y + 0.5) * cell
+            y = y0 + (display_y + 0.5) * cell_y
             canvas.create_line(x0 - 5, y, x0, y, fill=axis_color)
             pos = (self.data.y_positions[y_start] + self.data.y_positions[y_end]) / 2.0
             label = f"{y_start + 1} / {format_pos(pos)}" if y_start == y_end else f"{y_start + 1}-{y_end + 1} / {format_pos(pos)}"
@@ -9484,7 +9598,16 @@ class RFMViewer(tk.Toplevel):
             font=("TkDefaultFont", 10),
         )
 
-    def _draw_selection_outline(self, canvas: tk.Canvas, x0: float, y0: float, cell: float, x_groups: list[AxisGroup] | None = None, y_groups: list[AxisGroup] | None = None) -> None:
+    def _draw_selection_outline(
+        self,
+        canvas: tk.Canvas,
+        x0: float,
+        y0: float,
+        cell_x: float,
+        cell_y: float,
+        x_groups: list[AxisGroup] | None = None,
+        y_groups: list[AxisGroup] | None = None,
+    ) -> None:
         if self.selected_cell is None:
             return
         y_start, _y_end, x_idx, _x_end = self.selected_cell
@@ -9502,10 +9625,24 @@ class RFMViewer(tk.Toplevel):
                 break
         if display_y is None:
             return
-        x = x0 + group_idx * cell
-        y = y0 + display_y * cell
-        canvas.create_rectangle(x + 1, y + 1, x + cell - 1, y + cell - 1, outline="#111827", width=2)
-        canvas.create_rectangle(x + 3, y + 3, x + cell - 3, y + cell - 3, outline="#ffffff", width=1)
+        x = x0 + group_idx * cell_x
+        y = y0 + display_y * cell_y
+        canvas.create_rectangle(
+            x + 1,
+            y + 1,
+            x + cell_x - 1,
+            y + cell_y - 1,
+            outline="#111827",
+            width=2,
+        )
+        canvas.create_rectangle(
+            x + 3,
+            y + 3,
+            x + cell_x - 3,
+            y + cell_y - 3,
+            outline="#ffffff",
+            width=1,
+        )
 
     def _draw_polar_matrix(
         self,
@@ -9527,7 +9664,8 @@ class RFMViewer(tk.Toplevel):
         )
         total_deg = self.data.infer_total_deg()
         n_rows = len(y_groups)
-        radius_units = INNER_BLANK_ROWS + n_rows + POLAR_PAD_ROWS
+        ring_span = polar_ring_span(n_rows)
+        radius_units = INNER_BLANK_ROWS + n_rows * ring_span + POLAR_PAD_ROWS
         reserved_height = 84 if key == "rf" else 130
         scale = min((w - 180) / (2 * radius_units), (h - reserved_height) / (2 * radius_units))
         scale = max(4.0, scale)
@@ -9578,8 +9716,8 @@ class RFMViewer(tk.Toplevel):
             ring_rows = list(range(n_rows - 1, -1, -1))
 
         for ring_idx, display_row in enumerate(ring_rows):
-            r_inner = INNER_BLANK_ROWS + ring_idx
-            r_outer = INNER_BLANK_ROWS + ring_idx + 1
+            r_inner = INNER_BLANK_ROWS + ring_idx * ring_span
+            r_outer = r_inner + ring_span
             for col in range(len(x_groups)):
                 value = disp[display_row][col]
                 fill = delay_color(value, low, high) if palette == "Delay" else palette_color(value, low, high, palette)
@@ -9601,9 +9739,10 @@ class RFMViewer(tk.Toplevel):
             x_groups,
             y_groups,
             ring_rows,
+            ring_span,
         )
 
-        outer_r = (INNER_BLANK_ROWS + n_rows) * scale
+        outer_r = (INNER_BLANK_ROWS + n_rows * ring_span) * scale
         canvas.create_oval(cx - outer_r, cy - outer_r, cx + outer_r, cy + outer_r, outline="#475467")
         canvas.create_text(cx, cy - outer_r - 18, text="x columns span visual angle", fill="#475467")
         canvas.create_text(
@@ -9631,6 +9770,7 @@ class RFMViewer(tk.Toplevel):
             "x_groups": x_groups,
             "y_groups": y_groups,
             "ring_rows": ring_rows,
+            "ring_span": ring_span,
         }
 
     def _draw_polar_selection_outline(
@@ -9643,6 +9783,7 @@ class RFMViewer(tk.Toplevel):
         x_groups: list[AxisGroup],
         y_groups: list[AxisGroup],
         ring_rows: list[int],
+        ring_span: float,
     ) -> None:
         if self.selected_cell is None:
             return
@@ -9662,8 +9803,8 @@ class RFMViewer(tk.Toplevel):
             cx,
             cy,
             scale,
-            INNER_BLANK_ROWS + ring_idx,
-            INNER_BLANK_ROWS + ring_idx + 1,
+            INNER_BLANK_ROWS + ring_idx * ring_span,
+            INNER_BLANK_ROWS + (ring_idx + 1) * ring_span,
             theta_edges[column],
             theta_edges[column + 1],
         )
@@ -9708,9 +9849,13 @@ class RFMViewer(tk.Toplevel):
             self._grouped_temporal_metric_matrices(0.0)
         )
         n_rows = len(y_groups)
-        cell = max(4.0, min(plot_w / len(x_groups), plot_h / n_rows))
-        grid_w = cell * len(x_groups)
-        grid_h = cell * n_rows
+        cell_x, cell_y, grid_w, grid_h = spatial_grid_dimensions(
+            plot_w,
+            plot_h,
+            len(x_groups),
+            n_rows,
+            minimum_cell_width=4.0,
+        )
         x0 = margin_l + (plot_w - grid_w) / 2
         y0 = margin_t + (plot_h - grid_h) / 2
         _response_low, response_high = nonnegative_response_range(total_disp)
@@ -9741,7 +9886,7 @@ class RFMViewer(tk.Toplevel):
         )
 
         for display_y in range(n_rows):
-            y = y0 + display_y * cell
+            y = y0 + display_y * cell_y
             for group_idx, (x_start, x_end) in enumerate(x_groups):
                 raw_total = total_disp[display_y][group_idx]
                 missing = raw_total is None or not math.isfinite(float(raw_total))
@@ -9762,12 +9907,38 @@ class RFMViewer(tk.Toplevel):
                             int(round(entropy_norm * 255)),
                         )
                     )
-                x = x0 + group_idx * cell
-                canvas.create_rectangle(x, y, x + cell, y + cell, fill=fill, outline="#ffffff", width=0)
+                x = x0 + group_idx * cell_x
+                canvas.create_rectangle(
+                    x,
+                    y,
+                    x + cell_x,
+                    y + cell_y,
+                    fill=fill,
+                    outline="#ffffff",
+                    width=0,
+                )
                 if missing:
-                    self._draw_missing_hatch(canvas, x, y, x + cell, y + cell)
-        self._draw_selection_outline(canvas, x0, y0, cell, x_groups, y_groups)
-        self._draw_axes(canvas, x0, y0, cell, grid_w, grid_h, x_groups, y_groups)
+                    self._draw_missing_hatch(canvas, x, y, x + cell_x, y + cell_y)
+        self._draw_selection_outline(
+            canvas,
+            x0,
+            y0,
+            cell_x,
+            cell_y,
+            x_groups,
+            y_groups,
+        )
+        self._draw_axes(
+            canvas,
+            x0,
+            y0,
+            cell_x,
+            cell_y,
+            grid_w,
+            grid_h,
+            x_groups,
+            y_groups,
+        )
         legend_x = min(x0 + grid_w + 34, w - 154)
         legend_y = y0
         for i, (label, color) in enumerate(
@@ -9807,7 +9978,8 @@ class RFMViewer(tk.Toplevel):
             "geometry": "rectangle",
             "x0": x0,
             "y0": y0,
-            "cell": cell,
+            "cell": cell_x,
+            "cell_y": cell_y,
             "grid_w": grid_w,
             "grid_h": grid_h,
             "x_groups": x_groups,
@@ -9830,7 +10002,8 @@ class RFMViewer(tk.Toplevel):
         w, h = max(canvas.winfo_width(), 200), max(canvas.winfo_height(), 160)
         total_deg = self.data.infer_total_deg()
         n_rows = len(y_groups)
-        radius_units = INNER_BLANK_ROWS + n_rows + POLAR_PAD_ROWS
+        ring_span = polar_ring_span(n_rows)
+        radius_units = INNER_BLANK_ROWS + n_rows * ring_span + POLAR_PAD_ROWS
         scale = max(4.0, min((w - 220) / (2 * radius_units), (h - 130) / (2 * radius_units)))
         cx = w / 2
         cy = h / 2 + 22
@@ -9884,8 +10057,8 @@ class RFMViewer(tk.Toplevel):
                     cx,
                     cy,
                     scale,
-                    INNER_BLANK_ROWS + ring_idx,
-                    INNER_BLANK_ROWS + ring_idx + 1,
+                    INNER_BLANK_ROWS + ring_idx * ring_span,
+                    INNER_BLANK_ROWS + (ring_idx + 1) * ring_span,
                     theta_edges[column],
                     theta_edges[column + 1],
                 )
@@ -9905,8 +10078,9 @@ class RFMViewer(tk.Toplevel):
             x_groups,
             y_groups,
             ring_rows,
+            ring_span,
         )
-        outer_r = (INNER_BLANK_ROWS + n_rows) * scale
+        outer_r = (INNER_BLANK_ROWS + n_rows * ring_span) * scale
         canvas.create_oval(cx - outer_r, cy - outer_r, cx + outer_r, cy + outer_r, outline="#475467")
         legend_x = min(cx + outer_r + 26, w - 154)
         legend_y = max(64.0, cy - 40.0)
@@ -9956,6 +10130,7 @@ class RFMViewer(tk.Toplevel):
             "x_groups": x_groups,
             "y_groups": y_groups,
             "ring_rows": ring_rows,
+            "ring_span": ring_span,
         }
 
     def _all_positions_timeline_values(
@@ -9999,7 +10174,8 @@ class RFMViewer(tk.Toplevel):
         x_groups: list[AxisGroup],
         y_groups: list[AxisGroup],
         smooth_radius: int,
-        cell_size: float,
+        cell_width: float,
+        cell_height: float,
         tile_positions: dict[int, tuple[float, float]],
         atlas_width: int,
         atlas_height: int,
@@ -10016,7 +10192,8 @@ class RFMViewer(tk.Toplevel):
             self.palette_var.get(),
             self.polar_layout_var.get(),
             self.polar_radius_var.get(),
-            round(cell_size, 6),
+            round(cell_width, 6),
+            round(cell_height, 6),
             tuple((bin_idx, *tile_positions[bin_idx]) for bin_idx in visible_bins),
             atlas_width,
             atlas_height,
@@ -10058,13 +10235,15 @@ class RFMViewer(tk.Toplevel):
                 ring_rows = sorted(range(len(y_groups)), key=lambda index: y_groups[index][0])
             else:
                 ring_rows = list(range(len(y_groups) - 1, -1, -1))
+            ring_span = polar_ring_span(len(y_groups))
             polar_tiles = [
                 (
                     prepared_by_bin[bin_idx],
                     *tile_positions[bin_idx],
-                    cell_size,
+                    cell_width,
                     total_deg,
                     ring_rows,
+                    ring_span,
                 )
                 for bin_idx in visible_bins
             ]
@@ -10076,7 +10255,12 @@ class RFMViewer(tk.Toplevel):
             )
         else:
             tiles = [
-                (prepared_by_bin[bin_idx], *tile_positions[bin_idx], cell_size)
+                (
+                    prepared_by_bin[bin_idx],
+                    *tile_positions[bin_idx],
+                    cell_width,
+                    cell_height,
+                )
                 for bin_idx in visible_bins
             ]
             ppm = matrix_atlas_ppm_data(
@@ -10127,16 +10311,23 @@ class RFMViewer(tk.Toplevel):
         base_grid_h = min(78.0, max(44.0, min(screen_h * 0.085, window_h * 0.12)))
         density_scale = min(1.0, max(0.35, math.sqrt(50.0 / count)))
         target_grid_h = max(18.0, base_grid_h * density_scale)
-        target_cell = target_grid_h / y_count
-        target_grid_w = target_cell * x_count
+        target_aspect = (
+            SINGLETON_Y_REFERENCE_COLUMNS / SINGLETON_Y_REFERENCE_ROWS
+            if y_count == 1
+            else x_count / y_count
+        )
+        target_grid_w = target_grid_h * target_aspect
+        target_grid_w = max(target_grid_w, 2.0 * x_count)
+        target_grid_h = target_grid_w / target_aspect
         max_cols_by_width = max(1, int((available_w + gap_x) // max(1.0, target_grid_w + gap_x)))
         max_cols_by_screen = max(1, int((min(screen_w, window_w, width) - left - right_pad + gap_x) // max(1.0, target_grid_w + gap_x)))
         cols = min(count, max(1, min(max_cols_by_width, max_cols_by_screen)))
         slot_w = max(1.0, (available_w - (cols - 1) * gap_x) / cols)
-        cell = min(target_cell, slot_w / x_count)
-        cell = max(2.0, cell)
-        grid_w = cell * x_count
-        grid_h = cell * y_count
+        grid_w = min(target_grid_w, slot_w)
+        cell_x = max(2.0, grid_w / x_count)
+        grid_w = cell_x * x_count
+        grid_h = grid_w / target_aspect
+        cell_y = grid_h / y_count
         row_step = grid_h + label_gap + label_height + row_gap
         rows = int(math.ceil(count / cols))
         return {
@@ -10148,7 +10339,8 @@ class RFMViewer(tk.Toplevel):
             "label_height": label_height,
             "row_gap": row_gap,
             "slot_w": slot_w,
-            "cell": cell,
+            "cell": cell_x,
+            "cell_y": cell_y,
             "grid_w": grid_w,
             "grid_h": grid_h,
             "row_step": row_step,
@@ -10360,8 +10552,11 @@ class RFMViewer(tk.Toplevel):
         preview_x_groups = self._x_groups()
         preview_y_groups = self._display_y_groups()
         smooth_radius = self._smooth_radius()
+        preview_ring_span = polar_ring_span(len(preview_y_groups))
         if self.polar_layout_var.get():
-            polar_diameter_units = 2 * (INNER_BLANK_ROWS + len(preview_y_groups))
+            polar_diameter_units = 2 * (
+                INNER_BLANK_ROWS + len(preview_y_groups) * preview_ring_span
+            )
             layout_x_count = polar_diameter_units
             layout_y_count = polar_diameter_units
         else:
@@ -10383,7 +10578,8 @@ class RFMViewer(tk.Toplevel):
         label_height = float(mini_layout["label_height"])
         row_gap = float(mini_layout["row_gap"])
         slot_w = float(mini_layout["slot_w"])
-        preview_cell = float(mini_layout["cell"])
+        preview_cell_x = float(mini_layout["cell"])
+        preview_cell_y = float(mini_layout.get("cell_y", preview_cell_x))
         preview_grid_w = float(mini_layout["grid_w"])
         preview_grid_h = float(mini_layout["grid_h"])
         row_step = float(mini_layout["row_step"])
@@ -10411,7 +10607,8 @@ class RFMViewer(tk.Toplevel):
             preview_x_groups,
             preview_y_groups,
             smooth_radius,
-            preview_cell,
+            preview_cell_x,
+            preview_cell_y,
             tile_positions,
             atlas_width,
             atlas_height,
@@ -10455,7 +10652,8 @@ class RFMViewer(tk.Toplevel):
             slot_x = mini_left + col * (slot_w + gap_x)
             x0 = slot_x + max(0.0, (slot_w - preview_grid_w) / 2.0)
             y0 = mini_top + row * row_step
-            cell = preview_cell
+            cell_x = preview_cell_x
+            cell_y = preview_cell_y
             grid_w = preview_grid_w
             grid_h = preview_grid_h
             timeline_layout: dict[str, object] = {
@@ -10465,7 +10663,8 @@ class RFMViewer(tk.Toplevel):
                 "source_end": source_end,
                 "x0": x0,
                 "y0": y0,
-                "cell": cell,
+                "cell": cell_x,
+                "cell_y": cell_y,
                 "grid_w": grid_w,
                 "grid_h": grid_h,
                 "label_gap": label_gap,
@@ -10480,8 +10679,9 @@ class RFMViewer(tk.Toplevel):
                     {
                         "cx": x0 + grid_w / 2.0,
                         "cy": y0 + grid_h / 2.0,
-                        "scale": cell,
+                        "scale": cell_x,
                         "total_deg": self.data.infer_total_deg(),
+                        "ring_span": preview_ring_span,
                         "ring_rows": (
                             sorted(
                                 range(len(preview_y_groups)),
@@ -10539,13 +10739,14 @@ class RFMViewer(tk.Toplevel):
             return None
         x0 = layout["x0"]
         y0 = layout["y0"]
-        cell = layout["cell"]
+        cell_x = layout["cell"]
+        cell_y = layout.get("cell_y", cell_x)
         grid_w = layout["grid_w"]
         grid_h = layout["grid_h"]
         if not (x0 <= event.x < x0 + grid_w and y0 <= event.y < y0 + grid_h):
             return None
-        group_idx = int((event.x - x0) // cell)
-        display_y = int((event.y - y0) // cell)
+        group_idx = int((event.x - x0) // cell_x)
+        display_y = int((event.y - y0) // cell_y)
         x_groups = layout.get("x_groups") or self._x_groups()
         y_groups = layout.get("y_groups") or self._display_y_groups()
         if not (0 <= group_idx < len(x_groups) and 0 <= display_y < len(y_groups)):
@@ -10655,9 +10856,10 @@ class RFMViewer(tk.Toplevel):
             return int(layout["bin_idx"]), cell_ref
         x0 = float(layout["x0"])
         y0 = float(layout["y0"])
-        cell = float(layout["cell"])
-        group_idx = int((event_x - x0) // cell)
-        display_y = int((event_y - y0) // cell)
+        cell_x = float(layout["cell"])
+        cell_y = float(layout.get("cell_y", cell_x))
+        group_idx = int((event_x - x0) // cell_x)
+        display_y = int((event_y - y0) // cell_y)
         x_groups = layout.get("x_groups") or self._x_groups()
         y_groups = layout.get("y_groups") or self._display_y_groups()
         if 0 <= group_idx < len(x_groups) and 0 <= display_y < len(y_groups):
@@ -10691,9 +10893,14 @@ class RFMViewer(tk.Toplevel):
         dx = (event_x - cx) / scale
         dy = (cy - event_y) / scale
         radius = math.hypot(dx, dy)
-        if not (INNER_BLANK_ROWS <= radius < INNER_BLANK_ROWS + len(y_groups)):
+        ring_span = max(float(layout.get("ring_span", 1.0)), 1e-9)
+        if not (
+            INNER_BLANK_ROWS
+            <= radius
+            < INNER_BLANK_ROWS + len(y_groups) * ring_span
+        ):
             return None
-        ring_idx = int(math.floor(radius - INNER_BLANK_ROWS))
+        ring_idx = int(math.floor((radius - INNER_BLANK_ROWS) / ring_span))
         if not (0 <= ring_idx < len(ring_rows)):
             return None
         display_row = int(ring_rows[ring_idx])
@@ -10912,10 +11119,19 @@ class RFMViewer(tk.Toplevel):
                     group_idx = next((idx for idx, (start, end) in enumerate(x_groups) if start <= x_idx <= end), 0)
                     x0 = layout["x0"]
                     y0 = layout["y0"]
-                    cell_size = layout["cell"]
-                    x = x0 + group_idx * cell_size
-                    y = y0 + display_y * cell_size
-                    canvas.create_rectangle(x + 1, y + 1, x + cell_size - 1, y + cell_size - 1, outline="#f97316", width=3, tags="hover")
+                    cell_x = layout["cell"]
+                    cell_y = layout.get("cell_y", cell_x)
+                    x = x0 + group_idx * cell_x
+                    y = y0 + display_y * cell_y
+                    canvas.create_rectangle(
+                        x + 1,
+                        y + 1,
+                        x + cell_x - 1,
+                        y + cell_y - 1,
+                        outline="#f97316",
+                        width=3,
+                        tags="hover",
+                    )
         elif key in {"rf", "delay"}:
             polar = self._polar_cell_at(key, event)
             layout = self._canvas_layouts.get(key)
@@ -10933,8 +11149,8 @@ class RFMViewer(tk.Toplevel):
                     layout["cx"],
                     layout["cy"],
                     layout["scale"],
-                    INNER_BLANK_ROWS + ring_idx,
-                    INNER_BLANK_ROWS + ring_idx + 1,
+                    INNER_BLANK_ROWS + ring_idx * float(layout.get("ring_span", 1.0)),
+                    INNER_BLANK_ROWS + (ring_idx + 1) * float(layout.get("ring_span", 1.0)),
                     theta_edges[col],
                     theta_edges[col + 1],
                 )
@@ -10951,7 +11167,8 @@ class RFMViewer(tk.Toplevel):
                     group_idx = next((idx for idx, (start, end) in enumerate(x_groups) if start <= x_idx_t <= end), 0)
                     x0 = float(layout["x0"])
                     y0 = float(layout["y0"])
-                    cell_size = float(layout["cell"])
+                    cell_x = float(layout["cell"])
+                    cell_y = float(layout.get("cell_y", cell_x))
                     if layout.get("geometry") == "polar":
                         polar = self._polar_cell_from_layout(
                             layout,
@@ -10983,8 +11200,10 @@ class RFMViewer(tk.Toplevel):
                             float(layout["cx"]),
                             float(layout["cy"]),
                             float(layout["scale"]),
-                            INNER_BLANK_ROWS + ring_idx,
-                            INNER_BLANK_ROWS + ring_idx + 1,
+                            INNER_BLANK_ROWS
+                            + ring_idx * float(layout.get("ring_span", 1.0)),
+                            INNER_BLANK_ROWS
+                            + (ring_idx + 1) * float(layout.get("ring_span", 1.0)),
                             theta_edges[column],
                             theta_edges[column + 1],
                         )
@@ -10996,13 +11215,13 @@ class RFMViewer(tk.Toplevel):
                             tags="hover",
                         )
                     else:
-                        x = x0 + group_idx * cell_size
-                        y = y0 + display_y * cell_size
+                        x = x0 + group_idx * cell_x
+                        y = y0 + display_y * cell_y
                         canvas.create_rectangle(
                             x,
                             y,
-                            x + cell_size,
-                            y + cell_size,
+                            x + cell_x,
+                            y + cell_y,
                             outline="#f97316",
                             width=2,
                             tags="hover",

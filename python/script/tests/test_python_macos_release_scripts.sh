@@ -84,9 +84,9 @@ pass_test "atomic helper passes non-macOS and macOS-API C syntax validation"
   [[ "$RF_MAPPING_EXECUTABLE_NAME" == "Free-Moving RF Viewer" ]]
   [[ "$RF_MAPPING_BUNDLE_ID" == "org.local.rfmapping.viewer.freemoving" ]]
   [[ "$RF_MAPPING_APP_VERSION" == "1.10.0" ]]
-  [[ "$RF_MAPPING_APP_PRERELEASE" == "alpha.2" ]]
-  [[ "$RF_MAPPING_PACKAGE_VERSION" == "1.10.0a2" ]]
-  [[ "$RF_MAPPING_APP_BUILD" == "110002" ]]
+  [[ "$RF_MAPPING_APP_PRERELEASE" == "alpha.3" ]]
+  [[ "$RF_MAPPING_PACKAGE_VERSION" == "1.10.0a3" ]]
+  [[ "$RF_MAPPING_APP_BUILD" == "110003" ]]
   [[ "$RF_MAPPING_RELEASE_EDITION" == "FreeMovingAlpha" ]]
   [[ "$RF_MAPPING_RELEASE_FLAVOR" == "freemoving" ]]
   [[ "$RF_MAPPING_APP_ARCHITECTURE" == "arm64" ]]
@@ -108,8 +108,10 @@ assert_file_contains "$BUILD_SCRIPT" 'H5PY_VERSION="3.16.0"'
 assert_file_contains "$BUILD_SCRIPT" 'TKINTERDND2_VERSION="0.6.2"'
 assert_file_contains "$BUILD_SCRIPT" '--additional-hooks-dir "$PYINSTALLER_HOOKS"'
 assert_file_contains "$BUILD_SCRIPT" '--add-data "$SUPPORT_DOCUMENTATION:."'
-assert_file_contains "$BUILD_SCRIPT" '"$BUILD_VENV/bin/python" "$SMOKE_FIXTURE_GENERATOR" "$SMOKE_RF"'
-assert_file_contains "$BUILD_SCRIPT" '"$APP_BINARY" --self-test "$SMOKE_RF"'
+assert_file_contains "$BUILD_SCRIPT" '--stimulus square "$SMOKE_SQUARE_RF"'
+assert_file_contains "$BUILD_SCRIPT" '--stimulus bar "$SMOKE_BAR_RF"'
+assert_file_contains "$BUILD_SCRIPT" '"$APP_BINARY" --stimulus square --self-test "$SMOKE_SQUARE_RF"'
+assert_file_contains "$BUILD_SCRIPT" '"$APP_BINARY" --stimulus bar --self-test "$SMOKE_BAR_RF"'
 assert_file_contains "$BUILD_SCRIPT" '"$APP_BINARY" --self-test-dnd'
 assert_file_contains "$BUILD_SCRIPT" 'Add :LSMinimumSystemVersion string $MINIMUM_MACOS_VERSION'
 assert_file_contains "$BUILD_SCRIPT" 'Add :RFMappingReleaseEdition string $RELEASE_EDITION'

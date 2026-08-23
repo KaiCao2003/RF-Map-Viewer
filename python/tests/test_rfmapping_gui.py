@@ -160,6 +160,70 @@ class UnitFilterSettingsTests(unittest.TestCase):
         self.assertEqual(restored.rf_zero_bin_threshold, 1)
 
 
+class SpatialDisplayGeometryTests(unittest.TestCase):
+    def test_singleton_y_uses_legacy_30_by_7_visual_aspect(self) -> None:
+        cell_x, cell_y, grid_w, grid_h = gui.spatial_grid_dimensions(
+            900.0,
+            600.0,
+            120,
+            1,
+        )
+
+        self.assertAlmostEqual(grid_w / grid_h, 30.0 / 7.0)
+        self.assertAlmostEqual(cell_x * 120, grid_w)
+        self.assertAlmostEqual(cell_y, grid_h)
+
+    def test_multirow_maps_keep_square_cells(self) -> None:
+        cell_x, cell_y, grid_w, grid_h = gui.spatial_grid_dimensions(
+            900.0,
+            600.0,
+            30,
+            7,
+        )
+
+        self.assertAlmostEqual(cell_x, cell_y)
+        self.assertAlmostEqual(grid_w / grid_h, 30.0 / 7.0)
+
+    def test_stretched_rectangle_and_polar_ring_remain_fully_clickable(self) -> None:
+        rectangle_layout = {
+            "geometry": "rectangle",
+            "x0": 10.0,
+            "y0": 20.0,
+            "cell": 2.0,
+            "cell_y": 28.0,
+            "grid_w": 4.0,
+            "grid_h": 28.0,
+            "x_groups": [(0, 0), (1, 1)],
+            "y_groups": [(0, 0)],
+        }
+        rectangle_viewer = SimpleNamespace(_canvas_layouts={"rf": rectangle_layout})
+        rectangle_cell = gui.RFMViewer._canvas_to_cell(
+            rectangle_viewer,
+            "rf",
+            SimpleNamespace(x=13.0, y=47.0),
+        )
+        self.assertEqual(rectangle_cell, (0, 0, 1, 1))
+
+        polar_layout = {
+            "geometry": "polar",
+            "cx": 20.0,
+            "cy": 20.0,
+            "scale": 1.0,
+            "total_deg": 360.0,
+            "ring_span": 7.0,
+            "x_groups": [(0, 0)],
+            "y_groups": [(0, 0)],
+            "ring_rows": [0],
+        }
+        polar_cell = gui.RFMViewer._polar_cell_from_layout(
+            SimpleNamespace(),
+            polar_layout,
+            30.0,
+            20.0,
+        )
+        self.assertEqual(polar_cell, (0, (0, 0, 0, 0)))
+
+
 class RasterTests(unittest.TestCase):
     def test_matrix_ppm_nearest_neighbor_colors(self) -> None:
         ppm = gui.matrix_ppm_data(
@@ -194,6 +258,17 @@ class RasterTests(unittest.TestCase):
         self.assertEqual(pixel(2, 2), b"\x10\x20\x30")
         self.assertEqual(pixel(3, 3), b"\xff\xff\xff")
 
+    def test_atlas_supports_a_stretched_singleton_row(self) -> None:
+        ppm = gui.matrix_atlas_ppm_data(
+            [([[1.0, 1.0]], 0.0, 0.0, 2.0, 6.0)],
+            4,
+            6,
+            lambda _value: "#102030",
+        )
+        header = b"P6\n4 6\n255\n"
+        pixels = ppm[len(header) :]
+        self.assertEqual(pixels, b"\x10\x20\x30" * 24)
+
     def test_polar_atlas_preserves_blank_center_and_colors_rings(self) -> None:
         ppm = gui.polar_matrix_atlas_ppm_data(
             [([[1.0, 1.0]], 0.0, 0.0, 2.0, 360.0, [0])],
@@ -210,6 +285,23 @@ class RasterTests(unittest.TestCase):
 
         self.assertEqual(pixel(10, 10), b"\xff\xff\xff")
         self.assertEqual(pixel(10, 1), b"\x12\x34\x56")
+
+    def test_polar_atlas_stretches_one_row_across_seven_radial_units(self) -> None:
+        ppm = gui.polar_matrix_atlas_ppm_data(
+            [([[1.0]], 0.0, 0.0, 1.0, 360.0, [0], 7.0)],
+            22,
+            22,
+            lambda _value: "#123456",
+        )
+        header = b"P6\n22 22\n255\n"
+        pixels = ppm[len(header) :]
+
+        def pixel(x: int, y: int) -> bytes:
+            offset = (y * 22 + x) * 3
+            return pixels[offset : offset + 3]
+
+        self.assertEqual(pixel(11, 11), b"\xff\xff\xff")
+        self.assertEqual(pixel(11, 0), b"\x12\x34\x56")
 
 
 class ProbeGeometryTests(unittest.TestCase):

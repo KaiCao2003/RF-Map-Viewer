@@ -11,7 +11,7 @@ import h5py
 import numpy as np
 
 
-def create_fixture(path: Path) -> None:
+def create_fixture(path: Path, stimulus_kind: str) -> None:
     logical_rate = np.array(
         [[[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]]],
         dtype=np.float32,
@@ -25,10 +25,20 @@ def create_fixture(path: Path) -> None:
     }
     encoded = json.dumps(calibration, separators=(",", ":")).encode("utf-8")
     with h5py.File(path, "w") as file:
-        file.attrs["format"] = "rfmapping_fm_hdf5_v1"
+        file.attrs["format"] = (
+            "rfmapping_fm_hdf5_v1"
+            if stimulus_kind == "square"
+            else "rfmapping_fm_bar_hdf5_v1"
+        )
         file.attrs["logical_dimension_order"] = "unit,elevation,azimuth,time"
         file.attrs["complete"] = np.uint8(1)
         file.attrs["viewpoint_model"] = "rigid_body_origin"
+        if stimulus_kind == "bar":
+            file.attrs["stimulus_geometry"] = "vertical_bar_full_source_height"
+            file.attrs["bar_width_handling"] = (
+                "pooled; each trial uses its recorded Square_Size"
+            )
+            file.attrs["bar_widths_present_deg"] = np.array([3.0, 6.0, 12.0])
         file.create_dataset("/units/id", data=np.array([[101]], dtype=np.int64))
         file.create_dataset(
             "/axes/elevation_centers_deg", data=np.array([[-45.0, 45.0]])
@@ -54,9 +64,10 @@ def create_fixture(path: Path) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--stimulus", choices=("square", "bar"), required=True)
     parser.add_argument("output", type=Path)
     args = parser.parse_args()
-    create_fixture(args.output)
+    create_fixture(args.output, args.stimulus)
     return 0
 
 

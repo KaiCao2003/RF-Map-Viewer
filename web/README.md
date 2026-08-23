@@ -1,11 +1,16 @@
-# Web Viewer 1.9.0
+# Web Viewer 1.9.1
 
 The Web implementation contains a FastAPI backend in `backend/` and a
 React/Vite frontend in `frontend/`. The backend owns its figure renderer and
 does not import the analysis repository or the Python/Tk implementation.
-Its `1.9.0` version places it in the same stable feature generation as the
+Its `1.9.1` version places it in the same stable feature generation as the
 Python `1.9.x` reference; `web` remains an artifact/tag identity rather than a
 version suffix.
+
+Version 1.9.1 accepts MATLAB numeric scalars for declared singleton spatial
+axes. Singleton-y Cartesian maps keep a `30:7` footprint, and the sole Polar
+row spans seven radial units in RF, delay, RGB, timeline, selection, hit-test,
+and backend figure-export paths. Multirow geometry is unchanged.
 
 ## Input files
 

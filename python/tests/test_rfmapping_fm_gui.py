@@ -1,21 +1,27 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
+import rfmapping_fm_gui as gui
 from rfmapping_fm_gui import (
     APP_RELEASE_VERSION,
     VIEW_2D,
     VIEW_3D,
     VIEWS,
+    FreeMovingRFViewer,
     _nearest_center_indices,
     colorize_matrix,
     finite_display_range,
     head_angles_from_sphere_point,
     project_head_angles_to_sphere,
     render_spherical_texture,
+    spatial_display_aspect,
     sphere_direction_from_normalized,
 )
+from rfmapping_viewer.fm_dataset import STIMULUS_BAR, STIMULUS_SQUARE
 
 
 def test_colorize_preserves_shape_and_marks_nan() -> None:
@@ -35,6 +41,14 @@ def test_display_range_is_robust_and_nonempty() -> None:
     assert finite_display_range(np.array([[np.nan]])) == (0.0, 1.0)
 
 
+def test_singleton_y_uses_legacy_30_by_7_visual_aspect() -> None:
+    assert spatial_display_aspect(120, 1) == pytest.approx(30.0 / 7.0)
+
+
+def test_multirow_2d_map_aspect_is_unchanged() -> None:
+    assert spatial_display_aspect(120, 7) == pytest.approx(120.0 / 7.0)
+
+
 def test_colorize_rejects_invalid_palette_and_range() -> None:
     with pytest.raises(ValueError, match="Unknown palette"):
         colorize_matrix(np.zeros((1, 1)), "Nope", 0.0, 1.0)
@@ -42,9 +56,62 @@ def test_colorize_rejects_invalid_palette_and_range() -> None:
         colorize_matrix(np.zeros((1, 1)), "Gray", 1.0, 1.0)
 
 
-def test_alpha2_exposes_2d_and_3d_view_modes() -> None:
-    assert APP_RELEASE_VERSION == "1.10.0-alpha.2"
+def test_alpha3_exposes_2d_and_3d_view_modes() -> None:
+    assert APP_RELEASE_VERSION == "1.10.0-alpha.3"
     assert VIEWS == (VIEW_2D, VIEW_3D)
+
+
+def test_open_flow_selects_stimulus_before_file_picker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[object] = []
+
+    class ViewerDouble:
+        def _ask_stimulus_kind(self) -> str:
+            events.append("choose-stimulus")
+            return STIMULUS_BAR
+
+        def open_document(self, path: str, stimulus_kind: str) -> None:
+            events.append(("load", path, stimulus_kind))
+
+    def askopenfilename(**options: object) -> str:
+        events.append(("file-picker", options["title"]))
+        return "/tmp/bar.rfmap"
+
+    monkeypatch.setattr(
+        gui,
+        "filedialog",
+        SimpleNamespace(askopenfilename=askopenfilename),
+    )
+
+    FreeMovingRFViewer.choose_document(ViewerDouble())  # type: ignore[arg-type]
+
+    assert events == [
+        "choose-stimulus",
+        ("file-picker", "Open Bar free-moving RF map"),
+        ("load", "/tmp/bar.rfmap", STIMULUS_BAR),
+    ]
+
+
+def test_external_open_requires_stimulus_choice_before_load() -> None:
+    events: list[object] = []
+
+    class ViewerDouble:
+        def _ask_stimulus_kind(self) -> str:
+            events.append("choose-stimulus")
+            return STIMULUS_SQUARE
+
+        def open_document(self, path: str, stimulus_kind: str) -> None:
+            events.append(("load", path, stimulus_kind))
+
+    FreeMovingRFViewer._open_external_document(  # type: ignore[arg-type]
+        ViewerDouble(), "/tmp/square.rfmap"
+    )
+
+    assert events == [
+        "choose-stimulus",
+        ("load", "/tmp/square.rfmap", STIMULUS_SQUARE),
+    ]
 
 
 def test_sphere_center_tracks_head_centric_yaw_and_pitch() -> None:

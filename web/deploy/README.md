@@ -221,7 +221,7 @@ and every `unit_data` column is aligned by the same `unit_id` index.
    curl -fsS http://127.0.0.1:3005/rfmapping/api/health
    ```
 
-   The health response must report `1.9.0`.
+   The health response must report `1.9.1`.
 
 4. If the optional Nginx include is active, validate it separately:
 

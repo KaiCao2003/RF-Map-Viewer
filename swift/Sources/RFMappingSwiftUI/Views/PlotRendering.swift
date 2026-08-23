@@ -1,5 +1,59 @@
 import SwiftUI
 
+let singletonYReferenceColumns = 30
+let singletonYReferenceRows = 7
+
+struct SpatialGridDimensions: Equatable {
+    let cellWidth: CGFloat
+    let cellHeight: CGFloat
+    let gridWidth: CGFloat
+    let gridHeight: CGFloat
+}
+
+/// Fits a spatial grid while preserving the legacy 30-column by 7-row visual
+/// proportion for data that scientifically contains only one y row.
+func spatialGridDimensions(
+    availableWidth: CGFloat,
+    availableHeight: CGFloat,
+    columns: Int,
+    rows: Int,
+    minimumCellWidth: CGFloat = 0
+) -> SpatialGridDimensions {
+    let columns = max(1, columns)
+    let rows = max(1, rows)
+    let width = max(0, availableWidth)
+    let height = max(0, availableHeight)
+    if rows == 1 {
+        let aspect = CGFloat(singletonYReferenceColumns) / CGFloat(singletonYReferenceRows)
+        var gridWidth = min(width, height * aspect)
+        let cellWidth = max(minimumCellWidth, gridWidth / CGFloat(columns))
+        gridWidth = cellWidth * CGFloat(columns)
+        let gridHeight = gridWidth / aspect
+        return SpatialGridDimensions(
+            cellWidth: cellWidth,
+            cellHeight: gridHeight,
+            gridWidth: gridWidth,
+            gridHeight: gridHeight
+        )
+    }
+
+    let cell = max(
+        minimumCellWidth,
+        min(width / CGFloat(columns), height / CGFloat(rows))
+    )
+    return SpatialGridDimensions(
+        cellWidth: cell,
+        cellHeight: cell,
+        gridWidth: cell * CGFloat(columns),
+        gridHeight: cell * CGFloat(rows)
+    )
+}
+
+/// Returns the visual radial width assigned to one scientific y row.
+func polarRingSpan(rowCount: Int) -> CGFloat {
+    CGFloat(rowCount == 1 ? singletonYReferenceRows : 1)
+}
+
 struct HeatmapPlot {
     let matrix: OptionalMatrix
     let xGroups: [AxisGroup]
@@ -11,7 +65,8 @@ struct HeatmapPlot {
 struct HeatmapLayout {
     let x0: CGFloat
     let y0: CGFloat
-    let cell: CGFloat
+    let cellWidth: CGFloat
+    let cellHeight: CGFloat
     let gridWidth: CGFloat
     let gridHeight: CGFloat
     let xGroups: [AxisGroup]
@@ -21,8 +76,8 @@ struct HeatmapLayout {
         guard x0 <= point.x, point.x < x0 + gridWidth, y0 <= point.y, point.y < y0 + gridHeight else {
             return nil
         }
-        let groupIndex = Int((point.x - x0) / cell)
-        let displayY = Int((point.y - y0) / cell)
+        let groupIndex = Int((point.x - x0) / cellWidth)
+        let displayY = Int((point.y - y0) / cellHeight)
         guard xGroups.indices.contains(groupIndex), yGroups.indices.contains(displayY) else {
             return nil
         }
@@ -37,10 +92,10 @@ struct HeatmapLayout {
             return nil
         }
         return CGRect(
-            x: x0 + CGFloat(groupIndex) * cell,
-            y: y0 + CGFloat(displayY) * cell,
-            width: cell,
-            height: cell
+            x: x0 + CGFloat(groupIndex) * cellWidth,
+            y: y0 + CGFloat(displayY) * cellHeight,
+            width: cellWidth,
+            height: cellHeight
         )
     }
 }
@@ -61,12 +116,25 @@ func makeHeatmapLayout(size: CGSize, plot: HeatmapPlot, margins: EdgeInsets = Ed
     let plotHeight = max(10, size.height - margins.top - margins.bottom)
     let rows = max(1, plot.yGroups.count)
     let cols = max(1, plot.xGroups.count)
-    let cell = max(4, min(plotWidth / CGFloat(cols), plotHeight / CGFloat(rows)))
-    let gridWidth = cell * CGFloat(cols)
-    let gridHeight = cell * CGFloat(rows)
-    let x0 = margins.leading + (plotWidth - gridWidth) / 2.0
-    let y0 = margins.top + (plotHeight - gridHeight) / 2.0
-    return HeatmapLayout(x0: x0, y0: y0, cell: cell, gridWidth: gridWidth, gridHeight: gridHeight, xGroups: plot.xGroups, yGroups: plot.yGroups)
+    let dimensions = spatialGridDimensions(
+        availableWidth: plotWidth,
+        availableHeight: plotHeight,
+        columns: cols,
+        rows: rows,
+        minimumCellWidth: 4
+    )
+    let x0 = margins.leading + (plotWidth - dimensions.gridWidth) / 2.0
+    let y0 = margins.top + (plotHeight - dimensions.gridHeight) / 2.0
+    return HeatmapLayout(
+        x0: x0,
+        y0: y0,
+        cellWidth: dimensions.cellWidth,
+        cellHeight: dimensions.cellHeight,
+        gridWidth: dimensions.gridWidth,
+        gridHeight: dimensions.gridHeight,
+        xGroups: plot.xGroups,
+        yGroups: plot.yGroups
+    )
 }
 
 func drawHeatmap(
@@ -86,10 +154,10 @@ func drawHeatmap(
     for displayY in plot.matrix.indices {
         for groupIndex in plot.matrix[displayY].indices {
             let rect = CGRect(
-                x: layout.x0 + CGFloat(groupIndex) * layout.cell,
-                y: layout.y0 + CGFloat(displayY) * layout.cell,
-                width: layout.cell,
-                height: layout.cell
+                x: layout.x0 + CGFloat(groupIndex) * layout.cellWidth,
+                y: layout.y0 + CGFloat(displayY) * layout.cellHeight,
+                width: layout.cellWidth,
+                height: layout.cellHeight
             )
             let value = plot.matrix[displayY][groupIndex]
             let fill = palette.map { paletteColor(value, low: plot.low, high: plot.high, palette: $0) }
@@ -173,7 +241,7 @@ func drawAxes(context: inout GraphicsContext, store: RFMappingStore, layout: Hea
     let tickStep = max(1, layout.xGroups.count / 6)
     for groupIndex in stride(from: 0, to: layout.xGroups.count, by: tickStep) {
         let group = layout.xGroups[groupIndex]
-        let x = layout.x0 + (CGFloat(groupIndex) + 0.5) * layout.cell
+        let x = layout.x0 + (CGFloat(groupIndex) + 0.5) * layout.cellWidth
         var tick = Path()
         tick.move(to: CGPoint(x: x, y: layout.y0 + layout.gridHeight))
         tick.addLine(to: CGPoint(x: x, y: layout.y0 + layout.gridHeight + 5))
@@ -188,7 +256,7 @@ func drawAxes(context: inout GraphicsContext, store: RFMappingStore, layout: Hea
 
     if let last = layout.xGroups.indices.last, last % tickStep != 0 {
         let group = layout.xGroups[last]
-        let x = layout.x0 + (CGFloat(last) + 0.5) * layout.cell
+        let x = layout.x0 + (CGFloat(last) + 0.5) * layout.cellWidth
         let pos = (data.xPositions[group.start] + data.xPositions[group.end]) / 2.0
         context.draw(
             Text(formatPos(pos)).font(.system(size: 9)).foregroundStyle(.secondary),
@@ -198,7 +266,7 @@ func drawAxes(context: inout GraphicsContext, store: RFMappingStore, layout: Hea
     }
 
     for (displayY, group) in layout.yGroups.enumerated() {
-        let y = layout.y0 + (CGFloat(displayY) + 0.5) * layout.cell
+        let y = layout.y0 + (CGFloat(displayY) + 0.5) * layout.cellHeight
         var tick = Path()
         tick.move(to: CGPoint(x: layout.x0 - 5, y: y))
         tick.addLine(to: CGPoint(x: layout.x0, y: y))

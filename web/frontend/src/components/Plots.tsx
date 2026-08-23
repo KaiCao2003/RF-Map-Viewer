@@ -20,6 +20,15 @@ import {
 } from "../math";
 import { delayColor, paletteColor, responseRangeForPalette, rgbComposite } from "../palette";
 import {
+  POLAR_INNER_BLANK_ROWS,
+  polarRingSpan,
+  spatialCellAt,
+  spatialGridDimensions,
+  type PolarSpatialLayout,
+  type RectSpatialLayout,
+  type SpatialLayout,
+} from "../spatialLayout";
+import {
   timelineBinAtTime,
   timelineChartX,
   timelineGridLayout,
@@ -33,7 +42,7 @@ import type {
   ViewState,
 } from "../types";
 
-const INNER_BLANK_ROWS = 4;
+const INNER_BLANK_ROWS = POLAR_INNER_BLANK_ROWS;
 
 interface CommonPlotProps {
   meta: DatasetMeta;
@@ -54,29 +63,9 @@ interface TooltipState {
   lines: string[];
 }
 
-interface RectLayout {
-  kind: "rect";
-  x: number;
-  y: number;
-  cell: number;
-  width: number;
-  height: number;
-  xGroups: AxisGroup[];
-  yGroups: AxisGroup[];
-}
-
-interface PolarLayout {
-  kind: "polar";
-  cx: number;
-  cy: number;
-  scale: number;
-  totalDegrees: number;
-  xGroups: AxisGroup[];
-  yGroups: AxisGroup[];
-  ringRows: number[];
-}
-
-type PlotLayout = RectLayout | PolarLayout;
+type RectLayout = RectSpatialLayout;
+type PolarLayout = PolarSpatialLayout;
+type PlotLayout = SpatialLayout;
 
 function useContainerSize(
   ref: React.RefObject<HTMLElement | null>,
@@ -151,7 +140,12 @@ function drawRectMatrix(
 ): void {
   matrix.forEach((row, y) => row.forEach((value, x) => {
     context.fillStyle = color(value);
-    context.fillRect(layout.x + x * layout.cell, layout.y + y * layout.cell, Math.ceil(layout.cell), Math.ceil(layout.cell));
+    context.fillRect(
+      layout.x + x * layout.cellWidth,
+      layout.y + y * layout.cellHeight,
+      Math.ceil(layout.cellWidth),
+      Math.ceil(layout.cellHeight),
+    );
   }));
 }
 
@@ -177,8 +171,8 @@ function drawPolarMatrix(
         layout.cx,
         layout.cy,
         layout.scale,
-        INNER_BLANK_ROWS + ring,
-        INNER_BLANK_ROWS + ring + 1,
+        INNER_BLANK_ROWS + ring * layout.ringSpan,
+        INNER_BLANK_ROWS + (ring + 1) * layout.ringSpan,
         thetaEdges[column],
         thetaEdges[column + 1],
       );
@@ -187,7 +181,13 @@ function drawPolarMatrix(
     }
   });
   context.beginPath();
-  context.arc(layout.cx, layout.cy, (INNER_BLANK_ROWS + layout.yGroups.length) * layout.scale, 0, Math.PI * 2);
+  context.arc(
+    layout.cx,
+    layout.cy,
+    (INNER_BLANK_ROWS + layout.yGroups.length * layout.ringSpan) * layout.scale,
+    0,
+    Math.PI * 2,
+  );
   context.strokeStyle = "#475467";
   context.lineWidth = 1;
   context.stroke();
@@ -205,20 +205,29 @@ function drawSelection(context: CanvasRenderingContext2D, layout: PlotLayout, se
   const [displayRow, column] = group;
   context.save();
   if (layout.kind === "rect") {
-    const x = layout.x + column * layout.cell;
-    const y = layout.y + displayRow * layout.cell;
+    const x = layout.x + column * layout.cellWidth;
+    const y = layout.y + displayRow * layout.cellHeight;
     context.strokeStyle = "#101828";
     context.lineWidth = 2;
-    context.strokeRect(x + 1, y + 1, layout.cell - 2, layout.cell - 2);
+    context.strokeRect(x + 1, y + 1, layout.cellWidth - 2, layout.cellHeight - 2);
     context.strokeStyle = "white";
     context.lineWidth = 1;
-    context.strokeRect(x + 3, y + 3, layout.cell - 6, layout.cell - 6);
+    context.strokeRect(x + 3, y + 3, layout.cellWidth - 6, layout.cellHeight - 6);
   } else {
     const ring = layout.ringRows.indexOf(displayRow);
     if (ring < 0) return;
     const start = ((90 + layout.totalDegrees / 2 - (layout.totalDegrees * column) / layout.xGroups.length) * Math.PI) / 180;
     const end = ((90 + layout.totalDegrees / 2 - (layout.totalDegrees * (column + 1)) / layout.xGroups.length) * Math.PI) / 180;
-    polarCellPath(context, layout.cx, layout.cy, layout.scale, INNER_BLANK_ROWS + ring, INNER_BLANK_ROWS + ring + 1, start, end);
+    polarCellPath(
+      context,
+      layout.cx,
+      layout.cy,
+      layout.scale,
+      INNER_BLANK_ROWS + ring * layout.ringSpan,
+      INNER_BLANK_ROWS + (ring + 1) * layout.ringSpan,
+      start,
+      end,
+    );
     context.strokeStyle = "white";
     context.lineWidth = 4;
     context.stroke();
@@ -240,13 +249,13 @@ function drawAxes(
   const tickStep = Math.max(1, Math.floor(layout.xGroups.length / 6));
   layout.xGroups.forEach(([start, end], index) => {
     if (index % tickStep !== 0 && index !== layout.xGroups.length - 1) return;
-    const x = layout.x + (index + 0.5) * layout.cell;
+    const x = layout.x + (index + 0.5) * layout.cellWidth;
     drawText(context, formatNumber((meta.xPositions[start] + meta.xPositions[end]) / 2, 2), x, layout.y + layout.height + 19, {
       color: "#475467", font: canvasFont(11), align: "center",
     });
   });
   layout.yGroups.forEach(([start, end], index) => {
-    const y = layout.y + (index + 0.5) * layout.cell;
+    const y = layout.y + (index + 0.5) * layout.cellHeight;
     const position = formatNumber((meta.yPositions[start] + meta.yPositions[end]) / 2, 2);
     const indexLabel = start === end ? `${start + 1}` : `${start + 1}–${end + 1}`;
     drawText(context, `${indexLabel} / ${position}`, layout.x - 10, y, {
@@ -291,35 +300,7 @@ function finiteMaximum(matrix: Matrix): number {
 }
 
 function hitTest(layout: PlotLayout, x: number, y: number): CellRef | null {
-  let displayRow: number;
-  let column: number;
-  if (layout.kind === "rect") {
-    if (x < layout.x || x >= layout.x + layout.width || y < layout.y || y >= layout.y + layout.height) return null;
-    column = Math.floor((x - layout.x) / layout.cell);
-    displayRow = Math.floor((y - layout.y) / layout.cell);
-  } else {
-    const dx = (x - layout.cx) / layout.scale;
-    const dy = (layout.cy - y) / layout.scale;
-    const radius = Math.hypot(dx, dy);
-    if (radius < INNER_BLANK_ROWS || radius >= INNER_BLANK_ROWS + layout.yGroups.length) return null;
-    const ring = Math.floor(radius - INNER_BLANK_ROWS);
-    displayRow = layout.ringRows[ring];
-    let degrees = (Math.atan2(dy, dx) * 180) / Math.PI;
-    const start = 90 + layout.totalDegrees / 2;
-    if (layout.totalDegrees >= 359.999) {
-      column = Math.floor((((start - degrees) % 360 + 360) % 360) / (layout.totalDegrees / layout.xGroups.length));
-    } else {
-      const end = 90 - layout.totalDegrees / 2;
-      while (degrees > start) degrees -= 360;
-      while (degrees < end) degrees += 360;
-      if (degrees < end || degrees > start) return null;
-      column = Math.floor((start - degrees) / (layout.totalDegrees / layout.xGroups.length));
-    }
-    column = Math.max(0, Math.min(layout.xGroups.length - 1, column));
-  }
-  const yGroup = layout.yGroups[displayRow];
-  const xGroup = layout.xGroups[column];
-  return yGroup && xGroup ? [yGroup[0], yGroup[1], xGroup[0], xGroup[1]] : null;
+  return spatialCellAt(layout, x, y);
 }
 
 function groupLabel(axis: "x" | "y", group: AxisGroup, positions: number[]): string {
@@ -436,14 +417,20 @@ export function SpatialPlot({
       const marginRight = state.rgbMode && kind === "delay" ? 188 : 104;
       const marginTop = 56;
       const marginBottom = 68;
-      const cell = Math.max(4, Math.min((width - marginLeft - marginRight) / prepared.xGroups.length, (height - marginTop - marginBottom) / prepared.yGroups.length));
-      const gridWidth = cell * prepared.xGroups.length;
-      const gridHeight = cell * prepared.yGroups.length;
+      const dimensions = spatialGridDimensions(
+        width - marginLeft - marginRight,
+        height - marginTop - marginBottom,
+        prepared.xGroups.length,
+        prepared.yGroups.length,
+        4,
+      );
+      const { cellWidth, cellHeight, gridWidth, gridHeight } = dimensions;
       const nextLayout: RectLayout = {
         kind: "rect",
         x: marginLeft + Math.max(0, (width - marginLeft - marginRight - gridWidth) / 2),
         y: marginTop + Math.max(0, (height - marginTop - marginBottom - gridHeight) / 2),
-        cell,
+        cellWidth,
+        cellHeight,
         width: gridWidth,
         height: gridHeight,
         xGroups: prepared.xGroups,
@@ -452,7 +439,12 @@ export function SpatialPlot({
       layout.current = nextLayout;
       prepared.matrix.forEach((row, rowIndex) => row.forEach((value, column) => {
         context.fillStyle = color(value, rowIndex, column);
-        context.fillRect(nextLayout.x + column * cell, nextLayout.y + rowIndex * cell, Math.ceil(cell), Math.ceil(cell));
+        context.fillRect(
+          nextLayout.x + column * cellWidth,
+          nextLayout.y + rowIndex * cellHeight,
+          Math.ceil(cellWidth),
+          Math.ceil(cellHeight),
+        );
       }));
       drawSelection(context, nextLayout, selectedCell);
       drawAxes(context, nextLayout, meta);
@@ -477,7 +469,8 @@ export function SpatialPlot({
         );
       }
     } else {
-      const radiusUnits = INNER_BLANK_ROWS + prepared.yGroups.length + 1;
+      const ringSpan = polarRingSpan(prepared.yGroups.length);
+      const radiusUnits = INNER_BLANK_ROWS + prepared.yGroups.length * ringSpan + 1;
       const horizontalMargin = kind === "delay" && state.rgbMode ? 220 : 180;
       const scale = Math.max(4, Math.min((width - horizontalMargin) / (2 * radiusUnits), (height - 130) / (2 * radiusUnits)));
       const ringRows = state.polarRadius === "MATLAB row 1 inner"
@@ -489,6 +482,7 @@ export function SpatialPlot({
         cy: height / 2 + 22,
         scale,
         totalDegrees,
+        ringSpan,
         xGroups: prepared.xGroups,
         yGroups: prepared.yGroups,
         ringRows,
@@ -506,7 +500,16 @@ export function SpatialPlot({
         );
         ringRows.forEach((displayRow, ring) => {
           prepared.matrix[displayRow].forEach((value, column) => {
-            polarCellPath(context, nextLayout.cx, nextLayout.cy, scale, INNER_BLANK_ROWS + ring, INNER_BLANK_ROWS + ring + 1, thetaEdges[column], thetaEdges[column + 1]);
+            polarCellPath(
+              context,
+              nextLayout.cx,
+              nextLayout.cy,
+              scale,
+              INNER_BLANK_ROWS + ring * ringSpan,
+              INNER_BLANK_ROWS + (ring + 1) * ringSpan,
+              thetaEdges[column],
+              thetaEdges[column + 1],
+            );
             context.fillStyle = color(value, displayRow, column);
             context.fill();
           });
@@ -515,7 +518,7 @@ export function SpatialPlot({
         drawPolarMatrix(context, prepared.matrix, nextLayout, color);
       }
       drawSelection(context, nextLayout, selectedCell);
-      const outer = (INNER_BLANK_ROWS + prepared.yGroups.length) * scale;
+      const outer = (INNER_BLANK_ROWS + prepared.yGroups.length * ringSpan) * scale;
       if (kind === "delay" && state.rgbMode) {
         context.beginPath();
         context.arc(nextLayout.cx, nextLayout.cy, outer, 0, Math.PI * 2);
@@ -611,7 +614,6 @@ interface TimelineMapRowProps {
   gapX: number;
   slotWidth: number;
   rowHeight: number;
-  miniCell: number;
   miniGridWidth: number;
   miniGridHeight: number;
   preparedBins: PreparedTimelineBin[];
@@ -638,7 +640,6 @@ const TimelineMapRow = memo(function TimelineMapRow({
   gapX,
   slotWidth,
   rowHeight,
-  miniCell,
   miniGridWidth,
   miniGridHeight,
   preparedBins,
@@ -689,26 +690,24 @@ const TimelineMapRow = memo(function TimelineMapRow({
       if (!prepared) continue;
       const column = binIndex - startBin;
       const slotX = miniLeft + column * (slotWidth + gapX);
-      const cell = Math.min(
-        miniCell,
-        miniGridWidth / prepared.xGroups.length,
-        miniGridHeight / prepared.yGroups.length,
-      );
       let plot: PlotLayout;
       let frameX: number;
       let frameY: number;
       let frameWidth: number;
       let frameHeight: number;
       if (polarLayout) {
+        const ringSpan = polarRingSpan(prepared.yGroups.length);
         const size = Math.min(miniGridWidth, miniGridHeight);
-        const scale = Math.max(0.7, size / (2 * (INNER_BLANK_ROWS + prepared.yGroups.length)));
-        const radius = (INNER_BLANK_ROWS + prepared.yGroups.length) * scale;
+        const radiusUnits = INNER_BLANK_ROWS + prepared.yGroups.length * ringSpan;
+        const scale = Math.max(0.7, size / (2 * radiusUnits));
+        const radius = radiusUnits * scale;
         const polar: PolarLayout = {
           kind: "polar",
           cx: slotX + slotWidth / 2,
           cy: miniGridHeight / 2,
           scale,
           totalDegrees: inferTotalDegrees(meta.xPositions),
+          ringSpan,
           xGroups: prepared.xGroups,
           yGroups: prepared.yGroups,
           ringRows: polarRadius === "MATLAB row 1 inner"
@@ -722,13 +721,19 @@ const TimelineMapRow = memo(function TimelineMapRow({
         frameHeight = radius * 2;
         drawPolarMatrix(context, prepared.matrix, polar, (value) => paletteColor(value, 0, globalHigh, palette));
       } else {
-        const gridWidth = cell * prepared.xGroups.length;
-        const gridHeight = cell * prepared.yGroups.length;
+        const dimensions = spatialGridDimensions(
+          miniGridWidth,
+          miniGridHeight,
+          prepared.xGroups.length,
+          prepared.yGroups.length,
+        );
+        const { cellWidth, cellHeight, gridWidth, gridHeight } = dimensions;
         const rect: RectLayout = {
           kind: "rect",
           x: slotX + Math.max(0, (slotWidth - gridWidth) / 2),
           y: Math.max(0, (miniGridHeight - gridHeight) / 2),
-          cell,
+          cellWidth,
+          cellHeight,
           width: gridWidth,
           height: gridHeight,
           xGroups: prepared.xGroups,
@@ -776,7 +781,6 @@ const TimelineMapRow = memo(function TimelineMapRow({
     groups,
     gapX,
     meta,
-    miniCell,
     miniGridHeight,
     miniGridWidth,
     miniLeft,
@@ -909,7 +913,8 @@ export function TimelinePlot({
   1), [preparedBins]);
   const sourceXCount = preparedBins[0]?.xGroups.length ?? 1;
   const sourceYCount = preparedBins[0]?.yGroups.length ?? 1;
-  const polarDiameter = 2 * (INNER_BLANK_ROWS + sourceYCount);
+  const sourceRingSpan = polarRingSpan(sourceYCount);
+  const polarDiameter = 2 * (INNER_BLANK_ROWS + sourceYCount * sourceRingSpan);
   const layoutXCount = state.polarLayout ? polarDiameter : sourceXCount;
   const layoutYCount = state.polarLayout ? polarDiameter : sourceYCount;
   const gridLayout = timelineGridLayout({
@@ -923,7 +928,6 @@ export function TimelinePlot({
   const columnCount = gridLayout.columns;
   const rowCount = gridLayout.rows;
   const slotWidth = gridLayout.slotWidth;
-  const miniCell = gridLayout.cell;
   const miniGridWidth = gridLayout.gridWidth;
   const miniGridHeight = gridLayout.gridHeight;
   const rowHeight = gridLayout.rowHeight;
@@ -1201,7 +1205,6 @@ export function TimelinePlot({
                   gapX={gapX}
                   slotWidth={slotWidth}
                   rowHeight={rowHeight}
-                  miniCell={miniCell}
                   miniGridWidth={miniGridWidth}
                   miniGridHeight={miniGridHeight}
                   preparedBins={preparedBins}

@@ -91,15 +91,15 @@ pass_test "candidate shell and Python helpers pass syntax validation"
   [[ "$RF_MAPPING_EXECUTABLE_NAME" == "Free-Moving RF Viewer" ]]
   [[ "$RF_MAPPING_BUNDLE_ID" == "org.local.rfmapping.viewer.freemoving" ]]
   [[ "$RF_MAPPING_APP_VERSION" == "1.10.0" ]]
-  [[ "$RF_MAPPING_APP_PRERELEASE" == "alpha.2" ]]
-  [[ "$RF_MAPPING_PACKAGE_VERSION" == "1.10.0a2" ]]
-  [[ "$RF_MAPPING_APP_BUILD" == "110002" ]]
+  [[ "$RF_MAPPING_APP_PRERELEASE" == "alpha.3" ]]
+  [[ "$RF_MAPPING_PACKAGE_VERSION" == "1.10.0a3" ]]
+  [[ "$RF_MAPPING_APP_BUILD" == "110003" ]]
   [[ "$RF_MAPPING_RELEASE_EDITION" == "FreeMovingAlpha" ]]
   [[ "$RF_MAPPING_RELEASE_FLAVOR" == "freemoving" ]]
   [[ "$RF_MAPPING_APP_ARCHITECTURE" == "arm64" ]]
   [[ "$RF_MAPPING_MINIMUM_MACOS_VERSION" == "14.0" ]]
 ) || fail_test "canonical free-moving alpha metadata is incomplete or unexpected"
-pass_test "canonical metadata identifies Python 1.10.0-alpha.2 build 110002"
+pass_test "canonical metadata identifies Python 1.10.0-alpha.3 build 110003"
 
 python3 - "$PYPROJECT" "$REQUIREMENTS" <<'PY' \
   || fail_test "package metadata is inconsistent"
@@ -108,7 +108,7 @@ import sys
 import tomllib
 
 pyproject = tomllib.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
-assert pyproject["project"]["version"] == "1.10.0a2"
+assert pyproject["project"]["version"] == "1.10.0a3"
 assert "h5py>=3.16,<4" in pyproject["project"]["dependencies"]
 assert "tkinterdnd2==0.6.2" in pyproject["project"]["dependencies"]
 requirements = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8").splitlines()
@@ -135,8 +135,10 @@ for marker in \
   'TKINTERDND2_VERSION="0.6.2"' \
   '--additional-hooks-dir "$PYINSTALLER_HOOKS"' \
   '--add-data "$SUPPORT_DOCUMENTATION:."' \
-  '"$BUILD_VENV/bin/python" "$SMOKE_FIXTURE_GENERATOR" "$SMOKE_RF"' \
-  '"$APP_BINARY" --self-test "$SMOKE_RF"' \
+  '--stimulus square "$SMOKE_SQUARE_RF"' \
+  '--stimulus bar "$SMOKE_BAR_RF"' \
+  '"$APP_BINARY" --stimulus square --self-test "$SMOKE_SQUARE_RF"' \
+  '"$APP_BINARY" --stimulus bar --self-test "$SMOKE_BAR_RF"' \
   '"$APP_BINARY" --self-test-dnd' \
   'Add :LSMinimumSystemVersion string $MINIMUM_MACOS_VERSION' \
   'Add :RFMappingReleaseEdition string $RELEASE_EDITION' \
@@ -163,9 +165,9 @@ pass_test "FM alpha bundle has HDF5 smoke tests, one document type, signing, and
 
 # shellcheck source=../build_python_macos_app.sh
 source "$BUILD_SCRIPT"
-[[ "$ARCHIVE_NAME" == "Free_Moving_RF_Viewer-python-1.10.0-alpha.2-freemoving-macos-arm64.zip" ]] \
+[[ "$ARCHIVE_NAME" == "Free_Moving_RF_Viewer-python-1.10.0-alpha.3-freemoving-macos-arm64.zip" ]] \
   || fail_test "archive name does not preserve version and alpha flavor"
-[[ "$CHECKSUM_NAME" == "SHA256SUMS-python-1.10.0-alpha.2-freemoving.txt" ]] \
+[[ "$CHECKSUM_NAME" == "SHA256SUMS-python-1.10.0-alpha.3-freemoving.txt" ]] \
   || fail_test "checksum name does not preserve version and alpha flavor"
 pass_test "FM alpha artifacts are independently named from the stable viewer"
 
@@ -177,21 +179,21 @@ AUDIT_FIXTURE="$FIXTURE_ROOT/metadata"
 /bin/cp "$REQUIREMENTS" "$AUDIT_FIXTURE/requirements.txt"
 printf '%s\n' \
   'APP_VERSION = "1.10.0"' \
-  'APP_PRERELEASE = "alpha.2"' \
+  'APP_PRERELEASE = "alpha.3"' \
   'APP_EDITION = "FreeMovingAlpha"' \
   'DND_SMOKE_ARGUMENT = "--self-test-dnd"' \
   >"$AUDIT_FIXTURE/rfmapping_fm_gui.py"
 python3 "$METADATA_AUDITOR" \
-  "$AUDIT_FIXTURE" 1.10.0 alpha.2 1.10.0a2 FreeMovingAlpha >/dev/null \
+  "$AUDIT_FIXTURE" 1.10.0 alpha.3 1.10.0a3 FreeMovingAlpha >/dev/null \
   || fail_test "metadata auditor rejected a matching FM alpha"
 printf '%s\n' \
   'APP_VERSION = "1.9.0"' \
-  'APP_PRERELEASE = "alpha.2"' \
+  'APP_PRERELEASE = "alpha.3"' \
   'APP_EDITION = "Full"' \
   'DND_SMOKE_ARGUMENT = "--self-test-dnd"' \
   >"$AUDIT_FIXTURE/rfmapping_fm_gui.py"
 if python3 "$METADATA_AUDITOR" \
-  "$AUDIT_FIXTURE" 1.10.0 alpha.2 1.10.0a2 FreeMovingAlpha >/dev/null 2>&1; then
+  "$AUDIT_FIXTURE" 1.10.0 alpha.3 1.10.0a3 FreeMovingAlpha >/dev/null 2>&1; then
   fail_test "metadata auditor accepted stale Full source as the FM alpha"
 fi
 pass_test "metadata auditor rejects cross-edition or stale source versions"
@@ -248,10 +250,12 @@ if (
 fi
 pass_test "archive fixture rejects __MACOSX and AppleDouble entries"
 
-SMOKE_RF="$FIXTURE_ROOT/release-smoke.rfmap"
-"$TEST_PYTHON" "$SMOKE_GENERATOR" "$SMOKE_RF"
-"$TEST_PYTHON" - "$SMOKE_RF" <<'PY' \
-  || fail_test "synthetic frozen-executable smoke HDF5 is malformed"
+SMOKE_SQUARE_RF="$FIXTURE_ROOT/release-smoke-square.rfmap"
+SMOKE_BAR_RF="$FIXTURE_ROOT/release-smoke-bar.rfmap"
+"$TEST_PYTHON" "$SMOKE_GENERATOR" --stimulus square "$SMOKE_SQUARE_RF"
+"$TEST_PYTHON" "$SMOKE_GENERATOR" --stimulus bar "$SMOKE_BAR_RF"
+"$TEST_PYTHON" - "$SMOKE_SQUARE_RF" "$SMOKE_BAR_RF" <<'PY' \
+  || fail_test "synthetic Square/Bar frozen-executable smoke HDF5 is malformed"
 import h5py
 import sys
 
@@ -259,7 +263,13 @@ with h5py.File(sys.argv[1], "r") as file:
     assert file.attrs["format"] == "rfmapping_fm_hdf5_v1"
     assert file["/rf/rate_hz"].shape == (3, 2, 2, 1)
     assert file["/units/id"][...].reshape(-1).tolist() == [101]
+
+with h5py.File(sys.argv[2], "r") as file:
+    assert file.attrs["format"] == "rfmapping_fm_bar_hdf5_v1"
+    assert file.attrs["stimulus_geometry"] == "vertical_bar_full_source_height"
+    assert file.attrs["bar_widths_present_deg"].tolist() == [3.0, 6.0, 12.0]
+    assert file["/rf/rate_hz"].shape == (3, 2, 2, 1)
 PY
-pass_test "release smoke fixture is minimal, structural, and explicitly free-moving"
+pass_test "release smoke fixtures cover explicit Square and latest Bar formats"
 
 echo "1..$TEST_COUNT"

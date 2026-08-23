@@ -65,6 +65,7 @@ struct PolarLayout {
     let xGroups: [AxisGroup]
     let yGroups: [AxisGroup]
     let ringRows: [Int]
+    let ringSpan: CGFloat
 }
 
 struct PolarInteractionLayer: View {
@@ -112,8 +113,16 @@ struct PolarInteractionLayer: View {
 func makePolarLayout(size: CGSize, store: RFMappingStore, plot: HeatmapPlot) -> PolarLayout {
     let totalDegrees = store.data?.inferTotalDeg() ?? 360.0
     let rowCount = max(1, plot.yGroups.count)
-    let radiusUnits = Double(innerBlankRows + rowCount + polarPadRows)
-    let scale = max(4.0, min((size.width - 180.0) / CGFloat(2.0 * radiusUnits), (size.height - 130.0) / CGFloat(2.0 * radiusUnits)))
+    let ringSpan = polarRingSpan(rowCount: rowCount)
+    let radiusUnits = CGFloat(innerBlankRows + polarPadRows)
+        + CGFloat(rowCount) * ringSpan
+    let scale = max(
+        4.0,
+        min(
+            (size.width - 180.0) / (2.0 * radiusUnits),
+            (size.height - 130.0) / (2.0 * radiusUnits)
+        )
+    )
     let center = CGPoint(x: size.width / 2.0, y: size.height / 2.0 + 22.0)
     let ringRows: [Int]
     if store.polarRadiusMode == .matlabRowOneInner {
@@ -121,7 +130,15 @@ func makePolarLayout(size: CGSize, store: RFMappingStore, plot: HeatmapPlot) -> 
     } else {
         ringRows = Array((0..<rowCount).reversed())
     }
-    return PolarLayout(center: center, scale: scale, totalDegrees: totalDegrees, xGroups: plot.xGroups, yGroups: plot.yGroups, ringRows: ringRows)
+    return PolarLayout(
+        center: center,
+        scale: scale,
+        totalDegrees: totalDegrees,
+        xGroups: plot.xGroups,
+        yGroups: plot.yGroups,
+        ringRows: ringRows,
+        ringSpan: ringSpan
+    )
 }
 
 private func drawPolar(
@@ -157,8 +174,8 @@ private func drawPolar(
     }
 
     for (ringIndex, displayRow) in layout.ringRows.enumerated() {
-        let rInner = Double(innerBlankRows + ringIndex)
-        let rOuter = Double(innerBlankRows + ringIndex + 1)
+        let rInner = CGFloat(innerBlankRows) + CGFloat(ringIndex) * layout.ringSpan
+        let rOuter = rInner + layout.ringSpan
         for col in layout.xGroups.indices {
             let value = plot.matrix[displayRow][col]
             let fill = isDelay
@@ -167,8 +184,8 @@ private func drawPolar(
             let path = polarCellPath(
                 center: layout.center,
                 scale: layout.scale,
-                rInner: rInner,
-                rOuter: rOuter,
+                rInner: Double(rInner),
+                rOuter: Double(rOuter),
                 thetaStart: thetaEdges[col],
                 thetaEnd: thetaEdges[col + 1]
             )
@@ -185,7 +202,9 @@ private func drawPolar(
         }
     }
 
-    let outer = CGFloat(innerBlankRows + layout.yGroups.count) * layout.scale
+    let outer = (
+        CGFloat(innerBlankRows) + CGFloat(layout.yGroups.count) * layout.ringSpan
+    ) * layout.scale
     context.stroke(
         Path(ellipseIn: CGRect(x: layout.center.x - outer, y: layout.center.y - outer, width: outer * 2, height: outer * 2)),
         with: .color(.secondary),
@@ -265,8 +284,12 @@ func polarPath(for cell: CellRef, layout: PolarLayout) -> Path? {
     return polarCellPath(
         center: layout.center,
         scale: layout.scale,
-        rInner: Double(innerBlankRows + ringIndex),
-        rOuter: Double(innerBlankRows + ringIndex + 1),
+        rInner: Double(
+            CGFloat(innerBlankRows) + CGFloat(ringIndex) * layout.ringSpan
+        ),
+        rOuter: Double(
+            CGFloat(innerBlankRows) + CGFloat(ringIndex + 1) * layout.ringSpan
+        ),
         thetaStart: thetaStart,
         thetaEnd: thetaEnd
     )
@@ -276,10 +299,12 @@ func polarCell(at point: CGPoint, layout: PolarLayout) -> (ring: Int, cell: Cell
     let dx = Double((point.x - layout.center.x) / layout.scale)
     let dy = Double((layout.center.y - point.y) / layout.scale)
     let radius = hypot(dx, dy)
-    guard radius >= Double(innerBlankRows), radius < Double(innerBlankRows + layout.yGroups.count) else {
+    let ringSpan = max(Double(layout.ringSpan), Double.ulpOfOne)
+    let outerRadius = Double(innerBlankRows) + Double(layout.yGroups.count) * ringSpan
+    guard radius >= Double(innerBlankRows), radius < outerRadius else {
         return nil
     }
-    let ring = Int(floor(radius - Double(innerBlankRows)))
+    let ring = Int(floor((radius - Double(innerBlankRows)) / ringSpan))
     guard layout.ringRows.indices.contains(ring) else { return nil }
     let displayRow = layout.ringRows[ring]
     var thetaDegrees = atan2(dy, dx) * 180.0 / Double.pi
