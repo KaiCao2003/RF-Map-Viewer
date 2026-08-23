@@ -12,8 +12,10 @@ const meta: DatasetMeta = {
   xPositions: [0],
   yPositions: [0],
   timeBinEdges: [-0.1, -0.05, 0, 0.05, 0.1],
-  presentationCounts: [[1]],
-  capabilities: { probe: false, hd: false, normalized: true },
+  occupancyTimeSec: [[1]],
+  responseUnits: "spike_count",
+  responseNormalization: "none",
+  capabilities: { probe: false, hd: false, occupancy: true },
 };
 
 const state: ViewState = {

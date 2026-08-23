@@ -47,7 +47,6 @@ from .companions import TuningCurveData
 from .datasets import DatasetRecord
 from .exports import (
     VALUE_MODE_COUNT,
-    VALUE_MODE_PER_PRESENTATION,
     VALUE_MODE_RATE,
     VALUE_MODES,
     _axis_groups,
@@ -110,8 +109,8 @@ _SPATIAL_SETTINGS = {
     ),
     "valueMode": _setting(
         "string",
-        VALUE_MODE_COUNT,
-        choices=(VALUE_MODE_COUNT, VALUE_MODE_PER_PRESENTATION, VALUE_MODE_RATE),
+        VALUE_MODE_RATE,
+        choices=(VALUE_MODE_RATE, VALUE_MODE_COUNT),
         description="Displayed response normalization.",
     ),
     "xBins": _setting(
@@ -394,10 +393,6 @@ def _normalized_settings(
             raise FigureExportValidationError(
                 f"Unknown value mode: {result.get('valueMode')}"
             )
-        if result["valueMode"] != VALUE_MODE_COUNT and metadata["presentationCounts"] is None:
-            raise FigureExportValidationError(
-                f"{result['valueMode']} requires stimulusPresentationCounts metadata"
-            )
     if "xBins" in schema:
         result["xBins"] = min(n_x, result["xBins"])
     if "yBins" in schema:
@@ -568,7 +563,7 @@ def _spatial_group_observations(
     x_group: tuple[int, int],
     start: int,
     end: int,
-) -> tuple[float, float | None, int]:
+) -> tuple[float, float, int]:
     """Mirror frontend/src/math.ts spatialGroupObservations for one display cell."""
 
     _n_units, n_y, n_x, n_bins = metadata["shape"]
@@ -582,16 +577,10 @@ def _spatial_group_observations(
         counts[y_start : y_end + 1, x_start : x_end + 1, :],
         dtype=np.float64,
     )
-    presentations = metadata["presentationCounts"]
-    if presentations is None:
-        source_pixel_count = int(block.shape[0] * block.shape[1])
-        count = float(block[..., range_start : range_end + 1].sum())
-        return count, None, source_pixel_count
-
-    exposure = np.asarray(presentations, dtype=np.float64)[
+    occupancy = np.asarray(metadata["occupancyTimeSec"], dtype=np.float64)[
         y_start : y_end + 1, x_start : x_end + 1
     ]
-    valid = exposure > 0
+    valid = occupancy > 0
     source_pixel_count = int(np.count_nonzero(valid))
     valid_histograms = block[valid]
     count = (
@@ -599,7 +588,7 @@ def _spatial_group_observations(
         if source_pixel_count
         else 0.0
     )
-    return count, float(exposure[valid].sum()), source_pixel_count
+    return count, float(occupancy[valid].sum()), source_pixel_count
 
 
 def _spatial_group_histogram(
@@ -619,14 +608,10 @@ def _spatial_group_histogram(
         counts[y_start : y_end + 1, x_start : x_end + 1, :],
         dtype=np.float64,
     )
-    presentations = metadata["presentationCounts"]
-    if presentations is None:
-        return block.sum(axis=(0, 1)), int(block.shape[0] * block.shape[1])
-
-    exposure = np.asarray(presentations, dtype=np.float64)[
+    occupancy = np.asarray(metadata["occupancyTimeSec"], dtype=np.float64)[
         y_start : y_end + 1, x_start : x_end + 1
     ]
-    valid = exposure > 0
+    valid = occupancy > 0
     source_pixel_count = int(np.count_nonzero(valid))
     if not source_pixel_count:
         return np.zeros(block.shape[2], dtype=np.float64), 0
@@ -658,7 +643,7 @@ def _group_response_value(
 ) -> float | None:
     """Mirror frontend/src/math.ts groupResponseValue."""
 
-    count, presentations, source_pixel_count = _spatial_group_observations(
+    count, occupancy_seconds, source_pixel_count = _spatial_group_observations(
         counts,
         metadata,
         (cell[0], cell[1]),
@@ -668,18 +653,9 @@ def _group_response_value(
     )
     if value_mode == VALUE_MODE_COUNT:
         return count / source_pixel_count if source_pixel_count > 0 else None
-    if presentations is None or presentations <= 0:
+    if occupancy_seconds <= 0:
         return None
-    normalized = count / presentations
-    if value_mode == VALUE_MODE_PER_PRESENTATION:
-        return normalized
-    n_bins = int(metadata["shape"][3])
-    lower = max(0, min(n_bins - 1, min(source_range)))
-    upper = max(0, min(n_bins - 1, max(source_range)))
-    duration = float(metadata["timeBinEdges"][upper + 1]) - float(
-        metadata["timeBinEdges"][lower]
-    )
-    return normalized / duration if duration > 0 else None
+    return count / occupancy_seconds if value_mode == VALUE_MODE_RATE else None
 
 
 def _prepared_response(
@@ -705,7 +681,7 @@ def _prepared_response(
     valid = [
         [
             source_pixel_count > 0
-            for _count, _presentations, source_pixel_count in row
+            for _count, _occupancy_seconds, source_pixel_count in row
         ]
         for row in observations
     ]
@@ -713,7 +689,7 @@ def _prepared_response(
         matrix = [
             [
                 count / source_pixel_count if source_pixel_count > 0 else None
-                for count, _presentations, source_pixel_count in row
+                for count, _occupancy_seconds, source_pixel_count in row
             ]
             for row in observations
         ]
@@ -730,16 +706,14 @@ def _prepared_response(
         pooled_counts: list[list[float | None]] = [
             [
                 count if source_pixel_count > 0 else None
-                for count, _presentations, source_pixel_count in row
+                for count, _occupancy_seconds, source_pixel_count in row
             ]
             for row in observations
         ]
-        pooled_presentations: list[list[float | None]] = [
+        pooled_occupancy: list[list[float | None]] = [
             [
-                (presentations if presentations is not None else 0.0)
-                if source_pixel_count > 0
-                else None
-                for _count, presentations, source_pixel_count in row
+                occupancy_seconds if source_pixel_count > 0 else None
+                for _count, occupancy_seconds, source_pixel_count in row
             ]
             for row in observations
         ]
@@ -747,35 +721,23 @@ def _prepared_response(
             pooled_counts = _smooth_preserving_missing(
                 pooled_counts, settings["smoothRadius"]
             )
-            pooled_presentations = _smooth_preserving_missing(
-                pooled_presentations, settings["smoothRadius"]
+            pooled_occupancy = _smooth_preserving_missing(
+                pooled_occupancy, settings["smoothRadius"]
             )
-        duration = float(metadata["timeBinEdges"][end + 1]) - float(
-            metadata["timeBinEdges"][start]
-        )
         matrix = []
         for y_index, count_row in enumerate(pooled_counts):
             row: list[float | None] = []
             for x_index, count in enumerate(count_row):
-                exposure = pooled_presentations[y_index][x_index]
+                occupancy_seconds = pooled_occupancy[y_index][x_index]
                 if (
                     not valid[y_index][x_index]
                     or count is None
-                    or exposure is None
-                    or exposure <= 0
+                    or occupancy_seconds is None
+                    or occupancy_seconds <= 0
                 ):
                     row.append(None)
                     continue
-                normalized = count / exposure
-                row.append(
-                    normalized / duration
-                    if settings["valueMode"] == VALUE_MODE_RATE and duration > 0
-                    else (
-                        normalized
-                        if settings["valueMode"] == VALUE_MODE_PER_PRESENTATION
-                        else None
-                    )
-                )
+                row.append(count / occupancy_seconds)
             matrix.append(row)
     return (
         np.asarray(
@@ -1005,14 +967,10 @@ class FigurePageRenderer:
         totals: list[float] = []
         selected: list[float] = []
         spatial_frames: list[list[list[float]]] = []
-        presentations = self.metadata["presentationCounts"]
-        all_exposure: float | None = None
-        if presentations is not None:
-            exposure_array = np.asarray(presentations, dtype=np.float64)
-            all_exposure = float(exposure_array[exposure_array > 0].sum())
+        occupancy = np.asarray(self.metadata["occupancyTimeSec"], dtype=np.float64)
+        all_occupancy = float(occupancy[occupancy > 0].sum())
         for start, end in groups:
             center = (edges_ms[start] + edges_ms[end + 1]) / 2.0
-            duration = max((edges_ms[end + 1] - edges_ms[start]) / 1000.0, np.finfo(float).eps)
             selected_value = _group_response_value(
                 counts,
                 self.metadata,
@@ -1023,12 +981,10 @@ class FigurePageRenderer:
             total_value = float(np.asarray(counts[..., start : end + 1]).sum())
             if settings["valueMode"] != VALUE_MODE_COUNT:
                 total_value = (
-                    total_value / all_exposure
-                    if all_exposure is not None and all_exposure > 0
+                    total_value / all_occupancy
+                    if all_occupancy > 0
                     else 0.0
                 )
-            if settings["valueMode"] == VALUE_MODE_RATE:
-                total_value /= duration
             frame_settings = {
                 "rfStartMs": edges_ms[start],
                 "rfEndMs": edges_ms[end + 1],

@@ -19,13 +19,33 @@ from unittest import mock
 import rfmapping_gui as gui
 
 
+def current_rf_payload(payload: dict) -> dict:
+    n_y, n_x = payload["unitsSpikeCountsSize"][1:3]
+    payload.update(
+        responseUnits="spike_count",
+        responseNormalization="none",
+        spikeCountDefinition=(
+            "each_qualifying_trial_contributes_once_per_final_spatial_bin"
+        ),
+        occupancyTimeSec=[
+            [1.0 for _x in range(n_x)]
+            for _y in range(n_y)
+        ],
+        occupancyTimeSecSize=[n_y, n_x],
+        occupancyTimeDefinition=(
+            "sum_of_qualifying_trial_durations_per_final_spatial_bin"
+        ),
+    )
+    return payload
+
+
 @unittest.skipUnless(gui.TK_AVAILABLE, "Tk is not available in this Python")
 class TkViewerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         n_bins = 30
-        payload = {
+        payload = current_rf_payload({
             "unitsSpikeCounts": [
                 [
                     [[(unit + x + y + bin_idx) % 4 for bin_idx in range(n_bins)] for x in range(3)]
@@ -38,8 +58,7 @@ class TkViewerTests(unittest.TestCase):
             "xPositions": [-1, 0, 1],
             "yPositions": [-1, 1],
             "timeBinEdges": [index * 0.001 for index in range(n_bins + 1)],
-            "stimulusPresentationCounts": [[5, 5, 5], [5, 5, 5]],
-        }
+        })
         path = Path(self.directory.name) / "viewer.json"
         path.write_text(json.dumps(payload), encoding="utf-8")
         settings_path = Path(self.directory.name) / "settings.json"
@@ -1263,7 +1282,7 @@ class TkViewerTests(unittest.TestCase):
     def test_pairing_navigates_union_and_shows_na_for_missing_units(self) -> None:
         def write_units(name: str, unit_ids: list[int]) -> Path:
             n_bins = 30
-            payload = {
+            payload = current_rf_payload({
                 "unitsSpikeCounts": [
                     [
                         [
@@ -1279,8 +1298,7 @@ class TkViewerTests(unittest.TestCase):
                 "xPositions": [-1, 0, 1],
                 "yPositions": [-1, 1],
                 "timeBinEdges": [index * 0.001 for index in range(n_bins + 1)],
-                "stimulusPresentationCounts": [[5, 5, 5], [5, 5, 5]],
-            }
+            })
             path = Path(self.directory.name) / name
             path.write_text(json.dumps(payload), encoding="utf-8")
             return path
@@ -1395,7 +1413,7 @@ class TkViewerTests(unittest.TestCase):
             first = next(csv.DictReader(file))
         self.assertEqual(first["value_mode"], gui.VALUE_MODE_RATE)
         self.assertEqual(first["value_unit"], "Hz")
-        self.assertEqual(first["presentation_count_min"], "5.0")
+        self.assertEqual(first["occupancy_time_sec_min"], "1.0")
         self.assertAlmostEqual(float(first["value"]), expected)
 
 

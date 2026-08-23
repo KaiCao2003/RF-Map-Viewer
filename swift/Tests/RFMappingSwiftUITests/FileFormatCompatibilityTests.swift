@@ -48,7 +48,7 @@ final class FileFormatCompatibilityTests: XCTestCase {
         )
     }
 
-    func testExtensionAliasesAndLegacyExtensionsRemainAccepted() {
+    func testCurrentSchemaFilenameAliasesRemainAccepted() {
         XCTAssertTrue(RFMappingFileTypes.isRFMappingURL(
             URL(fileURLWithPath: "/tmp/map.RFMAP")
         ))
@@ -72,11 +72,11 @@ final class FileFormatCompatibilityTests: XCTestCase {
         ))
     }
 
-    func testRFDiscoveryIncludesRFMapAndLegacyJSONOnly() throws {
+    func testRFDiscoveryIncludesRFMapAndJSONFilenameAliasesOnly() throws {
         let root = try temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
         let rfmapURL = root.appendingPathComponent("new.rfmap")
-        let jsonURL = root.appendingPathComponent("legacy.json")
+        let jsonURL = root.appendingPathComponent("current.json")
         try write("{}", to: rfmapURL)
         try write("{}", to: jsonURL)
         try write("{}", to: root.appendingPathComponent("tuning.tc"))
@@ -90,6 +90,24 @@ final class FileFormatCompatibilityTests: XCTestCase {
         let root = try temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
         let url = root.appendingPathComponent("example.rfmap")
+        let payload = currentRFSchemaPayload([
+            "unitsSpikeCounts": [[[[1.0]]]],
+            "unitsSpikeCountsSize": [1, 1, 1, 1],
+            "unitPool": [17],
+            "xPositions": [10.0],
+            "yPositions": [20.0],
+            "timeBinEdges": [0.0, 0.1],
+        ], occupancyTimeSec: 0.1, occupancyTimeSecSize: [1, 1])
+        try write(try JSONSerialization.data(withJSONObject: payload), to: url)
+
+        let decoded = try RFMappingData(url: url)
+        XCTAssertEqual(decoded.url.pathExtension, "rfmap")
+        XCTAssertEqual(decoded.unitPool, [17])
+        XCTAssertEqual(decoded.counts, [[[[1.0]]]])
+        XCTAssertEqual(decoded.occupancyTimeSeconds, [[0.1]])
+    }
+
+    func testLegacyPresentationCountSchemaIsRejected() throws {
         let payload: [String: Any] = [
             "unitsSpikeCounts": [[[[1.0]]]],
             "unitsSpikeCountsSize": [1, 1, 1, 1],
@@ -99,12 +117,13 @@ final class FileFormatCompatibilityTests: XCTestCase {
             "timeBinEdges": [0.0, 0.1],
             "stimulusPresentationCounts": [[1.0]],
         ]
-        try write(try JSONSerialization.data(withJSONObject: payload), to: url)
 
-        let decoded = try RFMappingData(url: url)
-        XCTAssertEqual(decoded.url.pathExtension, "rfmap")
-        XCTAssertEqual(decoded.unitPool, [17])
-        XCTAssertEqual(decoded.counts, [[[[1.0]]]])
+        XCTAssertThrowsError(try RFMappingData(
+            data: JSONSerialization.data(withJSONObject: payload),
+            url: URL(fileURLWithPath: "/tmp/old-schema.rfmap")
+        )) { error in
+            XCTAssertTrue(error.localizedDescription.contains("occupancyTimeSec"))
+        }
     }
 
     func testMATLABSingletonYScalarAxisDecodesFromRFMapFile() throws {
@@ -115,10 +134,16 @@ final class FileFormatCompatibilityTests: XCTestCase {
         {
           "unitsSpikeCounts": [[[[1.0], [2.0]]]],
           "unitsSpikeCountsSize": [1, 1, 2, 1],
-          "unitPool": [17],
+          "unitPool": 17,
           "xPositions": [-3.0, 3.0],
           "yPositions": 0.0,
-          "timeBinEdges": [0.0, 0.1]
+          "timeBinEdges": [0.0, 0.1],
+          "occupancyTimeSec": [0.1, 0.2],
+          "occupancyTimeSecSize": [1, 2],
+          "responseUnits": "spike_count",
+          "responseNormalization": "none",
+          "spikeCountDefinition": "each_qualifying_trial_contributes_once_per_final_spatial_bin",
+          "occupancyTimeDefinition": "sum_of_qualifying_trial_durations_per_final_spatial_bin"
         }
         """#.utf8)
         try write(payload, to: url)
@@ -130,6 +155,8 @@ final class FileFormatCompatibilityTests: XCTestCase {
         XCTAssertEqual(decoded.size.2, 2)
         XCTAssertEqual(decoded.xPositions, [-3, 3])
         XCTAssertEqual(decoded.yPositions, [0])
+        XCTAssertEqual(decoded.unitPool, [17])
+        XCTAssertEqual(decoded.occupancyTimeSeconds, [[0.1, 0.2]])
     }
 
     func testMATLABSingletonXScalarAxisDecodesSymmetrically() throws {
@@ -140,7 +167,13 @@ final class FileFormatCompatibilityTests: XCTestCase {
           "unitPool": [17],
           "xPositions": 0.0,
           "yPositions": [-3.0, 3.0],
-          "timeBinEdges": [0.0, 0.1]
+          "timeBinEdges": [0.0, 0.1],
+          "occupancyTimeSec": [0.1, 0.2],
+          "occupancyTimeSecSize": [2, 1],
+          "responseUnits": "spike_count",
+          "responseNormalization": "none",
+          "spikeCountDefinition": "each_qualifying_trial_contributes_once_per_final_spatial_bin",
+          "occupancyTimeDefinition": "sum_of_qualifying_trial_durations_per_final_spatial_bin"
         }
         """#.utf8)
 
@@ -151,6 +184,7 @@ final class FileFormatCompatibilityTests: XCTestCase {
 
         XCTAssertEqual(decoded.xPositions, [0])
         XCTAssertEqual(decoded.yPositions, [-3, 3])
+        XCTAssertEqual(decoded.occupancyTimeSeconds, [[0.1], [0.2]])
     }
 
     func testScalarSpatialAxisRequiresDeclaredSingletonDimension() {
@@ -161,7 +195,13 @@ final class FileFormatCompatibilityTests: XCTestCase {
           "unitPool": [17],
           "xPositions": [0.0],
           "yPositions": 0.0,
-          "timeBinEdges": [0.0, 0.1]
+          "timeBinEdges": [0.0, 0.1],
+          "occupancyTimeSec": [0.1, 0.1],
+          "occupancyTimeSecSize": [2, 1],
+          "responseUnits": "spike_count",
+          "responseNormalization": "none",
+          "spikeCountDefinition": "each_qualifying_trial_contributes_once_per_final_spatial_bin",
+          "occupancyTimeDefinition": "sum_of_qualifying_trial_durations_per_final_spatial_bin"
         }
         """#.utf8)
 
@@ -181,7 +221,13 @@ final class FileFormatCompatibilityTests: XCTestCase {
           "unitPool": [17],
           "xPositions": [0.0],
           "yPositions": true,
-          "timeBinEdges": [0.0, 0.1]
+          "timeBinEdges": [0.0, 0.1],
+          "occupancyTimeSec": 0.1,
+          "occupancyTimeSecSize": [1, 1],
+          "responseUnits": "spike_count",
+          "responseNormalization": "none",
+          "spikeCountDefinition": "each_qualifying_trial_contributes_once_per_final_spatial_bin",
+          "occupancyTimeDefinition": "sum_of_qualifying_trial_durations_per_final_spatial_bin"
         }
         """#.utf8)
 

@@ -26,7 +26,7 @@ final class RFMapTests: XCTestCase {
             xPositions: [10, 20],
             yPositions: [30],
             timeBinEdgesSeconds: edges,
-            presentationCounts: [[4, 4]],
+            occupancyTimeSeconds: [[0.4, 0.4]],
             metadata: metadata,
             sourceURL: sourceURL
         )
@@ -52,7 +52,7 @@ final class RFMapTests: XCTestCase {
         XCTAssertEqual(result.nTimeBins, 1)
         XCTAssertEqual(result.unitIndex, 0)
         XCTAssertEqual(result.unitID, 11)
-        XCTAssertEqual(result.presentationCounts, [[4, 4]])
+        XCTAssertEqual(result.occupancyTimeSeconds, [[0.4, 0.4]])
         XCTAssertEqual(result.metadata["session"], RFMapJSONValue.string("example"))
         XCTAssertEqual(
             result.metadata["VSTimeWindow"],
@@ -99,7 +99,7 @@ final class RFMapTests: XCTestCase {
             xPositions: [0],
             yPositions: [0],
             timeBinEdgesSeconds: [0, 1.5e-12, 1],
-            presentationCounts: nil,
+            occupancyTimeSeconds: [[1]],
             sourceURL: sourceURL
         )
 
@@ -157,7 +157,7 @@ final class RFMapTests: XCTestCase {
             xPositions: [-10, 0, 10],
             yPositions: [-10, 0, 10],
             timeBinEdgesSeconds: [-0.1, 0.0, 0.1],
-            presentationCounts: Array(repeating: Array(repeating: 1, count: 3), count: 3),
+            occupancyTimeSeconds: Array(repeating: Array(repeating: 1, count: 3), count: 3),
             sourceURL: sourceURL
         )
 
@@ -187,7 +187,7 @@ final class RFMapTests: XCTestCase {
             xPositions: [0, 1],
             yPositions: [0],
             timeBinEdgesSeconds: [-0.1, 0.0, 0.1],
-            presentationCounts: [[1, 1]],
+            occupancyTimeSeconds: [[1, 1]],
             sourceURL: sourceURL
         )
 
@@ -207,7 +207,7 @@ final class RFMapTests: XCTestCase {
             xPositions: [0, 1],
             yPositions: [0],
             timeBinEdgesSeconds: [-0.1, 0.0, 0.1],
-            presentationCounts: [[1, 1]],
+            occupancyTimeSeconds: [[1, 1]],
             sourceURL: sourceURL
         )
         let warning = try warningMap.detectSpatialBumps(spatialSize: 3)
@@ -226,7 +226,7 @@ final class RFMapTests: XCTestCase {
     }
 
     func testRFMappingDataExposesPerUnitMapsAndPreservesMetadata() throws {
-        let object: [String: Any] = [
+        let object = currentRFSchemaPayload([
             "unitsSpikeCounts": [
                 [[[1.0, 2.0]]],
                 [[[3.0, 4.0]]],
@@ -236,10 +236,9 @@ final class RFMapTests: XCTestCase {
             "xPositions": [10.0],
             "yPositions": [20.0],
             "timeBinEdges": [0.0, 0.1, 0.2],
-            "stimulusPresentationCounts": [[2]],
             "sessionName": "preserved",
             "nested": ["enabled": true],
-        ]
+        ], occupancyTimeSec: 0.2, occupancyTimeSecSize: [1, 1])
         let json = try JSONSerialization.data(withJSONObject: object)
         let data = try RFMappingData(data: json, url: sourceURL)
 

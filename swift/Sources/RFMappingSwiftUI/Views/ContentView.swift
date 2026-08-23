@@ -192,7 +192,6 @@ private struct PlotControlBar: View {
                         ForEach(ResponseValueMode.allCases) { mode in
                             Text(mode.rawValue)
                                 .tag(mode)
-                                .disabled(mode.requiresPresentationCounts && !store.supportsNormalizedValues)
                         }
                     }
                     .labelsHidden()
