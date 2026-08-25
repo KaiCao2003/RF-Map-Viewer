@@ -5802,9 +5802,14 @@ class RFMViewer(tk.Toplevel):
             self.show_tuning_curve_var.get() or self.show_waveform_var.get()
         )
         collapsed = bool(self.tuning_collapsed_var.get())
+        container_width = max(1, int(container.winfo_width()))
+        responsive_stacked = self._should_responsively_stack_auxiliary(
+            container_width
+        )
+        self._rf_split_responsive_stacked = responsive_stacked
         stacked = (
             self.tuning_layout_var.get() == "Stacked"
-            or bool(getattr(self, "_rf_split_responsive_stacked", False))
+            or responsive_stacked
         )
         self.rf_map_pane.grid(row=0, column=0, sticky="nsew")
         container.columnconfigure(0, weight=1)
@@ -5848,8 +5853,19 @@ class RFMViewer(tk.Toplevel):
             self.tuning_curve_pane.grid(
                 row=0, column=1, sticky="nsew", padx=(1, 0)
             )
+            # At the minimum supported window width the two companion plots
+            # need a little more horizontal room, while retaining the usual
+            # 5:2 split on larger displays and for a single companion.
+            auxiliary_weight = self._responsive_auxiliary_column_weight(
+                container_width
+            )
+            self._rf_split_auxiliary_weight = auxiliary_weight
             container.columnconfigure(0, weight=5, uniform="rf-hd-columns")
-            container.columnconfigure(1, weight=2, uniform="rf-hd-columns")
+            container.columnconfigure(
+                1,
+                weight=auxiliary_weight,
+                uniform="rf-hd-columns",
+            )
             self.tuning_fold_button.configure(
                 image=self._pane_icons["trailing"],
                 text="Collapse auxiliary plots",
@@ -5859,14 +5875,43 @@ class RFMViewer(tk.Toplevel):
                 text="Collapse auxiliary plots",
             )
 
+    def _should_responsively_stack_auxiliary(self, width: int) -> bool:
+        # A short display cannot fit RF plus both companion plots vertically:
+        # the fixed compact waveform would otherwise squeeze HD to one header
+        # row. Keep the companions side by side with RF unless the user
+        # explicitly selected the Stacked layout in Settings.
+        if self.show_tuning_curve_var.get() and self.show_waveform_var.get():
+            return False
+        return int(width) < 1050
+
+    def _responsive_auxiliary_column_weight(self, width: int) -> int:
+        if (
+            self.show_tuning_curve_var.get()
+            and self.show_waveform_var.get()
+            and int(width) < 1050
+        ):
+            return 3
+        return 2
+
     def _on_rf_split_configure(self, event: tk.Event) -> None:
         # At narrow window widths a side-by-side HD pane would be smaller than
         # its scientific axes. Switch arrangement without changing the saved
         # user preference, then restore it when space returns.
-        responsive_stacked = int(event.width) < 1050
-        if responsive_stacked == getattr(self, "_rf_split_responsive_stacked", False):
+        responsive_stacked = self._should_responsively_stack_auxiliary(
+            int(event.width)
+        )
+        auxiliary_weight = self._responsive_auxiliary_column_weight(
+            int(event.width)
+        )
+        if (
+            responsive_stacked
+            == getattr(self, "_rf_split_responsive_stacked", False)
+            and auxiliary_weight
+            == getattr(self, "_rf_split_auxiliary_weight", 2)
+        ):
             return
         self._rf_split_responsive_stacked = responsive_stacked
+        self._rf_split_auxiliary_weight = auxiliary_weight
         self._layout_rf_and_tuning()
 
     def _toggle_probe_collapsed(self) -> None:
