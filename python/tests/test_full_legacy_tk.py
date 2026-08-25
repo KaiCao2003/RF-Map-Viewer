@@ -75,6 +75,15 @@ class TkViewerTests(unittest.TestCase):
         ):
             self.app = gui.RFMViewer(gui.RFMappingData(path))
         self.addCleanup(self._destroy_app)
+        # Keep every test deterministic across native macOS Tk and Xvfb.  The
+        # production viewer intentionally starts companion discovery after a
+        # short timer and collapses an absent HD pane; whether that worker can
+        # finish during the first update is host-speed dependent.  Tests that
+        # exercise autoload start it explicitly below.
+        if self.app._optional_autoload_after is not None:
+            self.app.after_cancel(self.app._optional_autoload_after)
+            self.app._optional_autoload_after = None
+            self.app._optional_autoload_generation += 1
         self.app.notebook.select(2)
         self.app.update()
 
@@ -141,21 +150,40 @@ class TkViewerTests(unittest.TestCase):
         self.assertTrue(heartbeat, "Tk callback did not run while RF data decoded")
         self.assertIsNone(viewer._startup_loading_frame)
 
-    def test_rf_tab_tuning_pane_hides_and_restores_rf_space(self) -> None:
+    def test_rf_companion_stack_follows_independent_visibility_settings(self) -> None:
         self.app.notebook.select(0)
         self.app.update()
         initial_rf_width = self.app.rf_map_pane.winfo_width()
         self.assertTrue(self.app.tuning_curve_pane.winfo_ismapped())
+        self.assertTrue(self.app.tuning_curve_section.winfo_ismapped())
+        self.assertTrue(self.app.waveform_pane.winfo_ismapped())
+        self.assertEqual(int(self.app.tuning_curve_section.grid_info()["row"]), 0)
+        self.assertEqual(int(self.app.waveform_pane.grid_info()["row"]), 1)
         self.assertGreater(
             initial_rf_width,
             2 * self.app.tuning_curve_pane.winfo_width(),
         )
 
-        hidden = replace(
+        waveform_only = replace(
             self.app.settings,
             show_tuning_curve=False,
             auto_load_tuning_curve=False,
+            show_waveform=True,
         )
+        self.assertTrue(
+            self.app._apply_viewer_settings(
+                waveform_only,
+                persist=False,
+                broadcast=False,
+            )
+        )
+        self.app.update()
+        self.assertTrue(self.app.tuning_curve_pane.winfo_ismapped())
+        self.assertFalse(self.app.tuning_curve_section.winfo_ismapped())
+        self.assertTrue(self.app.waveform_pane.winfo_ismapped())
+        self.assertEqual(int(self.app.waveform_pane.grid_info()["row"]), 0)
+
+        hidden = replace(waveform_only, show_waveform=False)
         self.assertTrue(
             self.app._apply_viewer_settings(
                 hidden,
@@ -167,7 +195,20 @@ class TkViewerTests(unittest.TestCase):
         self.assertFalse(self.app.tuning_curve_pane.winfo_ismapped())
         self.assertGreater(self.app.rf_map_pane.winfo_width(), initial_rf_width)
 
-        shown = replace(hidden, show_tuning_curve=True)
+        tuning_only = replace(hidden, show_tuning_curve=True)
+        self.assertTrue(
+            self.app._apply_viewer_settings(
+                tuning_only,
+                persist=False,
+                broadcast=False,
+            )
+        )
+        self.app.update()
+        self.assertTrue(self.app.tuning_curve_pane.winfo_ismapped())
+        self.assertTrue(self.app.tuning_curve_section.winfo_ismapped())
+        self.assertFalse(self.app.waveform_pane.winfo_ismapped())
+
+        shown = replace(tuning_only, show_waveform=True)
         self.assertTrue(
             self.app._apply_viewer_settings(
                 shown,
@@ -176,7 +217,8 @@ class TkViewerTests(unittest.TestCase):
             )
         )
         self.app.update()
-        self.assertTrue(self.app.tuning_curve_pane.winfo_ismapped())
+        self.assertTrue(self.app.tuning_curve_section.winfo_ismapped())
+        self.assertTrue(self.app.waveform_pane.winfo_ismapped())
 
     def test_narrow_window_uses_responsive_stacked_tuning_layout(self) -> None:
         self.app.notebook.select(0)
@@ -537,22 +579,26 @@ class TkViewerTests(unittest.TestCase):
         self.addCleanup(settings.destroy)
         self.assertEqual(
             [settings.notebook.tab(tab, "text") for tab in settings.notebook.tabs()],
-            ["General", "RF Map", "Tuning Curve"],
+            ["General", "RF Map", "Waveform", "Tuning Curve"],
         )
 
         settings.show_tuning_curve_var.set(False)
+        settings.show_waveform_var.set(False)
         settings.show_probe_layout_var.set(False)
         settings.tuning_smoothing_var.set(False)
         settings.update_idletasks()
         self.assertIn("disabled", settings.auto_tuning_check.state())
+        self.assertIn("disabled", settings.waveform_channel_mode_combo.state())
         self.assertIn("disabled", settings.auto_probe_check.state())
         self.assertIn("disabled", settings.tuning_sigma_entry.state())
 
         settings.show_tuning_curve_var.set(True)
+        settings.show_waveform_var.set(True)
         settings.show_probe_layout_var.set(True)
         settings.tuning_smoothing_var.set(True)
         settings.update_idletasks()
         self.assertNotIn("disabled", settings.auto_tuning_check.state())
+        self.assertNotIn("disabled", settings.waveform_channel_mode_combo.state())
         self.assertNotIn("disabled", settings.auto_probe_check.state())
         self.assertNotIn("disabled", settings.tuning_sigma_entry.state())
 
@@ -829,6 +875,30 @@ class TkViewerTests(unittest.TestCase):
         self.assertEqual(result["generation"], 99)
         self.assertIn("unexpected discovery failure", str(result["worker_error"]))
 
+    def test_missing_tuning_result_does_not_collapse_enabled_waveform(self) -> None:
+        self.app.notebook.select(0)
+        self.app.show_tuning_curve_var.set(True)
+        self.app.show_waveform_var.set(True)
+        self.app.tuning_collapsed_var.set(False)
+        generation = self.app._optional_autoload_generation
+        self.app._optional_result_queue.put(
+            {
+                "generation": generation,
+                "data_path": self.app.data.path,
+                "probe_geometry": None,
+                "tuning_path": None,
+                "tuning_data": None,
+                "tuning_error": None,
+            }
+        )
+
+        self.app._poll_optional_results()
+        self.app.update_idletasks()
+
+        self.assertFalse(self.app.tuning_collapsed_var.get())
+        self.assertTrue(self.app.tuning_curve_pane.winfo_ismapped())
+        self.assertTrue(self.app.waveform_pane.winfo_ismapped())
+
     def test_settings_validation_selects_and_marks_the_owning_tab(self) -> None:
         self.app._show_settings()
         settings = self.app._app_root._rfm_settings_window
@@ -951,11 +1021,17 @@ class TkViewerTests(unittest.TestCase):
                 "_draw_tuning_curve",
                 wraps=self.app._draw_tuning_curve,
             ) as draw_tuning,
+            mock.patch.object(
+                self.app,
+                "_draw_waveform",
+                wraps=self.app._draw_waveform,
+            ) as draw_waveform,
         ):
             settings._commit(close=False)
 
         self.assertEqual(draw_probe.call_count, 1)
         self.assertEqual(draw_tuning.call_count, 1)
+        self.assertEqual(draw_waveform.call_count, 1)
 
     def test_applying_settings_propagates_only_to_paired_windows(self) -> None:
         paired = self.app._open_json_window(self.app.data.path)
@@ -976,6 +1052,7 @@ class TkViewerTests(unittest.TestCase):
         settings.tuning_display_bins_var.set("12")
         settings.tuning_compare_scale_var.set(True)
         settings.show_tuning_curve_var.set(False)
+        settings.show_waveform_var.set(False)
         settings._commit(close=False)
 
         self.assertEqual(settings.error_var.get(), "")
@@ -986,6 +1063,7 @@ class TkViewerTests(unittest.TestCase):
             self.assertEqual(viewer.tuning_display_bins_var.get(), 12)
             self.assertTrue(viewer.tuning_compare_scale_var.get())
             self.assertFalse(viewer.show_tuning_curve_var.get())
+            self.assertFalse(viewer.show_waveform_var.get())
             self.assertFalse(viewer.tuning_curve_pane.winfo_ismapped())
 
     def test_reused_settings_window_follows_the_active_viewer(self) -> None:
