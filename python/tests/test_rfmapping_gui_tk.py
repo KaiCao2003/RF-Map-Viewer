@@ -445,12 +445,17 @@ class TkViewerTests(unittest.TestCase):
         self.assertEqual(self.app._active_tab_key(), "rf")
         self.assertTrue(self.app.waveform_pane.winfo_ismapped())
         self.assertEqual(int(self.app.tuning_curve_section.grid_info()["row"]), 0)
-        self.assertEqual(int(self.app.waveform_pane.grid_info()["row"]), 1)
-        self.assertLessEqual(self.app.waveform_pane.winfo_height(), 200)
-        self.assertLess(
-            self.app.waveform_pane.winfo_height(),
-            self.app.tuning_curve_section.winfo_height(),
+        self.assertEqual(int(self.app.unit_info_pane.grid_info()["row"]), 1)
+        self.assertIs(self.app.waveform_pane.master, self.app.waveform_host)
+        self.assertEqual(int(self.app.waveform_pane.grid_info()["row"]), 0)
+        self.assertGreaterEqual(
+            self.app.waveform_pane.winfo_rooty(),
+            self.app.cell_label.winfo_rooty() + self.app.cell_label.winfo_height(),
         )
+        self.assertLessEqual(self.app.waveform_pane.winfo_height(), 200)
+        self.assertFalse(self.app.tuning_curve_status_label.winfo_ismapped())
+        self.assertIn("bin", self.app.cell_label.cget("text"))
+        self.assertIn("cluster 7", self.app.unit_stats_label.cget("text"))
         self.assertGreater(len(self.app.canvases["waveform"].find_all()), 20)
         self.assertIn("Same x column", self.app.waveform_subtitle_label.cget("text"))
 

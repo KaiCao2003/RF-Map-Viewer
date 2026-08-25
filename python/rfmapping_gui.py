@@ -4358,7 +4358,7 @@ class SettingsWindow(tk.Toplevel):
         self._section_label(tab, "Local average waveform", 0)
         ttk.Checkbutton(
             tab,
-            text="Show a compact waveform below the HD tuning curve",
+            text="Show a compact waveform below Spike Time in the left sidebar",
             variable=self.show_waveform_var,
         ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 8))
         self.waveform_channel_mode_combo = self._labeled_combo(
@@ -5183,6 +5183,12 @@ class RFMViewer(tk.Toplevel):
             font=("TkDefaultFont", 13, "bold"),
         )
         style.configure(
+            "SidebarTitle.TLabel",
+            background="#eef0f4",
+            foreground="#1d1d1f",
+            font=("TkDefaultFont", 12, "bold"),
+        )
+        style.configure(
             "Value.TLabel",
             background="#ffffff",
             foreground="#1d1d1f",
@@ -5429,7 +5435,7 @@ class RFMViewer(tk.Toplevel):
 
         self.probe_canvas = tk.Canvas(
             self.probe_section,
-            width=220,
+            width=240,
             height=330,
             background="#ffffff",
             highlightthickness=1,
@@ -5445,13 +5451,13 @@ class RFMViewer(tk.Toplevel):
             self.probe_section,
             text="",
             style="SidebarMuted.TLabel",
-            wraplength=220,
+            wraplength=240,
             justify="left",
         )
         self.spatial_status_label.grid(row=2, column=0, sticky="ew", pady=(5, 10))
         row += 1
 
-        ttk.Label(parent, text="Selection", style="Section.TLabel").grid(
+        ttk.Label(parent, text="Spike Time", style="Section.TLabel").grid(
             row=row, column=0, sticky="w", pady=(8, 5)
         )
         row += 1
@@ -5459,20 +5465,20 @@ class RFMViewer(tk.Toplevel):
             parent,
             text="",
             style="SidebarMuted.TLabel",
-            font=("TkFixedFont", 10),
-            wraplength=220,
+            font=("TkFixedFont", 9),
+            wraplength=240,
             justify="left",
         )
         self.cell_label.grid(row=row, column=0, sticky="ew")
         row += 1
-        self.unit_stats_label = ttk.Label(
+        self.waveform_host = ttk.Frame(
             parent,
-            text="",
-            style="SidebarMuted.TLabel",
-            wraplength=220,
-            justify="left",
+            style="Sidebar.TFrame",
         )
-        self.unit_stats_label.grid(row=row, column=0, sticky="ew", pady=(2, 0))
+        self.waveform_host.grid(row=row, column=0, sticky="nsew", pady=(8, 0))
+        self.waveform_host.columnconfigure(0, weight=1)
+        self.waveform_host.rowconfigure(0, weight=1)
+        self._waveform_section_row = row
 
     def _build_main(self, parent: ttk.Frame) -> None:
         toolbar = ttk.Frame(parent, style="Toolbar.TFrame", padding=(10, 7))
@@ -5668,66 +5674,82 @@ class RFMViewer(tk.Toplevel):
                     wraplength=360,
                     justify="left",
                 )
-                self.tuning_curve_status_label.grid(
+
+                self.unit_info_pane = ttk.Frame(
+                    self.rf_split_container,
+                    style="Panel.TFrame",
+                )
+                self.unit_info_pane.columnconfigure(0, weight=1)
+                ttk.Separator(self.unit_info_pane, orient="horizontal").grid(
+                    row=0, column=0, sticky="ew"
+                )
+                unit_info_header = ttk.Frame(
+                    self.unit_info_pane,
+                    style="Panel.TFrame",
+                    padding=(12, 8),
+                )
+                unit_info_header.grid(row=1, column=0, sticky="ew")
+                ttk.Label(
+                    unit_info_header,
+                    text="Unit Info",
+                    style="Title.TLabel",
+                ).grid(row=0, column=0, sticky="w")
+                self.unit_stats_label = ttk.Label(
+                    self.unit_info_pane,
+                    text="",
+                    style="Muted.TLabel",
+                    font=("TkFixedFont", 9),
+                    wraplength=330,
+                    justify="left",
+                )
+                self.unit_stats_label.grid(
                     row=2,
                     column=0,
                     sticky="ew",
                     padx=12,
-                    pady=(5, 7),
+                    pady=(0, 10),
                 )
 
                 self.waveform_pane = ttk.Frame(
-                    self.tuning_curve_pane,
-                    style="Panel.TFrame",
+                    self.waveform_host,
+                    style="Sidebar.TFrame",
                 )
                 self.waveform_pane.columnconfigure(0, weight=1)
-                self.waveform_pane.rowconfigure(2, weight=1)
-                ttk.Separator(self.waveform_pane, orient="horizontal").grid(
-                    row=0, column=0, sticky="ew"
-                )
+                self.waveform_pane.rowconfigure(1, weight=1)
                 waveform_header = ttk.Frame(
                     self.waveform_pane,
-                    style="Panel.TFrame",
-                    padding=(12, 7),
+                    style="Sidebar.TFrame",
+                    padding=(0, 4),
                 )
-                waveform_header.grid(row=1, column=0, sticky="ew")
+                waveform_header.grid(row=0, column=0, sticky="ew")
                 waveform_header.columnconfigure(0, weight=1)
                 ttk.Label(
                     waveform_header,
                     text="Local Average Waveform",
-                    style="Title.TLabel",
+                    style="SidebarTitle.TLabel",
                 ).grid(row=0, column=0, sticky="w")
                 self.waveform_subtitle_label = ttk.Label(
                     waveform_header,
                     text="",
-                    style="Muted.TLabel",
-                    font=("TkDefaultFont", 9),
-                    wraplength=330,
+                    style="SidebarMuted.TLabel",
+                    font=("TkDefaultFont", 8),
+                    wraplength=240,
                     justify="left",
                 )
                 self.waveform_subtitle_label.grid(
                     row=1, column=0, sticky="w", pady=(1, 0)
                 )
-                self.waveform_fold_button = ttk.Button(
-                    waveform_header,
-                    image=self._pane_icons["trailing"],
-                    text="Collapse auxiliary plots",
-                    width=2,
-                    command=self._toggle_tuning_collapsed,
-                )
-                self.waveform_fold_button.grid(row=0, column=1, sticky="e")
                 self.waveform_canvas = tk.Canvas(
                     self.waveform_pane,
                     background="#ffffff",
-                    highlightthickness=0,
-                    # Header, subtitle, and separator bring the complete pane
-                    # to roughly 180 px, leaving TC larger on short displays.
+                    highlightthickness=1,
+                    highlightbackground="#d7d9de",
                     height=100,
                 )
-                self.waveform_canvas.grid(row=2, column=0, sticky="nsew")
+                self.waveform_canvas.grid(row=1, column=0, sticky="nsew")
                 self.canvases["waveform"] = self.waveform_canvas
                 self.tuning_collapsed_rail = ttk.Frame(
-                    self.rf_split_container,
+                    self.tuning_curve_pane,
                     style="Panel.TFrame",
                     padding=(4, 6),
                 )
@@ -5739,7 +5761,7 @@ class RFMViewer(tk.Toplevel):
                     width=2,
                     command=self._toggle_tuning_collapsed,
                 )
-                self.tuning_restore_button.grid(row=0, column=0, sticky="n")
+                self.tuning_restore_button.grid(row=0, column=0, sticky="ne")
                 self._sync_auxiliary_sections()
                 self._layout_rf_and_tuning()
             else:
@@ -5755,103 +5777,107 @@ class RFMViewer(tk.Toplevel):
             self._tab_keys[str(frame)] = key
 
     def _sync_auxiliary_sections(self) -> None:
-        """Stack the enabled companion plots, with waveform below tuning."""
+        """Place waveform in the sidebar and unit info below tuning."""
 
         if not hasattr(self, "tuning_curve_section"):
             return
         tuning_visible = bool(self.show_tuning_curve_var.get())
+        tuning_collapsed = bool(self.tuning_collapsed_var.get())
         waveform_visible = bool(self.show_waveform_var.get())
         self.tuning_curve_section.grid_remove()
+        self.tuning_collapsed_rail.grid_remove()
         self.waveform_pane.grid_remove()
-        for index in range(2):
-            self.tuning_curve_pane.rowconfigure(index, weight=0, minsize=0)
+        self.waveform_host.grid_remove()
+        self.tuning_curve_pane.rowconfigure(0, weight=0, minsize=0)
+        self.sidebar_frame.rowconfigure(
+            self._waveform_section_row,
+            weight=0,
+            minsize=0,
+        )
 
-        if tuning_visible:
+        self.tuning_curve_pane.rowconfigure(0, weight=1)
+        if tuning_visible and tuning_collapsed:
+            self.tuning_collapsed_rail.grid(row=0, column=0, sticky="nsew")
+            self.tuning_restore_button.configure(
+                image=self._pane_icons["trailing"],
+                text="Restore HD tuning curve",
+            )
+        elif tuning_visible:
             self.tuning_curve_section.grid(row=0, column=0, sticky="nsew")
-            self.tuning_curve_pane.rowconfigure(0, weight=1)
             self.tuning_fold_button.grid()
         if waveform_visible:
-            waveform_row = 1 if tuning_visible else 0
-            self.waveform_pane.grid(row=waveform_row, column=0, sticky="nsew")
-            self.tuning_curve_pane.rowconfigure(
-                waveform_row,
+            self.waveform_host.grid()
+            self.waveform_pane.grid(row=0, column=0, sticky="nsew")
+            self.sidebar_frame.rowconfigure(
+                self._waveform_section_row,
                 weight=0,
                 minsize=180,
             )
-            if tuning_visible:
-                self.waveform_fold_button.grid_remove()
-            else:
-                self.waveform_fold_button.grid()
-                # Keep an enabled waveform compact even when HD is hidden.
-                self.tuning_curve_pane.rowconfigure(1, weight=1)
 
     def _layout_rf_and_tuning(self) -> None:
-        """Place RF and the optional tuning/waveform companion stack."""
+        """Place RF beside the optional tuning and unit-info stack."""
 
         if not hasattr(self, "rf_split_container"):
             return
         container = self.rf_split_container
         self.rf_map_pane.grid_forget()
         self.tuning_curve_pane.grid_forget()
-        self.tuning_collapsed_rail.grid_forget()
+        self.unit_info_pane.grid_forget()
         for index in range(2):
-            container.columnconfigure(index, weight=0, uniform="")
-            container.rowconfigure(index, weight=0, uniform="")
+            container.columnconfigure(index, weight=0, uniform="", minsize=0)
+            container.rowconfigure(index, weight=0, uniform="", minsize=0)
 
-        auxiliary_visible = bool(
-            self.show_tuning_curve_var.get() or self.show_waveform_var.get()
-        )
-        collapsed = bool(self.tuning_collapsed_var.get())
         container_width = max(1, int(container.winfo_width()))
         responsive_stacked = self._should_responsively_stack_auxiliary(
             container_width
         )
         self._rf_split_responsive_stacked = responsive_stacked
         stacked = (
-            self.tuning_layout_var.get() == "Stacked"
-            or responsive_stacked
+            self.show_tuning_curve_var.get()
+            and not self.tuning_collapsed_var.get()
+            and (
+                self.tuning_layout_var.get() == "Stacked"
+                or responsive_stacked
+            )
         )
-        self.rf_map_pane.grid(row=0, column=0, sticky="nsew")
-        container.columnconfigure(0, weight=1)
-        container.rowconfigure(0, weight=1)
 
-        if not auxiliary_visible:
-            return
-        if collapsed:
-            if stacked:
-                self.tuning_collapsed_rail.grid(
-                    row=1, column=0, sticky="ew", pady=(2, 0)
-                )
-                self.tuning_restore_button.configure(
-                    image=self._pane_icons["bottom"],
-                    text="Restore auxiliary plots",
-                )
-            else:
-                self.tuning_collapsed_rail.grid(
-                    row=0, column=1, sticky="ns", padx=(2, 0)
-                )
-                self.tuning_restore_button.configure(
-                    image=self._pane_icons["trailing"],
-                    text="Restore auxiliary plots",
-                )
-            return
         if stacked:
+            self.rf_map_pane.grid(
+                row=0, column=0, columnspan=2, sticky="nsew"
+            )
             self.tuning_curve_pane.grid(
-                row=1, column=0, sticky="nsew", pady=(1, 0)
+                row=1, column=0, sticky="nsew", pady=(1, 0), padx=(0, 1)
+            )
+            self.unit_info_pane.grid(
+                row=1, column=1, sticky="nsew", pady=(1, 0)
+            )
+            container.columnconfigure(0, weight=5, uniform="rf-hd-columns")
+            container.columnconfigure(
+                1,
+                weight=2,
+                uniform="rf-hd-columns",
+                minsize=220,
             )
             container.rowconfigure(0, weight=5, uniform="rf-hd-rows")
-            container.rowconfigure(1, weight=3, uniform="rf-hd-rows")
+            container.rowconfigure(
+                1,
+                weight=3,
+                uniform="rf-hd-rows",
+                minsize=260,
+            )
             self.tuning_fold_button.configure(
                 image=self._pane_icons["bottom"],
-                text="Collapse auxiliary plots",
-            )
-            self.waveform_fold_button.configure(
-                image=self._pane_icons["bottom"],
-                text="Collapse auxiliary plots",
+                text="Collapse HD tuning curve",
             )
         else:
+            self.rf_map_pane.grid(
+                row=0, column=0, rowspan=2, sticky="nsew"
+            )
             self.tuning_curve_pane.grid(
                 row=0, column=1, sticky="nsew", padx=(1, 0)
+            )
+            self.unit_info_pane.grid(
+                row=1, column=1, sticky="nsew", padx=(1, 0)
             )
             # At the minimum supported window width the two companion plots
             # need a little more horizontal room, while retaining the usual
@@ -5865,29 +5891,28 @@ class RFMViewer(tk.Toplevel):
                 1,
                 weight=auxiliary_weight,
                 uniform="rf-hd-columns",
+                minsize=220,
             )
+            container.rowconfigure(0, weight=1)
+            container.rowconfigure(1, weight=0, minsize=135)
             self.tuning_fold_button.configure(
                 image=self._pane_icons["trailing"],
-                text="Collapse auxiliary plots",
-            )
-            self.waveform_fold_button.configure(
-                image=self._pane_icons["trailing"],
-                text="Collapse auxiliary plots",
+                text="Collapse HD tuning curve",
             )
 
     def _should_responsively_stack_auxiliary(self, width: int) -> bool:
-        # A short display cannot fit RF plus both companion plots vertically:
-        # the fixed compact waveform would otherwise squeeze HD to one header
-        # row. Keep the companions side by side with RF unless the user
-        # explicitly selected the Stacked layout in Settings.
-        if self.show_tuning_curve_var.get() and self.show_waveform_var.get():
-            return False
-        return int(width) < 1050
+        # Unit Info owns the bottom-right position. Keep the right-side stack
+        # beside RF unless the user explicitly selected Stacked in Settings.
+        return False
 
     def _responsive_auxiliary_column_weight(self, width: int) -> int:
         if (
+            not self.show_tuning_curve_var.get()
+            or self.tuning_collapsed_var.get()
+        ):
+            return 1
+        if (
             self.show_tuning_curve_var.get()
-            and self.show_waveform_var.get()
             and int(width) < 1050
         ):
             return 3
@@ -5952,8 +5977,6 @@ class RFMViewer(tk.Toplevel):
         ):
             if self.show_tuning_curve_var.get():
                 self._schedule_optional_redraw("tuning")
-            if self.show_waveform_var.get() and self._active_tab_key() == "rf":
-                self._schedule_redraw()
 
     def _build_plot_controls(self, parent: ttk.Frame) -> None:
         controls = ttk.Frame(parent, style="Panel.TFrame", padding=(10, 6))
@@ -7591,7 +7614,6 @@ class RFMViewer(tk.Toplevel):
             elif (
                 self.settings.auto_load_tuning_curve
                 and current_result.get("tuning_path") is None
-                and not self.show_waveform_var.get()
             ):
                 # A missing optional file should not reserve two fifths of the
                 # RF tab. Keep a small, explicit HD restore control instead.
@@ -7841,7 +7863,7 @@ class RFMViewer(tk.Toplevel):
         if redraw:
             self._draw_probe_canvas()
             self._draw_tuning_curve()
-            if self.show_waveform_var.get() and self._active_tab_key() == "rf":
+            if self.show_waveform_var.get():
                 self._draw_waveform()
 
     def _effective_tuning_plot_mode(self) -> str:
@@ -7933,69 +7955,92 @@ class RFMViewer(tk.Toplevel):
 
     def _show_tuning_provenance(self) -> None:
         data = self.tuning_curve_data
-        metadata = data.metadata if data is not None else None
-        if metadata is None:
+        if data is None:
             return
-
-        rows = [
-            ("Schema", "2"),
-            ("Timestamp", metadata.timestamp_reference or "Not recorded"),
-            ("Timebase", metadata.timebase or "Not recorded"),
-            ("Direction", metadata.angle_convention_note or "Not recorded"),
-        ]
-        if metadata.feature_fs_hz is not None:
-            rows.append(("Tracking", f"{metadata.feature_fs_hz:g} Hz"))
-        classification = metadata.classification
-        if classification is not None:
-            rows.append(("Classification", classification.method or "Not recorded"))
-            if classification.rayleigh_alpha is not None:
-                rows.append(("Rayleigh α", f"{classification.rayleigh_alpha:g}"))
-            if classification.shuffle_alpha is not None:
-                rows.append(("Shuffle α", f"{classification.shuffle_alpha:g}"))
-            if classification.num_shuffle is not None:
-                rows.append(("Shuffles", str(classification.num_shuffle)))
-        ttl_qc = metadata.ttl_qc
-        if ttl_qc is not None:
-            if ttl_qc.ttl_pulse_count is not None:
-                rows.append(("Motive trigger TTLs", str(ttl_qc.ttl_pulse_count)))
-            if ttl_qc.measured_rate_hz is not None:
-                rows.append(("Measured rate", f"{ttl_qc.measured_rate_hz:g} Hz"))
-            if ttl_qc.median_period_s is not None:
-                rows.append(("Median period", f"{ttl_qc.median_period_s:g} s"))
-            if ttl_qc.camera_input_channel is not None:
-                rows.append(("Camera input", str(ttl_qc.camera_input_channel)))
-            if ttl_qc.camera_ttl_threshold is not None:
-                rows.append(("TTL threshold", f"{ttl_qc.camera_ttl_threshold:g}"))
-            if ttl_qc.camera_ttl_active_high is not None:
-                rows.append(
-                    (
-                        "TTL polarity",
-                        "Active high" if ttl_qc.camera_ttl_active_high else "Active low",
+        metadata = data.metadata
+        rows = [("File", data.path.name)]
+        if metadata is None:
+            rows.extend(
+                (
+                    ("Schema", "Legacy"),
+                    ("Timing / occupancy", "Not recorded"),
+                )
+            )
+        else:
+            rows.extend(
+                (
+                    ("Schema", "2"),
+                    ("Timestamp", metadata.timestamp_reference or "Not recorded"),
+                    ("Timebase", metadata.timebase or "Not recorded"),
+                    ("Direction", metadata.angle_convention_note or "Not recorded"),
+                )
+            )
+            if metadata.feature_fs_hz is not None:
+                rows.append(("Tracking", f"{metadata.feature_fs_hz:g} Hz"))
+            classification = metadata.classification
+            if classification is not None:
+                rows.append(("Classification", classification.method or "Not recorded"))
+                if classification.rayleigh_alpha is not None:
+                    rows.append(("Rayleigh α", f"{classification.rayleigh_alpha:g}"))
+                if classification.shuffle_alpha is not None:
+                    rows.append(("Shuffle α", f"{classification.shuffle_alpha:g}"))
+                if classification.num_shuffle is not None:
+                    rows.append(("Shuffles", str(classification.num_shuffle)))
+            ttl_qc = metadata.ttl_qc
+            if ttl_qc is not None:
+                if ttl_qc.ttl_pulse_count is not None:
+                    rows.append(("Motive trigger TTLs", str(ttl_qc.ttl_pulse_count)))
+                if ttl_qc.measured_rate_hz is not None:
+                    rows.append(("Measured rate", f"{ttl_qc.measured_rate_hz:g} Hz"))
+                if ttl_qc.median_period_s is not None:
+                    rows.append(("Median period", f"{ttl_qc.median_period_s:g} s"))
+                if ttl_qc.camera_input_channel is not None:
+                    rows.append(("Camera input", str(ttl_qc.camera_input_channel)))
+                if ttl_qc.camera_ttl_threshold is not None:
+                    rows.append(("TTL threshold", f"{ttl_qc.camera_ttl_threshold:g}"))
+                if ttl_qc.camera_ttl_active_high is not None:
+                    rows.append(
+                        (
+                            "TTL polarity",
+                            "Active high" if ttl_qc.camera_ttl_active_high else "Active low",
+                        )
                     )
-                )
-            if (
-                ttl_qc.matched_motive_frame_count is not None
-                and ttl_qc.motive_frame_count_raw is not None
-            ):
-                rows.append(
-                    (
-                        "Matched frames",
-                        f"{ttl_qc.matched_motive_frame_count} / {ttl_qc.motive_frame_count_raw}",
+                if (
+                    ttl_qc.matched_motive_frame_count is not None
+                    and ttl_qc.motive_frame_count_raw is not None
+                ):
+                    rows.append(
+                        (
+                            "Matched frames",
+                            f"{ttl_qc.matched_motive_frame_count} / {ttl_qc.motive_frame_count_raw}",
+                        )
                     )
-                )
-            if ttl_qc.frame_alignment_policy_applied is not None:
-                rows.append(
-                    ("Alignment", ttl_qc.frame_alignment_policy_applied)
-                )
-            if ttl_qc.dropped_motive_frame_ids:
-                rows.append(
-                    (
-                        "Dropped frame IDs",
-                        ", ".join(str(value) for value in ttl_qc.dropped_motive_frame_ids),
+                if ttl_qc.frame_alignment_policy_applied is not None:
+                    rows.append(
+                        ("Alignment", ttl_qc.frame_alignment_policy_applied)
                     )
+                if ttl_qc.dropped_motive_frame_ids:
+                    rows.append(
+                        (
+                            "Dropped frame IDs",
+                            ", ".join(str(value) for value in ttl_qc.dropped_motive_frame_ids),
+                        )
+                    )
+                if ttl_qc.frame_timestamp_mapping is not None:
+                    rows.append(("Frame mapping", ttl_qc.frame_timestamp_mapping))
+        raw_rates = data.rates_for(self._selected_unit_id_value())
+        if raw_rates is not None:
+            try:
+                _angles, rates = self._processed_tuning_values(
+                    self._selected_unit_id_value(), raw_rates
                 )
-            if ttl_qc.frame_timestamp_mapping is not None:
-                rows.append(("Frame mapping", ttl_qc.frame_timestamp_mapping))
+            except (ImportError, ValueError):
+                rates = ()
+            missing_bins = sum(
+                not math.isfinite(float(rate)) for rate in rates
+            )
+            if missing_bins:
+                rows.append(("Bins without occupancy", str(missing_bins)))
         label_width = max(len(label) for label, _value in rows)
         messagebox.showinfo(
             "Tuning Provenance",
@@ -8037,6 +8082,7 @@ class RFMViewer(tk.Toplevel):
             or self.tuning_collapsed_var.get()
         ):
             return
+        self.tuning_curve_status_label.configure(text="")
         self._set_tuning_hd_class_label(None)
         canvas = self.tuning_curve_canvas
         canvas.delete("all")
@@ -8050,7 +8096,6 @@ class RFMViewer(tk.Toplevel):
             if hasattr(self, "tuning_provenance_button"):
                 self.tuning_provenance_button.grid_remove()
             self._draw_tuning_placeholder("Unit filtered", filter_status)
-            self.tuning_curve_status_label.configure(text=filter_status)
             return
         data = self.tuning_curve_data
         if data is None:
@@ -8065,18 +8110,14 @@ class RFMViewer(tk.Toplevel):
             if self._optional_drop_available:
                 detail += "\nYou can also drop a .tc or tuning JSON file here."
             if self._tuning_curve_error:
+                detail += f"\n\n{self._tuning_curve_error}"
                 self._draw_tuning_placeholder("Could not load tuning curves", detail)
-                self.tuning_curve_status_label.configure(text=self._tuning_curve_error)
             else:
                 self._draw_tuning_placeholder("No tuning curves", detail)
-                self.tuning_curve_status_label.configure(text="Tuning curves optional")
             return
 
         if hasattr(self, "tuning_provenance_button"):
-            if data.metadata is None:
-                self.tuning_provenance_button.grid_remove()
-            else:
-                self.tuning_provenance_button.grid()
+            self.tuning_provenance_button.grid()
 
         if getattr(self._app_root, "_rfm_pairing_enabled", False):
             ready, eligible = self._pairing_eligibility()
@@ -8092,7 +8133,6 @@ class RFMViewer(tk.Toplevel):
                 f"Cluster {cluster_id} skipped",
                 "No open RF map contains this cluster.",
             )
-            self.tuning_curve_status_label.configure(text=data.path.name)
             return
         raw_rates = data.rates_for(cluster_id)
         if raw_rates is None:
@@ -8100,7 +8140,6 @@ class RFMViewer(tk.Toplevel):
                 f"No tuning curve for cluster {cluster_id}",
                 "The selected RF unit is not present in this tuning file.",
             )
-            self.tuning_curve_status_label.configure(text=data.path.name)
             return
         self._set_tuning_hd_class_label(data.hd_class_for(cluster_id))
         try:
@@ -8112,41 +8151,12 @@ class RFMViewer(tk.Toplevel):
             )
         except (ImportError, ValueError) as exc:
             self._draw_tuning_placeholder("Could not plot tuning curve", str(exc))
-            self.tuning_curve_status_label.configure(text=data.path.name)
             return
 
         if self._effective_tuning_plot_mode() == "Polar":
             self._draw_tuning_polar(angles_deg, rates, cluster_id, scale_high)
         else:
             self._draw_tuning_line(angles_deg, rates, cluster_id, scale_high)
-        sigma_deg = (
-            float(self.tuning_smooth_sigma_var.get())
-            * 360.0
-            / DEFAULT_HD_DISPLAY_BINS
-        )
-        smooth_label = (
-            f" · smoothed σ={sigma_deg:g}°"
-            if self.tuning_smoothing_var.get()
-            else " · smoothing off"
-        )
-        scale_label = (
-            f" · shared within file: 0–{format_response_value(scale_high, VALUE_MODE_RATE)} Hz"
-            if self.tuning_compare_scale_var.get()
-            else " · per-cell 0–peak Hz scale"
-        )
-        missing_bins = sum(not math.isfinite(float(rate)) for rate in rates)
-        missing_label = f" · {missing_bins} bins without occupancy" if missing_bins else ""
-        legacy_label = ""
-        if data.occupancy_time_s is None:
-            legacy_label = " · legacy schema (timing/occupancy provenance unavailable)"
-            if len(rates) < HD_RAW_BIN_COUNT:
-                legacy_label += " · rebinned rates averaged"
-        self.tuning_curve_status_label.configure(
-            text=(
-                f"{data.path.name} · {len(rates)} bins{smooth_label}"
-                f"{scale_label}{missing_label}{legacy_label}"
-            )
-        )
 
     def _draw_tuning_line(
         self,
@@ -9131,36 +9141,24 @@ class RFMViewer(tk.Toplevel):
             self._draw_unavailable_unit(key)
             if key == "rf":
                 self._draw_tuning_curve()
-                if (
-                    self.show_waveform_var.get()
-                    and not self.tuning_collapsed_var.get()
-                ):
-                    self.waveform_subtitle_label.configure(
-                        text=f"Cluster {self._selected_unit_id_value()} · waveform unavailable"
-                    )
-                    self._draw_unavailable_unit("waveform")
+            if self.show_waveform_var.get():
+                self.waveform_subtitle_label.configure(
+                    text=f"Cluster {self._selected_unit_id_value()} · waveform unavailable"
+                )
+                self._draw_unavailable_unit("waveform")
             return
         if key == "rf":
             self._draw_rf()
             self._draw_tuning_curve()
-            if (
-                self.show_waveform_var.get()
-                and not self.tuning_collapsed_var.get()
-            ):
-                self._draw_waveform()
         elif key == "delay":
             self._draw_rgb() if self.rgb_mode_var.get() else self._draw_delay()
         elif key == "timeline":
             self._draw_timeline()
-        elif key == "waveform":
+        if self.show_waveform_var.get():
             self._draw_waveform()
 
     def _request_waveform_payload(self) -> None:
-        if (
-            not self.show_waveform_var.get()
-            or self._active_tab_key() != "rf"
-            or self.tuning_collapsed_var.get()
-        ):
+        if not self.show_waveform_var.get():
             return
         key = (
             self._selected_unit_id_value(),
@@ -9248,11 +9246,7 @@ class RFMViewer(tk.Toplevel):
             self._waveform_payload_key = None
             self._waveform_error = str(error or "Waveform data is unavailable.")
             self._waveform_error_key = key
-        if (
-            self.show_waveform_var.get()
-            and self._active_tab_key() == "rf"
-            and not self.tuning_collapsed_var.get()
-        ):
+        if self.show_waveform_var.get():
             self._draw_waveform()
 
     @staticmethod
@@ -9261,7 +9255,7 @@ class RFMViewer(tk.Toplevel):
         heading: str,
         detail: str,
     ) -> None:
-        width = max(canvas.winfo_width(), 260)
+        width = max(canvas.winfo_width(), 220)
         height = max(canvas.winfo_height(), 165)
         canvas.create_text(
             width / 2,
@@ -9384,10 +9378,13 @@ class RFMViewer(tk.Toplevel):
         )
         best_row = int(best_row_raw) if isinstance(best_row_raw, int) else -1
 
-        width = max(canvas.winfo_width(), 280)
+        width = max(canvas.winfo_width(), 220)
         height = max(canvas.winfo_height(), 165)
-        margin_l, margin_r, margin_t, margin_b = 58, 68, 16, 42
-        grid_w = max(80.0, width - margin_l - margin_r)
+        compact = width < 280
+        margin_l = 48 if compact else 58
+        margin_r = 54 if compact else 68
+        margin_t, margin_b = 16, 42
+        grid_w = max(70.0, width - margin_l - margin_r)
         grid_h = max(80.0, height - margin_t - margin_b)
         x0, y0 = float(margin_l), float(margin_t)
         cell_w = grid_w / len(times)
@@ -9465,7 +9462,10 @@ class RFMViewer(tk.Toplevel):
             font=("TkDefaultFont", 8),
         )
 
-        colorbar_x = x0 + grid_w + 28
+        colorbar_gap = 10 if compact else 28
+        colorbar_width = 11 if compact else 16
+        colorbar_label_gap = 5 if compact else 7
+        colorbar_x = x0 + grid_w + colorbar_gap
         colorbar_h = min(120.0, grid_h)
         steps = 80
         for index in range(steps):
@@ -9475,7 +9475,7 @@ class RFMViewer(tk.Toplevel):
             canvas.create_rectangle(
                 colorbar_x,
                 top,
-                colorbar_x + 16,
+                colorbar_x + colorbar_width,
                 bottom,
                 fill=waveform_color(value, amplitude_limit),
                 outline="",
@@ -9483,7 +9483,7 @@ class RFMViewer(tk.Toplevel):
         canvas.create_rectangle(
             colorbar_x,
             y0,
-            colorbar_x + 16,
+            colorbar_x + colorbar_width,
             y0 + colorbar_h,
             outline="#475467",
         )
@@ -9493,7 +9493,7 @@ class RFMViewer(tk.Toplevel):
             (-amplitude_limit, y0 + colorbar_h),
         ):
             canvas.create_text(
-                colorbar_x + 23,
+                colorbar_x + colorbar_width + colorbar_label_gap,
                 top,
                 anchor="w",
                 text=f"{value:.3g}",
@@ -9520,8 +9520,8 @@ class RFMViewer(tk.Toplevel):
         )
         self.waveform_subtitle_label.configure(
             text=(
-                f"Cluster {key[0]} · Best + nearest {len(matrix) - 1} · "
-                f"{mode_label}{ptp_text} · baseline ≤ -0.25 ms"
+                f"Cluster {key[0]} · {mode_label} · "
+                f"best + {len(matrix) - 1} nearest{ptp_text}"
             )
         )
 
@@ -10082,6 +10082,23 @@ class RFMViewer(tk.Toplevel):
         x_end: int,
         display_bin: int | None = None,
     ) -> str:
+        unit_info, spike_time = self._cell_inspector_texts(
+            y_start,
+            y_end,
+            x_idx,
+            x_end,
+            display_bin,
+        )
+        return f"{unit_info}\n{spike_time}"
+
+    def _cell_inspector_texts(
+        self,
+        y_start: int,
+        y_end: int,
+        x_idx: int,
+        x_end: int,
+        display_bin: int | None = None,
+    ) -> tuple[str, str]:
         unit_idx = self.unit_idx.get()
         value_mode = self.value_mode_var.get()
         unit = value_mode_unit(value_mode)
@@ -10109,14 +10126,17 @@ class RFMViewer(tk.Toplevel):
         peak_text = f"{peak_bin + 1} ({self._time_group_label(peak_bin)})" if peak_bin is not None else "n/a"
         group_note = (
             (("mean" if value_mode == VALUE_MODE_COUNT else "occupancy-pooled")
-             + " over source pixels\n")
+             + " over source pixels")
             if (x_end != x_idx or y_end != y_start)
             else ""
         )
-        return (
+        unit_info = (
             f"cluster {self.data.cluster_id(unit_idx)}\n"
-            f"{self._y_group_text(y_start, y_end)}, {self._x_group_text(x_idx, x_end)}\n"
-            f"{group_note}"
+            f"{self._y_group_text(y_start, y_end)}, {self._x_group_text(x_idx, x_end)}"
+        )
+        if group_note:
+            unit_info += f"\n{group_note}"
+        spike_time = (
             f"bin {format_response_value(display_values[bin_idx], value_mode)} {unit} "
             f"({self._time_group_label(bin_idx)})\n"
             f"{self._rf_sum_range_value_text(range_value)}\n"
@@ -10125,6 +10145,7 @@ class RFMViewer(tk.Toplevel):
             f"peak bin {peak_text}\n"
             f"count-rate peak delay {delay_text}, count entropy {ent:.3f}"
         )
+        return unit_info, spike_time
 
     def _update_cell_label(
         self,
@@ -10146,9 +10167,17 @@ class RFMViewer(tk.Toplevel):
         if cell is None:
             return
         y_start, y_end, x_idx, x_end = cell
-        self.cell_label.configure(
-            text=prefix + self._cell_metrics_text(y_start, y_end, x_idx, x_end, display_bin=display_bin)
+        unit_info, spike_time = self._cell_inspector_texts(
+            y_start,
+            y_end,
+            x_idx,
+            x_end,
+            display_bin,
         )
+        self.cell_label.configure(
+            text=prefix + spike_time
+        )
+        self.unit_stats_label.configure(text=prefix + unit_info)
 
     def _cell_tooltip_text(self, cell: CellRef, display_bin: int | None = None) -> str:
         y_start, y_end, x_start, x_end = cell
