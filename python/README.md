@@ -27,8 +27,9 @@ scalars are restored for singleton `unitPool`, `xPositions`, `yPositions`, and
 footprint and seven-unit Polar ring across live plots, timeline thumbnails, hit
 testing, and figure exports.
 
-The RF tab can show a compact **Local Average Waveform** panel directly below
-the HD tuning curve. It auto-discovers the read-only schema-v4 SpikeInterface
+The RF tab can show a compact **Local Average Waveform** panel in the left
+sidebar, directly below **Spike Time**. **Unit Info** stays at the bottom-right
+below the HD tuning curve. The viewer auto-discovers the read-only schema-v4 SpikeInterface
 artifact at `data/waveform/ProbeA` or `ProbeB` and shows the selected unit's
 baseline-corrected average template on the best-PTP channel plus the four
 nearest channels. **Settings → Waveform** controls whether the panel is shown

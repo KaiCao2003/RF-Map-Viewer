@@ -299,7 +299,8 @@ class WaveformCanvasTests(unittest.TestCase):
             any(call[1].get("text") == "★ ch 2" for call in canvas.texts)
         )
         self.assertIn("Cluster 17", subtitle.text)
-        self.assertIn("baseline ≤ -0.25 ms", subtitle.text)
+        self.assertIn("Same x column", subtitle.text)
+        self.assertIn("best + 4 nearest", subtitle.text)
 
     def test_legacy_waveform_default_tab_migrates_to_rf(self) -> None:
         restored = gui.ViewerSettings.from_mapping(
