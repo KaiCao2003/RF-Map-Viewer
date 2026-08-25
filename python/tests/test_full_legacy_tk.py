@@ -161,7 +161,7 @@ class TkViewerTests(unittest.TestCase):
         self.assertEqual(int(self.app.waveform_pane.grid_info()["row"]), 1)
         self.assertGreater(
             initial_rf_width,
-            2 * self.app.tuning_curve_pane.winfo_width(),
+            self.app.tuning_curve_pane.winfo_width(),
         )
 
         waveform_only = replace(
@@ -220,17 +220,28 @@ class TkViewerTests(unittest.TestCase):
         self.assertTrue(self.app.tuning_curve_section.winfo_ismapped())
         self.assertTrue(self.app.waveform_pane.winfo_ismapped())
 
-    def test_narrow_window_uses_responsive_stacked_tuning_layout(self) -> None:
+    def test_narrow_window_keeps_both_companions_beside_rf(self) -> None:
         self.app.notebook.select(0)
         self.app.geometry("1120x720")
         self.app.update()
-        self.assertEqual(int(self.app.tuning_curve_pane.grid_info()["row"]), 1)
-        self.assertEqual(int(self.app.tuning_curve_pane.grid_info()["column"]), 0)
-
-        self.app.geometry("1440x900")
-        self.app.update()
         self.assertEqual(int(self.app.tuning_curve_pane.grid_info()["row"]), 0)
         self.assertEqual(int(self.app.tuning_curve_pane.grid_info()["column"]), 1)
+        self.assertLess(
+            self.app.waveform_pane.winfo_height(),
+            self.app.tuning_curve_section.winfo_height(),
+        )
+
+        tuning_only = replace(self.app.settings, show_waveform=False)
+        self.assertTrue(
+            self.app._apply_viewer_settings(
+                tuning_only,
+                persist=False,
+                broadcast=False,
+            )
+        )
+        self.app.update()
+        self.assertEqual(int(self.app.tuning_curve_pane.grid_info()["row"]), 1)
+        self.assertEqual(int(self.app.tuning_curve_pane.grid_info()["column"]), 0)
 
     def test_missing_tuning_curve_has_a_real_attach_action(self) -> None:
         self.app.notebook.select(0)

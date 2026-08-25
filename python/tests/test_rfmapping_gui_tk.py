@@ -428,6 +428,9 @@ class TkViewerTests(unittest.TestCase):
             self.fail(f"Timed out waiting for waveform payload {key}")
 
         settings_value = replace(hidden_settings, show_waveform=True)
+        # Exercise the supported minimum window where the responsive layout
+        # must not let the compact waveform squeeze HD down to its header.
+        self.app.geometry("1120x720")
         self.app.notebook.select(0)
         self.app.update()
         self.assertTrue(
