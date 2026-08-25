@@ -34,7 +34,6 @@ ARCHIVE_PATH="$DIST_DIR/$ARCHIVE_NAME"
 CHECKSUM_NAME="SHA256SUMS-python-$APP_VERSION-$RELEASE_FLAVOR.txt"
 CHECKSUM_PATH="$DIST_DIR/$CHECKSUM_NAME"
 INFO_PLIST="$APP_BUNDLE/Contents/Info.plist"
-DATA_SOURCE="$ROOT_DIR/data"
 SUPPORT_DOCUMENTATION="$ROOT_DIR/README.md"
 SMOKE_JSON="$ROOT_DIR/tests/fixtures/release_smoke_rf.json"
 PYINSTALLER_HOOKS="$ROOT_DIR/packaging/pyinstaller-hooks"
@@ -205,6 +204,10 @@ verify_archive_plist_missing() {
 }
 
 verify_archive_payload() {
+  if unzip -Z1 "$ARCHIVE_PATH" \
+    | /usr/bin/grep -Eiq '(^|/)[^/]+\.(rfmap|tc|probe)$|(^|/)release_smoke_rf\.json$'; then
+    fail "Archive must not bundle RF, tuning-curve, probe, or smoke sample data"
+  fi
   unzip -Z1 "$ARCHIVE_PATH" \
     | /usr/bin/grep -F "$APP_NAME.app/Contents/Resources/README.md" >/dev/null \
     || fail "Archive is missing the bundled support README"
@@ -321,13 +324,7 @@ run_pyinstaller() {
     "$ROOT_DIR/rfmapping_gui.py"
 }
 
-# macOS ships Bash 3.2, where expanding an empty array under `set -u` fails.
-# Pass the optional data argument through positional parameters instead.
-if [[ -d "$DATA_SOURCE" ]]; then
-  run_pyinstaller --add-data "$DATA_SOURCE:data"
-else
-  run_pyinstaller
-fi
+run_pyinstaller
 
 "$PLIST_BUDDY" -c "Set :CFBundleDisplayName $APP_NAME" "$INFO_PLIST"
 "$PLIST_BUDDY" -c "Set :CFBundleShortVersionString $APP_VERSION" "$INFO_PLIST"
@@ -406,21 +403,17 @@ verify_plist_value UTExportedTypeDeclarations:2:UTTypeIdentifier org.local.rfmap
 require_nonempty_file "$APP_BINARY"
 require_nonempty_file "$APP_RESOURCES/RFMappingViewer.icns"
 require_nonempty_file "$APP_RESOURCES/README.md"
-if [[ -d "$DATA_SOURCE" ]]; then
-  [[ -d "$APP_RESOURCES/data" ]] || fail "Bundled data directory is missing"
-  SOURCE_RF_COUNT="$(find "$DATA_SOURCE" -type f \( -iname '*.rfmap' -o -iname '*.json' \) | wc -l | tr -d '[:space:]')"
-  BUNDLED_RF_COUNT="$(find "$APP_RESOURCES/data" -type f \( -iname '*.rfmap' -o -iname '*.json' \) | wc -l | tr -d '[:space:]')"
-  [[ "$SOURCE_RF_COUNT" -gt 0 ]] || fail "No RF mapping resources found in $DATA_SOURCE"
-  [[ "$BUNDLED_RF_COUNT" == "$SOURCE_RF_COUNT" ]] \
-    || fail "Bundled RF mapping resource count does not match source"
-  diff -qr -x '.DS_Store' -x '._*' "$DATA_SOURCE" "$APP_RESOURCES/data" >/dev/null \
-    || fail "Bundled data does not match $DATA_SOURCE"
-fi
 verify_arm64_macho_files
 
 # These smoke tests run the frozen executable, not the build interpreter.
 "$APP_BINARY" --self-test "$SMOKE_JSON"
 "$APP_BINARY" --self-test-dnd
+EXPORT_SMOKE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/rfmapping-stable-export-smoke.XXXXXX")"
+"$APP_BINARY" --self-test-export "$EXPORT_SMOKE_DIR"
+require_nonempty_file "$EXPORT_SMOKE_DIR/figure-export-smoke.pdf"
+require_nonempty_file "$EXPORT_SMOKE_DIR/figure-export-smoke/manifest.json"
+require_nonempty_file "$EXPORT_SMOKE_DIR/displayed-data-smoke.csv"
+rm -rf -- "$EXPORT_SMOKE_DIR"
 
 clean_bundle_metadata "$APP_BUNDLE"
 SIGN_ARGUMENTS=(--force --deep --sign "$SIGNING_IDENTITY")

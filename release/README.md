@@ -32,6 +32,9 @@ Stable 1.9.5 is a coordinated schema release for the current regular
 the spatial `occupancyTimeSec` matrix, normalize firing rate as
 count/occupancy, and start in firing-rate mode. Earlier occupancy-free or
 already-normalized RF payloads are intentionally outside this release.
+The refreshed Python artifacts additionally ship the SpikeInterface waveform
+viewer/exporter on both macOS arm64 and Windows x64; Swift and Web are
+unchanged by that Python-only patch.
 
 Each active component records a `feature_generation_offset` from the Python
 stable reference. The current Swift/Web offset is `0`; a viewer verified to be
@@ -46,8 +49,12 @@ python3 release/verify_versions.py
 ```
 
 Pushing one exact component tag invokes only that component's release job.
-Manual workflow dispatch builds all four candidates without publishing a tag
-or GitHub Release. Python alpha releases are marked as GitHub prereleases.
+The Python stable job builds and smoke-tests both its macOS arm64 archive and
+Windows x64 portable/setup packages before it creates or updates the matching
+component Release.
+Manual workflow dispatch builds only the selected component candidate without
+publishing a tag or GitHub Release; selecting Python stable runs its paired
+macOS and Windows jobs. Python alpha releases are marked as GitHub prereleases.
 
 The alpha is written as `1.10.0-alpha.3`, not `1.10.0.3`: SemVer represents
 preview status after a hyphen. Python package metadata uses the PEP 440 spelling

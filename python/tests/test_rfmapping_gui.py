@@ -6,6 +6,8 @@ from pathlib import Path
 from types import MethodType, SimpleNamespace
 from unittest import mock
 
+import numpy as np
+
 import rfmapping_gui as gui
 
 
@@ -188,6 +190,130 @@ class UnitFilterSettingsTests(unittest.TestCase):
             defaults.rf_filter_units_with_zero_bins,
         )
         self.assertEqual(restored.rf_zero_bin_threshold, 1)
+
+
+class WaveformSettingsTests(unittest.TestCase):
+    def test_waveform_visibility_and_channel_mode_round_trip(self) -> None:
+        for mode in gui.WAVEFORM_CHANNEL_MODES:
+            with self.subTest(mode=mode):
+                settings = replace(
+                    gui.ViewerSettings(),
+                    show_waveform=False,
+                    waveform_channel_mode=mode,
+                )
+                serialized = settings.to_mapping()
+
+                self.assertIs(serialized["show_waveform"], False)
+                self.assertEqual(serialized["waveform_channel_mode"], mode)
+                restored = gui.ViewerSettings.from_mapping(serialized)
+                self.assertFalse(restored.show_waveform)
+                self.assertEqual(restored.waveform_channel_mode, mode)
+
+    def test_invalid_waveform_channel_mode_falls_back_independently(self) -> None:
+        defaults = gui.ViewerSettings()
+        restored = gui.ViewerSettings.from_mapping(
+            {
+                "schema_version": gui.SETTINGS_SCHEMA_VERSION,
+                "default_viewer_tab": "waveform",
+                "waveform_channel_mode": "same_y_row",
+            }
+        )
+
+        self.assertEqual(restored.waveform_channel_mode, defaults.waveform_channel_mode)
+        self.assertEqual(restored.default_viewer_tab, "rf")
+
+    def test_invalid_waveform_visibility_falls_back_without_resetting_mode(self) -> None:
+        defaults = gui.ViewerSettings()
+        restored = gui.ViewerSettings.from_mapping(
+            {
+                "schema_version": gui.SETTINGS_SCHEMA_VERSION,
+                "show_waveform": "yes",
+                "waveform_channel_mode": "same_shank",
+            }
+        )
+
+        self.assertEqual(restored.show_waveform, defaults.show_waveform)
+        self.assertEqual(restored.waveform_channel_mode, "same_shank")
+
+
+class WaveformCanvasTests(unittest.TestCase):
+    def test_live_canvas_accepts_the_shared_numpy_payload(self) -> None:
+        class Canvas:
+            def __init__(self) -> None:
+                self.rectangles: list[tuple[tuple[object, ...], dict[str, object]]] = []
+                self.texts: list[tuple[tuple[object, ...], dict[str, object]]] = []
+                self.lines: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+            def delete(self, *_args: object) -> None:
+                return None
+
+            def winfo_width(self) -> int:
+                return 900
+
+            def winfo_height(self) -> int:
+                return 520
+
+            def create_rectangle(self, *args: object, **kwargs: object) -> None:
+                self.rectangles.append((args, kwargs))
+
+            def create_text(self, *args: object, **kwargs: object) -> None:
+                self.texts.append((args, kwargs))
+
+            def create_line(self, *args: object, **kwargs: object) -> None:
+                self.lines.append((args, kwargs))
+
+        class Variable:
+            def get(self) -> str:
+                return "same_x_column"
+
+        class Label:
+            text = ""
+
+            def configure(self, *, text: str) -> None:
+                self.text = text
+
+        canvas = Canvas()
+        subtitle = Label()
+        viewer = SimpleNamespace(
+            canvases={"waveform": canvas},
+            show_waveform_var=SimpleNamespace(get=lambda: True),
+            waveform_channel_mode_var=Variable(),
+            waveform_subtitle_label=subtitle,
+            waveform_payload={
+                "matrix": np.arange(20, dtype=float).reshape(5, 4) - 10.0,
+                "times_ms": np.asarray((-0.5, -0.25, 0.0, 0.25)),
+                "channel_labels": tuple(f"ch {index}" for index in range(5)),
+                "best_channel_row": 2,
+                "amplitude_limit_uv": 12.0,
+                "max_ptp_uv": 22.5,
+            },
+            _waveform_payload_key=(17, "same_x_column"),
+            _selected_unit_id_value=lambda: 17,
+        )
+
+        gui.RFMViewer._draw_waveform(viewer)
+
+        self.assertGreaterEqual(len(canvas.rectangles), 20 + 80)
+        self.assertGreaterEqual(len(canvas.lines), 4)
+        self.assertTrue(
+            any(call[1].get("text") == "★ ch 2" for call in canvas.texts)
+        )
+        self.assertIn("Cluster 17", subtitle.text)
+        self.assertIn("baseline ≤ -0.25 ms", subtitle.text)
+
+    def test_legacy_waveform_default_tab_migrates_to_rf(self) -> None:
+        restored = gui.ViewerSettings.from_mapping(
+            {
+                "schema_version": gui.SETTINGS_SCHEMA_VERSION,
+                "default_viewer_tab": "waveform",
+                "waveform_channel_mode": "same_shank",
+                "rf_palette": "Viridis",
+            }
+        )
+
+        self.assertEqual(restored.default_viewer_tab, "rf")
+        self.assertEqual(restored.waveform_channel_mode, "same_shank")
+        self.assertEqual(restored.rf_palette, "Viridis")
 
 
 class SpatialDisplayGeometryTests(unittest.TestCase):
@@ -549,20 +675,16 @@ class RFPlotRangeTests(unittest.TestCase):
 
 
 class MacOSLifecycleTests(unittest.TestCase):
-    def test_frozen_startup_uses_bundled_json_without_modal_picker(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            contents = Path(directory) / "RF Map Viewer.app" / "Contents"
-            executable = contents / "MacOS" / "RF Map Viewer"
-            data_dir = contents / "Resources" / "data"
-            data_dir.mkdir(parents=True)
-            document = data_dir / "bundled.json"
-            document.write_text("{}", encoding="utf-8")
+    def test_no_argument_main_opens_file_chooser_viewer_without_sample_data(self) -> None:
+        viewer = mock.Mock()
+        with (
+            mock.patch.object(gui, "TK_AVAILABLE", True),
+            mock.patch.object(gui, "RFMViewer", return_value=viewer) as viewer_type,
+        ):
+            self.assertEqual(gui.main([]), 0)
 
-            with (
-                mock.patch.object(gui.sys, "frozen", True, create=True),
-                mock.patch.object(gui.sys, "executable", str(executable)),
-            ):
-                self.assertEqual(gui.startup_json_path(), document.resolve())
+        viewer_type.assert_called_once_with()
+        viewer.mainloop.assert_called_once_with()
 
     def test_macos_handlers_include_open_document_and_quit(self) -> None:
         class FakeTk:
@@ -627,11 +749,11 @@ class MacOSLifecycleTests(unittest.TestCase):
             gui.RFMViewer._open_json(viewer)
         self.assertEqual(viewer.opened, [Path("/tmp/next.json")])
 
-    def test_initial_open_document_replaces_deferred_bundled_load(self) -> None:
+    def test_initial_open_document_replaces_deferred_file_picker(self) -> None:
         class FakeViewer:
             def __init__(self) -> None:
                 self._viewer_ready = False
-                self._startup_after = "bundled-load"
+                self._startup_after = "file-picker"
                 self.cancelled = []
                 self.scheduled = []
 
@@ -652,7 +774,7 @@ class MacOSLifecycleTests(unittest.TestCase):
         viewer._cancel_startup_callback = lambda: gui.RFMViewer._cancel_startup_callback(viewer)
         gui.RFMViewer._on_macos_open_documents(viewer, "/tmp/requested.json")
 
-        self.assertEqual(viewer.cancelled, ["bundled-load"])
+        self.assertEqual(viewer.cancelled, ["file-picker"])
         self.assertEqual(viewer._startup_after, "document-load")
         viewer.scheduled[0]()
         self.assertEqual(viewer.loaded, Path("/tmp/requested.json"))

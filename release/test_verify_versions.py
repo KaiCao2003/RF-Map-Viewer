@@ -4,6 +4,7 @@ import copy
 import json
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -34,6 +35,47 @@ class ComponentVersionTests(unittest.TestCase):
         swift["artifact"] = "RF_Map_Viewer-1.8.4-swift-macos-arm64.zip"
         swift["tag"] = "swift-v1.8.4"
         verify_manifest(candidate)
+
+    def test_python_stable_windows_release_assets_are_canonical(self) -> None:
+        fields_and_labels = {
+            "windows_portable_artifact": "Python stable Windows portable artifact",
+            "windows_installer_artifact": "Python stable Windows installer artifact",
+            "windows_checksum": "Python stable Windows checksum",
+        }
+        for field, label in fields_and_labels.items():
+            with self.subTest(field=field):
+                candidate = copy.deepcopy(MANIFEST)
+                candidate["components"]["python_stable"][field] = "wrong-name"
+                with self.assertRaisesRegex(ValueError, label):
+                    verify_manifest(candidate)
+
+    def test_github_outputs_include_python_stable_windows_assets(self) -> None:
+        verifier = ROOT / "release/verify_versions.py"
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output_path = Path(temporary_directory) / "github-output"
+            subprocess.run(
+                [sys.executable, str(verifier), "--github-output", str(output_path)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            outputs = dict(
+                line.split("=", 1)
+                for line in output_path.read_text(encoding="utf-8").splitlines()
+            )
+        python_stable = MANIFEST["components"]["python_stable"]
+        self.assertEqual(
+            outputs["python_stable_windows_portable_artifact"],
+            python_stable["windows_portable_artifact"],
+        )
+        self.assertEqual(
+            outputs["python_stable_windows_installer_artifact"],
+            python_stable["windows_installer_artifact"],
+        )
+        self.assertEqual(
+            outputs["python_stable_windows_checksum"],
+            python_stable["windows_checksum"],
+        )
 
     def test_only_exact_component_tags_are_accepted(self) -> None:
         verifier = ROOT / "release/verify_versions.py"

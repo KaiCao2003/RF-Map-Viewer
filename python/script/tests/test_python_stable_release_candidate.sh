@@ -58,17 +58,19 @@ pass_test "stable release helpers pass syntax validation"
   [[ "$RF_MAPPING_BUNDLE_ID" == "org.local.rfmapping.viewer" ]]
   [[ "$RF_MAPPING_APP_VERSION" == "1.9.5" ]]
   [[ "$RF_MAPPING_PACKAGE_VERSION" == "1.9.5" ]]
-  [[ "$RF_MAPPING_APP_BUILD" == "10905" ]]
+  [[ "$RF_MAPPING_APP_BUILD" == "10906" ]]
   [[ "$RF_MAPPING_RELEASE_EDITION" == "Full" ]]
   [[ "$RF_MAPPING_RELEASE_FLAVOR" == "full" ]]
 ) || fail_test "canonical stable Python metadata is incomplete or unexpected"
-pass_test "canonical metadata identifies Python stable 1.9.5 build 10905"
+pass_test "canonical metadata identifies Python stable 1.9.5 build 10906"
 
 for marker in \
   'source "$SCRIPT_DIR/python_stable_macos_release.env"' \
   'METADATA_AUDITOR="$SCRIPT_DIR/verify_python_stable_release_metadata.py"' \
   '"$ROOT_DIR/rfmapping_gui.py"' \
   '"$APP_BINARY" --self-test "$SMOKE_JSON"' \
+  '"$APP_BINARY" --self-test-export "$EXPORT_SMOKE_DIR"' \
+  'Archive must not bundle RF, tuning-curve, probe, or smoke sample data' \
   'Add :CFBundleDocumentTypes:1:CFBundleTypeExtensions:0 string json' \
   'Add :UTExportedTypeDeclarations:1:UTTypeIdentifier string org.local.rfmapping.tc' \
   'Add :UTExportedTypeDeclarations:2:UTTypeIdentifier string org.local.rfmapping.probe'; do

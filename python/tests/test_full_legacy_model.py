@@ -18,6 +18,7 @@ from types import MethodType, SimpleNamespace
 from unittest import mock
 
 import rfmapping_gui as gui
+import rfmapping_viewer.figure_export as figure_export_module
 
 
 def write_payload(payload: dict) -> tuple[tempfile.TemporaryDirectory, Path]:
@@ -466,6 +467,7 @@ class ViewerSettingsTests(unittest.TestCase):
                 "schema_version": gui.SETTINGS_SCHEMA_VERSION,
                 "show_tuning_curve": 1,
                 "auto_load_tuning_curve": False,
+                "show_waveform": "yes",
                 "show_probe_layout": "yes",
                 "auto_load_probe_layout": False,
                 "rf_sum_start_ms": 20,
@@ -492,6 +494,7 @@ class ViewerSettingsTests(unittest.TestCase):
 
         self.assertEqual(settings.show_tuning_curve, defaults.show_tuning_curve)
         self.assertFalse(settings.auto_load_tuning_curve)
+        self.assertEqual(settings.show_waveform, defaults.show_waveform)
         self.assertEqual(settings.show_probe_layout, defaults.show_probe_layout)
         self.assertFalse(settings.auto_load_probe_layout)
         self.assertEqual(
@@ -1417,20 +1420,16 @@ class MacOSLifecycleTests(unittest.TestCase):
             "The viewer is still opening. Try again when it is ready."
         )
 
-    def test_frozen_startup_uses_bundled_json_without_modal_picker(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            contents = Path(directory) / "RF Map Viewer.app" / "Contents"
-            executable = contents / "MacOS" / "RF Map Viewer"
-            data_dir = contents / "Resources" / "data"
-            data_dir.mkdir(parents=True)
-            document = data_dir / "bundled.json"
-            document.write_text("{}", encoding="utf-8")
+    def test_no_argument_main_opens_file_chooser_viewer_without_sample_data(self) -> None:
+        viewer = mock.Mock()
+        with (
+            mock.patch.object(gui, "TK_AVAILABLE", True),
+            mock.patch.object(gui, "RFMViewer", return_value=viewer) as viewer_type,
+        ):
+            self.assertEqual(gui.main([]), 0)
 
-            with (
-                mock.patch.object(gui.sys, "frozen", True, create=True),
-                mock.patch.object(gui.sys, "executable", str(executable)),
-            ):
-                self.assertEqual(gui.startup_json_path(), document.resolve())
+        viewer_type.assert_called_once_with()
+        viewer.mainloop.assert_called_once_with()
 
     def test_macos_handlers_include_open_document_and_quit(self) -> None:
         class FakeTk:
@@ -1500,11 +1499,11 @@ class MacOSLifecycleTests(unittest.TestCase):
             gui.RFMViewer._open_json(viewer)
         self.assertEqual(viewer.opened, [Path("/tmp/next.json")])
 
-    def test_initial_open_document_replaces_deferred_bundled_load(self) -> None:
+    def test_initial_open_document_replaces_deferred_file_picker(self) -> None:
         class FakeViewer:
             def __init__(self) -> None:
                 self._viewer_ready = False
-                self._startup_after = "bundled-load"
+                self._startup_after = "file-picker"
                 self.cancelled = []
                 self.scheduled = []
 
@@ -1525,7 +1524,7 @@ class MacOSLifecycleTests(unittest.TestCase):
         viewer._cancel_startup_callback = lambda: gui.RFMViewer._cancel_startup_callback(viewer)
         gui.RFMViewer._on_macos_open_documents(viewer, "/tmp/requested.json")
 
-        self.assertEqual(viewer.cancelled, ["bundled-load"])
+        self.assertEqual(viewer.cancelled, ["file-picker"])
         self.assertEqual(viewer._startup_after, "document-load")
         viewer.scheduled[0]()
         self.assertEqual(viewer.loaded, Path("/tmp/requested.json"))
@@ -2522,8 +2521,26 @@ class TimelineHitTestingTests(unittest.TestCase):
 
 
 class CommandLineTests(unittest.TestCase):
+    def test_data_smoke_tolerates_windowed_executable_without_stdio(self) -> None:
+        directory, path = write_payload(base_payload())
+        self.addCleanup(directory.cleanup)
+        with (
+            mock.patch.object(gui.sys, "stdout", None),
+            mock.patch.object(gui.sys, "stderr", None),
+        ):
+            self.assertEqual(gui.main(["--self-test", str(path)]), 0)
+
     def test_tkdnd_smoke_flag_runs_without_requiring_a_json_path(self) -> None:
         with mock.patch.object(gui, "run_tkdnd_self_test") as smoke:
+            self.assertEqual(gui.main(["--self-test-dnd"]), 0)
+        smoke.assert_called_once_with()
+
+    def test_tkdnd_smoke_tolerates_windowed_executable_without_stdio(self) -> None:
+        with (
+            mock.patch.object(gui.sys, "stdout", None),
+            mock.patch.object(gui.sys, "stderr", None),
+            mock.patch.object(gui, "run_tkdnd_self_test") as smoke,
+        ):
             self.assertEqual(gui.main(["--self-test-dnd"]), 0)
         smoke.assert_called_once_with()
 
@@ -2534,6 +2551,73 @@ class CommandLineTests(unittest.TestCase):
             side_effect=RuntimeError("missing TkDND"),
         ):
             self.assertEqual(gui.main(["--self-test-dnd"]), 1)
+
+    def test_tkdnd_smoke_failure_without_stdio_still_returns_nonzero(self) -> None:
+        with (
+            mock.patch.object(gui.sys, "stdout", None),
+            mock.patch.object(gui.sys, "stderr", None),
+            mock.patch.object(
+                gui,
+                "run_tkdnd_self_test",
+                side_effect=RuntimeError("missing TkDND"),
+            ),
+        ):
+            self.assertEqual(gui.main(["--self-test-dnd"]), 1)
+
+    def test_figure_export_smoke_writes_pdf_png_manifest_and_csv(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        output_root = Path(directory.name) / "packaged-export"
+
+        self.assertEqual(
+            gui.main(["--self-test-export", str(output_root)]),
+            0,
+        )
+
+        self.assertTrue((output_root / "figure-export-smoke.pdf").is_file())
+        self.assertTrue(
+            (output_root / "figure-export-smoke" / "manifest.json").is_file()
+        )
+        self.assertEqual(
+            (output_root / "displayed-data-smoke.csv").read_text(encoding="utf-8"),
+            "unit_id,value\n1,3\n",
+        )
+
+    def test_figure_export_smoke_without_stdio_uses_exit_status(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        output_root = Path(directory.name) / "packaged-export"
+        with (
+            mock.patch.object(gui.sys, "stdout", None),
+            mock.patch.object(gui.sys, "stderr", None),
+        ):
+            self.assertEqual(
+                gui.main(["--self-test-export", str(output_root)]),
+                0,
+            )
+
+    def test_figure_export_smoke_exercises_windows_path_backends(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        output_root = Path(directory.name) / "packaged-export"
+        with (
+            mock.patch.object(gui, "_USE_PATH_CSV_PUBLICATION", True),
+            mock.patch.object(
+                figure_export_module,
+                "_USE_PATH_PUBLICATION",
+                True,
+            ),
+        ):
+            self.assertEqual(
+                gui.main(["--self-test-export", str(output_root)]),
+                0,
+            )
+
+        self.assertTrue((output_root / "figure-export-smoke.pdf").is_file())
+        self.assertTrue(
+            (output_root / "figure-export-smoke" / "manifest.json").is_file()
+        )
+        self.assertTrue((output_root / "displayed-data-smoke.csv").is_file())
 
 
 if __name__ == "__main__":

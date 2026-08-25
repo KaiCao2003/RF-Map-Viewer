@@ -33,7 +33,7 @@ advance without inventing a platform-specific fourth version number.
 
 | Viewer | Channel | Download | Release notes |
 | --- | --- | --- | --- |
-| Python RF Map Viewer `1.9.5` | Stable | [macOS Apple-silicon ZIP](https://github.com/KaiCao2003/RF-Map-Viewer/releases/download/python-v1.9.5/RF_Map_Viewer-python-1.9.5-full-macos-arm64.zip) | [`python-v1.9.5`](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/python-v1.9.5) |
+| Python RF Map Viewer `1.9.5` | Stable | [macOS Apple-silicon ZIP](https://github.com/KaiCao2003/RF-Map-Viewer/releases/download/python-v1.9.5/RF_Map_Viewer-python-1.9.5-full-macos-arm64.zip) · [Windows x64 portable ZIP](https://github.com/KaiCao2003/RF-Map-Viewer/releases/download/python-v1.9.5/RF_Map_Viewer-python-1.9.5-full-windows-x64-portable.zip) · [Windows x64 setup](https://github.com/KaiCao2003/RF-Map-Viewer/releases/download/python-v1.9.5/RF_Map_Viewer-python-1.9.5-full-windows-x64-setup.exe) | [`python-v1.9.5`](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/python-v1.9.5) |
 | Python Free-Moving `1.10.0-alpha.3` | Alpha preview | [macOS Apple-silicon ZIP](https://github.com/KaiCao2003/RF-Map-Viewer/releases/download/python-v1.10.0-alpha.3/Free_Moving_RF_Viewer-python-1.10.0-alpha.3-freemoving-macos-arm64.zip) | [`python-v1.10.0-alpha.3`](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/python-v1.10.0-alpha.3) |
 | Swift `1.9.5` | Stable | [macOS Apple-silicon ZIP](https://github.com/KaiCao2003/RF-Map-Viewer/releases/download/swift-v1.9.5/RF_Map_Viewer-1.9.5-swift-macos-arm64.zip) | [`swift-v1.9.5`](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/swift-v1.9.5) |
 | Web `1.9.5` | Stable | [deployment source archive](https://github.com/KaiCao2003/RF-Map-Viewer/releases/download/web-v1.9.5/RF_Map_Viewer-1.9.5-web.tar.gz) | [`web-v1.9.5`](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/web-v1.9.5) |
@@ -83,6 +83,11 @@ Python, Swift, and Web `1.9.5` accept MATLAB numeric scalars
 for a declared singleton `xPositions` or `yPositions` axis. Singleton-y maps
 use a `30:7` Cartesian footprint and a seven-unit Polar ring; multirow data and
 all scientific indices remain unchanged.
+
+The refreshed Python `1.9.5` application also discovers the companion
+SpikeInterface waveform artifact and exposes its notebook-equivalent nearest
+channels in the viewer and Figure Composer. This Python-only patch does not
+change the Swift or Web applications.
 
 ## Remote validation
 
