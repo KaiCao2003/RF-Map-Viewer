@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import gzip
+import hashlib
 import json
 import os
 import threading
@@ -975,6 +976,34 @@ def test_frozen_file_hash_rejects_changed_source(tmp_path: Path) -> None:
     source.write_text("modified after load", encoding="utf-8")
     with np.testing.assert_raises_regex(RuntimeError, "changed after it was loaded"):
         rfmapping_gui._hash_frozen_file(identity)
+
+
+def test_frozen_file_hash_keeps_windows_path_and_handle_domains_separate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.json"
+    source.write_bytes(b"scientific input")
+    real_fstat = rfmapping_gui.os.fstat
+
+    def handle_domain_stat(descriptor: int) -> SimpleNamespace:
+        result = real_fstat(descriptor)
+        return SimpleNamespace(
+            st_dev=result.st_dev + 1000,
+            st_ino=result.st_ino + 1000,
+            st_mode=result.st_mode,
+            st_size=result.st_size,
+            st_mtime_ns=result.st_mtime_ns + 100,
+            st_ctime_ns=result.st_ctime_ns + 100,
+        )
+
+    monkeypatch.setattr(rfmapping_gui.os, "fstat", handle_domain_stat)
+    identity = rfmapping_gui.FrozenFileIdentity.capture(source)
+
+    assert identity.handle_device != identity.device
+    assert rfmapping_gui._hash_frozen_file(identity) == hashlib.sha256(
+        b"scientific input"
+    ).hexdigest()
 
 
 def test_gui_shared_rf_scale_is_selection_scoped_and_frozen_in_plot_options(

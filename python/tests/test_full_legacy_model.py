@@ -1378,7 +1378,7 @@ class MacOSLifecycleTests(unittest.TestCase):
             )
 
     def test_support_documentation_opens_local_file_uri(self) -> None:
-        readme = Path("/tmp/RF Map Viewer README.md")
+        readme = Path(tempfile.gettempdir()) / "RF Map Viewer README.md"
         viewer = SimpleNamespace()
         with (
             mock.patch.object(gui, "support_documentation_path", return_value=readme),

@@ -14,6 +14,7 @@ import xml.etree.ElementTree as ET
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from PIL import Image, ImageChops, ImageDraw
@@ -2250,6 +2251,32 @@ def test_path_publication_backend_detects_destination_race(
 
     assert (destination / "raw.bin").read_bytes() == b"source-of-truth"
     assert not list(tmp_path.glob(".portable-race.tmp-*"))
+
+
+def test_path_pdf_snapshot_keeps_windows_path_and_handle_domains_separate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    destination = tmp_path / "portable.pdf"
+    destination.write_bytes(b"%PDF-1.4\n%%EOF\n")
+    real_fstat = figure_export_module.os.fstat
+
+    def handle_domain_stat(descriptor: int) -> SimpleNamespace:
+        result = real_fstat(descriptor)
+        return SimpleNamespace(
+            st_dev=result.st_dev + 1000,
+            st_ino=result.st_ino + 1000,
+            st_mode=result.st_mode,
+            st_size=result.st_size,
+            st_mtime_ns=result.st_mtime_ns + 100,
+            st_ctime_ns=result.st_ctime_ns + 100,
+        )
+
+    monkeypatch.setattr(figure_export_module.os, "fstat", handle_domain_stat)
+    first = figure_export_module._snapshot_pdf_path(destination)
+    second = figure_export_module._snapshot_pdf_path(destination)
+
+    assert figure_export_module._same_pdf_snapshot(second, first)
 
 
 @pytest.mark.parametrize(
