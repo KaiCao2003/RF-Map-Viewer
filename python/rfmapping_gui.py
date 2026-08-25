@@ -5721,8 +5721,8 @@ class RFMViewer(tk.Toplevel):
                     background="#ffffff",
                     highlightthickness=0,
                     # Header, subtitle, and separator bring the complete pane
-                    # to roughly the 220 px compact companion height below TC.
-                    height=140,
+                    # to roughly 180 px, leaving TC larger on short displays.
+                    height=100,
                 )
                 self.waveform_canvas.grid(row=2, column=0, sticky="nsew")
                 self.canvases["waveform"] = self.waveform_canvas
@@ -5776,7 +5776,7 @@ class RFMViewer(tk.Toplevel):
             self.tuning_curve_pane.rowconfigure(
                 waveform_row,
                 weight=0,
-                minsize=220,
+                minsize=180,
             )
             if tuning_visible:
                 self.waveform_fold_button.grid_remove()
