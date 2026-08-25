@@ -177,38 +177,106 @@ class FrozenFileIdentity:
     mtime_ns: int
     ctime_ns: int
     mode: int
+    handle_device: int
+    handle_inode: int
+    handle_size: int
+    handle_mtime_ns: int
+    handle_mode: int
 
     @classmethod
     def capture(cls, path: str | Path) -> FrozenFileIdentity:
         source = Path(path).expanduser().resolve(strict=True)
-        info = os.stat(source, follow_symlinks=False)
-        if not stat.S_ISREG(info.st_mode):
+        path_before = os.stat(source, follow_symlinks=False)
+        if not stat.S_ISREG(path_before.st_mode):
             raise ValueError(f"Scientific input is not a regular file: {source}")
+        descriptor = os.open(
+            source,
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+        )
+        try:
+            handle_info = os.fstat(descriptor)
+        finally:
+            os.close(descriptor)
+        path_after = os.stat(source, follow_symlinks=False)
+        if not stat.S_ISREG(handle_info.st_mode):
+            raise ValueError(f"Scientific input is not a regular file: {source}")
+        if (
+            handle_info.st_size != path_after.st_size
+            or cls.path_signature(path_after) != cls.path_signature(path_before)
+        ):
+            raise ValueError(f"Scientific input changed while it was opened: {source}")
         return cls(
             source,
-            int(info.st_dev),
-            int(info.st_ino),
-            int(info.st_size),
-            int(info.st_mtime_ns),
-            int(info.st_ctime_ns),
-            int(stat.S_IFMT(info.st_mode)),
+            int(path_after.st_dev),
+            int(path_after.st_ino),
+            int(path_after.st_size),
+            int(path_after.st_mtime_ns),
+            int(path_after.st_ctime_ns),
+            int(stat.S_IFMT(path_after.st_mode)),
+            int(handle_info.st_dev),
+            int(handle_info.st_ino),
+            int(handle_info.st_size),
+            int(handle_info.st_mtime_ns),
+            int(stat.S_IFMT(handle_info.st_mode)),
         )
 
-    def matches(self, info: os.stat_result) -> bool:
+    @staticmethod
+    def path_signature(info: os.stat_result) -> tuple[int, ...]:
         return (
             int(info.st_dev),
             int(info.st_ino),
             int(info.st_size),
             int(info.st_mtime_ns),
-            int(info.st_ctime_ns),
+            int(info.st_ctime_ns) if os.name != "nt" else 0,
+            int(stat.S_IFMT(info.st_mode)),
+        )
+
+    def matches(self, info: os.stat_result) -> bool:
+        stable_fields_match = (
+            int(info.st_dev),
+            int(info.st_ino),
+            int(info.st_size),
+            int(info.st_mtime_ns),
             int(stat.S_IFMT(info.st_mode)),
         ) == (
             self.device,
             self.inode,
             self.size,
             self.mtime_ns,
-            self.ctime_ns,
             self.mode,
+        )
+        # Windows reports creation/change timestamps inconsistently between
+        # path stat and an open file handle.  Size, mtime, file identity, and
+        # the provenance digest still detect scientific-input mutations.
+        return stable_fields_match and (
+            os.name == "nt" or int(info.st_ctime_ns) == self.ctime_ns
+        )
+
+    def matches_open_file(self, info: os.stat_result) -> bool:
+        return (
+            int(info.st_dev),
+            int(info.st_ino),
+            int(info.st_size),
+            int(info.st_mtime_ns),
+            int(stat.S_IFMT(info.st_mode)),
+        ) == (
+            self.handle_device,
+            self.handle_inode,
+            self.handle_size,
+            self.handle_mtime_ns,
+            self.handle_mode,
+        )
+
+    @staticmethod
+    def open_file_signature(info: os.stat_result) -> tuple[int, ...]:
+        return (
+            int(info.st_dev),
+            int(info.st_ino),
+            int(info.st_size),
+            int(info.st_mtime_ns),
+            int(stat.S_IFMT(info.st_mode)),
         )
 
     def verify_path(self) -> None:
@@ -244,13 +312,14 @@ def _hash_frozen_file(
             raise RuntimeError("Preview superseded by a newer recipe")
 
     check_cancelled()
+    identity.verify_path()
     descriptor = os.open(
         identity.path,
         os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
     )
     try:
         before = os.fstat(descriptor)
-        if not identity.matches(before):
+        if not identity.matches_open_file(before):
             raise RuntimeError(
                 f"Scientific input changed after it was loaded; reopen it before exporting: {identity.path}"
             )
@@ -260,7 +329,11 @@ def _hash_frozen_file(
             digest.update(chunk)
         check_cancelled()
         after = os.fstat(descriptor)
-        if not identity.matches(after):
+        if (
+            not identity.matches_open_file(after)
+            or identity.open_file_signature(after)
+            != identity.open_file_signature(before)
+        ):
             raise RuntimeError(
                 f"Scientific input changed while provenance was computed: {identity.path}"
             )
@@ -5647,7 +5720,9 @@ class RFMViewer(tk.Toplevel):
                     self.waveform_pane,
                     background="#ffffff",
                     highlightthickness=0,
-                    height=210,
+                    # Header, subtitle, and separator bring the complete pane
+                    # to roughly the 220 px compact companion height below TC.
+                    height=140,
                 )
                 self.waveform_canvas.grid(row=2, column=0, sticky="nsew")
                 self.canvases["waveform"] = self.waveform_canvas

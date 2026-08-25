@@ -3808,7 +3808,20 @@ def _same_pdf_file_metadata(
         _same_identity(result, identity.entry)
         and result.st_size == identity.size
         and result.st_mtime_ns == identity.mtime_ns
-        and result.st_ctime_ns == identity.ctime_ns
+        and (os.name == "nt" or result.st_ctime_ns == identity.ctime_ns)
+    )
+
+
+def _same_pdf_snapshot(
+    current: _PdfFileIdentity,
+    expected: _PdfFileIdentity,
+) -> bool:
+    return (
+        current.entry == expected.entry
+        and current.size == expected.size
+        and current.mtime_ns == expected.mtime_ns
+        and current.sha256 == expected.sha256
+        and (os.name == "nt" or current.ctime_ns == expected.ctime_ns)
     )
 
 
@@ -4734,6 +4747,24 @@ def _read_regular_path(
     return b"".join(chunks)
 
 
+def _same_regular_file_stat(
+    current: os.stat_result,
+    expected: os.stat_result,
+) -> bool:
+    """Compare stat snapshots produced within the same Windows/POSIX API domain."""
+
+    return (
+        stat.S_ISREG(current.st_mode)
+        and stat.S_ISREG(expected.st_mode)
+        and current.st_dev == expected.st_dev
+        and current.st_ino == expected.st_ino
+        and current.st_mode == expected.st_mode
+        and current.st_size == expected.st_size
+        and current.st_mtime_ns == expected.st_mtime_ns
+        and (os.name == "nt" or current.st_ctime_ns == expected.st_ctime_ns)
+    )
+
+
 def _snapshot_pdf_path(path: Path) -> _PdfFileIdentity:
     before = _path_lstat(path)
     if (
@@ -4750,7 +4781,7 @@ def _snapshot_pdf_path(path: Path) -> _PdfFileIdentity:
     )
     try:
         opened = os.fstat(descriptor)
-        if not _same_identity(opened, _EntryIdentity.from_stat(before)):
+        if not stat.S_ISREG(opened.st_mode) or opened.st_size != before.st_size:
             raise FigureExportError(
                 "PDF overwrite target changed while it was being opened"
             )
@@ -4758,22 +4789,21 @@ def _snapshot_pdf_path(path: Path) -> _PdfFileIdentity:
         after = os.fstat(descriptor)
     finally:
         os.close(descriptor)
-    snapshot = _PdfFileIdentity.from_stat_and_digest(before, digest)
     refreshed = _path_lstat(path)
     if (
         refreshed is None
-        or not _same_pdf_file_metadata(after, snapshot)
-        or not _same_pdf_file_metadata(refreshed, snapshot)
+        or not _same_regular_file_stat(after, opened)
+        or not _same_regular_file_stat(refreshed, before)
     ):
         raise FigureExportError(
             "PDF overwrite target changed while its content was being inspected"
         )
-    return snapshot
+    return _PdfFileIdentity.from_stat_and_digest(refreshed, digest)
 
 
 def _pdf_path_matches_snapshot(path: Path, expected: _PdfFileIdentity) -> bool:
     try:
-        return _snapshot_pdf_path(path) == expected
+        return _same_pdf_snapshot(_snapshot_pdf_path(path), expected)
     except (FigureExportError, OSError):
         return False
 
