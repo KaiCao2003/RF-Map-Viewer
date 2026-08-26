@@ -75,6 +75,15 @@ class TkViewerTests(unittest.TestCase):
         ):
             self.app = gui.RFMViewer(gui.RFMappingData(path))
         self.addCleanup(self._destroy_app)
+        # Keep every test deterministic across native macOS Tk and Xvfb.  The
+        # production viewer intentionally starts companion discovery after a
+        # short timer and collapses an absent HD pane; whether that worker can
+        # finish during the first update is host-speed dependent.  Tests that
+        # exercise autoload start it explicitly below.
+        if self.app._optional_autoload_after is not None:
+            self.app.after_cancel(self.app._optional_autoload_after)
+            self.app._optional_autoload_after = None
+            self.app._optional_autoload_generation += 1
         self.app.notebook.select(2)
         self.app.update()
 
@@ -141,21 +150,44 @@ class TkViewerTests(unittest.TestCase):
         self.assertTrue(heartbeat, "Tk callback did not run while RF data decoded")
         self.assertIsNone(viewer._startup_loading_frame)
 
-    def test_rf_tab_tuning_pane_hides_and_restores_rf_space(self) -> None:
+    def test_rf_companion_stack_follows_independent_visibility_settings(self) -> None:
         self.app.notebook.select(0)
         self.app.update()
         initial_rf_width = self.app.rf_map_pane.winfo_width()
         self.assertTrue(self.app.tuning_curve_pane.winfo_ismapped())
+        self.assertTrue(self.app.tuning_curve_section.winfo_ismapped())
+        self.assertTrue(self.app.unit_info_pane.winfo_ismapped())
+        self.assertTrue(self.app.waveform_pane.winfo_ismapped())
+        self.assertEqual(int(self.app.tuning_curve_section.grid_info()["row"]), 0)
+        self.assertEqual(int(self.app.unit_info_pane.grid_info()["row"]), 1)
+        self.assertIs(self.app.waveform_pane.master, self.app.waveform_host)
+        self.assertEqual(int(self.app.waveform_pane.grid_info()["row"]), 0)
         self.assertGreater(
             initial_rf_width,
-            2 * self.app.tuning_curve_pane.winfo_width(),
+            self.app.tuning_curve_pane.winfo_width(),
         )
 
-        hidden = replace(
+        waveform_only = replace(
             self.app.settings,
             show_tuning_curve=False,
             auto_load_tuning_curve=False,
+            show_waveform=True,
         )
+        self.assertTrue(
+            self.app._apply_viewer_settings(
+                waveform_only,
+                persist=False,
+                broadcast=False,
+            )
+        )
+        self.app.update()
+        self.assertTrue(self.app.tuning_curve_pane.winfo_ismapped())
+        self.assertFalse(self.app.tuning_curve_section.winfo_ismapped())
+        self.assertTrue(self.app.unit_info_pane.winfo_ismapped())
+        self.assertTrue(self.app.waveform_pane.winfo_ismapped())
+        self.assertEqual(int(self.app.waveform_pane.grid_info()["row"]), 0)
+
+        hidden = replace(waveform_only, show_waveform=False)
         self.assertTrue(
             self.app._apply_viewer_settings(
                 hidden,
@@ -164,10 +196,25 @@ class TkViewerTests(unittest.TestCase):
             )
         )
         self.app.update()
-        self.assertFalse(self.app.tuning_curve_pane.winfo_ismapped())
+        self.assertTrue(self.app.tuning_curve_pane.winfo_ismapped())
+        self.assertTrue(self.app.unit_info_pane.winfo_ismapped())
         self.assertGreater(self.app.rf_map_pane.winfo_width(), initial_rf_width)
 
-        shown = replace(hidden, show_tuning_curve=True)
+        tuning_only = replace(hidden, show_tuning_curve=True)
+        self.assertTrue(
+            self.app._apply_viewer_settings(
+                tuning_only,
+                persist=False,
+                broadcast=False,
+            )
+        )
+        self.app.update()
+        self.assertTrue(self.app.tuning_curve_pane.winfo_ismapped())
+        self.assertTrue(self.app.tuning_curve_section.winfo_ismapped())
+        self.assertTrue(self.app.unit_info_pane.winfo_ismapped())
+        self.assertFalse(self.app.waveform_pane.winfo_ismapped())
+
+        shown = replace(tuning_only, show_waveform=True)
         self.assertTrue(
             self.app._apply_viewer_settings(
                 shown,
@@ -176,19 +223,45 @@ class TkViewerTests(unittest.TestCase):
             )
         )
         self.app.update()
-        self.assertTrue(self.app.tuning_curve_pane.winfo_ismapped())
+        self.assertTrue(self.app.tuning_curve_section.winfo_ismapped())
+        self.assertTrue(self.app.unit_info_pane.winfo_ismapped())
+        self.assertTrue(self.app.waveform_pane.winfo_ismapped())
 
-    def test_narrow_window_uses_responsive_stacked_tuning_layout(self) -> None:
+    def test_narrow_window_keeps_tuning_and_unit_info_beside_rf(self) -> None:
         self.app.notebook.select(0)
         self.app.geometry("1120x720")
         self.app.update()
-        self.assertEqual(int(self.app.tuning_curve_pane.grid_info()["row"]), 1)
-        self.assertEqual(int(self.app.tuning_curve_pane.grid_info()["column"]), 0)
-
-        self.app.geometry("1440x900")
-        self.app.update()
         self.assertEqual(int(self.app.tuning_curve_pane.grid_info()["row"]), 0)
         self.assertEqual(int(self.app.tuning_curve_pane.grid_info()["column"]), 1)
+        self.assertEqual(int(self.app.unit_info_pane.grid_info()["row"]), 1)
+        self.assertEqual(int(self.app.unit_info_pane.grid_info()["column"]), 1)
+        self.assertIs(self.app.unit_info_pane.master, self.app.rf_split_container)
+        self.app.selected_cell = (0, 1, 0, 1)
+        self.app._update_cell_label()
+        self.app.update()
+        self.assertGreaterEqual(
+            self.app.unit_stats_label.winfo_width(),
+            self.app.unit_stats_label.winfo_reqwidth(),
+        )
+        self.assertGreaterEqual(
+            self.app.waveform_pane.winfo_rooty(),
+            self.app.cell_label.winfo_rooty() + self.app.cell_label.winfo_height(),
+        )
+
+        stacked = replace(self.app.settings, tuning_layout="Stacked")
+        self.assertTrue(
+            self.app._apply_viewer_settings(
+                stacked,
+                persist=False,
+                broadcast=False,
+            )
+        )
+        self.app.update()
+        self.assertEqual(int(self.app.tuning_curve_pane.grid_info()["row"]), 1)
+        self.assertEqual(int(self.app.tuning_curve_pane.grid_info()["column"]), 0)
+        self.assertEqual(int(self.app.unit_info_pane.grid_info()["row"]), 1)
+        self.assertEqual(int(self.app.unit_info_pane.grid_info()["column"]), 1)
+        self.assertGreaterEqual(self.app.tuning_curve_canvas.winfo_height(), 180)
 
     def test_missing_tuning_curve_has_a_real_attach_action(self) -> None:
         self.app.notebook.select(0)
@@ -213,11 +286,22 @@ class TkViewerTests(unittest.TestCase):
             self.app.tuning_attach_button.cget("text"),
             "Choose tuning_curves.tc or .json…",
         )
-        self.assertIn("optional", self.app.tuning_curve_status_label.cget("text").lower())
+        self.assertFalse(self.app.tuning_curve_status_label.winfo_ismapped())
+        self.assertEqual(self.app.tuning_curve_status_label.cget("text"), "")
 
         with mock.patch.object(self.app, "_attach_tuning_curve") as attach:
             self.app._on_tuning_curve_click(SimpleNamespace(x=20, y=20))
         attach.assert_called_once_with()
+
+        self.app._tuning_curve_error = "invalid tuning header"
+        self.app._draw_tuning_curve()
+        error_text = "\n".join(
+            self.app.tuning_curve_canvas.itemcget(item, "text")
+            for item in self.app.tuning_curve_canvas.find_all()
+            if self.app.tuning_curve_canvas.type(item) == "text"
+        )
+        self.assertIn("Could not load tuning curves", error_text)
+        self.assertIn("invalid tuning header", error_text)
 
     def test_loaded_tuning_curve_draws_line_and_polar_without_extending_units(self) -> None:
         tuning_path = Path(self.directory.name) / "tuning_curves.json"
@@ -236,10 +320,8 @@ class TkViewerTests(unittest.TestCase):
         )
         self.assertIn("Head direction (deg)", line_text)
         self.assertEqual(self.app.tuning_cluster_label.cget("text"), "Cluster 7")
-        self.assertIn(
-            "legacy schema",
-            self.app.tuning_curve_status_label.cget("text"),
-        )
+        self.assertEqual(self.app.tuning_curve_status_label.cget("text"), "")
+        self.assertFalse(self.app.tuning_curve_status_label.winfo_ismapped())
 
         self.app._sync_unit_combo()
         self.assertEqual(self.app._unit_combo_unit_ids, [7, 8])
@@ -374,7 +456,25 @@ class TkViewerTests(unittest.TestCase):
         self.app.tuning_curve_data = gui.TuningCurveData(tuning_path, {7: curve})
         self.app._draw_tuning_curve()
         self.app.update()
-        self.assertFalse(self.app.tuning_provenance_button.winfo_ismapped())
+        self.assertTrue(self.app.tuning_provenance_button.winfo_ismapped())
+        with mock.patch.object(gui.messagebox, "showinfo") as show_info:
+            self.app._show_tuning_provenance()
+        show_info.assert_called_once()
+        _title, detail = show_info.call_args.args
+        self.assertIn("Legacy", detail)
+        self.assertIn("Timing / occupancy", detail)
+        self.assertIn("Not recorded", detail)
+
+        missing_curve = (float("nan"),) * 6 + curve[6:]
+        self.app.tuning_curve_data = gui.TuningCurveData(
+            tuning_path, {7: missing_curve}
+        )
+        self.app.tuning_smoothing_var.set(False)
+        self.app._draw_tuning_curve()
+        with mock.patch.object(gui.messagebox, "showinfo") as show_info:
+            self.app._show_tuning_provenance()
+        _title, detail = show_info.call_args.args
+        self.assertIn("Bins without occupancy", detail)
 
     def test_tuning_polar_uses_one_outline_and_an_explicit_hz_axis(self) -> None:
         rates = tuple(float(index + 1) for index in range(30))
@@ -466,7 +566,8 @@ class TkViewerTests(unittest.TestCase):
             if self.app.tuning_curve_canvas.type(item) == "text"
         }
         self.assertIn("20", shared_labels)
-        self.assertIn("shared within file: 0–20 Hz", self.app.tuning_curve_status_label.cget("text"))
+        self.assertEqual(self.app.tuning_curve_status_label.cget("text"), "")
+        self.assertFalse(self.app.tuning_curve_status_label.winfo_ismapped())
 
         self.app.tuning_plot_mode_var.set("Polar")
         self.app._draw_tuning_curve()
@@ -537,22 +638,26 @@ class TkViewerTests(unittest.TestCase):
         self.addCleanup(settings.destroy)
         self.assertEqual(
             [settings.notebook.tab(tab, "text") for tab in settings.notebook.tabs()],
-            ["General", "RF Map", "Tuning Curve"],
+            ["General", "RF Map", "Waveform", "Tuning Curve"],
         )
 
         settings.show_tuning_curve_var.set(False)
+        settings.show_waveform_var.set(False)
         settings.show_probe_layout_var.set(False)
         settings.tuning_smoothing_var.set(False)
         settings.update_idletasks()
         self.assertIn("disabled", settings.auto_tuning_check.state())
+        self.assertIn("disabled", settings.waveform_channel_mode_combo.state())
         self.assertIn("disabled", settings.auto_probe_check.state())
         self.assertIn("disabled", settings.tuning_sigma_entry.state())
 
         settings.show_tuning_curve_var.set(True)
+        settings.show_waveform_var.set(True)
         settings.show_probe_layout_var.set(True)
         settings.tuning_smoothing_var.set(True)
         settings.update_idletasks()
         self.assertNotIn("disabled", settings.auto_tuning_check.state())
+        self.assertNotIn("disabled", settings.waveform_channel_mode_combo.state())
         self.assertNotIn("disabled", settings.auto_probe_check.state())
         self.assertNotIn("disabled", settings.tuning_sigma_entry.state())
 
@@ -626,8 +731,10 @@ class TkViewerTests(unittest.TestCase):
         self.assertFalse(self.app.tuning_curve_canvas.winfo_ismapped())
         self.assertFalse(self.app.sidebar_panel.winfo_ismapped())
         self.assertTrue(self.app.sidebar_collapsed_rail.winfo_ismapped())
-        self.assertFalse(self.app.tuning_curve_pane.winfo_ismapped())
+        self.assertTrue(self.app.tuning_curve_pane.winfo_ismapped())
+        self.assertTrue(self.app.unit_info_pane.winfo_ismapped())
         self.assertTrue(self.app.tuning_collapsed_rail.winfo_ismapped())
+        self.assertFalse(self.app.waveform_pane.winfo_ismapped())
         self.assertGreater(self.app.rf_map_pane.winfo_width(), expanded_rf_width)
 
         self.app._toggle_probe_collapsed()
@@ -829,6 +936,33 @@ class TkViewerTests(unittest.TestCase):
         self.assertEqual(result["generation"], 99)
         self.assertIn("unexpected discovery failure", str(result["worker_error"]))
 
+    def test_missing_tuning_result_collapses_only_tuning_curve(self) -> None:
+        self.app.notebook.select(0)
+        self.app.show_tuning_curve_var.set(True)
+        self.app.show_waveform_var.set(True)
+        self.app.tuning_collapsed_var.set(False)
+        generation = self.app._optional_autoload_generation
+        self.app._optional_result_queue.put(
+            {
+                "generation": generation,
+                "data_path": self.app.data.path,
+                "probe_geometry": None,
+                "tuning_path": None,
+                "tuning_data": None,
+                "tuning_error": None,
+            }
+        )
+
+        self.app._poll_optional_results()
+        self.app.update_idletasks()
+
+        self.assertTrue(self.app.tuning_collapsed_var.get())
+        self.assertTrue(self.app.tuning_curve_pane.winfo_ismapped())
+        self.assertFalse(self.app.tuning_curve_section.winfo_ismapped())
+        self.assertTrue(self.app.tuning_collapsed_rail.winfo_ismapped())
+        self.assertTrue(self.app.unit_info_pane.winfo_ismapped())
+        self.assertTrue(self.app.waveform_pane.winfo_ismapped())
+
     def test_settings_validation_selects_and_marks_the_owning_tab(self) -> None:
         self.app._show_settings()
         settings = self.app._app_root._rfm_settings_window
@@ -951,11 +1085,17 @@ class TkViewerTests(unittest.TestCase):
                 "_draw_tuning_curve",
                 wraps=self.app._draw_tuning_curve,
             ) as draw_tuning,
+            mock.patch.object(
+                self.app,
+                "_draw_waveform",
+                wraps=self.app._draw_waveform,
+            ) as draw_waveform,
         ):
             settings._commit(close=False)
 
         self.assertEqual(draw_probe.call_count, 1)
         self.assertEqual(draw_tuning.call_count, 1)
+        self.assertEqual(draw_waveform.call_count, 1)
 
     def test_applying_settings_propagates_only_to_paired_windows(self) -> None:
         paired = self.app._open_json_window(self.app.data.path)
@@ -976,6 +1116,7 @@ class TkViewerTests(unittest.TestCase):
         settings.tuning_display_bins_var.set("12")
         settings.tuning_compare_scale_var.set(True)
         settings.show_tuning_curve_var.set(False)
+        settings.show_waveform_var.set(False)
         settings._commit(close=False)
 
         self.assertEqual(settings.error_var.get(), "")
@@ -986,7 +1127,10 @@ class TkViewerTests(unittest.TestCase):
             self.assertEqual(viewer.tuning_display_bins_var.get(), 12)
             self.assertTrue(viewer.tuning_compare_scale_var.get())
             self.assertFalse(viewer.show_tuning_curve_var.get())
-            self.assertFalse(viewer.tuning_curve_pane.winfo_ismapped())
+            self.assertFalse(viewer.show_waveform_var.get())
+            self.assertEqual(viewer.tuning_curve_pane.winfo_manager(), "grid")
+            self.assertEqual(viewer.tuning_curve_section.winfo_manager(), "")
+            self.assertEqual(viewer.unit_info_pane.winfo_manager(), "grid")
 
     def test_reused_settings_window_follows_the_active_viewer(self) -> None:
         second = self.app._open_json_window(self.app.data.path)
@@ -1220,16 +1364,19 @@ class TkViewerTests(unittest.TestCase):
         ]
         self.assertEqual(separator_children, [])
 
-    def test_sidebar_selection_inspector_is_visible_and_updates(self) -> None:
+    def test_spike_time_and_unit_info_inspectors_are_visible_and_update(self) -> None:
         self.app.notebook.select(0)
         self.app._update_all()
         self.app.update_idletasks()
 
         self.assertTrue(self.app.cell_label.winfo_ismapped())
-        self.assertIn("cluster", self.app.cell_label.cget("text"))
+        self.assertIn("bin", self.app.cell_label.cget("text"))
+        self.assertTrue(self.app.unit_stats_label.winfo_ismapped())
+        self.assertIn("cluster", self.app.unit_stats_label.cget("text"))
+        self.assertIs(self.app.unit_stats_label.master, self.app.unit_info_pane)
         self.app.selected_cell = (0, 0, 0, 0)
         self.app._update_cell_label()
-        self.assertIn("xIdx 1", self.app.cell_label.cget("text"))
+        self.assertIn("xIdx 1", self.app.unit_stats_label.cget("text"))
 
     def test_spatial_region_filters_navigation_and_handles_no_matches(self) -> None:
         positions_path = Path(self.directory.name) / "positions.csv"

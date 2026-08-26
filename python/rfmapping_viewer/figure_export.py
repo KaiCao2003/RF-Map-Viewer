@@ -17,7 +17,6 @@ from __future__ import annotations
 import base64
 import ctypes
 import errno
-import fcntl
 import hashlib
 import io
 import json
@@ -27,6 +26,7 @@ import re
 import shutil
 import stat
 import sys
+import tempfile
 import uuid
 import zlib
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -38,6 +38,16 @@ from types import MappingProxyType
 from typing import Any, BinaryIO, TypeAlias
 
 from PIL import Image, ImageColor, ImageDraw, ImageFont
+
+try:  # POSIX advisory locks used by the descriptor-pinned publication backend.
+    import fcntl
+except ModuleNotFoundError:  # pragma: no cover - exercised on Windows CI.
+    fcntl = None  # type: ignore[assignment]
+
+try:  # Windows byte-range locks used by the path publication backend.
+    import msvcrt
+except ModuleNotFoundError:  # pragma: no cover - unavailable on POSIX.
+    msvcrt = None  # type: ignore[assignment]
 
 
 DEFAULT_PAGE_SIZE = (1600, 1200)
@@ -52,6 +62,7 @@ DEFAULT_FILE_MODE = 0o660
 DEFAULT_DIRECTORY_MODE = 0o770
 SINGLETON_Y_REFERENCE_COLUMNS = 30
 SINGLETON_Y_REFERENCE_ROWS = 7
+_USE_PATH_PUBLICATION = os.name == "nt"
 
 
 class FigureExportError(RuntimeError):
@@ -104,6 +115,7 @@ class PlotKind(str, Enum):
     HD_LINE = "hd.line"
     HD_POLAR = "hd.polar"
     PROBE_LAYOUT = "probe"
+    WAVEFORM_LOCAL_AVERAGE = "waveform.local_average"
 
     @classmethod
     def coerce(cls, value: PlotKind | str) -> PlotKind:
@@ -147,6 +159,11 @@ _PLOT_DEFINITIONS = (
         PlotKind.HD_POLAR, "HD tuning curve (polar)", "line", True
     ),
     PlotKindDefinition(PlotKind.PROBE_LAYOUT, "Probe layout", "points"),
+    PlotKindDefinition(
+        PlotKind.WAVEFORM_LOCAL_AVERAGE,
+        "Local average waveform",
+        "waveform_heatmap",
+    ),
 )
 
 # Registry keys are plain strings on purpose: both JSON clients and Python code
@@ -481,6 +498,41 @@ def shared_scalar_scale(
     return MappingProxyType({"vmin": low, "vmax": high})
 
 
+def shared_symmetric_scale(
+    matrices: Sequence[Any],
+    *,
+    limit: float | None = None,
+) -> Mapping[str, float]:
+    """Return a zero-centered scale reusable across waveform plots.
+
+    ``matrices`` accepts the same raw matrices or ``{"matrix": ...}``
+    payloads as :func:`shared_scalar_scale`.  The returned immutable mapping
+    can be merged into every related :class:`PlotSpec` so previews and all
+    exported units use one quantitative amplitude scale.
+    """
+
+    sources = _sequence(matrices, label="shared symmetric matrices")
+    if not sources:
+        raise FigureExportValidationError(
+            "shared symmetric scale requires at least one matrix"
+        )
+    values = [
+        value
+        for source in sources
+        for row in _scalar_matrix(_matrix_payload(source))
+        for value in row
+        if value is not None
+    ]
+    amplitude = max((abs(value) for value in values), default=0.0)
+    if limit is not None:
+        amplitude = _finite_float(limit, label="symmetric scale limit")
+        if amplitude < 0.0:
+            raise FigureExportValidationError(
+                "symmetric scale limit must be greater than or equal to zero"
+            )
+    return MappingProxyType({"vmin": -amplitude, "vmax": amplitude})
+
+
 def _palette(value: float, low: float, high: float, name: str) -> tuple[int, int, int]:
     fraction = 0.5 if high <= low else (value - low) / (high - low)
     fraction = max(0.0, min(1.0, fraction))
@@ -502,6 +554,20 @@ def _palette(value: float, low: float, high: float, name: str) -> tuple[int, int
             (0.35, (44, 171, 184)),
             (0.68, (246, 204, 89)),
             (1.0, (203, 71, 45)),
+        )
+    elif name in {"rdbu_r", "rdbu-r"}:
+        # Compact approximation of matplotlib's ``RdBu_r``.  Waveform
+        # amplitudes are always rendered on symmetric bounds, so zero lands
+        # on the neutral midpoint while negative/positive deflections retain
+        # the notebook's blue/red convention.
+        stops = (
+            (0.0, (5, 48, 97)),
+            (0.2, (33, 102, 172)),
+            (0.4, (146, 197, 222)),
+            (0.5, (247, 247, 247)),
+            (0.6, (244, 165, 130)),
+            (0.8, (178, 24, 43)),
+            (1.0, (103, 0, 31)),
         )
     else:  # Compact viridis approximation.
         stops = (
@@ -542,6 +608,36 @@ def _tick_indices(count: int, *, maximum: int = 6) -> tuple[int, ...]:
     return tuple(
         sorted({round(index * (count - 1) / (maximum - 1)) for index in range(maximum)})
     )
+
+
+def _non_overlapping_tick_indices(
+    positions: Sequence[float],
+    label_widths: Sequence[float],
+    *,
+    maximum: int = 6,
+    padding: float = 8.0,
+) -> tuple[int, ...]:
+    """Keep evenly distributed endpoint ticks without colliding labels."""
+
+    count = len(positions)
+    if count != len(label_widths):
+        raise ValueError("tick positions and label widths must have equal length")
+    if count <= 1:
+        return tuple(range(count))
+    for candidate_count in range(min(maximum, count), 1, -1):
+        indices = _tick_indices(count, maximum=candidate_count)
+        previous_right = -math.inf
+        fits = True
+        for index in indices:
+            left = float(positions[index]) - float(label_widths[index]) / 2.0
+            right = float(positions[index]) + float(label_widths[index]) / 2.0
+            if left < previous_right + padding:
+                fits = False
+                break
+            previous_right = right
+        if fits:
+            return indices
+    return (min(range(count), key=lambda index: abs(index - (count - 1) / 2.0)),)
 
 
 def _axis_values(spec: PlotSpec, axis: str, count: int) -> list[float]:
@@ -768,6 +864,314 @@ def _draw_cartesian_map(
             high,
             palette,
             str(spec.options.get("value_unit", "")),
+        )
+
+
+def _waveform_payload(
+    data: Any,
+) -> tuple[
+    list[list[float | None]],
+    list[float],
+    list[float],
+    list[str],
+    int,
+]:
+    """Validate the normalized local-waveform renderer payload.
+
+    The matrix is channel-major: one row per selected channel and one column
+    per waveform time sample.  This is intentionally a small target-local
+    contract so both the Tk view and Figure Composer can consume the same
+    baseline-corrected data without importing scientific analysis code.
+    """
+
+    if not isinstance(data, Mapping):
+        raise FigureExportValidationError(
+            "waveform data must be a mapping with matrix, times_ms, "
+            "channel_labels, and best_channel_row"
+        )
+    matrix = _scalar_matrix(_matrix_payload(data))
+    rows, columns = len(matrix), len(matrix[0])
+
+    times_source = _mapping_value(data, "times_ms", "time_ms")
+    if times_source is None:
+        raise FigureExportValidationError("waveform times_ms is required")
+    times = [
+        _finite_float(value, label="waveform time")
+        for value in _sequence(times_source, label="waveform times_ms")
+    ]
+    if len(times) != columns:
+        raise FigureExportValidationError(
+            f"waveform times_ms must contain exactly {columns} values"
+        )
+    if any(right <= left for left, right in zip(times, times[1:])):
+        raise FigureExportValidationError(
+            "waveform times_ms must be strictly increasing"
+        )
+    time_edges_source = _mapping_value(data, "time_edges_ms")
+    if time_edges_source is None:
+        time_edges = _waveform_time_boundaries(times)
+    else:
+        time_edges = [
+            _finite_float(value, label="waveform time edge")
+            for value in _sequence(
+                time_edges_source, label="waveform time_edges_ms"
+            )
+        ]
+        if len(time_edges) != columns + 1:
+            raise FigureExportValidationError(
+                "waveform time_edges_ms must contain exactly one more value "
+                "than times_ms"
+            )
+        if any(
+            right <= left for left, right in zip(time_edges, time_edges[1:])
+        ):
+            raise FigureExportValidationError(
+                "waveform time_edges_ms must be strictly increasing"
+            )
+        if any(
+            center < time_edges[index] or center > time_edges[index + 1]
+            for index, center in enumerate(times)
+        ):
+            raise FigureExportValidationError(
+                "each waveform time must fall inside its time_edges_ms interval"
+            )
+
+    labels_source = _mapping_value(data, "channel_labels", "channel_ids")
+    if labels_source is None:
+        raise FigureExportValidationError("waveform channel_labels is required")
+    labels = [
+        str(value).strip()
+        for value in _sequence(labels_source, label="waveform channel_labels")
+    ]
+    if len(labels) != rows:
+        raise FigureExportValidationError(
+            f"waveform channel_labels must contain exactly {rows} values"
+        )
+    if any(not label for label in labels):
+        raise FigureExportValidationError(
+            "waveform channel_labels must not contain empty labels"
+        )
+
+    best_row = _mapping_value(data, "best_channel_row", "best_row_index")
+    if isinstance(best_row, bool) or not isinstance(best_row, int):
+        raise FigureExportValidationError(
+            "waveform best_channel_row must be an integer"
+        )
+    if best_row < 0 or best_row >= rows:
+        raise FigureExportValidationError(
+            f"waveform best_channel_row must be inside 0..{rows - 1}"
+        )
+    return matrix, times, time_edges, labels, best_row
+
+
+def _waveform_time_boundaries(times: Sequence[float]) -> list[float]:
+    if len(times) == 1:
+        return [times[0] - 0.5, times[0] + 0.5]
+    boundaries = [times[0] - (times[1] - times[0]) / 2.0]
+    boundaries.extend(
+        (left + right) / 2.0 for left, right in zip(times, times[1:])
+    )
+    boundaries.append(times[-1] + (times[-1] - times[-2]) / 2.0)
+    return boundaries
+
+
+def _draw_waveform_heatmap(
+    draw: ImageDraw.ImageDraw,
+    box: tuple[int, int, int, int],
+    spec: PlotSpec,
+) -> None:
+    """Draw a channel-by-time waveform heatmap without square-cell scaling."""
+
+    matrix, times, time_boundaries, channel_labels, best_row = (
+        _waveform_payload(spec.data)
+    )
+    rows, columns = len(matrix), len(matrix[0])
+    left, top, right, bottom = box
+    show_axes = _boolean_option(spec.options, "show_axes", default=True)
+    show_colorbar = _boolean_option(spec.options, "show_colorbar", default=True)
+    show_zero_time = _boolean_option(
+        spec.options, "show_zero_time", default=True
+    )
+    missing_color = _color(
+        spec.options.get("missing_color", "#edf0f3"), label="missing_color"
+    )
+    palette = str(spec.options.get("palette", "rdbu_r")).strip().lower()
+    if palette not in {"rdbu_r", "rdbu-r"}:
+        raise FigureExportValidationError(
+            "waveform palette must be 'rdbu_r'"
+        )
+
+    low, high = _bounds(matrix, spec.options)
+    amplitude = max(abs(low), abs(high))
+    low, high = -amplitude, amplitude
+    colors = [
+        [
+            missing_color if value is None else _palette(value, low, high, palette)
+            for value in row
+        ]
+        for row in matrix
+    ]
+
+    panel_width = right - left
+    panel_height = bottom - top
+    axis_font = _font(max(8, round(panel_height * 0.035)))
+    best_axis_font = _font(max(8, round(panel_height * 0.035)), bold=True)
+    if show_axes:
+        measured_label_width = max(
+            (
+                draw.textbbox((0, 0), label, font=axis_font)[2]
+                for label in channel_labels
+            ),
+            default=0,
+        )
+        axis_left = max(
+            50,
+            min(round(panel_width * 0.34), measured_label_width + 20),
+        )
+        axis_bottom = max(34, round(panel_height * 0.13))
+    else:
+        axis_left = axis_bottom = 0
+    colorbar_space = max(76, round(panel_width * 0.17)) if show_colorbar else 0
+    grid_box = (
+        left + axis_left,
+        top + (6 if show_axes or show_colorbar else 0),
+        right - colorbar_space,
+        bottom - axis_bottom,
+    )
+    grid_width = grid_box[2] - grid_box[0]
+    grid_height = grid_box[3] - grid_box[1]
+    if grid_width < columns or grid_height < rows:
+        raise FigureExportValidationError(
+            "plot panel is too small for waveform axes and colorbar"
+        )
+
+    # Time samples and channels have different physical dimensions.  Filling
+    # the available rectangle (rather than forcing square spatial-map cells)
+    # keeps the 5 x 60 artifact legible in narrow multi-panel pages.
+    cell_height = grid_height / rows
+
+    def time_x(value: float) -> float:
+        return _scale(
+            value,
+            time_boundaries[0],
+            time_boundaries[-1],
+            grid_box[0],
+            grid_box[2],
+        )
+
+    for row_index, row in enumerate(colors):
+        y0 = round(grid_box[1] + cell_height * row_index)
+        y1 = round(grid_box[1] + cell_height * (row_index + 1))
+        for column_index, color in enumerate(row):
+            x0 = round(time_x(time_boundaries[column_index]))
+            x1 = round(time_x(time_boundaries[column_index + 1]))
+            draw.rectangle((x0, y0, x1, y1), fill=color)
+        if row_index:
+            draw.line(
+                (grid_box[0], y0, grid_box[2], y0),
+                fill="#ffffff",
+                width=1,
+            )
+
+    if show_zero_time and time_boundaries[0] <= 0.0 <= time_boundaries[-1]:
+        zero_x = time_x(0.0)
+        dash = max(3, round(grid_height * 0.025))
+        gap = max(2, dash // 2)
+        y = grid_box[1]
+        while y < grid_box[3]:
+            draw.line(
+                (zero_x, y, zero_x, min(grid_box[3], y + dash)),
+                fill="#111827",
+                width=1,
+            )
+            y += dash + gap
+
+    best_y0 = round(grid_box[1] + cell_height * best_row)
+    best_y1 = round(grid_box[1] + cell_height * (best_row + 1))
+    draw.rectangle(
+        (grid_box[0], best_y0, grid_box[2], best_y1),
+        outline="#dc2626",
+        width=2,
+    )
+    draw.rectangle(grid_box, outline="#334155", width=2)
+
+    if show_axes:
+        axis_color = "#475467"
+        for row_index, label in enumerate(channel_labels):
+            center_y = grid_box[1] + cell_height * (row_index + 0.5)
+            marker_radius = max(3, min(7, round(cell_height * 0.12)))
+            marker_x = grid_box[0] - marker_radius - 3
+            draw.ellipse(
+                (
+                    marker_x - marker_radius,
+                    center_y - marker_radius,
+                    marker_x + marker_radius,
+                    center_y + marker_radius,
+                ),
+                fill="#dc2626" if row_index == best_row else "#ffffff",
+                outline="#b42318" if row_index == best_row else "#667085",
+                width=2 if row_index == best_row else 1,
+            )
+            draw.text(
+                (marker_x - marker_radius - 5, center_y),
+                label,
+                fill="#b42318" if row_index == best_row else axis_color,
+                font=best_axis_font if row_index == best_row else axis_font,
+                anchor="rm",
+            )
+        tick_labels = [f"{value:.4g}" for value in times]
+        tick_positions = [time_x(value) for value in times]
+        tick_widths = [
+            draw.textbbox((0, 0), label, font=axis_font)[2]
+            for label in tick_labels
+        ]
+        for index in _non_overlapping_tick_indices(
+            tick_positions,
+            tick_widths,
+            padding=max(6.0, panel_height * 0.012),
+        ):
+            x = time_x(times[index])
+            draw.line(
+                (x, grid_box[3], x, grid_box[3] + 4),
+                fill=axis_color,
+                width=1,
+            )
+            draw.text(
+                (x, grid_box[3] + 6),
+                tick_labels[index],
+                fill=axis_color,
+                font=axis_font,
+                anchor="ma",
+            )
+        draw.text(
+            ((grid_box[0] + grid_box[2]) / 2.0, bottom - 2),
+            "Time from spike alignment (ms)",
+            fill=axis_color,
+            font=axis_font,
+            anchor="md",
+        )
+        draw.text(
+            (left + 2, grid_box[1]),
+            "channel",
+            fill=axis_color,
+            font=axis_font,
+            anchor="la",
+        )
+
+    if show_colorbar:
+        colorbar_left = min(right - 58, round(grid_box[2] + 16))
+        _draw_scalar_colorbar(
+            draw,
+            (
+                colorbar_left,
+                round(grid_box[1]),
+                colorbar_left + 12,
+                round(grid_box[3]),
+            ),
+            low,
+            high,
+            palette,
+            str(spec.options.get("value_unit", "µV")),
         )
 
 
@@ -2164,6 +2568,8 @@ class PillowFigureRenderer:
             _draw_polar_line(draw, plot_box, spec)
         elif spec.kind is PlotKind.PROBE_LAYOUT:
             _draw_probe_layout(draw, plot_box, spec)
+        elif spec.kind is PlotKind.WAVEFORM_LOCAL_AVERAGE:
+            _draw_waveform_heatmap(draw, plot_box, spec)
         else:  # Defensive against future Enum additions without renderer wiring.
             raise FigureExportValidationError(
                 f"plot kind {spec.kind.value!r} has no renderer"
@@ -2937,6 +3343,8 @@ def _directory_publish_lock(
     parent: _ParentDirectory,
     destination_name: str,
 ) -> Iterator[None]:
+    if fcntl is None:
+        raise FigureExportError("descriptor publication locks require fcntl")
     lock_name = _publish_lock_name(destination_name)
     descriptor = os.open(
         lock_name,
@@ -3400,7 +3808,20 @@ def _same_pdf_file_metadata(
         _same_identity(result, identity.entry)
         and result.st_size == identity.size
         and result.st_mtime_ns == identity.mtime_ns
-        and result.st_ctime_ns == identity.ctime_ns
+        and (os.name == "nt" or result.st_ctime_ns == identity.ctime_ns)
+    )
+
+
+def _same_pdf_snapshot(
+    current: _PdfFileIdentity,
+    expected: _PdfFileIdentity,
+) -> bool:
+    return (
+        current.entry == expected.entry
+        and current.size == expected.size
+        and current.mtime_ns == expected.mtime_ns
+        and current.sha256 == expected.sha256
+        and (os.name == "nt" or current.ctime_ns == expected.ctime_ns)
     )
 
 
@@ -4232,6 +4653,649 @@ def _write_pdf_document(
     )
 
 
+def _path_is_link_like(path: Path) -> bool:
+    """Return whether ``path`` is a symlink or a Windows junction."""
+
+    if path.is_symlink():
+        return True
+    is_junction = getattr(path, "is_junction", None)
+    return bool(is_junction is not None and is_junction())
+
+
+def _path_lstat(path: Path) -> os.stat_result | None:
+    try:
+        return path.lstat()
+    except FileNotFoundError:
+        return None
+
+
+def _path_parent_identity(path: Path) -> _EntryIdentity:
+    result = _path_lstat(path)
+    if (
+        result is None
+        or _path_is_link_like(path)
+        or not stat.S_ISDIR(result.st_mode)
+    ):
+        raise FigureExportError(f"export parent must be a real directory: {path}")
+    return _EntryIdentity.from_stat(result)
+
+
+def _verify_path_parent(path: Path, expected: _EntryIdentity) -> None:
+    result = _path_lstat(path)
+    if (
+        result is None
+        or _path_is_link_like(path)
+        or not stat.S_ISDIR(result.st_mode)
+        or not _same_identity(result, expected)
+    ):
+        raise FigureExportError(
+            f"export parent directory was replaced while rendering: {path}"
+        )
+
+
+def _read_regular_path(
+    path: Path,
+    *,
+    maximum_size: int = 16 * 1024 * 1024,
+) -> bytes:
+    before = _path_lstat(path)
+    if (
+        before is None
+        or _path_is_link_like(path)
+        or not stat.S_ISREG(before.st_mode)
+    ):
+        raise FigureExportError(f"export member is not a regular file: {path.name}")
+    if before.st_size > maximum_size:
+        raise FigureExportError(f"export metadata file is too large: {path.name}")
+    descriptor = os.open(
+        path,
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_CLOEXEC", 0),
+    )
+    try:
+        opened = os.fstat(descriptor)
+        if not _same_identity(opened, _EntryIdentity.from_stat(before)):
+            raise FigureExportError(
+                f"export member changed while it was being opened: {path.name}"
+            )
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(descriptor, min(1024 * 1024, maximum_size + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > maximum_size:
+                raise FigureExportError(
+                    f"export metadata file is too large: {path.name}"
+                )
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    refreshed = _path_lstat(path)
+    if (
+        refreshed is None
+        or not _same_identity(after, _EntryIdentity.from_stat(before))
+        or not _same_identity(refreshed, _EntryIdentity.from_stat(before))
+        or refreshed.st_size != before.st_size
+    ):
+        raise FigureExportError(
+            f"export member changed while it was being read: {path.name}"
+        )
+    return b"".join(chunks)
+
+
+def _same_regular_file_stat(
+    current: os.stat_result,
+    expected: os.stat_result,
+) -> bool:
+    """Compare stat snapshots produced within the same Windows/POSIX API domain."""
+
+    return (
+        stat.S_ISREG(current.st_mode)
+        and stat.S_ISREG(expected.st_mode)
+        and current.st_dev == expected.st_dev
+        and current.st_ino == expected.st_ino
+        and current.st_mode == expected.st_mode
+        and current.st_size == expected.st_size
+        and current.st_mtime_ns == expected.st_mtime_ns
+        and (os.name == "nt" or current.st_ctime_ns == expected.st_ctime_ns)
+    )
+
+
+def _snapshot_pdf_path(path: Path) -> _PdfFileIdentity:
+    before = _path_lstat(path)
+    if (
+        before is None
+        or _path_is_link_like(path)
+        or not stat.S_ISREG(before.st_mode)
+    ):
+        raise FigureExportError("PDF overwrite target must be a regular non-symlink file")
+    descriptor = os.open(
+        path,
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_CLOEXEC", 0),
+    )
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or opened.st_size != before.st_size:
+            raise FigureExportError(
+                "PDF overwrite target changed while it was being opened"
+            )
+        digest = _pdf_descriptor_digest(descriptor)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    refreshed = _path_lstat(path)
+    if (
+        refreshed is None
+        or not _same_regular_file_stat(after, opened)
+        or not _same_regular_file_stat(refreshed, before)
+    ):
+        raise FigureExportError(
+            "PDF overwrite target changed while its content was being inspected"
+        )
+    return _PdfFileIdentity.from_stat_and_digest(refreshed, digest)
+
+
+def _pdf_path_matches_snapshot(path: Path, expected: _PdfFileIdentity) -> bool:
+    try:
+        return _same_pdf_snapshot(_snapshot_pdf_path(path), expected)
+    except (FigureExportError, OSError):
+        return False
+
+
+def _validate_export_directory_path(
+    path: Path,
+    *,
+    expected_plan: ExportPlan | None,
+) -> _EntryIdentity:
+    directory_stat = _path_lstat(path)
+    if (
+        directory_stat is None
+        or _path_is_link_like(path)
+        or not stat.S_ISDIR(directory_stat.st_mode)
+    ):
+        raise FigureExportError(f"export target must be a real directory: {path}")
+    identity = _EntryIdentity.from_stat(directory_stat)
+    try:
+        document = json.loads(
+            _read_regular_path(path / EXPORT_MANIFEST_NAME).decode("utf-8")
+        )
+    except (
+        FileNotFoundError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        FigureExportError,
+    ) as exc:
+        raise FigureExportError(
+            f"refusing to overwrite unverified directory {path}: "
+            f"{EXPORT_MANIFEST_NAME} is missing or invalid"
+        ) from exc
+    if not isinstance(document, dict) or set(document) != {
+        "manifestVersion",
+        "producer",
+        "format",
+        "spec",
+        "files",
+    }:
+        raise FigureExportError("export manifest has an invalid top-level structure")
+    manifest_version = document["manifestVersion"]
+    if (
+        isinstance(manifest_version, bool)
+        or not isinstance(manifest_version, int)
+        or manifest_version not in {1, EXPORT_MANIFEST_VERSION}
+    ):
+        raise FigureExportError("export manifest version is not supported")
+    if document["producer"] != EXPORT_PRODUCER:
+        raise FigureExportError("export manifest producer marker does not match")
+    figure_format = document["format"]
+    if figure_format not in {FigureFormat.PNG.value, FigureFormat.SVG.value}:
+        raise FigureExportError("export manifest format is not a directory format")
+    _validate_manifest_spec_shape(document["spec"], manifest_version=manifest_version)
+    if expected_plan is not None:
+        if figure_format != expected_plan.format.value:
+            raise FigureExportError("existing export format does not match this plan")
+        expected_spec = (
+            _manifest_v1_spec(expected_plan)
+            if manifest_version == 1
+            else _manifest_spec(expected_plan)
+        )
+        if document["spec"] != expected_spec:
+            raise FigureExportError("existing export spec does not match this plan")
+
+    files = document["files"]
+    if not isinstance(files, list) or not files:
+        raise FigureExportError("export manifest files must be a non-empty list")
+    expected_metadata = _metadata_from_manifest_spec(document["spec"], figure_format)
+    file_names: list[str] = []
+    for index, entry in enumerate(files):
+        if not isinstance(entry, dict) or set(entry) != {
+            "file",
+            "unitId",
+            "unitPosition",
+            "pageIndex",
+            "pageName",
+            "size",
+            "sha256",
+        }:
+            raise FigureExportError("export manifest contains an invalid file entry")
+        metadata = {
+            key: entry[key]
+            for key in ("file", "unitId", "unitPosition", "pageIndex", "pageName")
+        }
+        if index >= len(expected_metadata) or metadata != expected_metadata[index]:
+            raise FigureExportError("existing export page structure does not match this plan")
+        filename = entry["file"]
+        if (
+            not isinstance(filename, str)
+            or Path(filename).name != filename
+            or filename in {"", ".", "..", EXPORT_MANIFEST_NAME}
+            or Path(filename).suffix.lower() != f".{figure_format}"
+        ):
+            raise FigureExportError("export manifest contains an unsafe page filename")
+        if filename in file_names:
+            raise FigureExportError("export manifest contains duplicate page filenames")
+        if (
+            isinstance(entry["size"], bool)
+            or not isinstance(entry["size"], int)
+            or entry["size"] < 0
+        ):
+            raise FigureExportError("export manifest contains an invalid page size")
+        digest = entry["sha256"]
+        if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            raise FigureExportError("export manifest contains an invalid page checksum")
+        file_names.append(filename)
+    if len(files) != len(expected_metadata):
+        raise FigureExportError("existing export page count does not match this plan")
+    if {entry.name for entry in os.scandir(path)} != {
+        EXPORT_MANIFEST_NAME,
+        *file_names,
+    }:
+        raise FigureExportError("export directory contents do not match its manifest")
+    for entry in files:
+        contents = _read_regular_path(
+            path / entry["file"],
+            maximum_size=max(16 * 1024 * 1024, entry["size"] + 1),
+        )
+        if (
+            len(contents) != entry["size"]
+            or hashlib.sha256(contents).hexdigest() != entry["sha256"]
+        ):
+            raise FigureExportError("export page checksum does not match its manifest")
+    refreshed = _path_lstat(path)
+    if refreshed is None or not _same_identity(refreshed, identity):
+        raise FigureExportError("export directory changed while it was being validated")
+    return identity
+
+
+def _write_path_bytes(path: Path, contents: bytes) -> None:
+    descriptor = os.open(
+        path,
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_CLOEXEC", 0),
+        0o600,
+    )
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            descriptor = -1
+            stream.write(contents)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(path, DEFAULT_FILE_MODE)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _copy_binary_stream_to_path(path: Path, source: BinaryIO) -> None:
+    """Copy an already rendered stream into a durable exclusive path."""
+
+    descriptor = os.open(
+        path,
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_CLOEXEC", 0),
+        0o600,
+    )
+    try:
+        with os.fdopen(descriptor, "wb") as destination:
+            descriptor = -1
+            shutil.copyfileobj(source, destination, length=1024 * 1024)
+            destination.flush()
+            os.fsync(destination.fileno())
+        os.chmod(path, DEFAULT_FILE_MODE)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+@contextmanager
+def _path_publish_lock(parent: Path, destination_name: str) -> Iterator[None]:
+    lock_path = parent / _publish_lock_name(destination_name)
+    existing = _path_lstat(lock_path)
+    if existing is not None and (
+        _path_is_link_like(lock_path) or not stat.S_ISREG(existing.st_mode)
+    ):
+        raise FigureExportError(
+            f"export publish lock is not a regular file: {lock_path.name}"
+        )
+    descriptor = os.open(
+        lock_path,
+        os.O_RDWR
+        | os.O_CREAT
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOINHERIT", 0)
+        | getattr(os, "O_CLOEXEC", 0),
+        0o600,
+    )
+    acquired = False
+    try:
+        opened = os.fstat(descriptor)
+        refreshed = _path_lstat(lock_path)
+        if (
+            refreshed is None
+            or _path_is_link_like(lock_path)
+            or not stat.S_ISREG(opened.st_mode)
+            or not _same_identity(refreshed, _EntryIdentity.from_stat(opened))
+        ):
+            raise FigureExportError(
+                f"export publish lock changed while opening: {lock_path.name}"
+            )
+        if msvcrt is not None:
+            if opened.st_size == 0:
+                os.write(descriptor, b"\0")
+                os.fsync(descriptor)
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            msvcrt.locking(descriptor, msvcrt.LK_LOCK, 1)
+        elif fcntl is not None:
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+        else:  # pragma: no cover - every supported host has one backend.
+            raise FigureExportError("no advisory file-lock backend is available")
+        acquired = True
+        yield
+    finally:
+        try:
+            if acquired and msvcrt is not None:
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+            elif acquired and fcntl is not None:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
+
+
+def _commit_pdf_path(
+    parent: Path,
+    parent_identity: _EntryIdentity,
+    staged: Path,
+    destination: Path,
+    *,
+    overwrite: bool,
+    expected_identity: _PdfFileIdentity | None,
+) -> None:
+    with _path_publish_lock(parent, destination.name):
+        _verify_path_parent(parent, parent_identity)
+        current = _path_lstat(destination)
+        if expected_identity is None:
+            if current is not None:
+                raise DestinationExistsError(
+                    f"destination already exists: {destination}; "
+                    "pass overwrite=True to replace it"
+                )
+            try:
+                os.rename(staged, destination)
+            except FileExistsError as exc:
+                raise DestinationExistsError(
+                    f"destination already exists: {destination}; "
+                    "pass overwrite=True to replace it"
+                ) from exc
+            return
+        if (
+            not overwrite
+            or current is None
+            or _path_is_link_like(destination)
+            or not stat.S_ISREG(current.st_mode)
+            or not _pdf_path_matches_snapshot(destination, expected_identity)
+        ):
+            raise FigureExportError("PDF overwrite target changed while pages were rendering")
+        backup = parent / f".{destination.name}.backup-{uuid.uuid4().hex}.pdf"
+        shutil.copy2(destination, backup, follow_symlinks=False)
+        backup_snapshot = _snapshot_pdf_path(backup)
+        if (
+            backup_snapshot.size != expected_identity.size
+            or backup_snapshot.sha256 != expected_identity.sha256
+        ):
+            backup.unlink(missing_ok=True)
+            raise FigureExportError("PDF overwrite backup could not be verified")
+        staged_snapshot = _snapshot_pdf_path(staged)
+        try:
+            os.replace(staged, destination)
+            published = _snapshot_pdf_path(destination)
+            if (
+                published.size != staged_snapshot.size
+                or published.sha256 != staged_snapshot.sha256
+            ):
+                raise FigureExportError("published PDF does not match the staged file")
+        except BaseException:
+            if backup.exists():
+                os.replace(backup, destination)
+            raise
+        backup.unlink(missing_ok=True)
+
+
+def _commit_directory_path(
+    parent: Path,
+    parent_identity: _EntryIdentity,
+    staged: Path,
+    destination: Path,
+    *,
+    overwrite: bool,
+    expected_identity: _EntryIdentity | None,
+    plan: ExportPlan,
+) -> None:
+    staged_identity = _EntryIdentity.from_stat(staged.lstat())
+    with _path_publish_lock(parent, destination.name):
+        _verify_path_parent(parent, parent_identity)
+        current = _path_lstat(destination)
+        if expected_identity is None:
+            if current is not None:
+                raise DestinationExistsError(
+                    f"destination already exists: {destination}; "
+                    "pass overwrite=True to replace it"
+                )
+            try:
+                os.rename(staged, destination)
+            except FileExistsError as exc:
+                raise DestinationExistsError(
+                    f"destination already exists: {destination}; "
+                    "pass overwrite=True to replace it"
+                ) from exc
+            _validate_export_directory_path(destination, expected_plan=plan)
+            return
+        if not overwrite:
+            raise DestinationExistsError(
+                f"destination already exists: {destination}; pass overwrite=True to replace it"
+            )
+        current_identity = _validate_export_directory_path(
+            destination,
+            expected_plan=None,
+        )
+        if current_identity != expected_identity:
+            raise FigureExportError("export destination changed while pages were rendering")
+        backup = parent / f".{destination.name}.backup-{uuid.uuid4().hex}"
+        os.rename(destination, backup)
+        try:
+            os.rename(staged, destination)
+            published_identity = _validate_export_directory_path(
+                destination,
+                expected_plan=plan,
+            )
+            if published_identity != staged_identity:
+                raise FigureExportError(
+                    "export destination changed during directory publication"
+                )
+        except BaseException:
+            published = _path_lstat(destination)
+            if published is not None:
+                if not _same_identity(published, staged_identity):
+                    raise FigureExportError(
+                        "directory publication failed and an unexpected destination "
+                        "prevents automatic rollback"
+                    )
+                shutil.rmtree(destination)
+            if backup.exists():
+                os.rename(backup, destination)
+            raise
+        shutil.rmtree(backup)
+
+
+def _export_figures_path_backend(
+    plan: ExportPlan,
+    *,
+    data_provider: PlotDataProvider | None,
+    renderer: PillowFigureRenderer,
+    overwrite: bool,
+    before_publish: Callable[[], None] | None,
+) -> ExportResult:
+    """Windows-safe publication using closed handles and absolute paths.
+
+    Windows lacks POSIX ``dir_fd`` operations and atomic exchange of non-empty
+    directories.  This backend retains the same validation and staging
+    contract, serializes publishers with a byte-range lock, and uses an
+    explicitly verified backup/rollback for directory replacement.
+    """
+
+    destination = plan.destination
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    parent = destination.parent
+    parent_identity = _path_parent_identity(parent)
+    generated_pages = tuple(iter_generated_pages(plan))
+    if plan.format is FigureFormat.PDF:
+        existing = _path_lstat(destination)
+        if existing is not None and not overwrite:
+            raise DestinationExistsError(
+                f"destination already exists: {destination}; pass overwrite=True to replace it"
+            )
+        expected_identity = (
+            None if existing is None else _snapshot_pdf_path(destination)
+        )
+        staged = parent / f".{destination.name}.tmp-{uuid.uuid4().hex}.pdf"
+        with tempfile.TemporaryFile(
+            mode="w+b",
+            prefix="rfmapping-figure-export-",
+            suffix=".pdf",
+        ) as rendered_pdf:
+            _write_pdf_document(
+                rendered_pdf,
+                generated_pages,
+                plan=plan,
+                renderer=renderer,
+                data_provider=data_provider,
+                title=destination.stem,
+            )
+            rendered_pdf.flush()
+            os.fsync(rendered_pdf.fileno())
+            _verify_path_parent(parent, parent_identity)
+            try:
+                rendered_pdf.seek(0)
+                _copy_binary_stream_to_path(staged, rendered_pdf)
+                if before_publish is not None:
+                    before_publish()
+                _commit_pdf_path(
+                    parent,
+                    parent_identity,
+                    staged,
+                    destination,
+                    overwrite=overwrite,
+                    expected_identity=expected_identity,
+                )
+            finally:
+                staged.unlink(missing_ok=True)
+        return ExportResult(
+            plan.format,
+            destination,
+            (destination,),
+            len(generated_pages),
+        )
+
+    existing = _path_lstat(destination)
+    if existing is not None and not overwrite:
+        raise DestinationExistsError(
+            f"destination already exists: {destination}; pass overwrite=True to replace it"
+        )
+    expected_identity = (
+        None
+        if existing is None
+        else _validate_export_directory_path(destination, expected_plan=None)
+    )
+    filenames: list[str] = []
+    rendered_integrity: list[tuple[int, str]] = []
+    with tempfile.TemporaryDirectory(
+        prefix="rfmapping-figure-export-"
+    ) as rendered_directory_name:
+        rendered_directory = Path(rendered_directory_name)
+        for item in generated_pages:
+            image = renderer.render_page(
+                item.unit_id,
+                item.page,
+                data_provider=data_provider,
+            )
+            try:
+                contents = (
+                    _png_bytes(image)
+                    if plan.format is FigureFormat.PNG
+                    else _svg_bytes(image)
+                )
+            finally:
+                image.close()
+            filename = _page_filename(item, plan.format.value)
+            _write_path_bytes(rendered_directory / filename, contents)
+            filenames.append(filename)
+            rendered_integrity.append(
+                (len(contents), hashlib.sha256(contents).hexdigest())
+            )
+        manifest = _manifest_document(plan, generated_pages, rendered_integrity)
+        _write_path_bytes(
+            rendered_directory / EXPORT_MANIFEST_NAME,
+            _manifest_bytes(manifest),
+        )
+        _validate_export_directory_path(rendered_directory, expected_plan=plan)
+        _verify_path_parent(parent, parent_identity)
+        staged = parent / f".{destination.name}.tmp-{uuid.uuid4().hex}"
+        staged.mkdir(mode=0o700)
+        try:
+            for filename in (*filenames, EXPORT_MANIFEST_NAME):
+                with (rendered_directory / filename).open("rb") as source:
+                    _copy_binary_stream_to_path(staged / filename, source)
+            _validate_export_directory_path(staged, expected_plan=plan)
+            os.chmod(staged, DEFAULT_DIRECTORY_MODE)
+            if before_publish is not None:
+                before_publish()
+            _commit_directory_path(
+                parent,
+                parent_identity,
+                staged,
+                destination,
+                overwrite=overwrite,
+                expected_identity=expected_identity,
+                plan=plan,
+            )
+        finally:
+            if staged.exists():
+                shutil.rmtree(staged)
+    files = tuple(destination / filename for filename in filenames)
+    return ExportResult(plan.format, destination, files, len(generated_pages))
+
+
 def export_figures(
     plan: ExportPlan,
     *,
@@ -4264,6 +5328,14 @@ def export_figures(
             "before_publish must be callable or None"
         )
     active_renderer = renderer or PillowFigureRenderer()
+    if _USE_PATH_PUBLICATION:
+        return _export_figures_path_backend(
+            plan,
+            data_provider=data_provider,
+            renderer=active_renderer,
+            overwrite=overwrite,
+            before_publish=before_publish,
+        )
     destination = plan.destination
     destination.parent.mkdir(parents=True, exist_ok=True)
     generated_pages = tuple(iter_generated_pages(plan))
@@ -4404,4 +5476,5 @@ __all__ = [
     "iter_generated_pages",
     "render_live_preview",
     "shared_scalar_scale",
+    "shared_symmetric_scale",
 ]

@@ -46,6 +46,30 @@ def shell_assignment(path: Path, name: str) -> str:
     return matches[0]
 
 
+def powershell_assignment(path: Path, name: str) -> str:
+    pattern = re.compile(rf'^\${re.escape(name)} = "([^"]+)"$')
+    matches = [
+        match.group(1)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if (match := pattern.fullmatch(line)) is not None
+    ]
+    if len(matches) != 1:
+        raise ValueError(f"{path} must define exactly one quoted ${name}")
+    return matches[0]
+
+
+def inno_define(path: Path, name: str) -> str:
+    pattern = re.compile(rf'^\s*#define {re.escape(name)} "([^"]+)"$')
+    matches = [
+        match.group(1)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if (match := pattern.fullmatch(line)) is not None
+    ]
+    if len(matches) != 1:
+        raise ValueError(f"{path} must define exactly one quoted #define {name}")
+    return matches[0]
+
+
 def toml_project_version(path: Path) -> str:
     with path.open("rb") as stream:
         value = tomllib.load(stream)["project"]["version"]
@@ -154,6 +178,23 @@ def verify_manifest(manifest: dict[str, Any]) -> None:
         python_stable.get("checksum"),
         f"SHA256SUMS-python-{stable_release}-{stable_flavor}.txt",
         "Python stable checksum",
+    )
+    expect(
+        python_stable.get("windows_portable_artifact"),
+        "RF_Map_Viewer-"
+        f"python-{stable_release}-{stable_flavor}-windows-x64-portable.zip",
+        "Python stable Windows portable artifact",
+    )
+    expect(
+        python_stable.get("windows_installer_artifact"),
+        "RF_Map_Viewer-"
+        f"python-{stable_release}-{stable_flavor}-windows-x64-setup.exe",
+        "Python stable Windows installer artifact",
+    )
+    expect(
+        python_stable.get("windows_checksum"),
+        f"SHA256SUMS-python-{stable_release}-{stable_flavor}-windows-x64.txt",
+        "Python stable Windows checksum",
     )
 
     python_fm = component(manifest, "python_freemoving")
@@ -286,6 +327,34 @@ def verify_sources(root: Path, manifest: dict[str, Any]) -> None:
         shell_assignment(python_stable_env, "RF_MAPPING_RELEASE_FLAVOR"),
         python_stable["artifact_flavor"],
         "Python stable artifact flavor",
+    )
+    python_stable_windows = root / "python/script/build_python_stable_windows_app.ps1"
+    for name, expected, label in (
+        ("AppVersion", python_stable["release_version"], "Windows app version"),
+        ("AppBuild", python_stable["build"], "Windows app build"),
+        ("ReleaseEdition", python_stable["edition"], "Windows release edition"),
+        (
+            "ReleaseFlavor",
+            python_stable["artifact_flavor"],
+            "Windows artifact flavor",
+        ),
+        ("Architecture", "x64", "Windows release architecture"),
+    ):
+        expect(
+            powershell_assignment(python_stable_windows, name),
+            expected,
+            f"Python stable {label}",
+        )
+    python_stable_inno = root / "python/packaging/windows/RFMapViewer.iss"
+    expect(
+        inno_define(python_stable_inno, "MyAppVersion"),
+        python_stable["release_version"],
+        "Python stable Inno Setup version",
+    )
+    expect(
+        inno_define(python_stable_inno, "MyAppBuild"),
+        python_stable["build"],
+        "Python stable Inno Setup build",
     )
     expect(
         literal_assignment(root / "python/rfmapping_fm_gui.py", "APP_VERSION"),
@@ -423,6 +492,13 @@ def main() -> int:
             "python_stable_tag": python_stable["tag"],
             "python_stable_artifact": python_stable["artifact"],
             "python_stable_checksum": python_stable["checksum"],
+            "python_stable_windows_portable_artifact": python_stable[
+                "windows_portable_artifact"
+            ],
+            "python_stable_windows_installer_artifact": python_stable[
+                "windows_installer_artifact"
+            ],
+            "python_stable_windows_checksum": python_stable["windows_checksum"],
             "python_fm_release": python_fm["release_version"],
             "python_fm_tag": python_fm["tag"],
             "python_fm_artifact": python_fm["artifact"],

@@ -83,8 +83,14 @@ class TkViewerTests(unittest.TestCase):
         })
         path = Path(self.directory.name) / "viewer.json"
         path.write_text(json.dumps(payload), encoding="utf-8")
-        self.app = gui.RFMViewer(gui.RFMappingData(path))
+        settings_path = Path(self.directory.name) / "settings.json"
+        with mock.patch.object(gui, "viewer_settings_path", return_value=settings_path):
+            self.app = gui.RFMViewer(gui.RFMappingData(path))
         self.addCleanup(self._destroy_app)
+        if self.app._optional_autoload_after is not None:
+            self.app.after_cancel(self.app._optional_autoload_after)
+            self.app._optional_autoload_after = None
+            self.app._optional_autoload_generation += 1
         self.app.notebook.select(2)
         self.app.update()
 
@@ -96,6 +102,30 @@ class TkViewerTests(unittest.TestCase):
         )
         self.assertEqual(float(self.app.range_start_ms_var.get()), 0.0)
         self.assertEqual(float(self.app.range_end_ms_var.get()), 30.0)
+
+    def test_no_document_window_has_real_open_file_landing(self) -> None:
+        chooser = gui.RFMViewer(master=self.app._app_root)
+        self.addCleanup(chooser.destroy)
+        if chooser._startup_after is not None:
+            chooser.after_cancel(chooser._startup_after)
+            chooser._startup_after = None
+
+        self.assertFalse(chooser._viewer_ready)
+        self.assertIsNotNone(chooser._startup_chooser_frame)
+        assert chooser._startup_chooser_frame is not None
+        labels = [
+            str(widget.cget("text"))
+            for widget in chooser._startup_chooser_frame.winfo_children()
+            if isinstance(widget, gui.ttk.Label)
+        ]
+        buttons = [
+            str(widget.cget("text"))
+            for widget in chooser._startup_chooser_frame.winfo_children()
+            if isinstance(widget, gui.ttk.Button)
+        ]
+        self.assertIn("Open RF mapping data", labels)
+        self.assertTrue(any("never loads sample data" in label for label in labels))
+        self.assertEqual(buttons, ["Open RF Map…"])
 
     def test_zero_spike_unit_filter_settings_validate_current_spatial_max(self) -> None:
         settings_value = replace(
@@ -343,6 +373,141 @@ class TkViewerTests(unittest.TestCase):
                 break
         self.assertNotIn("AttributeError", str(composer.preview_label.cget("text")))
         self.assertIn("provenance verified", str(composer.preview_status.cget("text")))
+
+    def test_compact_waveform_settings_and_unit_selection_drive_live_canvas(self) -> None:
+        hidden_settings = replace(
+            self.app.settings,
+            show_waveform=False,
+            waveform_channel_mode="same_x_column",
+        )
+        self.assertTrue(
+            self.app._apply_viewer_settings(
+                hidden_settings,
+                persist=False,
+                broadcast=False,
+            )
+        )
+        self.app._app_root._rfm_settings = hidden_settings
+        self.app._app_root._rfm_settings_path = (
+            Path(self.directory.name) / "waveform-settings.json"
+        )
+
+        requests: list[tuple[int, str]] = []
+
+        def waveform_payload(unit_id: int, channel_mode: str) -> dict[str, object]:
+            requests.append((unit_id, channel_mode))
+            mode_offset = 10.0 if channel_mode == "same_shank" else 0.0
+            return {
+                "unit_id": unit_id,
+                "channel_mode": channel_mode,
+                "matrix": tuple(
+                    tuple(
+                        float(unit_id + row + sample) + mode_offset
+                        for sample in range(4)
+                    )
+                    for row in range(5)
+                ),
+                "times_ms": (-0.5, -0.25, 0.0, 0.25),
+                "channel_labels": tuple(
+                    f"{channel_mode} ch {row}" for row in range(5)
+                ),
+                "best_channel_row": 2,
+                "amplitude_limit_uv": 40.0,
+                "max_ptp_uv": 80.0,
+                "baseline_end_ms": -0.25,
+            }
+
+        self.app.data.waveform_plot_payload = waveform_payload  # type: ignore[method-assign]
+
+        def wait_for_payload(key: tuple[int, str]) -> None:
+            deadline = __import__("time").monotonic() + 2.0
+            while __import__("time").monotonic() < deadline:
+                self.app.update()
+                if self.app._waveform_payload_key == key:
+                    return
+            self.fail(f"Timed out waiting for waveform payload {key}")
+
+        settings_value = replace(hidden_settings, show_waveform=True)
+        # Exercise the supported minimum window where the responsive layout
+        # must not let the compact waveform squeeze HD down to its header.
+        self.app.geometry("1120x720")
+        self.app.notebook.select(0)
+        self.app.update()
+        self.assertTrue(
+            self.app._apply_viewer_settings(
+                settings_value,
+                persist=False,
+                broadcast=False,
+            )
+        )
+        self.app._app_root._rfm_settings = settings_value
+        wait_for_payload((7, "same_x_column"))
+        self.assertEqual(self.app._active_tab_key(), "rf")
+        self.assertTrue(self.app.waveform_pane.winfo_ismapped())
+        self.assertEqual(int(self.app.tuning_curve_section.grid_info()["row"]), 0)
+        self.assertEqual(int(self.app.unit_info_pane.grid_info()["row"]), 1)
+        self.assertIs(self.app.waveform_pane.master, self.app.waveform_host)
+        self.assertEqual(int(self.app.waveform_pane.grid_info()["row"]), 0)
+        self.assertGreaterEqual(
+            self.app.waveform_pane.winfo_rooty(),
+            self.app.cell_label.winfo_rooty() + self.app.cell_label.winfo_height(),
+        )
+        self.assertLessEqual(self.app.waveform_pane.winfo_height(), 200)
+        self.assertFalse(self.app.tuning_curve_status_label.winfo_ismapped())
+        self.assertIn("bin", self.app.cell_label.cget("text"))
+        self.assertIn("cluster 7", self.app.unit_stats_label.cget("text"))
+        self.assertGreater(len(self.app.canvases["waveform"].find_all()), 20)
+        self.assertIn("Same x column", self.app.waveform_subtitle_label.cget("text"))
+
+        self.app._show_settings()
+        settings = self.app._app_root._rfm_settings_window
+        self.assertIsInstance(settings, gui.SettingsWindow)
+        assert isinstance(settings, gui.SettingsWindow)
+        settings.notebook.select(settings._tab_widget_by_name["Waveform"])
+        settings.waveform_channel_mode_var.set("Same shank")
+        settings._save()
+        self.assertFalse(settings.winfo_exists())
+
+        wait_for_payload((7, "same_shank"))
+        self.assertEqual(self.app.waveform_channel_mode_var.get(), "same_shank")
+        self.assertIn("Same shank", self.app.waveform_subtitle_label.cget("text"))
+        saved = json.loads(
+            self.app._app_root._rfm_settings_path.read_text(encoding="utf-8")
+        )
+        self.assertEqual(saved["waveform_channel_mode"], "same_shank")
+
+        self.app.unit_combo.current(1)
+        self.app.unit_combo.event_generate("<<ComboboxSelected>>")
+        wait_for_payload((8, "same_shank"))
+        self.assertEqual(self.app._selected_unit_id_value(), 8)
+        self.assertIn("Cluster 8", self.app.waveform_subtitle_label.cget("text"))
+
+        with mock.patch.object(gui.FigureExportWindow, "_schedule_preview"):
+            self.app.export_toolbar_button.invoke()
+        composer = self.app._figure_export_window
+        self.addCleanup(lambda: composer.winfo_exists() and composer.destroy())
+        self.assertIn(gui.PlotKind.WAVEFORM_LOCAL_AVERAGE, composer.available_kinds)
+        composer.pages[0]["plots"] = [gui.PlotKind.WAVEFORM_LOCAL_AVERAGE]
+        self.assertEqual(
+            composer.pages[0]["plots"],
+            [gui.PlotKind.WAVEFORM_LOCAL_AVERAGE],
+        )
+        self.assertEqual(composer.snapshot.waveform_channel_mode, "same_shank")
+
+        request_count = len(requests)
+        hidden = replace(self.app.settings, show_waveform=False)
+        self.assertTrue(
+            self.app._apply_viewer_settings(
+                hidden,
+                persist=False,
+                broadcast=False,
+            )
+        )
+        self.app.update()
+        self.assertFalse(self.app.waveform_pane.winfo_ismapped())
+        self.app._step_unit(1)
+        self.app.update()
+        self.assertEqual(len(requests), request_count)
 
     def test_preview_daemon_worker_cooperatively_cancels_on_close(self) -> None:
         started = threading.Event()

@@ -84,6 +84,11 @@ for a declared singleton `xPositions` or `yPositions` axis. Singleton-y maps
 use a `30:7` Cartesian footprint and a seven-unit Polar ring; multirow data and
 all scientific indices remain unchanged.
 
+The refreshed Python `1.9.5` application also discovers the companion
+SpikeInterface waveform artifact and exposes its notebook-equivalent nearest
+channels in the viewer and Figure Composer. This Python-only patch does not
+change the Swift or Web applications.
+
 ## Remote validation
 
 Project code is run on `hhw9l84` with `~/.virtualenvs/rfmapping`:

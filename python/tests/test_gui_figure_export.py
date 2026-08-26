@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import csv
+import gzip
+import hashlib
 import json
 import os
 import threading
@@ -33,6 +36,13 @@ from rfmapping_gui import (
 )
 
 
+POSIX_CSV_PUBLICATION_ONLY = pytest.mark.skipif(
+    os.name == "nt",
+    reason="exercises descriptor-pinned CSV directory fsync behavior",
+)
+
+
+@POSIX_CSV_PUBLICATION_ONLY
 def test_atomic_csv_publish_replaces_only_after_fsync(tmp_path: Path, monkeypatch) -> None:
     destination = tmp_path / "displayed.csv"
     destination.write_text("old\n", encoding="utf-8")
@@ -76,13 +86,59 @@ def test_atomic_csv_rejects_symlink_destination(tmp_path: Path) -> None:
     victim = tmp_path / "victim.csv"
     victim.write_text("do not replace\n", encoding="utf-8")
     destination = tmp_path / "displayed.csv"
-    destination.symlink_to(victim)
+    try:
+        destination.symlink_to(victim)
+    except OSError:
+        if os.name == "nt":
+            pytest.skip("Windows runner does not grant symlink creation privilege")
+        raise
 
     with np.testing.assert_raises_regex(ValueError, "regular file"):
         rfmapping_gui._atomic_write_csv(
             destination, lambda writer: writer.writerow(["new"]),
         )
     assert victim.read_text(encoding="utf-8") == "do not replace\n"
+
+
+def test_atomic_csv_path_backend_publishes_and_overwrites(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(rfmapping_gui, "_USE_PATH_CSV_PUBLICATION", True)
+    destination = tmp_path / "displayed.csv"
+
+    rfmapping_gui._atomic_write_csv(
+        destination,
+        lambda writer: writer.writerow(["first"]),
+    )
+    rfmapping_gui._atomic_write_csv(
+        destination,
+        lambda writer: writer.writerow(["second"]),
+    )
+
+    assert destination.read_text(encoding="utf-8") == "second\n"
+    assert not tuple(tmp_path.glob(".displayed.csv.tmp-*"))
+
+
+def test_atomic_csv_path_backend_detects_destination_race(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(rfmapping_gui, "_USE_PATH_CSV_PUBLICATION", True)
+    destination = tmp_path / "displayed.csv"
+
+    def race() -> None:
+        destination.write_text("other writer\n", encoding="utf-8")
+
+    with np.testing.assert_raises_regex(RuntimeError, "destination changed"):
+        rfmapping_gui._atomic_write_csv(
+            destination,
+            lambda writer: writer.writerow(["ours"]),
+            before_publish=race,
+        )
+
+    assert destination.read_text(encoding="utf-8") == "other writer\n"
+    assert not tuple(tmp_path.glob(".displayed.csv.tmp-*"))
 
 
 def _write_fixture(tmp_path: Path) -> Path:
@@ -146,7 +202,162 @@ def _write_probe_fixture(tmp_path: Path) -> tuple[Path, Path]:
     return rf_path, positions_path
 
 
-def _snapshot(*, timeline_polar: bool = False) -> FigureViewerSnapshot:
+_WAVEFORM_CHANNELS = (
+    (0, 100, 0, 0.0, 120.0, 0),
+    (1, 101, 1, 0.0, 90.0, 0),
+    (2, 102, 2, 0.0, 60.0, 0),
+    (3, 103, 3, 0.0, 30.0, 0),
+    (4, 104, 4, 0.0, 0.0, 0),
+    (5, 105, 5, 20.0, 61.0, 0),
+    (6, 106, 6, 40.0, 60.0, 1),
+)
+_WAVEFORM_TIMES_MS = (-0.5, -0.25, 0.0, 0.25)
+
+
+def _write_csv_rows(
+    path: Path,
+    header: tuple[str, ...],
+    rows: list[tuple[object, ...]],
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(header)
+        writer.writerows(rows)
+
+
+def _write_waveform_fixture(
+    tmp_path: Path,
+    *,
+    unit_ids: tuple[int, ...] = (17, 42),
+) -> tuple[Path, Path]:
+    """Write an independent, minimal public schema-v4 waveform artifact."""
+
+    data_root = tmp_path / "260630_3" / "data"
+    rf_parent = data_root / "rfmapping" / "good" / "-100_400_1ms" / "ProbeA"
+    rf_parent.mkdir(parents=True)
+    rf_path = _write_fixture(rf_parent)
+    artifact = data_root / "waveform" / "ProbeA"
+    artifact.mkdir(parents=True)
+    manifest = {
+        "schema_name": "rfmapping-spikeinterface-waveforms",
+        "schema_version": 4,
+        "generated_at_utc": "2026-08-25T00:00:00+00:00",
+        "session": {"name": "260630_3", "probe": "A"},
+        "recording": {
+            "sampling_frequency_hz": 30_000.0,
+            "num_frames": 1_800_000,
+            "duration_minutes": 1.0,
+        },
+        "units": {"scope": "good", "count": len(unit_ids)},
+        "waveform": {
+            "selection_method": "uniform",
+            "max_spikes_per_unit": 500,
+            "seed": 0,
+            "pre_ms": 0.5,
+            "post_ms": 0.25,
+            "nbefore": 2,
+            "num_samples": len(_WAVEFORM_TIMES_MS),
+        },
+        "files": {"units": "units.csv", "spike_positions": None},
+    }
+    (artifact / "manifest.json").write_text(
+        json.dumps(manifest), encoding="utf-8"
+    )
+    _write_csv_rows(
+        artifact / "channels.csv",
+        (
+            "channel_index",
+            "channel_id",
+            "raw_channel_index",
+            "x_um",
+            "y_um",
+            "shank_id",
+        ),
+        list(_WAVEFORM_CHANNELS),
+    )
+    _write_csv_rows(
+        artifact / "waveform_time.csv",
+        ("sample_index", "sample_offset", "time_ms"),
+        [
+            (sample_index, sample_index - 2, time_ms)
+            for sample_index, time_ms in enumerate(_WAVEFORM_TIMES_MS)
+        ],
+    )
+
+    unit_rows: list[tuple[object, ...]] = []
+    template_header = (
+        "sample_index",
+        *(
+            f"chidx_{channel_index:03d}_uv"
+            for channel_index in range(len(_WAVEFORM_CHANNELS))
+        ),
+    )
+    for unit_index, unit_id in enumerate(unit_ids):
+        unit_dir_name = f"Unit{unit_id}"
+        unit_dir = artifact / unit_dir_name
+        unit_dir.mkdir()
+        unit_scale = float(unit_index + 1)
+        with gzip.open(
+            unit_dir / "template_uv.csv.gz",
+            "wt",
+            encoding="utf-8",
+            newline="",
+        ) as handle:
+            writer = csv.writer(handle)
+            writer.writerow(template_header)
+            for sample_index in range(len(_WAVEFORM_TIMES_MS)):
+                writer.writerow(
+                    (
+                        sample_index,
+                        *(
+                            unit_scale * (sample_index + 1) * (channel_index + 1)
+                            for channel_index in range(len(_WAVEFORM_CHANNELS))
+                        ),
+                    )
+                )
+        unit_rows.append(
+            (
+                unit_index,
+                unit_id,
+                "good",
+                1000 + unit_index,
+                500,
+                90.0,
+                2,
+                102,
+                0.0,
+                60.0,
+                40.0 * unit_scale,
+                unit_dir_name,
+            )
+        )
+    _write_csv_rows(
+        artifact / "units.csv",
+        (
+            "unit_index",
+            "unit_id",
+            "quality",
+            "total_spike_count",
+            "selected_spike_count",
+            "time_coverage_percent",
+            "best_channel_index",
+            "best_channel_id",
+            "best_channel_x_um",
+            "best_channel_y_um",
+            "max_ptp_uv",
+            "unit_data_dir",
+        ),
+        unit_rows,
+    )
+    return rf_path, artifact
+
+
+def _snapshot(
+    *,
+    timeline_polar: bool = False,
+    waveform_channel_mode: str = "same_x_column",
+) -> FigureViewerSnapshot:
     return FigureViewerSnapshot(
         value_mode=VALUE_MODE_COUNT,
         rf_source_start=1,
@@ -163,6 +374,7 @@ def _snapshot(*, timeline_polar: bool = False) -> FigureViewerSnapshot:
         timeline_range_start=1,
         timeline_range_end=2,
         timeline_active_bin=2,
+        waveform_channel_mode=waveform_channel_mode,
     )
 
 
@@ -235,6 +447,89 @@ def test_gui_provider_returns_explicit_placeholder_for_missing_unit(
     assert result.data == {
         "unavailable": "Unit 999 is unavailable in this RF dataset."
     }
+
+
+def test_gui_provider_waveform_available_and_unavailable_are_unit_scoped(
+    tmp_path: Path,
+) -> None:
+    rf_path, _artifact = _write_waveform_fixture(tmp_path, unit_ids=(17,))
+    provider = GUIFigureDataProvider(RFMappingData(rf_path), _snapshot())
+
+    available = provider(17, PlotSpec(PlotKind.WAVEFORM_LOCAL_AVERAGE))
+
+    assert available.data["unit_id"] == 17
+    assert available.data["channel_mode"] == "same_x_column"
+    assert np.asarray(available.data["matrix"]).shape == (5, 4)
+    assert available.data["channel_labels"] == (
+        "ch 100 · x 0 y 120 · s0",
+        "ch 101 · x 0 y 90 · s0",
+        "ch 102 · x 0 y 60 · s0",
+        "ch 103 · x 0 y 30 · s0",
+        "ch 104 · x 0 y 0 · s0",
+    )
+    assert available.data["best_channel_row"] == 2
+    assert available.data["amplitude_limit_uv"] == pytest.approx(17.5)
+    assert available.options["palette"] == "rdbu_r"
+    assert available.options["value_unit"] == "µV"
+    assert available.options["show_colorbar"] is True
+    assert available.options["vmin"] == pytest.approx(-17.5)
+    assert available.options["vmax"] == pytest.approx(17.5)
+
+    missing_unit = provider(42, PlotSpec(PlotKind.WAVEFORM_LOCAL_AVERAGE))
+    assert missing_unit.data == {
+        "unavailable": "Waveform is unavailable for RF unit 42."
+    }
+
+    no_waveform_root = tmp_path / "without-waveform"
+    no_waveform_root.mkdir()
+    no_waveform_provider = GUIFigureDataProvider(
+        RFMappingData(_write_fixture(no_waveform_root)),
+        _snapshot(),
+    )
+    no_waveform = no_waveform_provider(
+        17, PlotSpec(PlotKind.WAVEFORM_LOCAL_AVERAGE)
+    )
+    assert no_waveform.data == {
+        "unavailable": "No companion waveform artifact was found for this RF dataset."
+    }
+
+
+def test_gui_provider_freezes_waveform_channel_mode_with_snapshot(
+    tmp_path: Path,
+) -> None:
+    rf_path, _artifact = _write_waveform_fixture(tmp_path)
+    data = RFMappingData(rf_path)
+    captured_snapshot = _snapshot(waveform_channel_mode="same_x_column")
+    provider = GUIFigureDataProvider(data, captured_snapshot)
+
+    # Replacing the caller's current settings after the composer opens must not
+    # alter the provider bound to its immutable FigureViewerSnapshot.
+    current_snapshot = replace(
+        captured_snapshot, waveform_channel_mode="same_shank"
+    )
+    frozen = provider(17, PlotSpec(PlotKind.WAVEFORM_LOCAL_AVERAGE)).data
+    current = GUIFigureDataProvider(data, current_snapshot)(
+        17, PlotSpec(PlotKind.WAVEFORM_LOCAL_AVERAGE)
+    ).data
+
+    assert provider.snapshot is captured_snapshot
+    assert frozen["channel_mode"] == "same_x_column"
+    assert current["channel_mode"] == "same_shank"
+    assert frozen["channel_labels"] != current["channel_labels"]
+    assert tuple(label.split(" ·", 1)[0] for label in frozen["channel_labels"]) == (
+        "ch 100",
+        "ch 101",
+        "ch 102",
+        "ch 103",
+        "ch 104",
+    )
+    assert tuple(label.split(" ·", 1)[0] for label in current["channel_labels"]) == (
+        "ch 100",
+        "ch 101",
+        "ch 105",
+        "ch 102",
+        "ch 103",
+    )
 
 
 def test_gui_provider_renders_discovered_probe_geometry_from_frozen_session(
@@ -683,6 +978,34 @@ def test_frozen_file_hash_rejects_changed_source(tmp_path: Path) -> None:
         rfmapping_gui._hash_frozen_file(identity)
 
 
+def test_frozen_file_hash_keeps_windows_path_and_handle_domains_separate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.json"
+    source.write_bytes(b"scientific input")
+    real_fstat = rfmapping_gui.os.fstat
+
+    def handle_domain_stat(descriptor: int) -> SimpleNamespace:
+        result = real_fstat(descriptor)
+        return SimpleNamespace(
+            st_dev=result.st_dev + 1000,
+            st_ino=result.st_ino + 1000,
+            st_mode=result.st_mode,
+            st_size=result.st_size,
+            st_mtime_ns=result.st_mtime_ns + 100,
+            st_ctime_ns=result.st_ctime_ns + 100,
+        )
+
+    monkeypatch.setattr(rfmapping_gui.os, "fstat", handle_domain_stat)
+    identity = rfmapping_gui.FrozenFileIdentity.capture(source)
+
+    assert identity.handle_device != identity.device
+    assert rfmapping_gui._hash_frozen_file(identity) == hashlib.sha256(
+        b"scientific input"
+    ).hexdigest()
+
+
 def test_gui_shared_rf_scale_is_selection_scoped_and_frozen_in_plot_options(
     tmp_path: Path,
 ) -> None:
@@ -703,6 +1026,63 @@ def test_gui_shared_rf_scale_is_selection_scoped_and_frozen_in_plot_options(
     assert all(plot.options["vmin"] == 0.0 for plot in resolved[0].plots)
     assert all(plot.options["vmax"] == 7.0 for plot in resolved[0].plots)
     assert all(plot.options["value_unit"] == "spikes" for plot in resolved[0].plots)
+
+
+def test_gui_shared_waveform_scale_is_selection_scoped_and_resolved_in_options(
+    tmp_path: Path,
+) -> None:
+    rf_path, _artifact = _write_waveform_fixture(tmp_path)
+    data = RFMappingData(rf_path)
+    snapshot = _snapshot(waveform_channel_mode="same_shank")
+    provider = GUIFigureDataProvider(data, snapshot)
+
+    limit_one = provider.shared_waveform_amplitude_limit((17,))
+    limit_both = provider.shared_waveform_amplitude_limit((17, 42))
+
+    assert limit_one == pytest.approx(17.5)
+    assert limit_both == pytest.approx(35.0)
+
+    composer = SimpleNamespace(
+        pages=[
+            {
+                "name": "Waveform",
+                "plots": [PlotKind.WAVEFORM_LOCAL_AVERAGE],
+            }
+        ],
+        snapshot=snapshot,
+        data=data,
+    )
+    raw = FigureExportWindow._export_pages(composer)
+    resolved = FigureExportWindow._resolved_export_pages(
+        composer,
+        raw,
+        None,
+        limit_both,
+    )
+    resolved_plot = resolved[0].plots[0]
+
+    assert resolved_plot.title == "Local average waveform"
+    assert resolved_plot.options["palette"] == "rdbu_r"
+    assert resolved_plot.options["value_unit"] == "µV"
+    assert resolved_plot.options["show_axes"] is True
+    assert resolved_plot.options["show_colorbar"] is True
+    assert resolved_plot.options["vmin"] == pytest.approx(-35.0)
+    assert resolved_plot.options["vmax"] == pytest.approx(35.0)
+    assert resolved_plot.options["subtitle"] == (
+        "best + nearest 4; Same shank; baseline ≤ -0.25 ms"
+    )
+
+    shared_provider = GUIFigureDataProvider(
+        data,
+        snapshot,
+        shared_waveform_limit=limit_both,
+    )
+    prepared = shared_provider(
+        17, PlotSpec(PlotKind.WAVEFORM_LOCAL_AVERAGE)
+    )
+    assert prepared.data["amplitude_limit_uv"] == pytest.approx(17.5)
+    assert prepared.options["vmin"] == pytest.approx(-35.0)
+    assert prepared.options["vmax"] == pytest.approx(35.0)
 
 
 def test_polar_export_labels_follow_provider_rows_for_both_radius_modes_and_flip(
@@ -768,6 +1148,89 @@ def test_freeze_context_revalidates_cached_source(tmp_path: Path) -> None:
     data.path.write_text(data.path.read_text() + " ", encoding="utf-8")
     with np.testing.assert_raises_regex(RuntimeError, "changed after it was loaded"):
         FigureExportWindow._freeze_context(composer, (17,), raw)
+
+
+def test_freeze_context_captures_waveform_provenance_identities(
+    tmp_path: Path,
+) -> None:
+    rf_path, artifact = _write_waveform_fixture(tmp_path)
+    data = RFMappingData(rf_path)
+    snapshot = _snapshot(waveform_channel_mode="same_shank")
+    composer = SimpleNamespace(
+        data=data,
+        snapshot=snapshot,
+        _provider_lock=threading.Lock(),
+        _base_data_provider=None,
+        _provenance_metadata=None,
+        _context_cache={},
+        pages=[
+            {
+                "name": "Waveform",
+                "plots": [PlotKind.WAVEFORM_LOCAL_AVERAGE],
+            }
+        ],
+    )
+    composer._recipe_key = lambda unit_ids, pages: FigureExportWindow._recipe_key(
+        composer, unit_ids, pages
+    )
+    composer._verify_export_inputs = lambda: FigureExportWindow._verify_export_inputs(
+        composer
+    )
+    composer._export_pages = lambda: FigureExportWindow._export_pages(composer)
+    composer._resolved_export_pages = (
+        lambda pages, scale, waveform_limit=None: FigureExportWindow._resolved_export_pages(
+            composer,
+            pages,
+            scale,
+            waveform_limit,
+        )
+    )
+    raw = composer._export_pages()
+
+    pages, metadata, frozen_provider = FigureExportWindow._freeze_context(
+        composer,
+        (17, 42),
+        raw,
+    )
+
+    expected_paths = {
+        artifact / "manifest.json",
+        artifact / "channels.csv",
+        artifact / "waveform_time.csv",
+        artifact / "units.csv",
+        artifact / "Unit17" / "template_uv.csv.gz",
+        artifact / "Unit42" / "template_uv.csv.gz",
+    }
+    assert {identity.path for identity in data._waveform_file_identities} == {
+        path.resolve() for path in expected_paths
+    }
+    waveform_companions = [
+        companion
+        for companion in metadata["companions"]
+        if companion["kind"] == "waveform"
+    ]
+    assert {Path(companion["path"]) for companion in waveform_companions} == {
+        path.resolve() for path in expected_paths
+    }
+    assert all(len(str(companion["sha256"])) == 64 for companion in waveform_companions)
+    assert metadata["companionStatus"]["waveform"] == "available"
+    assert metadata["snapshot"]["waveformChannelMode"] == "same_shank"
+    assert metadata["sharedWaveformScale"] == {
+        "vmin": -35.0,
+        "vmax": 35.0,
+        "unit": "µV",
+        "unitIds": [17, 42],
+        "baselineEndMs": -0.25,
+        "channelMode": "same_shank",
+    }
+    assert pages[0].plots[0].options["vmin"] == pytest.approx(-35.0)
+    assert pages[0].plots[0].options["vmax"] == pytest.approx(35.0)
+    assert frozen_provider.shared_waveform_limit == pytest.approx(35.0)
+
+    changed_template = artifact / "Unit17" / "template_uv.csv.gz"
+    changed_template.write_bytes(changed_template.read_bytes() + b"changed")
+    with pytest.raises(RuntimeError, match="changed after it was loaded"):
+        FigureExportWindow._freeze_context(composer, (17, 42), raw)
 
 
 def test_active_export_registry_tracks_non_daemon_future_until_completion() -> None:
@@ -868,6 +1331,7 @@ def test_atomic_csv_accepts_replace_lost_success_reply(tmp_path: Path, monkeypat
     assert not tuple(tmp_path.glob(".displayed.csv.tmp-*"))
 
 
+@POSIX_CSV_PUBLICATION_ONLY
 def test_atomic_csv_reports_post_publish_durability_failure(
     tmp_path: Path,
     monkeypatch,
