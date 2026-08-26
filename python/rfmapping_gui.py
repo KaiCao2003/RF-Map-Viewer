@@ -48,6 +48,11 @@ from rfmapping_viewer.hd_tuning import (
     probe_name_for_rf,
 )
 from rfmapping_viewer.rf_dataset import RFMap, RFMapList, load_rf_maps
+from rfmapping_viewer.waveform import (
+    WaveformArtifactStore,
+    WaveformPayload,
+    discover_waveform_artifact,
+)
 
 try:
     from tkinter import filedialog, messagebox, ttk
@@ -122,6 +127,15 @@ VALUE_MODE_RATE = "Mean firing rate (Hz)"
 VALUE_MODES = (VALUE_MODE_COUNT, VALUE_MODE_RATE)
 PALETTES = ("Gray", "Viridis", "Inferno")
 POLAR_RADIUS_MODES = ("MATLAB row 1 inner", "Display bottom inner")
+WAVEFORM_CHANNEL_MODE_LABELS = {
+    "same_x_column": "Same x column",
+    "same_shank": "Same shank",
+}
+_USE_PATH_CSV_PUBLICATION = os.name == "nt"
+WAVEFORM_CHANNEL_MODES = tuple(WAVEFORM_CHANNEL_MODE_LABELS)
+WAVEFORM_CHANNEL_MODE_BY_LABEL = {
+    label: mode for mode, label in WAVEFORM_CHANNEL_MODE_LABELS.items()
+}
 AxisGroup = tuple[int, int]
 CellRef = tuple[int, int, int, int]
 PROBE_CLICK_WIDTH_UM = 160.0
@@ -163,38 +177,106 @@ class FrozenFileIdentity:
     mtime_ns: int
     ctime_ns: int
     mode: int
+    handle_device: int
+    handle_inode: int
+    handle_size: int
+    handle_mtime_ns: int
+    handle_mode: int
 
     @classmethod
     def capture(cls, path: str | Path) -> FrozenFileIdentity:
         source = Path(path).expanduser().resolve(strict=True)
-        info = os.stat(source, follow_symlinks=False)
-        if not stat.S_ISREG(info.st_mode):
+        path_before = os.stat(source, follow_symlinks=False)
+        if not stat.S_ISREG(path_before.st_mode):
             raise ValueError(f"Scientific input is not a regular file: {source}")
+        descriptor = os.open(
+            source,
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+        )
+        try:
+            handle_info = os.fstat(descriptor)
+        finally:
+            os.close(descriptor)
+        path_after = os.stat(source, follow_symlinks=False)
+        if not stat.S_ISREG(handle_info.st_mode):
+            raise ValueError(f"Scientific input is not a regular file: {source}")
+        if (
+            handle_info.st_size != path_after.st_size
+            or cls.path_signature(path_after) != cls.path_signature(path_before)
+        ):
+            raise ValueError(f"Scientific input changed while it was opened: {source}")
         return cls(
             source,
-            int(info.st_dev),
-            int(info.st_ino),
-            int(info.st_size),
-            int(info.st_mtime_ns),
-            int(info.st_ctime_ns),
-            int(stat.S_IFMT(info.st_mode)),
+            int(path_after.st_dev),
+            int(path_after.st_ino),
+            int(path_after.st_size),
+            int(path_after.st_mtime_ns),
+            int(path_after.st_ctime_ns),
+            int(stat.S_IFMT(path_after.st_mode)),
+            int(handle_info.st_dev),
+            int(handle_info.st_ino),
+            int(handle_info.st_size),
+            int(handle_info.st_mtime_ns),
+            int(stat.S_IFMT(handle_info.st_mode)),
         )
 
-    def matches(self, info: os.stat_result) -> bool:
+    @staticmethod
+    def path_signature(info: os.stat_result) -> tuple[int, ...]:
         return (
             int(info.st_dev),
             int(info.st_ino),
             int(info.st_size),
             int(info.st_mtime_ns),
-            int(info.st_ctime_ns),
+            int(info.st_ctime_ns) if os.name != "nt" else 0,
+            int(stat.S_IFMT(info.st_mode)),
+        )
+
+    def matches(self, info: os.stat_result) -> bool:
+        stable_fields_match = (
+            int(info.st_dev),
+            int(info.st_ino),
+            int(info.st_size),
+            int(info.st_mtime_ns),
             int(stat.S_IFMT(info.st_mode)),
         ) == (
             self.device,
             self.inode,
             self.size,
             self.mtime_ns,
-            self.ctime_ns,
             self.mode,
+        )
+        # Windows reports creation/change timestamps inconsistently between
+        # path stat and an open file handle.  Size, mtime, file identity, and
+        # the provenance digest still detect scientific-input mutations.
+        return stable_fields_match and (
+            os.name == "nt" or int(info.st_ctime_ns) == self.ctime_ns
+        )
+
+    def matches_open_file(self, info: os.stat_result) -> bool:
+        return (
+            int(info.st_dev),
+            int(info.st_ino),
+            int(info.st_size),
+            int(info.st_mtime_ns),
+            int(stat.S_IFMT(info.st_mode)),
+        ) == (
+            self.handle_device,
+            self.handle_inode,
+            self.handle_size,
+            self.handle_mtime_ns,
+            self.handle_mode,
+        )
+
+    @staticmethod
+    def open_file_signature(info: os.stat_result) -> tuple[int, ...]:
+        return (
+            int(info.st_dev),
+            int(info.st_ino),
+            int(info.st_size),
+            int(info.st_mtime_ns),
+            int(stat.S_IFMT(info.st_mode)),
         )
 
     def verify_path(self) -> None:
@@ -230,13 +312,14 @@ def _hash_frozen_file(
             raise RuntimeError("Preview superseded by a newer recipe")
 
     check_cancelled()
+    identity.verify_path()
     descriptor = os.open(
         identity.path,
         os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
     )
     try:
         before = os.fstat(descriptor)
-        if not identity.matches(before):
+        if not identity.matches_open_file(before):
             raise RuntimeError(
                 f"Scientific input changed after it was loaded; reopen it before exporting: {identity.path}"
             )
@@ -246,7 +329,11 @@ def _hash_frozen_file(
             digest.update(chunk)
         check_cancelled()
         after = os.fstat(descriptor)
-        if not identity.matches(after):
+        if (
+            not identity.matches_open_file(after)
+            or identity.open_file_signature(after)
+            != identity.open_file_signature(before)
+        ):
             raise RuntimeError(
                 f"Scientific input changed while provenance was computed: {identity.path}"
             )
@@ -321,6 +408,121 @@ def _shutdown_export_executor(root: tk.Misc) -> None:
         root._rfm_export_executor = None
 
 
+def _path_is_link_like(path: Path) -> bool:
+    if path.is_symlink():
+        return True
+    is_junction = getattr(path, "is_junction", None)
+    return bool(is_junction is not None and is_junction())
+
+
+def _path_stat_signature(result: os.stat_result | None) -> tuple | None:
+    if result is None:
+        return None
+    return (
+        result.st_dev,
+        result.st_ino,
+        stat.S_IFMT(result.st_mode),
+        result.st_size,
+        result.st_mtime_ns,
+        result.st_ctime_ns,
+    )
+
+
+def _path_lstat(path: Path) -> os.stat_result | None:
+    try:
+        return path.lstat()
+    except FileNotFoundError:
+        return None
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _atomic_write_csv_path_backend(
+    target: Path,
+    write_rows: Callable[[csv.writer], None],
+    *,
+    before_publish: Callable[[], None] | None,
+) -> Path:
+    """Windows-safe sibling staging and atomic file replacement."""
+
+    parent = target.parent if str(target.parent) else Path(".")
+    parent_before = _path_lstat(parent)
+    if (
+        parent_before is None
+        or _path_is_link_like(parent)
+        or not stat.S_ISDIR(parent_before.st_mode)
+    ):
+        raise ValueError("CSV parent must be a real directory")
+    existing = _path_lstat(target)
+    if existing is not None and (
+        _path_is_link_like(target) or not stat.S_ISREG(existing.st_mode)
+    ):
+        raise ValueError("CSV destination must be a regular file")
+    existing_signature = _path_stat_signature(existing)
+    temporary_path = parent / f".{target.name}.tmp-{uuid.uuid4().hex}"
+    descriptor: int | None = os.open(
+        temporary_path,
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_CLOEXEC", 0),
+        0o600,
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as stream:
+            descriptor = None
+            write_rows(csv.writer(stream))
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary_path, 0o660)
+        staged = temporary_path.lstat()
+        staged_digest = _file_sha256(temporary_path)
+        if before_publish is not None:
+            before_publish()
+        current = _path_lstat(target)
+        if _path_stat_signature(current) != existing_signature:
+            raise RuntimeError("CSV destination changed while the export was being written")
+        parent_now = _path_lstat(parent)
+        if (
+            parent_now is None
+            or _path_is_link_like(parent)
+            or (
+                parent_now.st_dev,
+                parent_now.st_ino,
+                stat.S_IFMT(parent_now.st_mode),
+            )
+            != (
+                parent_before.st_dev,
+                parent_before.st_ino,
+                stat.S_IFMT(parent_before.st_mode),
+            )
+        ):
+            raise RuntimeError("CSV parent directory changed while the export was being written")
+        try:
+            os.replace(temporary_path, target)
+        except OSError:
+            published = _path_lstat(target)
+            if (
+                temporary_path.exists()
+                or published is None
+                or published.st_size != staged.st_size
+                or _file_sha256(target) != staged_digest
+            ):
+                raise
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        temporary_path.unlink(missing_ok=True)
+    return target
+
+
 def _atomic_write_csv(
     destination: str | Path,
     write_rows: Callable[[csv.writer], None],
@@ -337,6 +539,12 @@ def _atomic_write_csv(
     target = Path(destination).expanduser()
     if not target.name or target.name in {".", ".."}:
         raise ValueError("CSV destination must name a file")
+    if _USE_PATH_CSV_PUBLICATION:
+        return _atomic_write_csv_path_backend(
+            target,
+            write_rows,
+            before_publish=before_publish,
+        )
     parent = target.parent if str(target.parent) else Path(".")
     directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
     directory_flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
@@ -688,19 +896,11 @@ def latest_json_path(root: Path | None = None) -> Path:
     return files[0] if files else DEFAULT_JSON
 
 
-def startup_json_path() -> Path:
-    """Return a real startup document without opening a modal dialog.
+def startup_file_dialog_directory() -> Path:
+    """Return a stable existing directory for a no-document file picker."""
 
-    Finder delivers ``Open With`` paths as an Apple event, after Tk has created
-    its application object.  A modal chooser here would prevent Tk from
-    installing and servicing that event handler.  The bundled JSON is only a
-    temporary document; an initial OpenDocument event replaces it as soon as
-    the event loop starts.
-    """
-    if getattr(sys, "frozen", False):
-        resources = Path(sys.executable).resolve().parent.parent / "Resources"
-        return latest_json_path(resources)
-    return latest_json_path()
+    documents = Path.home() / "Documents"
+    return documents if documents.is_dir() else Path.home()
 
 
 def support_documentation_path(
@@ -771,6 +971,7 @@ class ViewerSettings:
     schema_version: int = SETTINGS_SCHEMA_VERSION
     show_tuning_curve: bool = True
     auto_load_tuning_curve: bool = True
+    show_waveform: bool = True
     show_probe_layout: bool = True
     auto_load_probe_layout: bool = True
     rf_sum_start_ms: float = DEFAULT_RF_SUM_START_MS
@@ -788,6 +989,7 @@ class ViewerSettings:
     rf_polar_layout: bool = False
     rf_rgb_mode: bool = False
     default_viewer_tab: str = "rf"
+    waveform_channel_mode: str = "same_x_column"
     tuning_plot_mode: str = "Auto"
     tuning_layout: str = TUNING_LAYOUTS[0]
     tuning_display_bins: int = DEFAULT_HD_DISPLAY_BINS
@@ -841,6 +1043,11 @@ class ViewerSettings:
         viewer_tab = payload.get("default_viewer_tab", defaults.default_viewer_tab)
         if viewer_tab not in {"rf", "delay", "timeline"}:
             viewer_tab = defaults.default_viewer_tab
+        waveform_channel_mode = payload.get(
+            "waveform_channel_mode", defaults.waveform_channel_mode
+        )
+        if waveform_channel_mode not in WAVEFORM_CHANNEL_MODES:
+            waveform_channel_mode = defaults.waveform_channel_mode
         tuning_mode = payload.get("tuning_plot_mode", defaults.tuning_plot_mode)
         if tuning_mode not in TUNING_PLOT_MODES:
             tuning_mode = defaults.tuning_plot_mode
@@ -854,6 +1061,7 @@ class ViewerSettings:
         return cls(
             show_tuning_curve=boolean("show_tuning_curve"),
             auto_load_tuning_curve=boolean("auto_load_tuning_curve"),
+            show_waveform=boolean("show_waveform"),
             show_probe_layout=boolean("show_probe_layout"),
             auto_load_probe_layout=boolean("auto_load_probe_layout"),
             rf_sum_start_ms=start_ms,
@@ -875,6 +1083,7 @@ class ViewerSettings:
             rf_polar_layout=boolean("rf_polar_layout"),
             rf_rgb_mode=boolean("rf_rgb_mode"),
             default_viewer_tab=viewer_tab,
+            waveform_channel_mode=waveform_channel_mode,
             tuning_plot_mode=tuning_mode,
             tuning_layout=tuning_layout,
             tuning_display_bins=normalize_hd_bin_count(raw_hd_bins),
@@ -2213,6 +2422,7 @@ class ViewerSyncState:
     tuning_smooth_sigma: float = DEFAULT_HD_SMOOTH_SIGMA
     tuning_compare_scale: bool = False
     show_tuning_curve: bool = True
+    show_waveform: bool = True
     show_probe_layout: bool = True
 
     def changed_fields(self, baseline: ViewerSyncState) -> frozenset[str]:
@@ -2268,6 +2478,7 @@ class ViewerSyncState:
             fields.add("tuning_display")
         if (
             self.show_tuning_curve != baseline.show_tuning_curve
+            or self.show_waveform != baseline.show_waveform
             or self.show_probe_layout != baseline.show_probe_layout
         ):
             fields.add("optional_views")
@@ -2331,6 +2542,7 @@ class ViewerSyncState:
         if "optional_views" in fields:
             updates.update(
                 show_tuning_curve=incoming.show_tuning_curve,
+                show_waveform=incoming.show_waveform,
                 show_probe_layout=incoming.show_probe_layout,
             )
         return replace(self, **updates)
@@ -2370,6 +2582,11 @@ class RFMappingData:
         self._probe_geometry: ProbeGeometry | None = None
         self._probe_geometry_error: str | None = None
         self._probe_file_identities: tuple[FrozenFileIdentity, ...] = ()
+        self._waveform_lock = threading.Lock()
+        self._waveform_checked = False
+        self._waveform_store: WaveformArtifactStore | None = None
+        self._waveform_error: str | None = None
+        self._waveform_file_identities: tuple[FrozenFileIdentity, ...] = ()
 
     def rf_map(self, unit_idx: int) -> RFMap:
         """Return one unit by its original JSON array index."""
@@ -2564,6 +2781,106 @@ class RFMappingData:
     def probe_geometry_error(self) -> str | None:
         self.probe_geometry()
         return self._probe_geometry_error
+
+    def waveform_store(self) -> WaveformArtifactStore | None:
+        """Lazily discover the read-only schema-v4 waveform artifact."""
+
+        if self._waveform_checked:
+            return self._waveform_store
+        with self._waveform_lock:
+            if self._waveform_checked:
+                return self._waveform_store
+            store: WaveformArtifactStore | None = None
+            error: str | None = None
+            try:
+                artifact = discover_waveform_artifact(self.path)
+                if artifact is not None:
+                    store = WaveformArtifactStore.open(artifact)
+            except Exception as exc:
+                error = str(exc)
+            self._waveform_store = store
+            self._waveform_error = error
+            self._waveform_checked = True
+        return self._waveform_store
+
+    @property
+    def waveform_error(self) -> str | None:
+        self.waveform_store()
+        return self._waveform_error
+
+    def waveform_payload(
+        self,
+        unit_id: int,
+        channel_mode: str,
+    ) -> WaveformPayload:
+        store = self.waveform_store()
+        if store is None:
+            if self._waveform_error:
+                raise ValueError(
+                    f"Waveform artifact could not be loaded: {self._waveform_error}"
+                )
+            raise ValueError(
+                "No companion data/waveform/Probe*/manifest.json was found "
+                "for this RF dataset."
+            )
+        try:
+            return store.payload_for(
+                int(unit_id),
+                mode=channel_mode,
+                local_channel_count=5,
+                baseline_end_ms=-0.25,
+            )
+        except KeyError as exc:
+            raise ValueError(
+                f"Waveform is unavailable for RF unit {int(unit_id)}."
+            ) from exc
+
+    def waveform_plot_payload(
+        self,
+        unit_id: int,
+        channel_mode: str,
+    ) -> dict[str, object]:
+        """Return one shared immutable-data contract for Tk and Pillow."""
+
+        payload = self.waveform_payload(unit_id, channel_mode)
+        summary = payload.summary
+        return {
+            "matrix": payload.matrix,
+            "times_ms": payload.times_ms,
+            "time_edges_ms": payload.time_edges_ms,
+            "channel_labels": tuple(
+                f"ch {channel.channel_id} · x {channel.x_um:g} y {channel.y_um:g} · s{channel.shank_id}"
+                for channel in payload.channels
+            ),
+            "best_channel_row": payload.best_channel_row,
+            "best_channel_index": payload.best_channel_index,
+            "amplitude_limit_uv": payload.amplitude_limit_uv,
+            "unit_id": int(summary.unit_id),
+            "max_ptp_uv": float(summary.max_ptp_uv),
+            "channel_mode": payload.mode,
+        }
+
+    def capture_waveform_inputs(
+        self,
+        unit_ids: Iterable[int],
+    ) -> tuple[FrozenFileIdentity, ...]:
+        """Freeze metadata and selected templates for export provenance."""
+
+        store = self.waveform_store()
+        if store is None:
+            self._waveform_file_identities = ()
+            return ()
+        paths: dict[Path, None] = {}
+        for unit_id in unit_ids:
+            try:
+                source_paths = store.source_paths_for_unit(int(unit_id))
+            except KeyError:
+                continue
+            for path in source_paths:
+                paths[Path(path).expanduser().resolve()] = None
+        identities = tuple(FrozenFileIdentity.capture(path) for path in paths)
+        self._waveform_file_identities = identities
+        return identities
 
     def display_y_indices(self, flip_y: bool = True) -> list[int]:
         if flip_y:
@@ -3286,6 +3603,25 @@ def delay_color(value: float | None, low: float = 0.0, high: float = 100.0) -> s
     )
 
 
+def waveform_color(value: float | None, amplitude_limit_uv: float) -> str:
+    """Return the notebook's red-white-blue diverging waveform color."""
+
+    if value is None or not math.isfinite(float(value)):
+        return "#e6e8eb"
+    limit = max(float(amplitude_limit_uv), 1e-12)
+    t = clamp((float(value) + limit) / (2.0 * limit))
+    return gradient_color(
+        t,
+        (
+            (0.0, (5, 48, 97)),
+            (0.25, (67, 147, 195)),
+            (0.50, (247, 247, 247)),
+            (0.75, (214, 96, 77)),
+            (1.0, (103, 0, 31)),
+        ),
+    )
+
+
 def gradient_color(t: float, stops: tuple[tuple[float, tuple[int, int, int]], ...]) -> str:
     t = clamp(t)
     for i in range(len(stops) - 1):
@@ -3719,7 +4055,7 @@ def polar_matrix_atlas_ppm_data(
 class SettingsWindow(tk.Toplevel):
     """Single native-style settings window shared by all viewer windows."""
 
-    TAB_NAMES = ("General", "RF Map", "Tuning Curve")
+    TAB_NAMES = ("General", "RF Map", "Waveform", "Tuning Curve")
 
     def __init__(self, owner: RFMViewer):
         self.owner = owner
@@ -3746,6 +4082,7 @@ class SettingsWindow(tk.Toplevel):
     def _create_variables(self, settings: ViewerSettings) -> None:
         self.show_tuning_curve_var = tk.BooleanVar(value=settings.show_tuning_curve)
         self.auto_load_tuning_curve_var = tk.BooleanVar(value=settings.auto_load_tuning_curve)
+        self.show_waveform_var = tk.BooleanVar(value=settings.show_waveform)
         self.show_probe_layout_var = tk.BooleanVar(value=settings.show_probe_layout)
         self.auto_load_probe_layout_var = tk.BooleanVar(value=settings.auto_load_probe_layout)
         self.rf_sum_start_var = tk.StringVar(value=format_ms(settings.rf_sum_start_ms))
@@ -3772,9 +4109,19 @@ class SettingsWindow(tk.Toplevel):
             value="Polar" if settings.rf_polar_layout else "Rectangle"
         )
         self.rf_rgb_mode_var = tk.BooleanVar(value=settings.rf_rgb_mode)
-        viewer_tab_labels = {"rf": "RF", "delay": "Delay / RGB", "timeline": "Timeline"}
+        viewer_tab_labels = {
+            "rf": "RF",
+            "delay": "Delay / RGB",
+            "timeline": "Timeline",
+        }
         self.default_viewer_tab_var = tk.StringVar(
-            value=viewer_tab_labels[settings.default_viewer_tab]
+            value=viewer_tab_labels.get(settings.default_viewer_tab, "RF")
+        )
+        self.waveform_channel_mode_var = tk.StringVar(
+            value=WAVEFORM_CHANNEL_MODE_LABELS.get(
+                settings.waveform_channel_mode,
+                WAVEFORM_CHANNEL_MODE_LABELS["same_x_column"],
+            )
         )
         self.tuning_plot_mode_var = tk.StringVar(value=settings.tuning_plot_mode)
         self.tuning_layout_var = tk.StringVar(value=settings.tuning_layout)
@@ -3799,13 +4146,16 @@ class SettingsWindow(tk.Toplevel):
 
         self.notebook = ttk.Notebook(outer)
         self.notebook.grid(row=0, column=0, sticky="nsew")
+        self.notebook.enable_traversal()
         self._tab_name_by_widget: dict[str, str] = {}
         self._tab_widget_by_name: dict[str, str] = {}
         general = self._new_tab("General")
         rf_map = self._new_tab("RF Map")
+        waveform = self._new_tab("Waveform")
         tuning = self._new_tab("Tuning Curve")
         self._build_general_tab(general)
         self._build_rf_tab(rf_map)
+        self._build_waveform_tab(waveform)
         self._build_tuning_tab(tuning)
         self.notebook.bind("<<NotebookTabChanged>>", self._remember_selected_tab)
 
@@ -3826,6 +4176,7 @@ class SettingsWindow(tk.Toplevel):
 
         for variable in (
             self.show_tuning_curve_var,
+            self.show_waveform_var,
             self.show_probe_layout_var,
             self.rf_filter_units_with_zero_bins_var,
             self.tuning_smoothing_var,
@@ -4003,6 +4354,32 @@ class SettingsWindow(tk.Toplevel):
             foreground="#667085",
         ).grid(row=16, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
+    def _build_waveform_tab(self, tab: ttk.Frame) -> None:
+        self._section_label(tab, "Local average waveform", 0)
+        ttk.Checkbutton(
+            tab,
+            text="Show a compact waveform below Spike Time in the left sidebar",
+            variable=self.show_waveform_var,
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 8))
+        self.waveform_channel_mode_combo = self._labeled_combo(
+            tab,
+            2,
+            "Nearby channels",
+            self.waveform_channel_mode_var,
+            tuple(WAVEFORM_CHANNEL_MODE_LABELS.values()),
+        )
+        ttk.Label(
+            tab,
+            text=(
+                "The display follows the notebook: the best-PTP channel plus the "
+                "four nearest channels matching this rule, ordered from larger to "
+                "smaller probe Y. It is not forced to two channels above and two below."
+            ),
+            foreground="#667085",
+            wraplength=500,
+            justify="left",
+        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(12, 0))
+
     def _build_tuning_tab(self, tab: ttk.Frame) -> None:
         self._section_label(tab, "Head-direction display", 0)
         self._labeled_combo(
@@ -4134,6 +4511,9 @@ class SettingsWindow(tk.Toplevel):
         self.auto_probe_check.state(
             ["!disabled"] if self.show_probe_layout_var.get() else ["disabled"]
         )
+        self.waveform_channel_mode_combo.state(
+            ["!disabled"] if self.show_waveform_var.get() else ["disabled"]
+        )
         self.rf_zero_bin_threshold_entry.state(
             ["!disabled"]
             if self.rf_filter_units_with_zero_bins_var.get()
@@ -4209,8 +4589,15 @@ class SettingsWindow(tk.Toplevel):
         palette = self.rf_palette_var.get()
         polar_radius = self.rf_polar_radius_var.get()
         layout = self.rf_layout_var.get()
-        tab_keys = {"RF": "rf", "Delay / RGB": "delay", "Timeline": "timeline"}
+        tab_keys = {
+            "RF": "rf",
+            "Delay / RGB": "delay",
+            "Timeline": "timeline",
+        }
         initial_tab = self.default_viewer_tab_var.get()
+        waveform_channel_mode = WAVEFORM_CHANNEL_MODE_BY_LABEL.get(
+            self.waveform_channel_mode_var.get()
+        )
         if value_mode not in VALUE_MODES:
             raise SettingsValidationError("RF Map", "Choose a supported RF value mode.")
         if palette not in PALETTES:
@@ -4221,6 +4608,10 @@ class SettingsWindow(tk.Toplevel):
             raise SettingsValidationError("RF Map", "Choose Rectangle or Polar layout.")
         if initial_tab not in tab_keys:
             raise SettingsValidationError("RF Map", "Choose a supported initial tab.")
+        if waveform_channel_mode is None:
+            raise SettingsValidationError(
+                "Waveform", "Choose Same x column or Same shank."
+            )
 
         smoothing = bool(self.tuning_smoothing_var.get())
         try:
@@ -4263,6 +4654,7 @@ class SettingsWindow(tk.Toplevel):
         return ViewerSettings(
             show_tuning_curve=bool(self.show_tuning_curve_var.get()),
             auto_load_tuning_curve=bool(self.auto_load_tuning_curve_var.get()),
+            show_waveform=bool(self.show_waveform_var.get()),
             show_probe_layout=bool(self.show_probe_layout_var.get()),
             auto_load_probe_layout=bool(self.auto_load_probe_layout_var.get()),
             rf_sum_start_ms=start_ms,
@@ -4282,6 +4674,7 @@ class SettingsWindow(tk.Toplevel):
             rf_polar_layout=layout == "Polar",
             rf_rgb_mode=bool(self.rf_rgb_mode_var.get()),
             default_viewer_tab=tab_keys[initial_tab],
+            waveform_channel_mode=waveform_channel_mode,
             tuning_plot_mode=tuning_mode,
             tuning_layout=tuning_layout,
             tuning_display_bins=hd_bins,
@@ -4335,8 +4728,8 @@ class RFMViewer(tk.Toplevel):
         startup_path: Path | None = None,
         master: tk.Misc | None = None,
     ):
-        if (data is None) == (startup_path is None):
-            raise ValueError("Provide exactly one of data or startup_path")
+        if data is not None and startup_path is not None:
+            raise ValueError("Provide at most one of data or startup_path")
 
         if master is None:
             master = tk.Tk()
@@ -4376,10 +4769,16 @@ class RFMViewer(tk.Toplevel):
         ] = queue.SimpleQueue()
         self._startup_loading_frame: ttk.Frame | None = None
         self._startup_progress: ttk.Progressbar | None = None
+        self._startup_chooser_frame: ttk.Frame | None = None
         self._optional_autoload_after: str | None = None
         self._optional_poll_after: str | None = None
         self._optional_autoload_generation = 0
         self._optional_result_queue: queue.SimpleQueue[dict[str, object]] = (
+            queue.SimpleQueue()
+        )
+        self._waveform_poll_after: str | None = None
+        self._waveform_generation = 0
+        self._waveform_result_queue: queue.SimpleQueue[dict[str, object]] = (
             queue.SimpleQueue()
         )
         self._redraw_after: str | None = None
@@ -4394,15 +4793,20 @@ class RFMViewer(tk.Toplevel):
 
         if data is not None:
             self._initialize_viewer(data)
-        else:
-            assert startup_path is not None
+        elif startup_path is not None:
             self._show_startup_loading_shell(startup_path)
             self._startup_after = self.after(
                 STARTUP_EVENT_WAIT_MS,
                 lambda path=startup_path: self._load_startup_document(path),
             )
+        else:
+            self._show_startup_chooser_shell()
+            # Give Finder's OpenDocument Apple event a short chance to replace
+            # this callback before a direct launch opens the modal chooser.
+            self._startup_after = self.after(200, self._open_startup_file_dialog)
 
     def _initialize_viewer(self, data: RFMappingData) -> None:
+        self._remove_startup_chooser_shell()
         self._remove_startup_loading_shell()
         self.data = data
         self.settings = self._app_root._rfm_settings
@@ -4444,6 +4848,7 @@ class RFMViewer(tk.Toplevel):
         self._last_time_groups = [(index, index) for index in range(data.n_bins)]
         self.smooth_radius_var = tk.IntVar(value=self.settings.rf_smooth_radius)
         self.show_tuning_curve_var = tk.BooleanVar(value=self.settings.show_tuning_curve)
+        self.show_waveform_var = tk.BooleanVar(value=self.settings.show_waveform)
         self.show_probe_layout_var = tk.BooleanVar(value=self.settings.show_probe_layout)
         self.tuning_plot_mode_var = tk.StringVar(value=self.settings.tuning_plot_mode)
         self.tuning_layout_var = tk.StringVar(value=self.settings.tuning_layout)
@@ -4452,6 +4857,9 @@ class RFMViewer(tk.Toplevel):
         self.tuning_smooth_sigma_var = tk.DoubleVar(value=self.settings.tuning_smooth_sigma)
         self.tuning_compare_scale_var = tk.BooleanVar(
             value=self.settings.tuning_compare_scale
+        )
+        self.waveform_channel_mode_var = tk.StringVar(
+            value=self.settings.waveform_channel_mode
         )
         self.selected_cell: CellRef | None = None
         self.hover_cell: CellRef | None = None
@@ -4476,6 +4884,11 @@ class RFMViewer(tk.Toplevel):
         self._tuning_processed_cache: tuple[object, ...] | None = None
         self._tuning_scale_cache: tuple[object, ...] | None = None
         self._probe_static_signature: tuple[object, ...] | None = None
+        self.waveform_payload: Mapping[str, object] | None = None
+        self._waveform_payload_key: tuple[int, str] | None = None
+        self._waveform_loading_key: tuple[int, str] | None = None
+        self._waveform_error: str | None = None
+        self._waveform_error_key: tuple[int, str] | None = None
         self.spatial_region: SpatialRegion | None = None
         self._probe_drag_start: tuple[float, float] | None = None
         self._probe_drag_moved = False
@@ -4523,6 +4936,7 @@ class RFMViewer(tk.Toplevel):
         self._startup_generation += 1
         generation = self._startup_generation
         path = Path(path).expanduser()
+        self._remove_startup_chooser_shell()
         self._show_startup_loading_shell(path)
 
         def decode_document() -> None:
@@ -4573,6 +4987,51 @@ class RFMViewer(tk.Toplevel):
         self.title(f"Opening {path.name} — RF Map Viewer {APP_DISPLAY_VERSION}")
         self.deiconify()
         self.lift()
+
+    def _show_startup_chooser_shell(self) -> None:
+        """Show the no-document landing view behind the native file chooser."""
+
+        if self._startup_chooser_frame is not None:
+            return
+        self.geometry("560x230")
+        self.minsize(480, 210)
+        frame = ttk.Frame(self, padding=28)
+        frame.pack(fill="both", expand=True)
+        frame.columnconfigure(0, weight=1)
+        ttk.Label(
+            frame,
+            text="Open RF mapping data",
+            font=("TkDefaultFont", 15, "bold"),
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            frame,
+            text=(
+                "Choose a current .rfmap or JSON result. The viewer never "
+                "loads sample data when opened without a document."
+            ),
+            foreground="#667085",
+            wraplength=500,
+            justify="left",
+        ).grid(row=1, column=0, sticky="ew", pady=(10, 18))
+        ttk.Button(
+            frame,
+            text="Open RF Map…",
+            command=self._open_json,
+        ).grid(row=2, column=0, sticky="w")
+        self._startup_chooser_frame = frame
+        self.title(f"RF Map Viewer {APP_DISPLAY_VERSION}")
+        self.deiconify()
+        self.lift()
+
+    def _remove_startup_chooser_shell(self) -> None:
+        if self._startup_chooser_frame is not None:
+            self._startup_chooser_frame.destroy()
+            self._startup_chooser_frame = None
+
+    def _open_startup_file_dialog(self) -> None:
+        self._startup_after = None
+        if not self._quitting and not self._viewer_ready:
+            self._open_json()
 
     def _remove_startup_loading_shell(self) -> None:
         if self._startup_progress is not None:
@@ -4650,6 +5109,13 @@ class RFMViewer(tk.Toplevel):
             except tk.TclError:
                 pass
             self._optional_poll_after = None
+        self._waveform_generation += 1
+        if self._waveform_poll_after is not None:
+            try:
+                self.after_cancel(self._waveform_poll_after)
+            except tk.TclError:
+                pass
+            self._waveform_poll_after = None
         if self._redraw_after is not None:
             try:
                 self.after_cancel(self._redraw_after)
@@ -4715,6 +5181,12 @@ class RFMViewer(tk.Toplevel):
             background="#ffffff",
             foreground="#1d1d1f",
             font=("TkDefaultFont", 13, "bold"),
+        )
+        style.configure(
+            "SidebarTitle.TLabel",
+            background="#eef0f4",
+            foreground="#1d1d1f",
+            font=("TkDefaultFont", 12, "bold"),
         )
         style.configure(
             "Value.TLabel",
@@ -4963,7 +5435,7 @@ class RFMViewer(tk.Toplevel):
 
         self.probe_canvas = tk.Canvas(
             self.probe_section,
-            width=220,
+            width=240,
             height=330,
             background="#ffffff",
             highlightthickness=1,
@@ -4979,13 +5451,13 @@ class RFMViewer(tk.Toplevel):
             self.probe_section,
             text="",
             style="SidebarMuted.TLabel",
-            wraplength=220,
+            wraplength=240,
             justify="left",
         )
         self.spatial_status_label.grid(row=2, column=0, sticky="ew", pady=(5, 10))
         row += 1
 
-        ttk.Label(parent, text="Selection", style="Section.TLabel").grid(
+        ttk.Label(parent, text="Spike Time", style="Section.TLabel").grid(
             row=row, column=0, sticky="w", pady=(8, 5)
         )
         row += 1
@@ -4993,20 +5465,20 @@ class RFMViewer(tk.Toplevel):
             parent,
             text="",
             style="SidebarMuted.TLabel",
-            font=("TkFixedFont", 10),
-            wraplength=220,
+            font=("TkFixedFont", 9),
+            wraplength=240,
             justify="left",
         )
         self.cell_label.grid(row=row, column=0, sticky="ew")
         row += 1
-        self.unit_stats_label = ttk.Label(
+        self.waveform_host = ttk.Frame(
             parent,
-            text="",
-            style="SidebarMuted.TLabel",
-            wraplength=220,
-            justify="left",
+            style="Sidebar.TFrame",
         )
-        self.unit_stats_label.grid(row=row, column=0, sticky="ew", pady=(2, 0))
+        self.waveform_host.grid(row=row, column=0, sticky="nsew", pady=(8, 0))
+        self.waveform_host.columnconfigure(0, weight=1)
+        self.waveform_host.rowconfigure(0, weight=1)
+        self._waveform_section_row = row
 
     def _build_main(self, parent: ttk.Frame) -> None:
         toolbar = ttk.Frame(parent, style="Toolbar.TFrame", padding=(10, 7))
@@ -5122,9 +5594,14 @@ class RFMViewer(tk.Toplevel):
                     style="Panel.TFrame",
                 )
                 self.tuning_curve_pane.columnconfigure(0, weight=1)
-                self.tuning_curve_pane.rowconfigure(1, weight=1)
-                tuning_header = ttk.Frame(
+                self.tuning_curve_section = ttk.Frame(
                     self.tuning_curve_pane,
+                    style="Panel.TFrame",
+                )
+                self.tuning_curve_section.columnconfigure(0, weight=1)
+                self.tuning_curve_section.rowconfigure(1, weight=1)
+                tuning_header = ttk.Frame(
+                    self.tuning_curve_section,
                     style="Panel.TFrame",
                     padding=(12, 9),
                 )
@@ -5180,7 +5657,7 @@ class RFMViewer(tk.Toplevel):
                 )
                 self.tuning_fold_button.grid(row=0, column=3, sticky="e")
                 self.tuning_curve_canvas = tk.Canvas(
-                    self.tuning_curve_pane,
+                    self.tuning_curve_section,
                     background="#ffffff",
                     highlightthickness=0,
                 )
@@ -5191,21 +5668,88 @@ class RFMViewer(tk.Toplevel):
                     command=self._attach_tuning_curve,
                 )
                 self.tuning_curve_status_label = ttk.Label(
-                    self.tuning_curve_pane,
+                    self.tuning_curve_section,
                     text="",
                     style="Muted.TLabel",
                     wraplength=360,
                     justify="left",
                 )
-                self.tuning_curve_status_label.grid(
+
+                self.unit_info_pane = ttk.Frame(
+                    self.rf_split_container,
+                    style="Panel.TFrame",
+                )
+                self.unit_info_pane.columnconfigure(0, weight=1)
+                ttk.Separator(self.unit_info_pane, orient="horizontal").grid(
+                    row=0, column=0, sticky="ew"
+                )
+                unit_info_header = ttk.Frame(
+                    self.unit_info_pane,
+                    style="Panel.TFrame",
+                    padding=(12, 8),
+                )
+                unit_info_header.grid(row=1, column=0, sticky="ew")
+                ttk.Label(
+                    unit_info_header,
+                    text="Unit Info",
+                    style="Title.TLabel",
+                ).grid(row=0, column=0, sticky="w")
+                self.unit_stats_label = ttk.Label(
+                    self.unit_info_pane,
+                    text="",
+                    style="Muted.TLabel",
+                    font=("TkFixedFont", 9),
+                    wraplength=330,
+                    justify="left",
+                )
+                self.unit_stats_label.grid(
                     row=2,
                     column=0,
                     sticky="ew",
                     padx=12,
-                    pady=(5, 7),
+                    pady=(0, 10),
                 )
+
+                self.waveform_pane = ttk.Frame(
+                    self.waveform_host,
+                    style="Sidebar.TFrame",
+                )
+                self.waveform_pane.columnconfigure(0, weight=1)
+                self.waveform_pane.rowconfigure(1, weight=1)
+                waveform_header = ttk.Frame(
+                    self.waveform_pane,
+                    style="Sidebar.TFrame",
+                    padding=(0, 4),
+                )
+                waveform_header.grid(row=0, column=0, sticky="ew")
+                waveform_header.columnconfigure(0, weight=1)
+                ttk.Label(
+                    waveform_header,
+                    text="Local Average Waveform",
+                    style="SidebarTitle.TLabel",
+                ).grid(row=0, column=0, sticky="w")
+                self.waveform_subtitle_label = ttk.Label(
+                    waveform_header,
+                    text="",
+                    style="SidebarMuted.TLabel",
+                    font=("TkDefaultFont", 8),
+                    wraplength=240,
+                    justify="left",
+                )
+                self.waveform_subtitle_label.grid(
+                    row=1, column=0, sticky="w", pady=(1, 0)
+                )
+                self.waveform_canvas = tk.Canvas(
+                    self.waveform_pane,
+                    background="#ffffff",
+                    highlightthickness=1,
+                    highlightbackground="#d7d9de",
+                    height=100,
+                )
+                self.waveform_canvas.grid(row=1, column=0, sticky="nsew")
+                self.canvases["waveform"] = self.waveform_canvas
                 self.tuning_collapsed_rail = ttk.Frame(
-                    self.rf_split_container,
+                    self.tuning_curve_pane,
                     style="Panel.TFrame",
                     padding=(4, 6),
                 )
@@ -5217,7 +5761,8 @@ class RFMViewer(tk.Toplevel):
                     width=2,
                     command=self._toggle_tuning_collapsed,
                 )
-                self.tuning_restore_button.grid(row=0, column=0, sticky="n")
+                self.tuning_restore_button.grid(row=0, column=0, sticky="ne")
+                self._sync_auxiliary_sections()
                 self._layout_rf_and_tuning()
             else:
                 canvas = tk.Canvas(frame, background="#ffffff", highlightthickness=0)
@@ -5231,78 +5776,167 @@ class RFMViewer(tk.Toplevel):
             self.canvases[key] = canvas
             self._tab_keys[str(frame)] = key
 
+    def _sync_auxiliary_sections(self) -> None:
+        """Place waveform in the sidebar and unit info below tuning."""
+
+        if not hasattr(self, "tuning_curve_section"):
+            return
+        tuning_visible = bool(self.show_tuning_curve_var.get())
+        tuning_collapsed = bool(self.tuning_collapsed_var.get())
+        waveform_visible = bool(self.show_waveform_var.get())
+        self.tuning_curve_section.grid_remove()
+        self.tuning_collapsed_rail.grid_remove()
+        self.waveform_pane.grid_remove()
+        self.waveform_host.grid_remove()
+        self.tuning_curve_pane.rowconfigure(0, weight=0, minsize=0)
+        self.sidebar_frame.rowconfigure(
+            self._waveform_section_row,
+            weight=0,
+            minsize=0,
+        )
+
+        self.tuning_curve_pane.rowconfigure(0, weight=1)
+        if tuning_visible and tuning_collapsed:
+            self.tuning_collapsed_rail.grid(row=0, column=0, sticky="nsew")
+            self.tuning_restore_button.configure(
+                image=self._pane_icons["trailing"],
+                text="Restore HD tuning curve",
+            )
+        elif tuning_visible:
+            self.tuning_curve_section.grid(row=0, column=0, sticky="nsew")
+            self.tuning_fold_button.grid()
+        if waveform_visible:
+            self.waveform_host.grid()
+            self.waveform_pane.grid(row=0, column=0, sticky="nsew")
+            self.sidebar_frame.rowconfigure(
+                self._waveform_section_row,
+                weight=0,
+                minsize=180,
+            )
+
     def _layout_rf_and_tuning(self) -> None:
-        """Place the RF and tuning views using the saved arrangement."""
+        """Place RF beside the optional tuning and unit-info stack."""
 
         if not hasattr(self, "rf_split_container"):
             return
         container = self.rf_split_container
         self.rf_map_pane.grid_forget()
         self.tuning_curve_pane.grid_forget()
-        self.tuning_collapsed_rail.grid_forget()
+        self.unit_info_pane.grid_forget()
         for index in range(2):
-            container.columnconfigure(index, weight=0, uniform="")
-            container.rowconfigure(index, weight=0, uniform="")
+            container.columnconfigure(index, weight=0, uniform="", minsize=0)
+            container.rowconfigure(index, weight=0, uniform="", minsize=0)
 
-        tuning_visible = bool(self.show_tuning_curve_var.get())
-        collapsed = bool(self.tuning_collapsed_var.get())
-        stacked = (
-            self.tuning_layout_var.get() == "Stacked"
-            or bool(getattr(self, "_rf_split_responsive_stacked", False))
+        container_width = max(1, int(container.winfo_width()))
+        responsive_stacked = self._should_responsively_stack_auxiliary(
+            container_width
         )
-        self.rf_map_pane.grid(row=0, column=0, sticky="nsew")
-        container.columnconfigure(0, weight=1)
-        container.rowconfigure(0, weight=1)
+        self._rf_split_responsive_stacked = responsive_stacked
+        stacked = (
+            self.show_tuning_curve_var.get()
+            and not self.tuning_collapsed_var.get()
+            and (
+                self.tuning_layout_var.get() == "Stacked"
+                or responsive_stacked
+            )
+        )
 
-        if not tuning_visible:
-            return
-        if collapsed:
-            if stacked:
-                self.tuning_collapsed_rail.grid(
-                    row=1, column=0, sticky="ew", pady=(2, 0)
-                )
-                self.tuning_restore_button.configure(
-                    image=self._pane_icons["bottom"],
-                    text="Restore HD tuning curve",
-                )
-            else:
-                self.tuning_collapsed_rail.grid(
-                    row=0, column=1, sticky="ns", padx=(2, 0)
-                )
-                self.tuning_restore_button.configure(
-                    image=self._pane_icons["trailing"],
-                    text="Restore HD tuning curve",
-                )
-            return
         if stacked:
+            self.rf_map_pane.grid(
+                row=0, column=0, columnspan=2, sticky="nsew"
+            )
             self.tuning_curve_pane.grid(
-                row=1, column=0, sticky="nsew", pady=(1, 0)
+                row=1, column=0, sticky="nsew", pady=(1, 0), padx=(0, 1)
+            )
+            self.unit_info_pane.grid(
+                row=1, column=1, sticky="nsew", pady=(1, 0)
+            )
+            container.columnconfigure(0, weight=5, uniform="rf-hd-columns")
+            container.columnconfigure(
+                1,
+                weight=2,
+                uniform="rf-hd-columns",
+                minsize=220,
             )
             container.rowconfigure(0, weight=5, uniform="rf-hd-rows")
-            container.rowconfigure(1, weight=3, uniform="rf-hd-rows")
+            container.rowconfigure(
+                1,
+                weight=3,
+                uniform="rf-hd-rows",
+                minsize=260,
+            )
             self.tuning_fold_button.configure(
                 image=self._pane_icons["bottom"],
                 text="Collapse HD tuning curve",
             )
         else:
+            self.rf_map_pane.grid(
+                row=0, column=0, rowspan=2, sticky="nsew"
+            )
             self.tuning_curve_pane.grid(
                 row=0, column=1, sticky="nsew", padx=(1, 0)
             )
+            self.unit_info_pane.grid(
+                row=1, column=1, sticky="nsew", padx=(1, 0)
+            )
+            # At the minimum supported window width the two companion plots
+            # need a little more horizontal room, while retaining the usual
+            # 5:2 split on larger displays and for a single companion.
+            auxiliary_weight = self._responsive_auxiliary_column_weight(
+                container_width
+            )
+            self._rf_split_auxiliary_weight = auxiliary_weight
             container.columnconfigure(0, weight=5, uniform="rf-hd-columns")
-            container.columnconfigure(1, weight=2, uniform="rf-hd-columns")
+            container.columnconfigure(
+                1,
+                weight=auxiliary_weight,
+                uniform="rf-hd-columns",
+                minsize=220,
+            )
+            container.rowconfigure(0, weight=1)
+            container.rowconfigure(1, weight=0, minsize=135)
             self.tuning_fold_button.configure(
                 image=self._pane_icons["trailing"],
                 text="Collapse HD tuning curve",
             )
 
+    def _should_responsively_stack_auxiliary(self, width: int) -> bool:
+        # Unit Info owns the bottom-right position. Keep the right-side stack
+        # beside RF unless the user explicitly selected Stacked in Settings.
+        return False
+
+    def _responsive_auxiliary_column_weight(self, width: int) -> int:
+        if (
+            not self.show_tuning_curve_var.get()
+            or self.tuning_collapsed_var.get()
+        ):
+            return 1
+        if (
+            self.show_tuning_curve_var.get()
+            and int(width) < 1050
+        ):
+            return 3
+        return 2
+
     def _on_rf_split_configure(self, event: tk.Event) -> None:
         # At narrow window widths a side-by-side HD pane would be smaller than
         # its scientific axes. Switch arrangement without changing the saved
         # user preference, then restore it when space returns.
-        responsive_stacked = int(event.width) < 1050
-        if responsive_stacked == getattr(self, "_rf_split_responsive_stacked", False):
+        responsive_stacked = self._should_responsively_stack_auxiliary(
+            int(event.width)
+        )
+        auxiliary_weight = self._responsive_auxiliary_column_weight(
+            int(event.width)
+        )
+        if (
+            responsive_stacked
+            == getattr(self, "_rf_split_responsive_stacked", False)
+            and auxiliary_weight
+            == getattr(self, "_rf_split_auxiliary_weight", 2)
+        ):
             return
         self._rf_split_responsive_stacked = responsive_stacked
+        self._rf_split_auxiliary_weight = auxiliary_weight
         self._layout_rf_and_tuning()
 
     def _toggle_probe_collapsed(self) -> None:
@@ -5334,19 +5968,15 @@ class RFMViewer(tk.Toplevel):
         if not hasattr(self, "tuning_curve_canvas"):
             return
         collapsed = bool(self.tuning_collapsed_var.get())
-        if collapsed:
-            self.tuning_curve_canvas.grid_remove()
-            self.tuning_curve_status_label.grid_remove()
-        else:
-            self.tuning_curve_canvas.grid()
-            self.tuning_curve_status_label.grid()
+        self._sync_auxiliary_sections()
         self._layout_rf_and_tuning()
         if (
             not collapsed
             and schedule_redraw
             and self.__dict__.get("_viewer_ready", False)
         ):
-            self._schedule_optional_redraw("tuning")
+            if self.show_tuning_curve_var.get():
+                self._schedule_optional_redraw("tuning")
 
     def _build_plot_controls(self, parent: ttk.Frame) -> None:
         controls = ttk.Frame(parent, style="Panel.TFrame", padding=(10, 6))
@@ -6116,6 +6746,7 @@ class RFMViewer(tk.Toplevel):
             tuning_smooth_sigma=float(self.tuning_smooth_sigma_var.get()),
             tuning_compare_scale=bool(self.tuning_compare_scale_var.get()),
             show_tuning_curve=bool(self.show_tuning_curve_var.get()),
+            show_waveform=bool(self.show_waveform_var.get()),
             show_probe_layout=bool(self.show_probe_layout_var.get()),
         )
 
@@ -6285,6 +6916,7 @@ class RFMViewer(tk.Toplevel):
                 self._tuning_scale_cache = None
             if "optional_views" in fields:
                 self.show_tuning_curve_var.set(bool(state.show_tuning_curve))
+                self.show_waveform_var.set(bool(state.show_waveform))
                 self.show_probe_layout_var.set(bool(state.show_probe_layout))
                 self._sync_optional_view_visibility(redraw=False)
                 if (
@@ -6488,12 +7120,14 @@ class RFMViewer(tk.Toplevel):
 
         old_show_probe = bool(self.show_probe_layout_var.get())
         old_show_tuning = bool(self.show_tuning_curve_var.get())
+        old_show_waveform = bool(self.show_waveform_var.get())
         needs_optional_autoload = False
         previous_pair_apply = self._pair_apply_in_progress
         self._pair_apply_in_progress = True
         try:
             self.show_probe_layout_var.set(settings.show_probe_layout)
             self.show_tuning_curve_var.set(settings.show_tuning_curve)
+            self.show_waveform_var.set(settings.show_waveform)
             value_mode = settings.rf_value_mode
             if not self.data.supports_value_mode(value_mode):
                 value_mode = VALUE_MODE_RATE
@@ -6515,6 +7149,20 @@ class RFMViewer(tk.Toplevel):
             self.tuning_smoothing_var.set(settings.tuning_smoothing)
             self.tuning_smooth_sigma_var.set(settings.tuning_smooth_sigma)
             self.tuning_compare_scale_var.set(settings.tuning_compare_scale)
+            mode_changed = (
+                self.waveform_channel_mode_var.get()
+                != settings.waveform_channel_mode
+            )
+            self.waveform_channel_mode_var.set(settings.waveform_channel_mode)
+            if mode_changed or (
+                old_show_waveform and not settings.show_waveform
+            ):
+                self.waveform_payload = None
+                self._waveform_payload_key = None
+                self._waveform_error = None
+                self._waveform_error_key = None
+                self._waveform_loading_key = None
+                self._waveform_generation += 1
             self._tuning_processed_cache = None
             self._tuning_scale_cache = None
 
@@ -6637,7 +7285,11 @@ class RFMViewer(tk.Toplevel):
         return window
 
     def _open_json(self, _event: object | None = None) -> None:
-        initial_dir = self.data.path.parent if self._viewer_ready else startup_json_path().parent
+        initial_dir = (
+            self.data.path.parent
+            if self._viewer_ready
+            else startup_file_dialog_directory()
+        )
         path = filedialog.askopenfilename(
             parent=self,
             title="Open RF mapping file",
@@ -6649,6 +7301,7 @@ class RFMViewer(tk.Toplevel):
                 self._open_json_window(Path(path))
             else:
                 self._cancel_startup_callback()
+                self._remove_startup_chooser_shell()
                 self._startup_after = self.after_idle(
                     lambda selected=Path(path): self._load_startup_document(selected)
                 )
@@ -7183,12 +7836,35 @@ class RFMViewer(tk.Toplevel):
             self._tuning_curve_candidate = None
             self._tuning_processed_cache = None
             self._tuning_scale_cache = None
+        if not self.show_waveform_var.get():
+            had_waveform_state = any(
+                value is not None
+                for value in (
+                    self.waveform_payload,
+                    self._waveform_payload_key,
+                    self._waveform_loading_key,
+                    self._waveform_error,
+                    self._waveform_error_key,
+                )
+            )
+            if had_waveform_state:
+                self._waveform_generation += 1
+            self.waveform_payload = None
+            self._waveform_payload_key = None
+            self._waveform_loading_key = None
+            self._waveform_error = None
+            self._waveform_error_key = None
+            self.waveform_subtitle_label.configure(text="")
+            self.waveform_canvas.delete("all")
+        self._sync_auxiliary_sections()
         self._sync_tuning_collapsed_state(schedule_redraw=False)
         self._layout_rf_and_tuning()
         self._sync_optional_menu_states()
         if redraw:
             self._draw_probe_canvas()
             self._draw_tuning_curve()
+            if self.show_waveform_var.get():
+                self._draw_waveform()
 
     def _effective_tuning_plot_mode(self) -> str:
         mode = self.tuning_plot_mode_var.get()
@@ -7279,69 +7955,92 @@ class RFMViewer(tk.Toplevel):
 
     def _show_tuning_provenance(self) -> None:
         data = self.tuning_curve_data
-        metadata = data.metadata if data is not None else None
-        if metadata is None:
+        if data is None:
             return
-
-        rows = [
-            ("Schema", "2"),
-            ("Timestamp", metadata.timestamp_reference or "Not recorded"),
-            ("Timebase", metadata.timebase or "Not recorded"),
-            ("Direction", metadata.angle_convention_note or "Not recorded"),
-        ]
-        if metadata.feature_fs_hz is not None:
-            rows.append(("Tracking", f"{metadata.feature_fs_hz:g} Hz"))
-        classification = metadata.classification
-        if classification is not None:
-            rows.append(("Classification", classification.method or "Not recorded"))
-            if classification.rayleigh_alpha is not None:
-                rows.append(("Rayleigh α", f"{classification.rayleigh_alpha:g}"))
-            if classification.shuffle_alpha is not None:
-                rows.append(("Shuffle α", f"{classification.shuffle_alpha:g}"))
-            if classification.num_shuffle is not None:
-                rows.append(("Shuffles", str(classification.num_shuffle)))
-        ttl_qc = metadata.ttl_qc
-        if ttl_qc is not None:
-            if ttl_qc.ttl_pulse_count is not None:
-                rows.append(("Motive trigger TTLs", str(ttl_qc.ttl_pulse_count)))
-            if ttl_qc.measured_rate_hz is not None:
-                rows.append(("Measured rate", f"{ttl_qc.measured_rate_hz:g} Hz"))
-            if ttl_qc.median_period_s is not None:
-                rows.append(("Median period", f"{ttl_qc.median_period_s:g} s"))
-            if ttl_qc.camera_input_channel is not None:
-                rows.append(("Camera input", str(ttl_qc.camera_input_channel)))
-            if ttl_qc.camera_ttl_threshold is not None:
-                rows.append(("TTL threshold", f"{ttl_qc.camera_ttl_threshold:g}"))
-            if ttl_qc.camera_ttl_active_high is not None:
-                rows.append(
-                    (
-                        "TTL polarity",
-                        "Active high" if ttl_qc.camera_ttl_active_high else "Active low",
+        metadata = data.metadata
+        rows = [("File", data.path.name)]
+        if metadata is None:
+            rows.extend(
+                (
+                    ("Schema", "Legacy"),
+                    ("Timing / occupancy", "Not recorded"),
+                )
+            )
+        else:
+            rows.extend(
+                (
+                    ("Schema", "2"),
+                    ("Timestamp", metadata.timestamp_reference or "Not recorded"),
+                    ("Timebase", metadata.timebase or "Not recorded"),
+                    ("Direction", metadata.angle_convention_note or "Not recorded"),
+                )
+            )
+            if metadata.feature_fs_hz is not None:
+                rows.append(("Tracking", f"{metadata.feature_fs_hz:g} Hz"))
+            classification = metadata.classification
+            if classification is not None:
+                rows.append(("Classification", classification.method or "Not recorded"))
+                if classification.rayleigh_alpha is not None:
+                    rows.append(("Rayleigh α", f"{classification.rayleigh_alpha:g}"))
+                if classification.shuffle_alpha is not None:
+                    rows.append(("Shuffle α", f"{classification.shuffle_alpha:g}"))
+                if classification.num_shuffle is not None:
+                    rows.append(("Shuffles", str(classification.num_shuffle)))
+            ttl_qc = metadata.ttl_qc
+            if ttl_qc is not None:
+                if ttl_qc.ttl_pulse_count is not None:
+                    rows.append(("Motive trigger TTLs", str(ttl_qc.ttl_pulse_count)))
+                if ttl_qc.measured_rate_hz is not None:
+                    rows.append(("Measured rate", f"{ttl_qc.measured_rate_hz:g} Hz"))
+                if ttl_qc.median_period_s is not None:
+                    rows.append(("Median period", f"{ttl_qc.median_period_s:g} s"))
+                if ttl_qc.camera_input_channel is not None:
+                    rows.append(("Camera input", str(ttl_qc.camera_input_channel)))
+                if ttl_qc.camera_ttl_threshold is not None:
+                    rows.append(("TTL threshold", f"{ttl_qc.camera_ttl_threshold:g}"))
+                if ttl_qc.camera_ttl_active_high is not None:
+                    rows.append(
+                        (
+                            "TTL polarity",
+                            "Active high" if ttl_qc.camera_ttl_active_high else "Active low",
+                        )
                     )
-                )
-            if (
-                ttl_qc.matched_motive_frame_count is not None
-                and ttl_qc.motive_frame_count_raw is not None
-            ):
-                rows.append(
-                    (
-                        "Matched frames",
-                        f"{ttl_qc.matched_motive_frame_count} / {ttl_qc.motive_frame_count_raw}",
+                if (
+                    ttl_qc.matched_motive_frame_count is not None
+                    and ttl_qc.motive_frame_count_raw is not None
+                ):
+                    rows.append(
+                        (
+                            "Matched frames",
+                            f"{ttl_qc.matched_motive_frame_count} / {ttl_qc.motive_frame_count_raw}",
+                        )
                     )
-                )
-            if ttl_qc.frame_alignment_policy_applied is not None:
-                rows.append(
-                    ("Alignment", ttl_qc.frame_alignment_policy_applied)
-                )
-            if ttl_qc.dropped_motive_frame_ids:
-                rows.append(
-                    (
-                        "Dropped frame IDs",
-                        ", ".join(str(value) for value in ttl_qc.dropped_motive_frame_ids),
+                if ttl_qc.frame_alignment_policy_applied is not None:
+                    rows.append(
+                        ("Alignment", ttl_qc.frame_alignment_policy_applied)
                     )
+                if ttl_qc.dropped_motive_frame_ids:
+                    rows.append(
+                        (
+                            "Dropped frame IDs",
+                            ", ".join(str(value) for value in ttl_qc.dropped_motive_frame_ids),
+                        )
+                    )
+                if ttl_qc.frame_timestamp_mapping is not None:
+                    rows.append(("Frame mapping", ttl_qc.frame_timestamp_mapping))
+        raw_rates = data.rates_for(self._selected_unit_id_value())
+        if raw_rates is not None:
+            try:
+                _angles, rates = self._processed_tuning_values(
+                    self._selected_unit_id_value(), raw_rates
                 )
-            if ttl_qc.frame_timestamp_mapping is not None:
-                rows.append(("Frame mapping", ttl_qc.frame_timestamp_mapping))
+            except (ImportError, ValueError):
+                rates = ()
+            missing_bins = sum(
+                not math.isfinite(float(rate)) for rate in rates
+            )
+            if missing_bins:
+                rows.append(("Bins without occupancy", str(missing_bins)))
         label_width = max(len(label) for label, _value in rows)
         messagebox.showinfo(
             "Tuning Provenance",
@@ -7383,6 +8082,7 @@ class RFMViewer(tk.Toplevel):
             or self.tuning_collapsed_var.get()
         ):
             return
+        self.tuning_curve_status_label.configure(text="")
         self._set_tuning_hd_class_label(None)
         canvas = self.tuning_curve_canvas
         canvas.delete("all")
@@ -7396,7 +8096,6 @@ class RFMViewer(tk.Toplevel):
             if hasattr(self, "tuning_provenance_button"):
                 self.tuning_provenance_button.grid_remove()
             self._draw_tuning_placeholder("Unit filtered", filter_status)
-            self.tuning_curve_status_label.configure(text=filter_status)
             return
         data = self.tuning_curve_data
         if data is None:
@@ -7411,18 +8110,14 @@ class RFMViewer(tk.Toplevel):
             if self._optional_drop_available:
                 detail += "\nYou can also drop a .tc or tuning JSON file here."
             if self._tuning_curve_error:
+                detail += f"\n\n{self._tuning_curve_error}"
                 self._draw_tuning_placeholder("Could not load tuning curves", detail)
-                self.tuning_curve_status_label.configure(text=self._tuning_curve_error)
             else:
                 self._draw_tuning_placeholder("No tuning curves", detail)
-                self.tuning_curve_status_label.configure(text="Tuning curves optional")
             return
 
         if hasattr(self, "tuning_provenance_button"):
-            if data.metadata is None:
-                self.tuning_provenance_button.grid_remove()
-            else:
-                self.tuning_provenance_button.grid()
+            self.tuning_provenance_button.grid()
 
         if getattr(self._app_root, "_rfm_pairing_enabled", False):
             ready, eligible = self._pairing_eligibility()
@@ -7438,7 +8133,6 @@ class RFMViewer(tk.Toplevel):
                 f"Cluster {cluster_id} skipped",
                 "No open RF map contains this cluster.",
             )
-            self.tuning_curve_status_label.configure(text=data.path.name)
             return
         raw_rates = data.rates_for(cluster_id)
         if raw_rates is None:
@@ -7446,7 +8140,6 @@ class RFMViewer(tk.Toplevel):
                 f"No tuning curve for cluster {cluster_id}",
                 "The selected RF unit is not present in this tuning file.",
             )
-            self.tuning_curve_status_label.configure(text=data.path.name)
             return
         self._set_tuning_hd_class_label(data.hd_class_for(cluster_id))
         try:
@@ -7458,41 +8151,12 @@ class RFMViewer(tk.Toplevel):
             )
         except (ImportError, ValueError) as exc:
             self._draw_tuning_placeholder("Could not plot tuning curve", str(exc))
-            self.tuning_curve_status_label.configure(text=data.path.name)
             return
 
         if self._effective_tuning_plot_mode() == "Polar":
             self._draw_tuning_polar(angles_deg, rates, cluster_id, scale_high)
         else:
             self._draw_tuning_line(angles_deg, rates, cluster_id, scale_high)
-        sigma_deg = (
-            float(self.tuning_smooth_sigma_var.get())
-            * 360.0
-            / DEFAULT_HD_DISPLAY_BINS
-        )
-        smooth_label = (
-            f" · smoothed σ={sigma_deg:g}°"
-            if self.tuning_smoothing_var.get()
-            else " · smoothing off"
-        )
-        scale_label = (
-            f" · shared within file: 0–{format_response_value(scale_high, VALUE_MODE_RATE)} Hz"
-            if self.tuning_compare_scale_var.get()
-            else " · per-cell 0–peak Hz scale"
-        )
-        missing_bins = sum(not math.isfinite(float(rate)) for rate in rates)
-        missing_label = f" · {missing_bins} bins without occupancy" if missing_bins else ""
-        legacy_label = ""
-        if data.occupancy_time_s is None:
-            legacy_label = " · legacy schema (timing/occupancy provenance unavailable)"
-            if len(rates) < HD_RAW_BIN_COUNT:
-                legacy_label += " · rebinned rates averaged"
-        self.tuning_curve_status_label.configure(
-            text=(
-                f"{data.path.name} · {len(rates)} bins{smooth_label}"
-                f"{scale_label}{missing_label}{legacy_label}"
-            )
-        )
 
     def _draw_tuning_line(
         self,
@@ -8477,6 +9141,11 @@ class RFMViewer(tk.Toplevel):
             self._draw_unavailable_unit(key)
             if key == "rf":
                 self._draw_tuning_curve()
+            if self.show_waveform_var.get():
+                self.waveform_subtitle_label.configure(
+                    text=f"Cluster {self._selected_unit_id_value()} · waveform unavailable"
+                )
+                self._draw_unavailable_unit("waveform")
             return
         if key == "rf":
             self._draw_rf()
@@ -8485,6 +9154,376 @@ class RFMViewer(tk.Toplevel):
             self._draw_rgb() if self.rgb_mode_var.get() else self._draw_delay()
         elif key == "timeline":
             self._draw_timeline()
+        if self.show_waveform_var.get():
+            self._draw_waveform()
+
+    def _request_waveform_payload(self) -> None:
+        if not self.show_waveform_var.get():
+            return
+        key = (
+            self._selected_unit_id_value(),
+            self.waveform_channel_mode_var.get(),
+        )
+        if (
+            self._waveform_loading_key == key
+            or self._waveform_payload_key == key
+            or getattr(self, "_waveform_error_key", None) == key
+        ):
+            return
+        self._waveform_generation += 1
+        generation = self._waveform_generation
+        self._waveform_loading_key = key
+        data = self.data
+
+        def load() -> None:
+            result: dict[str, object] = {
+                "generation": generation,
+                "data_path": data.path,
+                "key": key,
+                "payload": None,
+                "error": None,
+            }
+            try:
+                result["payload"] = data.waveform_plot_payload(
+                    key[0], key[1]
+                )
+            except Exception as exc:
+                result["error"] = str(exc)
+            finally:
+                self._waveform_result_queue.put(result)
+
+        threading.Thread(
+            target=load,
+            name=f"rfmapping-waveform-{generation}",
+            daemon=True,
+        ).start()
+        self._schedule_waveform_result_poll()
+
+    def _schedule_waveform_result_poll(self) -> None:
+        if self._waveform_poll_after is None:
+            self._waveform_poll_after = self.after(
+                30, self._poll_waveform_results
+            )
+
+    def _poll_waveform_results(self) -> None:
+        self._waveform_poll_after = None
+        current: dict[str, object] | None = None
+        while True:
+            try:
+                result = self._waveform_result_queue.get_nowait()
+            except queue.Empty:
+                break
+            if result.get("generation") == self._waveform_generation:
+                current = result
+        if current is None:
+            if self._waveform_loading_key is not None and not self._quitting:
+                self._schedule_waveform_result_poll()
+            return
+        if (
+            current.get("data_path") != self.data.path
+            or not self.__dict__.get("_viewer_ready", False)
+        ):
+            return
+        raw_key = current.get("key")
+        if not (
+            isinstance(raw_key, tuple)
+            and len(raw_key) == 2
+            and isinstance(raw_key[0], int)
+            and isinstance(raw_key[1], str)
+        ):
+            return
+        key = (raw_key[0], raw_key[1])
+        self._waveform_loading_key = None
+        payload = current.get("payload")
+        error = current.get("error")
+        if isinstance(payload, Mapping):
+            self.waveform_payload = payload
+            self._waveform_payload_key = key
+            self._waveform_error = None
+            self._waveform_error_key = None
+        else:
+            self.waveform_payload = None
+            self._waveform_payload_key = None
+            self._waveform_error = str(error or "Waveform data is unavailable.")
+            self._waveform_error_key = key
+        if self.show_waveform_var.get():
+            self._draw_waveform()
+
+    @staticmethod
+    def _draw_waveform_message(
+        canvas: tk.Canvas,
+        heading: str,
+        detail: str,
+    ) -> None:
+        width = max(canvas.winfo_width(), 220)
+        height = max(canvas.winfo_height(), 165)
+        canvas.create_text(
+            width / 2,
+            height / 2 - 14,
+            text=heading,
+            fill="#667085",
+            font=("TkDefaultFont", 16, "bold"),
+        )
+        canvas.create_text(
+            width / 2,
+            height / 2 + 25,
+            text=detail,
+            fill="#667085",
+            font=("TkDefaultFont", 9),
+            width=max(180, width - 60),
+            justify="center",
+        )
+
+    def _draw_waveform(self) -> None:
+        canvas = self.canvases["waveform"]
+        canvas.delete("all")
+        if not self.show_waveform_var.get():
+            self.waveform_subtitle_label.configure(text="")
+            return
+        key = (
+            self._selected_unit_id_value(),
+            self.waveform_channel_mode_var.get(),
+        )
+        if self._waveform_payload_key != key:
+            if getattr(self, "_waveform_error_key", None) == key:
+                self.waveform_subtitle_label.configure(
+                    text=f"Cluster {key[0]} · waveform unavailable"
+                )
+                self._draw_waveform_message(
+                    canvas,
+                    "N/A",
+                    self._waveform_error or "Waveform data is unavailable.",
+                )
+                return
+            self._request_waveform_payload()
+            self.waveform_subtitle_label.configure(
+                text=f"Cluster {key[0]} · loading waveform artifact…"
+            )
+            self._draw_waveform_message(
+                canvas,
+                "Loading…",
+                "Reading the selected unit's precomputed average template.",
+            )
+            return
+
+        payload = self.waveform_payload
+        if payload is None:
+            self._draw_waveform_message(
+                canvas, "N/A", "Waveform data is unavailable."
+            )
+            return
+        matrix_raw = payload.get("matrix")
+        times_raw = payload.get("times_ms", payload.get("time_ms"))
+        labels_raw = payload.get("channel_labels")
+        if hasattr(matrix_raw, "tolist"):
+            matrix_raw = matrix_raw.tolist()
+        if hasattr(times_raw, "tolist"):
+            times_raw = times_raw.tolist()
+        if hasattr(labels_raw, "tolist"):
+            labels_raw = labels_raw.tolist()
+        if not (
+            isinstance(matrix_raw, Sequence)
+            and not isinstance(matrix_raw, (str, bytes))
+            and isinstance(times_raw, Sequence)
+            and not isinstance(times_raw, (str, bytes))
+            and isinstance(labels_raw, Sequence)
+            and not isinstance(labels_raw, (str, bytes))
+        ):
+            self._draw_waveform_message(
+                canvas, "N/A", "The waveform payload is incomplete."
+            )
+            return
+        try:
+            matrix = [
+                [float(value) for value in row]
+                for row in matrix_raw
+            ]
+            times = [float(value) for value in times_raw]
+            labels = [str(value).split(" · ", 1)[0] for value in labels_raw]
+        except (TypeError, ValueError):
+            self._draw_waveform_message(
+                canvas, "N/A", "The waveform payload contains invalid values."
+            )
+            return
+        if (
+            not matrix
+            or len(labels) != len(matrix)
+            or len(times) < 2
+            or any(len(row) != len(times) for row in matrix)
+            or not all(math.isfinite(value) for value in times)
+            or any(right <= left for left, right in zip(times, times[1:]))
+        ):
+            self._draw_waveform_message(
+                canvas, "N/A", "The waveform payload has inconsistent dimensions."
+            )
+            return
+
+        amplitude_limit = max(
+            (
+                abs(value)
+                for row in matrix
+                for value in row
+                if math.isfinite(value)
+            ),
+            default=0.0,
+        )
+        configured_limit = payload.get("amplitude_limit_uv")
+        if isinstance(configured_limit, (int, float)) and math.isfinite(
+            float(configured_limit)
+        ):
+            amplitude_limit = max(amplitude_limit, abs(float(configured_limit)))
+        amplitude_limit = max(amplitude_limit, 1e-9)
+        best_row_raw = payload.get(
+            "best_channel_row", payload.get("best_row_index", -1)
+        )
+        best_row = int(best_row_raw) if isinstance(best_row_raw, int) else -1
+
+        width = max(canvas.winfo_width(), 220)
+        height = max(canvas.winfo_height(), 165)
+        compact = width < 280
+        margin_l = 48 if compact else 58
+        margin_r = 54 if compact else 68
+        margin_t, margin_b = 16, 42
+        grid_w = max(70.0, width - margin_l - margin_r)
+        grid_h = max(80.0, height - margin_t - margin_b)
+        x0, y0 = float(margin_l), float(margin_t)
+        cell_w = grid_w / len(times)
+        cell_h = grid_h / len(matrix)
+        for row_index, row in enumerate(matrix):
+            top = y0 + row_index * cell_h
+            for sample_index, value in enumerate(row):
+                left = x0 + sample_index * cell_w
+                canvas.create_rectangle(
+                    left,
+                    top,
+                    left + cell_w + 0.5,
+                    top + cell_h + 0.5,
+                    fill=waveform_color(value, amplitude_limit),
+                    outline="",
+                )
+            label_color = "#b42318" if row_index == best_row else "#475467"
+            canvas.create_text(
+                x0 - 12,
+                top + cell_h / 2,
+                anchor="e",
+                text=("★ " if row_index == best_row else "") + labels[row_index],
+                fill=label_color,
+                font=("TkFixedFont", 8, "bold" if row_index == best_row else "normal"),
+            )
+            if row_index == best_row:
+                canvas.create_rectangle(
+                    x0,
+                    top,
+                    x0 + grid_w,
+                    top + cell_h,
+                    outline="#b42318",
+                    width=2,
+                )
+        canvas.create_rectangle(
+            x0, y0, x0 + grid_w, y0 + grid_h, outline="#344054", width=1
+        )
+
+        time_span = times[-1] - times[0]
+        if time_span > 0.0 and times[0] <= 0.0 <= times[-1]:
+            zero_x = x0 + (
+                (0.0 - times[0]) / time_span
+            ) * max(0.0, grid_w - cell_w) + cell_w / 2.0
+            canvas.create_line(
+                zero_x,
+                y0,
+                zero_x,
+                y0 + grid_h,
+                fill="#111827",
+                dash=(5, 4),
+                width=2,
+            )
+        tick_values = [times[0], 0.0, times[-1]]
+        for value in tick_values:
+            if not times[0] <= value <= times[-1]:
+                continue
+            x = x0 + ((value - times[0]) / time_span) * max(
+                0.0, grid_w - cell_w
+            ) + cell_w / 2.0
+            canvas.create_line(
+                x, y0 + grid_h, x, y0 + grid_h + 5, fill="#475467"
+            )
+            canvas.create_text(
+                x,
+                y0 + grid_h + 19,
+                text=f"{value:g}",
+                fill="#475467",
+                font=("TkDefaultFont", 8),
+            )
+        canvas.create_text(
+            x0 + grid_w / 2,
+            y0 + grid_h + 34,
+            text="Time from spike (ms)",
+            fill="#475467",
+            font=("TkDefaultFont", 8),
+        )
+
+        colorbar_gap = 10 if compact else 28
+        colorbar_width = 11 if compact else 16
+        colorbar_label_gap = 5 if compact else 7
+        colorbar_x = x0 + grid_w + colorbar_gap
+        colorbar_h = min(120.0, grid_h)
+        steps = 80
+        for index in range(steps):
+            value = amplitude_limit * (1.0 - 2.0 * index / max(1, steps - 1))
+            top = y0 + colorbar_h * index / steps
+            bottom = y0 + colorbar_h * (index + 1) / steps
+            canvas.create_rectangle(
+                colorbar_x,
+                top,
+                colorbar_x + colorbar_width,
+                bottom,
+                fill=waveform_color(value, amplitude_limit),
+                outline="",
+            )
+        canvas.create_rectangle(
+            colorbar_x,
+            y0,
+            colorbar_x + colorbar_width,
+            y0 + colorbar_h,
+            outline="#475467",
+        )
+        for value, top in (
+            (amplitude_limit, y0),
+            (0.0, y0 + colorbar_h / 2),
+            (-amplitude_limit, y0 + colorbar_h),
+        ):
+            canvas.create_text(
+                colorbar_x + colorbar_width + colorbar_label_gap,
+                top,
+                anchor="w",
+                text=f"{value:.3g}",
+                fill="#475467",
+                font=("TkDefaultFont", 7),
+            )
+        canvas.create_text(
+            colorbar_x,
+            y0 - 16,
+            anchor="w",
+            text="µV",
+            fill="#475467",
+            font=("TkDefaultFont", 8),
+        )
+        mode_label = WAVEFORM_CHANNEL_MODE_LABELS.get(
+            key[1], key[1]
+        )
+        max_ptp = payload.get("max_ptp_uv")
+        ptp_text = (
+            f" · max PTP {float(max_ptp):.3g} µV"
+            if isinstance(max_ptp, (int, float))
+            and math.isfinite(float(max_ptp))
+            else ""
+        )
+        self.waveform_subtitle_label.configure(
+            text=(
+                f"Cluster {key[0]} · {mode_label} · "
+                f"best + {len(matrix) - 1} nearest{ptp_text}"
+            )
+        )
 
     def _draw_unavailable_unit(self, key: str) -> None:
         canvas = self.canvases[key]
@@ -9043,6 +10082,23 @@ class RFMViewer(tk.Toplevel):
         x_end: int,
         display_bin: int | None = None,
     ) -> str:
+        unit_info, spike_time = self._cell_inspector_texts(
+            y_start,
+            y_end,
+            x_idx,
+            x_end,
+            display_bin,
+        )
+        return f"{unit_info}\n{spike_time}"
+
+    def _cell_inspector_texts(
+        self,
+        y_start: int,
+        y_end: int,
+        x_idx: int,
+        x_end: int,
+        display_bin: int | None = None,
+    ) -> tuple[str, str]:
         unit_idx = self.unit_idx.get()
         value_mode = self.value_mode_var.get()
         unit = value_mode_unit(value_mode)
@@ -9070,14 +10126,17 @@ class RFMViewer(tk.Toplevel):
         peak_text = f"{peak_bin + 1} ({self._time_group_label(peak_bin)})" if peak_bin is not None else "n/a"
         group_note = (
             (("mean" if value_mode == VALUE_MODE_COUNT else "occupancy-pooled")
-             + " over source pixels\n")
+             + " over source pixels")
             if (x_end != x_idx or y_end != y_start)
             else ""
         )
-        return (
+        unit_info = (
             f"cluster {self.data.cluster_id(unit_idx)}\n"
-            f"{self._y_group_text(y_start, y_end)}, {self._x_group_text(x_idx, x_end)}\n"
-            f"{group_note}"
+            f"{self._y_group_text(y_start, y_end)}, {self._x_group_text(x_idx, x_end)}"
+        )
+        if group_note:
+            unit_info += f"\n{group_note}"
+        spike_time = (
             f"bin {format_response_value(display_values[bin_idx], value_mode)} {unit} "
             f"({self._time_group_label(bin_idx)})\n"
             f"{self._rf_sum_range_value_text(range_value)}\n"
@@ -9086,6 +10145,7 @@ class RFMViewer(tk.Toplevel):
             f"peak bin {peak_text}\n"
             f"count-rate peak delay {delay_text}, count entropy {ent:.3f}"
         )
+        return unit_info, spike_time
 
     def _update_cell_label(
         self,
@@ -9107,9 +10167,17 @@ class RFMViewer(tk.Toplevel):
         if cell is None:
             return
         y_start, y_end, x_idx, x_end = cell
-        self.cell_label.configure(
-            text=prefix + self._cell_metrics_text(y_start, y_end, x_idx, x_end, display_bin=display_bin)
+        unit_info, spike_time = self._cell_inspector_texts(
+            y_start,
+            y_end,
+            x_idx,
+            x_end,
+            display_bin,
         )
+        self.cell_label.configure(
+            text=prefix + spike_time
+        )
+        self.unit_stats_label.configure(text=prefix + unit_info)
 
     def _cell_tooltip_text(self, cell: CellRef, display_bin: int | None = None) -> str:
         y_start, y_end, x_start, x_end = cell
@@ -11126,12 +12194,14 @@ class RFMViewer(tk.Toplevel):
         self.smooth_radius_var.set(self.settings.rf_smooth_radius)
         self.show_probe_layout_var.set(self.settings.show_probe_layout)
         self.show_tuning_curve_var.set(self.settings.show_tuning_curve)
+        self.show_waveform_var.set(self.settings.show_waveform)
         self.tuning_plot_mode_var.set(self.settings.tuning_plot_mode)
         self.tuning_layout_var.set(self.settings.tuning_layout)
         self.tuning_display_bins_var.set(self.settings.tuning_display_bins)
         self.tuning_smoothing_var.set(self.settings.tuning_smoothing)
         self.tuning_smooth_sigma_var.set(self.settings.tuning_smooth_sigma)
         self.tuning_compare_scale_var.set(self.settings.tuning_compare_scale)
+        self.waveform_channel_mode_var.set(self.settings.waveform_channel_mode)
         self.selected_cell = None
         self.hover_cell = None
         self._hover_signature = None
@@ -11154,6 +12224,12 @@ class RFMViewer(tk.Toplevel):
         self._probe_drag_start = None
         self._probe_canvas_transform = None
         self._probe_static_signature = None
+        self._waveform_generation += 1
+        self.waveform_payload = None
+        self._waveform_payload_key = None
+        self._waveform_loading_key = None
+        self._waveform_error = None
+        self._waveform_error_key = None
         self._sync_time_control_ranges()
         self.time_res_spin.configure(from_=self._base_bin_ms(), to=self._total_time_ms(), increment=self._base_bin_ms())
         self.x_bins_var.set(min(self.data.n_x, self.settings.rf_x_bins or self.data.n_x))
@@ -11348,6 +12424,7 @@ class FigureViewerSnapshot:
     unit_filter_enabled: bool = False
     zero_bin_threshold: int = 1
     visible_unit_ids: tuple[int, ...] | None = None
+    waveform_channel_mode: str = "same_x_column"
 
     @classmethod
     def capture(cls, viewer: RFMViewer) -> FigureViewerSnapshot:
@@ -11382,6 +12459,7 @@ class FigureViewerSnapshot:
             ),
             zero_bin_threshold=int(viewer.settings.rf_zero_bin_threshold),
             visible_unit_ids=tuple(viewer._local_quality_visible_unit_ids()),
+            waveform_channel_mode=viewer.waveform_channel_mode_var.get(),
         )
 
 
@@ -11394,10 +12472,12 @@ class GUIFigureDataProvider:
         snapshot: FigureViewerSnapshot,
         *,
         shared_rf_scale: tuple[float, float] | None = None,
+        shared_waveform_limit: float | None = None,
     ):
         self.data = data
         self.snapshot = snapshot
         self.shared_rf_scale = shared_rf_scale
+        self.shared_waveform_limit = shared_waveform_limit
         # Capture companion geometry with the same source-session object used
         # for every other plot.  A non-modal composer must not start reading a
         # different CSV after the parent viewer switches JSON documents.
@@ -11405,6 +12485,8 @@ class GUIFigureDataProvider:
         self.probe_geometry_error = data.probe_geometry_error
         self.hd_tuning = data.hd_tuning()
         self.hd_tuning_error = data.hd_tuning_error
+        self.waveform_store = data.waveform_store()
+        self.waveform_error = data.waveform_error
 
     def __call__(self, unit_id: int, template: PlotSpec) -> PlotSpec:
         try:
@@ -11453,6 +12535,20 @@ class GUIFigureDataProvider:
                     template,
                     title=f"{self.probe_geometry.probe_name} layout",
                 )
+        elif kind is PlotKind.WAVEFORM_LOCAL_AVERAGE:
+            payload = self._waveform_payload(unit_id)
+            options["palette"] = "rdbu_r"
+            options["value_unit"] = "µV"
+            options["show_colorbar"] = True
+            if "unavailable" not in payload:
+                local_limit = float(payload["amplitude_limit_uv"])
+                limit = (
+                    self.shared_waveform_limit
+                    if self.shared_waveform_limit is not None
+                    else local_limit
+                )
+                options["vmin"] = -abs(float(limit))
+                options["vmax"] = abs(float(limit))
         else:
             payload = {"unavailable": f"Unsupported figure kind: {kind.value}"}
         if kind in {PlotKind.RF_CARTESIAN, PlotKind.DELAY_CARTESIAN, PlotKind.RGB_CARTESIAN}:
@@ -11491,6 +12587,26 @@ class GUIFigureDataProvider:
             matrices.append(self._rf_matrix(unit_idx, polar=False))
         bounds = shared_scalar_scale(matrices)
         return float(bounds["vmin"]), float(bounds["vmax"])
+
+    def shared_waveform_amplitude_limit(
+        self,
+        unit_ids: Iterable[int],
+        cancelled: Callable[[], bool] | None = None,
+    ) -> float | None:
+        limit = 0.0
+        found = False
+        for unit_id in unit_ids:
+            if cancelled is not None and cancelled():
+                raise RuntimeError("Preview superseded by a newer recipe")
+            try:
+                payload = self.data.waveform_payload(
+                    int(unit_id), self.snapshot.waveform_channel_mode
+                )
+            except (OSError, ValueError):
+                continue
+            limit = max(limit, float(payload.amplitude_limit_uv))
+            found = True
+        return limit if found else None
 
     def _prepare(
         self,
@@ -11962,6 +13078,23 @@ class GUIFigureDataProvider:
             **({"missingPosition": True} if missing_position else {}),
         }
 
+    def _waveform_payload(self, unit_id: int) -> dict[str, object]:
+        if self.waveform_store is None:
+            detail = self.waveform_error
+            return {
+                "unavailable": (
+                    f"Waveform artifact could not be loaded: {detail}"
+                    if detail
+                    else "No companion waveform artifact was found for this RF dataset."
+                )
+            }
+        try:
+            return self.data.waveform_plot_payload(
+                int(unit_id), self.snapshot.waveform_channel_mode
+            )
+        except (OSError, ValueError) as exc:
+            return {"unavailable": str(exc)}
+
 
 def _figure_snapshot_metadata(data: RFMappingData, snapshot: FigureViewerSnapshot) -> dict[str, object]:
     visible_unit_ids = (
@@ -11989,6 +13122,7 @@ def _figure_snapshot_metadata(data: RFMappingData, snapshot: FigureViewerSnapsho
         "timelinePolar": snapshot.timeline_polar,
         "timelineRange": [snapshot.timeline_range_start, snapshot.timeline_range_end],
         "timelineActiveBin": snapshot.timeline_active_bin,
+        "waveformChannelMode": snapshot.waveform_channel_mode,
         "totalDegrees": snapshot.total_degrees,
         "selectedCell": list(snapshot.selected_cell) if snapshot.selected_cell is not None else None,
         "occupancyTimeSecAvailable": True,
@@ -12018,6 +13152,7 @@ def _figure_provenance_metadata(
     for kind, identities in (
         ("headDirection", (data._hd_tuning_identity,) if data._hd_tuning_identity else ()),
         ("probeGeometry", data._probe_file_identities),
+        ("waveform", data._waveform_file_identities),
     ):
         for identity in identities:
             companions.append({"kind": kind, **identity.metadata(_hash_frozen_file(identity, cancelled))})
@@ -12034,6 +13169,7 @@ def _figure_provenance_metadata(
         "companionStatus": {
             "headDirection": "available" if data._hd_tuning is not None else (data._hd_tuning_error or "unavailable"),
             "probeGeometry": "available" if data._probe_geometry is not None else (data._probe_geometry_error or "unavailable"),
+            "waveform": "available" if data._waveform_store is not None else (data._waveform_error or "unavailable"),
         },
         "renderingContract": {
             "preview": "same-page-renderer",
@@ -12504,6 +13640,7 @@ class FigureExportWindow(tk.Toplevel):
         self,
         raw_pages: tuple[ExportPage, ...],
         shared_rf_scale: tuple[float, float] | None,
+        shared_waveform_limit: float | None = None,
     ) -> tuple[ExportPage, ...]:
         pages: list[ExportPage] = []
         for page in raw_pages:
@@ -12584,6 +13721,18 @@ class FigureExportWindow(tk.Toplevel):
                         show_axes=True,
                         show_scale_bar=True,
                     )
+                if plot.kind is PlotKind.WAVEFORM_LOCAL_AVERAGE:
+                    options.update(
+                        palette="rdbu_r",
+                        value_unit="µV",
+                        show_axes=True,
+                        show_colorbar=True,
+                    )
+                    if shared_waveform_limit is not None:
+                        options.update(
+                            vmin=-abs(float(shared_waveform_limit)),
+                            vmax=abs(float(shared_waveform_limit)),
+                        )
                 if plot.kind in {PlotKind.RGB_CARTESIAN, PlotKind.RGB_POLAR}:
                     options["show_colorbar"] = False
                 if shared_rf_scale is not None and plot.kind in {
@@ -12621,6 +13770,12 @@ class FigureExportWindow(tk.Toplevel):
                         f"full timeline {format_ms(full_start_ms)} to "
                         f"{format_ms(full_end_ms)} ms; {grouping}"
                     )
+                elif plot.kind is PlotKind.WAVEFORM_LOCAL_AVERAGE:
+                    context = (
+                        "best + nearest 4; "
+                        f"{WAVEFORM_CHANNEL_MODE_LABELS.get(self.snapshot.waveform_channel_mode, self.snapshot.waveform_channel_mode)}; "
+                        "baseline ≤ -0.25 ms"
+                    )
                 else:
                     context = None
                 if context is not None:
@@ -12640,7 +13795,11 @@ class FigureExportWindow(tk.Toplevel):
         self.data.source_identity.verify_path()
         identities = tuple(
             identity
-            for identity in (self.data._hd_tuning_identity, *self.data._probe_file_identities)
+            for identity in (
+                self.data._hd_tuning_identity,
+                *self.data._probe_file_identities,
+                *self.data._waveform_file_identities,
+            )
             if identity is not None
         )
         for identity in identities:
@@ -12670,6 +13829,19 @@ class FigureExportWindow(tk.Toplevel):
             if cancelled is not None and cancelled():
                 raise RuntimeError("Preview superseded by a newer recipe")
             self._verify_export_inputs()
+            has_waveform = any(
+                plot.kind is PlotKind.WAVEFORM_LOCAL_AVERAGE
+                for page in raw_pages
+                for plot in page.plots
+            )
+            if has_waveform:
+                previous_waveform_inputs = self.data._waveform_file_identities
+                captured_waveform_inputs = self.data.capture_waveform_inputs(
+                    unit_ids
+                )
+                if captured_waveform_inputs != previous_waveform_inputs:
+                    self._provenance_metadata = None
+                self._verify_export_inputs()
             cached = self._context_cache.get(key)
             if cached is not None:
                 return cached
@@ -12691,11 +13863,23 @@ class FigureExportWindow(tk.Toplevel):
                 if has_rf
                 else None
             )
-            pages = self._resolved_export_pages(raw_pages, scale)
+            waveform_limit = (
+                self._base_data_provider.shared_waveform_amplitude_limit(
+                    unit_ids, cancelled
+                )
+                if has_waveform
+                else None
+            )
+            pages = (
+                self._resolved_export_pages(raw_pages, scale, waveform_limit)
+                if has_waveform
+                else self._resolved_export_pages(raw_pages, scale)
+            )
             provider = GUIFigureDataProvider(
                 self.data,
                 self.snapshot,
                 shared_rf_scale=scale,
+                shared_waveform_limit=waveform_limit,
             )
             metadata = dict(self._provenance_metadata)
             if scale is not None:
@@ -12704,6 +13888,15 @@ class FigureExportWindow(tk.Toplevel):
                     "vmax": scale[1],
                     "unit": value_mode_unit(self.snapshot.value_mode),
                     "unitIds": list(unit_ids),
+                }
+            if waveform_limit is not None:
+                metadata["sharedWaveformScale"] = {
+                    "vmin": -waveform_limit,
+                    "vmax": waveform_limit,
+                    "unit": "µV",
+                    "unitIds": list(unit_ids),
+                    "baselineEndMs": -0.25,
+                    "channelMode": self.snapshot.waveform_channel_mode,
                 }
             result = (pages, metadata, provider)
             if cancelled is not None and cancelled():
@@ -13103,7 +14296,7 @@ def run_self_test(path: Path) -> None:
     assert len(hd_angles) == DEFAULT_HD_DISPLAY_BINS
     assert len(hd_rates) == DEFAULT_HD_DISPLAY_BINS
     assert all(math.isfinite(value) and value >= 0.0 for value in hd_rates)
-    print(
+    _cli_print(
         "self-test passed:",
         f"{data.n_units} units, {data.n_y} y, {data.n_x} x, {data.n_bins} bins",
         "occupancy metadata: yes",
@@ -13127,7 +14320,81 @@ def run_tkdnd_self_test() -> None:
         root.update_idletasks()
     finally:
         root.destroy()
-    print(f"TkDND self-test passed: {version}")
+    _cli_print(f"TkDND self-test passed: {version}")
+
+
+def run_figure_export_self_test(output_root: Path) -> None:
+    """Exercise packaged PDF, directory-figure, and CSV publication paths."""
+
+    if output_root.exists():
+        if not output_root.is_dir() or any(output_root.iterdir()):
+            raise RuntimeError("figure export self-test directory must be empty")
+    else:
+        output_root.mkdir(parents=True)
+    page = ExportPage(
+        "Self test",
+        [
+            PlotSpec(
+                PlotKind.RF_CARTESIAN,
+                [[0.0, 1.0], [2.0, 3.0]],
+                options={"subtitle": "packaged publication smoke"},
+            ),
+            PlotSpec(
+                PlotKind.WAVEFORM_LOCAL_AVERAGE,
+                {
+                    "matrix": [
+                        [-1.0, -2.0, 0.0, 1.0],
+                        [-2.0, -5.0, 2.0, 1.0],
+                    ],
+                    "times_ms": [-0.5, 0.0, 0.5, 1.0],
+                    "time_edges_ms": [-0.75, -0.25, 0.25, 0.75, 1.25],
+                    "channel_labels": ["ch 7", "ch 3"],
+                    "best_channel_row": 1,
+                },
+                options={"subtitle": "same x column"},
+            ),
+        ],
+    )
+    png_destination = output_root / "figure-export-smoke"
+    pdf_destination = output_root / "figure-export-smoke.pdf"
+    png_result = export_figures(
+        ExportPlan(FigureFormat.PNG, [1], [page], png_destination)
+    )
+    pdf_result = export_figures(
+        ExportPlan(FigureFormat.PDF, [1], [page], pdf_destination)
+    )
+    csv_destination = output_root / "displayed-data-smoke.csv"
+
+    def write_smoke_csv(writer: csv.writer) -> None:
+        writer.writerow(["unit_id", "value"])
+        writer.writerow([1, 3])
+
+    _atomic_write_csv(csv_destination, write_smoke_csv)
+    if (
+        png_result.page_count != 1
+        or not (png_destination / "manifest.json").is_file()
+        or not png_result.files[0].is_file()
+        or pdf_result.page_count != 1
+        or not pdf_destination.read_bytes().startswith(b"%PDF-")
+        or csv_destination.read_text(encoding="utf-8") != "unit_id,value\n1,3\n"
+    ):
+        raise RuntimeError("figure export self-test output verification failed")
+    _cli_print(f"Figure export self-test passed: {output_root}")
+
+
+def _cli_print(*values: object, error: bool = False) -> None:
+    """Emit CLI diagnostics when the frozen executable has a console.
+
+    PyInstaller's Windows ``--windowed`` bootloader intentionally exposes
+    ``sys.stdout`` and ``sys.stderr`` as ``None``.  Release smoke tests still
+    need their exit status to be meaningful, so a missing stream must not turn
+    a successful (or deliberately failed) self-test into an unrelated
+    ``AttributeError``.
+    """
+
+    stream = sys.stderr if error else sys.stdout
+    if stream is not None:
+        print(*values, file=stream)
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -13136,13 +14403,19 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "json_path",
         nargs="?",
         default=None,
-        help=f"Path to an RF .rfmap or JSON file. Default: latest RF file in {DEFAULT_JSON_DIR}/",
+        help="Path to an RF .rfmap or JSON file. Omit it to open the file chooser.",
     )
     parser.add_argument("--self-test", action="store_true", help="Run data/model tests and exit.")
     parser.add_argument(
         "--self-test-dnd",
         action="store_true",
         help="Load the bundled TkDND runtime and exit.",
+    )
+    parser.add_argument(
+        "--self-test-export",
+        metavar="DIRECTORY",
+        default=None,
+        help="Write packaged PDF, PNG, and CSV smoke outputs, then exit.",
     )
     return parser.parse_args(argv)
 
@@ -13153,35 +14426,50 @@ def main(argv: list[str] | None = None) -> int:
         try:
             run_tkdnd_self_test()
         except Exception as exc:
-            print(f"TkDND self-test failed: {exc}", file=sys.stderr)
+            _cli_print(f"TkDND self-test failed: {exc}", error=True)
             return 1
         return 0
+    if args.self_test_export is not None:
+        try:
+            run_figure_export_self_test(Path(args.self_test_export).expanduser())
+        except Exception as exc:
+            _cli_print(f"Figure export self-test failed: {exc}", error=True)
+            return 1
+        return 0
+    path: Path | None
     if args.json_path is not None:
         path = Path(args.json_path).expanduser()
         if not path.exists():
-            print(f"RF mapping file not found: {path}", file=sys.stderr)
+            _cli_print(f"RF mapping file not found: {path}", error=True)
             return 2
         if document_kind(path) != "rf":
-            print(
+            _cli_print(
                 "A .tc or .probe companion needs an RF map; "
                 "open a .rfmap or .json file first.",
-                file=sys.stderr,
+                error=True,
             )
             return 2
     else:
-        path = startup_json_path()
+        path = None
+    if args.self_test and path is None:
+        _cli_print("--self-test requires an explicit RF mapping file", error=True)
+        return 2
     if args.self_test and not path.exists():
-        print(f"RF mapping file not found: {path}", file=sys.stderr)
+        _cli_print(f"RF mapping file not found: {path}", error=True)
         return 2
     if args.self_test:
+        assert path is not None
         run_self_test(path)
         return 0
 
     if not TK_AVAILABLE:
-        print("tkinter is not available in this Python; use a local Python with Tk to launch the GUI.", file=sys.stderr)
+        _cli_print(
+            "tkinter is not available in this Python; use a local Python with Tk to launch the GUI.",
+            error=True,
+        )
         return 1
 
-    app = RFMViewer(startup_path=path)
+    app = RFMViewer(startup_path=path) if path is not None else RFMViewer()
     app.mainloop()
     return 0
 

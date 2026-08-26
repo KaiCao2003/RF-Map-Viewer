@@ -11,7 +11,7 @@ so the alpha can be installed and released without replacing the stable app.
 ## Stable viewer 1.9.5
 
 The stable viewer opens the current JSON-text RF `.rfmap` contract and its
-tuning-curve and probe companions. Version 1.9.5 requires raw non-negative
+tuning-curve, probe, and waveform companions. Version 1.9.5 requires raw non-negative
 integer `unitsSpikeCounts` together with the matching spatial
 `occupancyTimeSec` map and the current response-definition fields written by
 `RFmapping_core.m`. Older RF documents without occupancy metadata are rejected
@@ -27,18 +27,45 @@ scalars are restored for singleton `unitPool`, `xPositions`, `yPositions`, and
 footprint and seven-unit Polar ring across live plots, timeline thumbnails, hit
 testing, and figure exports.
 
+The RF tab can show a compact **Local Average Waveform** panel in the left
+sidebar, directly below **Spike Time**. **Unit Info** stays at the bottom-right
+below the HD tuning curve. The viewer auto-discovers the read-only schema-v4 SpikeInterface
+artifact at `data/waveform/ProbeA` or `ProbeB` and shows the selected unit's
+baseline-corrected average template on the best-PTP channel plus the four
+nearest channels. **Settings → Waveform** controls whether the panel is shown
+and switches between `Same x column` and `Same shank`; both modes intentionally
+match the notebook's nearest-four selector rather than forcing two channels
+above and two below. Figure Composer exports the same payload with a shared
+symmetric µV scale across selected units and records the manifest, metadata
+tables, and selected template files in provenance.
+
 Run it from source with:
 
 ```sh
 ~/.virtualenvs/rfmapping/bin/python rfmapping_gui.py /path/to/result.rfmap
 ```
 
+Opening the app without a path shows the native file chooser. Release packages
+do not contain or auto-load sample RF data.
+
 Its macOS identity is `RF Map Viewer.app`, bundle ID
-`org.local.rfmapping.viewer`, and version/build `1.9.5` / `10905`. Build it with:
+`org.local.rfmapping.viewer`, and version/build `1.9.5` / `10906`. Build it with:
 
 ```sh
 script/build_python_stable_macos_app.sh
 ```
+
+The same Python release is packaged for Windows x64 as a portable ZIP and an
+Inno Setup installer. On a Windows build host with Python 3.14, PyInstaller,
+and Inno Setup 6 installed, build and smoke-test both artifacts with:
+
+```powershell
+script/build_python_stable_windows_app.ps1
+```
+
+The versioned outputs are written under `dist/windows/`; the builder verifies
+the portable executable and a silent temporary installation with the RF
+fixture, TkDND, and packaged PDF/PNG/CSV export smoke tests.
 
 ## Free-Moving alpha 1.10.0-alpha.3
 

@@ -14,13 +14,16 @@
       "release_version": "1.9.5",
       "marketing_version": "1.9.5",
       "package_version": "1.9.5",
-      "build": "10905",
+      "build": "10906",
       "channel": "stable",
       "feature_generation_offset": 0,
       "edition": "Full",
       "artifact_flavor": "full",
       "artifact": "RF_Map_Viewer-python-1.9.5-full-macos-arm64.zip",
       "checksum": "SHA256SUMS-python-1.9.5-full.txt",
+      "windows_portable_artifact": "RF_Map_Viewer-python-1.9.5-full-windows-x64-portable.zip",
+      "windows_installer_artifact": "RF_Map_Viewer-python-1.9.5-full-windows-x64-setup.exe",
+      "windows_checksum": "SHA256SUMS-python-1.9.5-full-windows-x64.txt",
       "tag": "python-v1.9.5"
     },
     "python_freemoving": {

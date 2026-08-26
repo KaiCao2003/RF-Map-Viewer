@@ -14,6 +14,7 @@ import xml.etree.ElementTree as ET
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from PIL import Image, ImageChops, ImageDraw
@@ -37,6 +38,13 @@ from rfmapping_viewer.figure_export import (
     iter_generated_pages,
     render_live_preview,
     shared_scalar_scale,
+    shared_symmetric_scale,
+)
+
+
+POSIX_PUBLICATION_ONLY = pytest.mark.skipif(
+    os.name == "nt",
+    reason="exercises the descriptor-pinned POSIX publication backend",
 )
 
 
@@ -60,6 +68,29 @@ PROBE_POINTS = {
         {"x": 0.0, "y": 200.0, "label": "C"},
     ]
 }
+WAVEFORM_PAYLOAD = {
+    "matrix": [
+        [-1.0, -2.0, -3.0, -2.0, 0.0, 2.0, 1.0, 0.0],
+        [-2.0, -4.0, -6.0, -3.0, 1.0, 5.0, 2.0, 0.0],
+        [-3.0, -7.0, -9.0, -4.0, 2.0, 12.0, 4.0, 1.0],
+        [-2.0, -5.0, -7.0, -3.0, 1.0, 7.0, 3.0, 0.0],
+        [-1.0, -3.0, -4.0, -2.0, 0.0, 3.0, 1.0, 0.0],
+    ],
+    "times_ms": [-0.5, -0.25, 0.0, 0.25, 0.5, 0.75, 1.0, 1.25],
+    "time_edges_ms": [
+        -0.625,
+        -0.375,
+        -0.125,
+        0.125,
+        0.375,
+        0.625,
+        0.875,
+        1.125,
+        1.375,
+    ],
+    "channel_labels": ["ch 7", "ch 8", "ch 9", "ch 10", "ch 11"],
+    "best_channel_row": 2,
+}
 
 
 def _data_for(unit_id: int, spec: PlotSpec):
@@ -79,6 +110,8 @@ def _data_for(unit_id: int, spec: PlotSpec):
         return HD_CURVE
     if spec.kind is PlotKind.PROBE_LAYOUT:
         return PROBE_POINTS
+    if spec.kind is PlotKind.WAVEFORM_LOCAL_AVERAGE:
+        return WAVEFORM_PAYLOAD
     return [[value + unit_id for value in row] for row in SCALAR_MATRIX]
 
 
@@ -113,6 +146,7 @@ def test_plot_kind_registry_has_all_stable_view_identifiers() -> None:
         "hd.line",
         "hd.polar",
         "probe",
+        "waveform.local_average",
     }
     assert all(
         definition.kind.value == stable_id and definition.label
@@ -199,6 +233,25 @@ def test_shared_scalar_scale_is_reusable_and_validated() -> None:
     }
     with pytest.raises(FigureExportValidationError, match="vmax"):
         shared_scalar_scale([[[1.0]]], vmin=2, vmax=1)
+
+
+def test_shared_symmetric_scale_is_reusable_and_validated() -> None:
+    scale = shared_symmetric_scale(
+        [
+            {"matrix": [[-2.0, 1.0], [float("nan"), None]]},
+            [[10.0, -4.0]],
+        ]
+    )
+
+    assert dict(scale) == {"vmin": -10.0, "vmax": 10.0}
+    with pytest.raises(TypeError):
+        scale["vmin"] = 0.0  # type: ignore[index]
+    assert dict(shared_symmetric_scale([[[100.0]]], limit=4.0)) == {
+        "vmin": -4.0,
+        "vmax": 4.0,
+    }
+    with pytest.raises(FigureExportValidationError, match="greater than"):
+        shared_symmetric_scale([[[1.0]]], limit=-1.0)
 
 
 def test_export_models_strictly_require_units_pages_and_plots(tmp_path: Path) -> None:
@@ -524,6 +577,192 @@ def test_scalar_map_rejects_coordinate_count_mismatch() -> None:
 
     with pytest.raises(FigureExportValidationError, match="exactly 2"):
         PillowFigureRenderer((500, 400)).render_page(1, page)
+
+
+def test_waveform_heatmap_draws_quantitative_annotations_and_best_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed_colorbar: list[tuple[float, float, str, str]] = []
+    observed_text: list[str] = []
+    observed_zero_segments: list[tuple[object, ...]] = []
+    observed_markers: list[object] = []
+    original_colorbar = figure_export_module._draw_scalar_colorbar
+    original_text = ImageDraw.ImageDraw.text
+    original_line = ImageDraw.ImageDraw.line
+    original_ellipse = ImageDraw.ImageDraw.ellipse
+
+    def recording_colorbar(draw, box, low, high, palette, unit):
+        observed_colorbar.append((low, high, palette, unit))
+        return original_colorbar(draw, box, low, high, palette, unit)
+
+    def recording_text(self, xy, text, *args, **kwargs):
+        observed_text.append(str(text))
+        return original_text(self, xy, text, *args, **kwargs)
+
+    def recording_line(self, xy, *args, **kwargs):
+        if kwargs.get("fill") == "#111827":
+            observed_zero_segments.append(tuple(xy))
+        return original_line(self, xy, *args, **kwargs)
+
+    def recording_ellipse(self, xy, *args, **kwargs):
+        if kwargs.get("fill") == "#dc2626":
+            observed_markers.append(xy)
+        return original_ellipse(self, xy, *args, **kwargs)
+
+    monkeypatch.setattr(
+        figure_export_module,
+        "_draw_scalar_colorbar",
+        recording_colorbar,
+    )
+    monkeypatch.setattr(ImageDraw.ImageDraw, "text", recording_text)
+    monkeypatch.setattr(ImageDraw.ImageDraw, "line", recording_line)
+    monkeypatch.setattr(ImageDraw.ImageDraw, "ellipse", recording_ellipse)
+    image = Image.new("RGB", (700, 460), "white")
+    spec = PlotSpec(
+        PlotKind.WAVEFORM_LOCAL_AVERAGE,
+        WAVEFORM_PAYLOAD,
+        options={"vmin": -20.0, "vmax": 8.0},
+    )
+
+    figure_export_module._draw_waveform_heatmap(
+        ImageDraw.Draw(image),
+        (10, 10, 690, 450),
+        spec,
+    )
+
+    assert observed_colorbar == [(-20.0, 20.0, "rdbu_r", "µV")]
+    assert set(WAVEFORM_PAYLOAD["channel_labels"]) <= set(observed_text)
+    assert {"channel", "Time from spike alignment (ms)"} <= set(observed_text)
+    assert len(observed_zero_segments) >= 2
+    assert len({round(segment[0]) for segment in observed_zero_segments}) == 1
+    assert len(observed_markers) == 1
+
+
+def test_waveform_palette_is_diverging_and_zero_centered() -> None:
+    negative = figure_export_module._palette(-1.0, -1.0, 1.0, "rdbu_r")
+    zero = figure_export_module._palette(0.0, -1.0, 1.0, "rdbu_r")
+    positive = figure_export_module._palette(1.0, -1.0, 1.0, "rdbu_r")
+
+    assert negative[2] > negative[0]
+    assert max(zero) - min(zero) == 0
+    assert positive[0] > positive[2]
+
+
+def test_waveform_tick_labels_are_thinned_until_they_do_not_overlap() -> None:
+    positions = tuple(float(index * 3) for index in range(61))
+    widths = tuple(42.0 for _index in positions)
+
+    indices = figure_export_module._non_overlapping_tick_indices(
+        positions,
+        widths,
+        padding=8.0,
+    )
+
+    assert indices[0] == 0
+    assert indices[-1] == 60
+    assert len(indices) < 6
+    for left_index, right_index in zip(indices, indices[1:]):
+        label_gap = positions[right_index] - positions[left_index]
+        required_gap = (widths[left_index] + widths[right_index]) / 2.0 + 8.0
+        assert label_gap >= required_gap
+
+
+def test_waveform_heatmap_fills_panel_with_non_square_time_cells(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cell_boxes: list[tuple[float, float, float, float]] = []
+    original_rectangle = ImageDraw.ImageDraw.rectangle
+
+    def recording_rectangle(self, xy, *args, **kwargs):
+        if isinstance(kwargs.get("fill"), tuple):
+            cell_boxes.append(tuple(xy))
+        return original_rectangle(self, xy, *args, **kwargs)
+
+    monkeypatch.setattr(ImageDraw.ImageDraw, "rectangle", recording_rectangle)
+    payload = {
+        "matrix": [
+            [float(column - 30) for column in range(60)]
+            for _row in range(5)
+        ],
+        "times_ms": [column / 30.0 - 0.5 for column in range(60)],
+        "channel_labels": [f"ch {index}" for index in range(5)],
+        "best_channel_row": 2,
+    }
+    image = Image.new("RGB", (620, 420), "white")
+
+    figure_export_module._draw_waveform_heatmap(
+        ImageDraw.Draw(image),
+        (10, 10, 610, 410),
+        PlotSpec(
+            PlotKind.WAVEFORM_LOCAL_AVERAGE,
+            payload,
+            options={
+                "show_axes": False,
+                "show_colorbar": False,
+                "show_zero_time": False,
+            },
+        ),
+    )
+
+    assert len(cell_boxes) == 5 * 60
+    first_cell = cell_boxes[0]
+    cell_width = first_cell[2] - first_cell[0]
+    cell_height = first_cell[3] - first_cell[1]
+    assert cell_height > cell_width * 5
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        (
+            {**WAVEFORM_PAYLOAD, "times_ms": [-0.5, 0.0]},
+            "exactly 8",
+        ),
+        (
+            {
+                **WAVEFORM_PAYLOAD,
+                "times_ms": [-0.5, -0.25, 0.0, 0.25, 0.5, 0.5, 1.0, 1.25],
+            },
+            "strictly increasing",
+        ),
+        (
+            {**WAVEFORM_PAYLOAD, "channel_labels": ["ch 7"]},
+            "exactly 5",
+        ),
+        (
+            {**WAVEFORM_PAYLOAD, "best_channel_row": 5},
+            "inside 0..4",
+        ),
+        (
+            {**WAVEFORM_PAYLOAD, "time_edges_ms": [-0.625, -0.375]},
+            "one more",
+        ),
+    ],
+)
+def test_waveform_heatmap_strictly_validates_normalized_payload(
+    payload: Mapping[str, object],
+    message: str,
+) -> None:
+    page = ExportPage(
+        "Invalid waveform",
+        [PlotSpec(PlotKind.WAVEFORM_LOCAL_AVERAGE, payload)],
+    )
+
+    with pytest.raises(FigureExportValidationError, match=message):
+        PillowFigureRenderer((700, 500)).render_page(1, page)
+
+
+def test_waveform_live_preview_and_page_render_share_exact_pixels() -> None:
+    page = ExportPage(
+        "Waveform",
+        [PlotSpec(PlotKind.WAVEFORM_LOCAL_AVERAGE, WAVEFORM_PAYLOAD)],
+    )
+    renderer = PillowFigureRenderer((700, 500))
+
+    preview = renderer.render_preview(9, page)
+    final_page = renderer.render_page(9, page)
+
+    assert ImageChops.difference(preview, final_page).getbbox() is None
 
 
 def test_polar_map_centers_gui_visual_angle_span_on_twelve_oclock() -> None:
@@ -1502,6 +1741,7 @@ def test_concurrent_pdf_overwrite_allows_exactly_one_publication(
     assert not list(tmp_path.glob(".concurrent.pdf.tmp-*"))
 
 
+@POSIX_PUBLICATION_ONLY
 def test_pdf_replace_failure_before_mutation_cleans_hardlink_backup(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1543,6 +1783,7 @@ def test_pdf_replace_failure_before_mutation_cleans_hardlink_backup(
     assert not list(tmp_path.glob(".replace-before.pdf.tmp-*"))
 
 
+@POSIX_PUBLICATION_ONLY
 def test_pdf_backup_fsync_failure_never_replaces_destination(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1604,6 +1845,7 @@ def test_pdf_backup_fsync_failure_never_replaces_destination(
     assert not list(tmp_path.glob(".backup-fsync.pdf.tmp-*"))
 
 
+@POSIX_PUBLICATION_ONLY
 def test_pdf_cifs_backup_verification_does_not_trust_link_counts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1673,6 +1915,7 @@ def test_pdf_cifs_backup_verification_does_not_trust_link_counts(
     assert all(link_count == 1 for _name, link_count in observed_path_link_counts)
 
 
+@POSIX_PUBLICATION_ONLY
 def test_pdf_replace_mutates_then_raises_restores_old_cifs_target(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1731,6 +1974,7 @@ def test_pdf_replace_mutates_then_raises_restores_old_cifs_target(
     assert not list(tmp_path.glob(".mutated-eio.pdf.tmp-*"))
 
 
+@POSIX_PUBLICATION_ONLY
 def test_pdf_backup_unlink_failure_before_mutation_rolls_back(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1772,6 +2016,7 @@ def test_pdf_backup_unlink_failure_before_mutation_rolls_back(
 
 
 @pytest.mark.parametrize("failure_point", ["unlink-after-mutation", "cleanup-fsync"])
+@POSIX_PUBLICATION_ONLY
 def test_pdf_post_commit_cleanup_failure_reports_success_without_residue(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1836,6 +2081,7 @@ def test_pdf_post_commit_cleanup_failure_reports_success_without_residue(
     "failure_errno",
     [errno.EIO, getattr(errno, "ENOTSUP", errno.EOPNOTSUPP)],
 )
+@POSIX_PUBLICATION_ONLY
 def test_publish_lock_acquire_failure_closes_fd_without_unlock(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1942,9 +2188,102 @@ def test_explicit_overwrite_replaces_the_complete_destination(tmp_path: Path) ->
 
 
 @pytest.mark.parametrize(
+    "figure_format",
+    [FigureFormat.PNG, FigureFormat.SVG, FigureFormat.PDF],
+)
+def test_path_publication_backend_exports_and_overwrites_complete_outputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    figure_format: FigureFormat,
+) -> None:
+    monkeypatch.setattr(figure_export_module, "_USE_PATH_PUBLICATION", True)
+    destination = (
+        tmp_path / "portable.pdf"
+        if figure_format is FigureFormat.PDF
+        else tmp_path / f"portable-{figure_format.value}"
+    )
+    plan = _plan(destination, figure_format=figure_format)
+
+    first = export_figures(
+        plan,
+        data_provider=_data_for,
+        renderer=PillowFigureRenderer((320, 240)),
+    )
+    second = export_figures(
+        plan,
+        data_provider=_shifted_provider(50.0),
+        renderer=PillowFigureRenderer((320, 240)),
+        overwrite=True,
+    )
+
+    assert first.page_count == second.page_count == 1
+    if figure_format is FigureFormat.PDF:
+        assert len(PdfReader(destination, strict=True).pages) == 1
+    else:
+        manifest = json.loads(
+            (destination / "manifest.json").read_text(encoding="utf-8")
+        )
+        assert manifest["format"] == figure_format.value
+        assert second.files[0].is_file()
+    assert not list(tmp_path.glob(f".{destination.name}.tmp-*"))
+    assert not list(tmp_path.glob(f".{destination.name}.backup-*"))
+
+
+def test_path_publication_backend_detects_destination_race(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(figure_export_module, "_USE_PATH_PUBLICATION", True)
+    destination = tmp_path / "portable-race"
+    plan = _plan(destination)
+
+    def create_raw_destination() -> None:
+        destination.mkdir()
+        (destination / "raw.bin").write_bytes(b"source-of-truth")
+
+    with pytest.raises(DestinationExistsError):
+        export_figures(
+            plan,
+            data_provider=_data_for,
+            renderer=PillowFigureRenderer((320, 240)),
+            before_publish=create_raw_destination,
+        )
+
+    assert (destination / "raw.bin").read_bytes() == b"source-of-truth"
+    assert not list(tmp_path.glob(".portable-race.tmp-*"))
+
+
+def test_path_pdf_snapshot_keeps_windows_path_and_handle_domains_separate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    destination = tmp_path / "portable.pdf"
+    destination.write_bytes(b"%PDF-1.4\n%%EOF\n")
+    real_fstat = figure_export_module.os.fstat
+
+    def handle_domain_stat(descriptor: int) -> SimpleNamespace:
+        result = real_fstat(descriptor)
+        return SimpleNamespace(
+            st_dev=result.st_dev + 1000,
+            st_ino=result.st_ino + 1000,
+            st_mode=result.st_mode,
+            st_size=result.st_size,
+            st_mtime_ns=result.st_mtime_ns + 100,
+            st_ctime_ns=result.st_ctime_ns + 100,
+        )
+
+    monkeypatch.setattr(figure_export_module.os, "fstat", handle_domain_stat)
+    first = figure_export_module._snapshot_pdf_path(destination)
+    second = figure_export_module._snapshot_pdf_path(destination)
+
+    assert figure_export_module._same_pdf_snapshot(second, first)
+
+
+@pytest.mark.parametrize(
     ("figure_format", "name"),
     [(FigureFormat.PNG, "shared"), (FigureFormat.SVG, "shared-svg")],
 )
+@POSIX_PUBLICATION_ONLY
 def test_directory_exports_publish_group_shared_safe_modes_after_validation(
     tmp_path: Path,
     figure_format: FigureFormat,
@@ -1966,6 +2305,7 @@ def test_directory_exports_publish_group_shared_safe_modes_after_validation(
     assert stat.S_IMODE(lock.stat().st_mode) == 0o660
 
 
+@POSIX_PUBLICATION_ONLY
 def test_pdf_publishes_group_shared_safe_mode_after_overwrite(tmp_path: Path) -> None:
     destination = tmp_path / "shared.pdf"
     plan = _plan(destination, figure_format=FigureFormat.PDF)
@@ -2052,6 +2392,7 @@ def test_directory_publish_does_not_clobber_empty_destination_created_mid_render
     assert not list(tmp_path.glob(f".{destination.name}.tmp-*"))
 
 
+@POSIX_PUBLICATION_ONLY
 def test_directory_overwrite_uses_one_atomic_exchange(
     tmp_path: Path,
     monkeypatch,
@@ -2096,6 +2437,7 @@ def test_directory_overwrite_uses_one_atomic_exchange(
     assert (destination / "manifest.json").is_file()
 
 
+@POSIX_PUBLICATION_ONLY
 def test_directory_overwrite_cifs_fallback_cleans_journal_and_backup(
     tmp_path: Path,
     monkeypatch,
@@ -2131,6 +2473,7 @@ def test_directory_overwrite_cifs_fallback_cleans_journal_and_backup(
     assert not list(tmp_path.glob(".figures.tmp-*"))
 
 
+@POSIX_PUBLICATION_ONLY
 def test_directory_overwrite_cifs_fallback_restores_old_on_publish_error(
     tmp_path: Path,
     monkeypatch,
@@ -2223,6 +2566,7 @@ def _write_interrupted_publish_journal(
         )
 
 
+@POSIX_PUBLICATION_ONLY
 def test_interrupted_fallback_recovers_old_directory(tmp_path: Path) -> None:
     destination = tmp_path / "figures"
     replacement = tmp_path / "replacement"
@@ -2257,6 +2601,7 @@ def test_interrupted_fallback_recovers_old_directory(tmp_path: Path) -> None:
     assert not (tmp_path / ".figures.figure-export-journal.json").exists()
 
 
+@POSIX_PUBLICATION_ONLY
 def test_interrupted_fallback_finishes_valid_new_directory(tmp_path: Path) -> None:
     destination = tmp_path / "figures"
     replacement = tmp_path / "replacement"
@@ -2290,6 +2635,7 @@ def test_interrupted_fallback_finishes_valid_new_directory(tmp_path: Path) -> No
     assert not (tmp_path / ".figures.figure-export-journal.json").exists()
 
 
+@POSIX_PUBLICATION_ONLY
 def test_recovery_journal_identity_gate_never_moves_raw_destination(
     tmp_path: Path,
 ) -> None:
@@ -2354,6 +2700,16 @@ def test_destination_replacement_during_render_fails_closed(
     outside.mkdir()
     sentinel = outside / "source.bin"
     sentinel.write_bytes(b"do-not-touch")
+    if replacement_kind == "symlink":
+        symlink_probe = tmp_path / "symlink-probe"
+        try:
+            symlink_probe.symlink_to(outside, target_is_directory=True)
+        except OSError:
+            if os.name == "nt":
+                pytest.skip("Windows runner does not grant symlink creation privilege")
+            raise
+        else:
+            symlink_probe.unlink()
 
     class ReplacingRenderer(PillowFigureRenderer):
         replaced = False
