@@ -18,23 +18,23 @@ component tag and artifact name:
 
 | Component | Release | Tag | Channel |
 | --- | --- | --- | --- |
-| Python stable | `1.9.5` | `python-v1.9.5` | stable |
+| Python stable | `1.9.6` | `python-v1.9.6` | stable |
 | Python Free-Moving | `1.10.0-alpha.3` | `python-v1.10.0-alpha.3` | alpha |
-| Swift | `1.9.5` | `swift-v1.9.5` | stable |
-| Web | `1.9.5` | `web-v1.9.5` | stable |
+| Swift | `1.9.6` | `swift-v1.9.6` | stable |
+| Web | `1.9.6` | `web-v1.9.6` | stable |
 
 Published downloads and checksums are available from the repository
 [Releases page](https://github.com/KaiCao2003/RF-Map-Viewer/releases). The root
 [`README.md`](../README.md#downloads) links directly to each component archive.
 
-Stable 1.9.5 is a coordinated schema release for the current regular
+Stable 1.9.6 is a coordinated companion-parity release for the current regular
 `RFmapping_core.m` output. Python, Swift, and Web require raw spike counts plus
 the spatial `occupancyTimeSec` matrix, normalize firing rate as
 count/occupancy, and start in firing-rate mode. Earlier occupancy-free or
 already-normalized RF payloads are intentionally outside this release.
-The refreshed Python artifacts additionally ship the SpikeInterface waveform
-viewer/exporter on both macOS arm64 and Windows x64; Swift and Web are
-unchanged by that Python-only patch.
+Python, Swift, and Web additionally ship exact positive tuning-session
+selection, the schema-v4 SpikeInterface waveform viewer/exporter, and matching
+rectangle/polar and palette keyboard shortcuts.
 
 Each active component records a `feature_generation_offset` from the Python
 stable reference. The current Swift/Web offset is `0`; a viewer verified to be

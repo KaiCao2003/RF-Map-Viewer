@@ -13,6 +13,7 @@ from .paths import (
     has_supported_tuning_suffix,
     is_within,
 )
+from .waveforms import discover_waveform_artifact
 
 
 HD_RAW_BIN_COUNT = 180
@@ -66,6 +67,7 @@ class CompanionSet:
     channels_path: Path | None
     positions_path: Path | None
     tuning_path: Path | None
+    waveform_dir: Path | None = None
     # Old image export endpoints remain available for compatibility, but these
     # Ad-hoc image artifacts do not make the current HD tuning view available.
     hd_summary_path: Path | None = None
@@ -79,6 +81,10 @@ class CompanionSet:
     @property
     def has_hd(self) -> bool:
         return self.tuning_path is not None
+
+    @property
+    def has_waveform(self) -> bool:
+        return self.waveform_dir is not None
 
 
 def _safe_file(path: Path, root: Path) -> Path | None:
@@ -129,8 +135,22 @@ def _first_file(paths: Iterable[Path], root: Path) -> Path | None:
     return None
 
 
-def discover_tuning_curve_path(rf_json_path: Path, scope_root: Path) -> Path | None:
-    """Find the first numeric session's tuning JSON for this date and probe."""
+def discover_tuning_curve_path(
+    rf_json_path: Path,
+    scope_root: Path,
+    session_index: int | None = None,
+) -> Path | None:
+    """Find a same-date tuning document for this RF file and probe.
+
+    ``session_index`` selects exactly one positive ``DATE_SESSION`` folder.
+    ``None`` retains the legacy earliest-available lookup for callers that do
+    not expose the viewer's explicit Tuning Curve Session preference.
+    """
+
+    if session_index is not None and (
+        type(session_index) is not int or session_index <= 0
+    ):
+        raise ValueError("Tuning Curve Session must be a positive integer.")
 
     root = scope_root.resolve(strict=True)
     probe_name = probe_name_for_json(rf_json_path)
@@ -164,7 +184,9 @@ def discover_tuning_curve_path(rf_json_path: Path, scope_root: Path) -> Path | N
         if match is None or match.group("date") != recording_date:
             continue
         sessions.append((int(match.group("index")), sibling))
-    for _index, session in sorted(sessions):
+    for index, session in sorted(sessions):
+        if session_index is not None and index != session_index:
+            continue
         tuning_directory = session / "data" / "tuning_curves" / probe_name
         for filename in ("tuning_curves.tc", "tuning_curves.json"):
             resolved = _safe_file(tuning_directory / filename, root)
@@ -291,12 +313,14 @@ def discover_companions(source: Path, scope_root: Path) -> CompanionSet:
         return CompanionSet(None, None, None, None)
     positions, channels = _discover_probe_paths(source, root, probe)
     tuning = discover_tuning_curve_path(source, root)
+    waveform = discover_waveform_artifact(source, root)
     summary, curve, image_roots = _legacy_artifacts(source, root, probe)
     return CompanionSet(
         probe=probe,
         channels_path=channels,
         positions_path=positions,
         tuning_path=tuning,
+        waveform_dir=waveform,
         hd_summary_path=summary,
         hd_curve_path=curve,
         hd_image_roots=image_roots,
@@ -340,6 +364,7 @@ def companion_for_positions(
         channels_path=infer_channels_path(resolved, root, probe),
         positions_path=resolved,
         tuning_path=companions.tuning_path,
+        waveform_dir=companions.waveform_dir,
         hd_summary_path=companions.hd_summary_path,
         hd_curve_path=companions.hd_curve_path,
         hd_image_roots=companions.hd_image_roots,

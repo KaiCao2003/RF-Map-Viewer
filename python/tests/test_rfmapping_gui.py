@@ -192,6 +192,88 @@ class UnitFilterSettingsTests(unittest.TestCase):
         self.assertEqual(restored.rf_zero_bin_threshold, 1)
 
 
+class TuningCurveSessionSettingsTests(unittest.TestCase):
+    def test_session_defaults_to_one_and_round_trips(self) -> None:
+        defaults = gui.ViewerSettings()
+        self.assertEqual(defaults.tuning_curve_session, 1)
+
+        restored = gui.ViewerSettings.from_mapping(
+            replace(defaults, tuning_curve_session=4).to_mapping()
+        )
+        self.assertEqual(restored.tuning_curve_session, 4)
+
+    def test_invalid_persisted_sessions_fall_back_to_one(self) -> None:
+        for invalid in (0, -1, True, "2", 1.5):
+            with self.subTest(session=invalid):
+                restored = gui.ViewerSettings.from_mapping(
+                    {
+                        "schema_version": gui.SETTINGS_SCHEMA_VERSION,
+                        "tuning_curve_session": invalid,
+                    }
+                )
+                self.assertEqual(restored.tuning_curve_session, 1)
+
+    def test_optional_worker_parses_only_selected_session_without_stale_publish(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            rf_path = (
+                root
+                / "260730_3"
+                / "data"
+                / "rfmapping"
+                / "ProbeA"
+                / "map.json"
+            )
+            rf_path.parent.mkdir(parents=True)
+            rf_path.write_text(json.dumps(base_payload()), encoding="utf-8")
+            tuning_paths = []
+            for session in (1, 2):
+                tuning_path = (
+                    root
+                    / f"260730_{session}"
+                    / "data"
+                    / "tuning_curves"
+                    / "ProbeA"
+                    / "tuning_curves.json"
+                )
+                tuning_path.parent.mkdir(parents=True)
+                tuning_path.write_text(
+                    json.dumps({"42": [float(session)] * gui.HD_RAW_BIN_COUNT}),
+                    encoding="utf-8",
+                )
+                tuning_paths.append(tuning_path.resolve())
+
+            data = gui.RFMappingData(rf_path)
+            result_queue = gui.queue.SimpleQueue()
+            worker = SimpleNamespace(
+                data=data,
+                _optional_result_queue=result_queue,
+            )
+            snapshot = {
+                "generation": 7,
+                "data": data,
+                "data_path": data.path,
+                "load_probe": False,
+                "load_tuning": True,
+                "tuning_session": 2,
+                "cluster_id": 42,
+                "tuning_bins": 30,
+                "tuning_smoothing": False,
+                "tuning_sigma": 1.5,
+            }
+
+            gui.RFMViewer._optional_autoload_worker(worker, snapshot)
+            result = result_queue.get_nowait()
+
+            self.assertEqual(result["tuning_path"], tuning_paths[1])
+            self.assertIsInstance(result["tuning_data"], gui.TuningCurveData)
+            self.assertEqual(result["tuning_data"].rates_for(42)[0], 2.0)
+            self.assertIsNone(data._hd_tuning)
+            self.assertFalse(data._hd_tuning_checked)
+
+
 class WaveformSettingsTests(unittest.TestCase):
     def test_waveform_visibility_and_channel_mode_round_trip(self) -> None:
         for mode in gui.WAVEFORM_CHANNEL_MODES:

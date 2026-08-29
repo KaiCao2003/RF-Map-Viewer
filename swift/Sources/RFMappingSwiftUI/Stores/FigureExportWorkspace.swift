@@ -19,7 +19,10 @@ final class FigureExportWindowRegistry {
         seeds[request.id] = FigureExportSeed(
             data: data,
             viewerSnapshot: store.viewerSyncState,
-            currentUnitID: currentUnitID
+            currentUnitID: currentUnitID,
+            tuningSessionIndex: store.tuningSessionIndex,
+            waveformChannelMode: store.waveformChannelMode,
+            companions: store.figureExportCompanions
         )
         return request
     }
@@ -61,6 +64,8 @@ final class FigureExportWorkspace {
 
     init(seed: FigureExportSeed) {
         self.seed = seed
+        companions = seed.companions
+        hdTuningURL = seed.companions.hdTuning?.sourceURL
         unitSelection = FigureUnitSelection(
             mode: .current,
             customUnitIDs: [seed.currentUnitID]
@@ -76,8 +81,9 @@ final class FigureExportWorkspace {
         selectedPageID = firstPage.id
         previewUnitID = seed.currentUnitID
         customSelectionAnchorIndex = seed.data.unitPool.firstIndex(of: seed.currentUnitID)
-        discoverHDTuning()
-        discoverProbeGeometry()
+        if companions.hdTuning == nil { discoverHDTuning() }
+        if companions.probeGeometry == nil { discoverProbeGeometry() }
+        if companions.waveformArtifact == nil { discoverWaveform() }
     }
 
     var resolvedUnitIDs: [Int] {
@@ -304,8 +310,7 @@ final class FigureExportWorkspace {
         let exportCompanions = companions
         isExporting = true
         completedPageCount = 0
-        totalPageCount = exportConfiguration.selectedUnitIDs.count
-            * exportConfiguration.pages.count
+        totalPageCount = exportConfiguration.selectedUnitIDs.count * exportConfiguration.pages.count
         errorMessage = nil
         successMessage = nil
         // Yield once so the independent composer window can display its
@@ -341,8 +346,11 @@ final class FigureExportWorkspace {
     }
 
     private func discoverHDTuning() {
-        guard let url = HDTuningDiscovery.discover(forRFURL: seed.data.url) else {
-            companions.hdError = "No companion HD tuning_curves.tc or tuning_curves.json was discovered."
+        guard let url = HDTuningDiscovery.discover(
+            forRFURL: seed.data.url,
+            sessionIndex: seed.tuningSessionIndex
+        ) else {
+            companions.hdError = "No tuning curve was found for exact session \(seed.tuningSessionIndex)."
             return
         }
         hdTuningURL = url
@@ -368,6 +376,19 @@ final class FigureExportWorkspace {
         } catch {
             companions.probeGeometry = nil
             companions.probeError = error.localizedDescription
+        }
+    }
+
+    private func discoverWaveform() {
+        companions.waveformChannelMode = seed.waveformChannelMode
+        do {
+            companions.waveformArtifact = try WaveformArtifactStore.discover(
+                forRFURL: seed.data.url
+            )
+            companions.waveformError = nil
+        } catch {
+            companions.waveformArtifact = nil
+            companions.waveformError = error.localizedDescription
         }
     }
 

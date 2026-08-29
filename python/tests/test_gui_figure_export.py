@@ -414,6 +414,26 @@ def test_gui_provider_prepares_every_registered_view_without_mutating_rf_data(
     np.testing.assert_array_equal(data.rf_map_by_unit_id(42).spike_counts, original)
 
 
+def test_gui_provider_discovers_the_snapshot_tuning_session(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    data = RFMappingData(_write_fixture(tmp_path))
+    calls: list[tuple[Path, int]] = []
+
+    def discover(path: Path, session_index: int) -> None:
+        calls.append((Path(path), session_index))
+        return None
+
+    monkeypatch.setattr(rfmapping_gui, "discover_tuning_curve_path", discover)
+    GUIFigureDataProvider(
+        data,
+        replace(_snapshot(), tuning_curve_session=4),
+    )
+
+    assert calls == [(data.path, 4)]
+
+
 def test_gui_provider_and_shared_renderer_render_all_views_on_one_live_page(
     tmp_path: Path,
 ) -> None:
@@ -1215,6 +1235,7 @@ def test_freeze_context_captures_waveform_provenance_identities(
     assert all(len(str(companion["sha256"])) == 64 for companion in waveform_companions)
     assert metadata["companionStatus"]["waveform"] == "available"
     assert metadata["snapshot"]["waveformChannelMode"] == "same_shank"
+    assert metadata["snapshot"]["tuningCurveSession"] == 1
     assert metadata["sharedWaveformScale"] == {
         "vmin": -35.0,
         "vmax": 35.0,

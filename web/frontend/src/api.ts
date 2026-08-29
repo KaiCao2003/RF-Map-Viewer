@@ -4,6 +4,8 @@ import type {
   HdDatasetArtifact,
   HdUnitArtifact,
   ProbeGeometry,
+  WaveformArtifact,
+  WaveformChannelMode,
 } from "./types";
 import type { RemoteFileKind } from "./fileFormats";
 import {
@@ -176,6 +178,7 @@ function normalizeMeta(payload: unknown): DatasetMeta {
     capabilities: {
       probe: capabilitiesSource.probe === true,
       hd: capabilitiesSource.hd === true,
+      waveform: capabilitiesSource.waveform === true,
       occupancy: capabilitiesSource.occupancy === true,
     },
   };
@@ -456,10 +459,12 @@ function normalizeHdDataset(payload: unknown): HdDatasetArtifact {
 export async function getHdDataset(
   id: string,
   path?: string,
+  session = 1,
   signal?: AbortSignal,
 ): Promise<HdDatasetArtifact> {
   const url = new URL(`datasets/${encodeURIComponent(id)}/hd`, apiBase);
   if (path) url.searchParams.set("path", path);
+  url.searchParams.set("session", String(session));
   const response = await checked(await protectedFetch(url, { signal }));
   return normalizeHdDataset(await response.json());
 }
@@ -468,10 +473,12 @@ export async function getHdArtifact(
   id: string,
   clusterId: number,
   path?: string,
+  session = 1,
   signal?: AbortSignal,
 ): Promise<HdDatasetArtifact> {
   const url = new URL(`datasets/${encodeURIComponent(id)}/hd/${encodeURIComponent(String(clusterId))}`, apiBase);
   if (path) url.searchParams.set("path", path);
+  url.searchParams.set("session", String(session));
   const response = await checked(
     await protectedFetch(url, { signal }),
   );
@@ -482,6 +489,85 @@ export async function getHdArtifact(
     ...normalized,
     units: normalized.units.length ? normalized.units : unit ? [unit] : [],
   };
+}
+
+function normalizeWaveformArtifact(payload: unknown): WaveformArtifact {
+  const source = record(payload);
+  if (source.available !== true) {
+    return {
+      available: false,
+      detail: String(source.detail ?? "Local average waveform is unavailable."),
+    };
+  }
+  const mode = source.mode === "same_shank" ? "same_shank" : "same_x_column";
+  const timesMs = numbers(source.timesMs);
+  const timeEdgesMs = numbers(source.timeEdgesMs);
+  const rows = Array.isArray(source.valuesUv)
+    ? source.valuesUv.map((row) => numbers(row))
+    : [];
+  const labels = Array.isArray(source.channelLabels)
+    ? source.channelLabels.map((value) => String(value))
+    : [];
+  const channels = Array.isArray(source.channels) ? source.channels.map((raw) => {
+    const item = record(raw);
+    return {
+      channelIndex: requiredFiniteNumber(item.channelIndex, "Waveform channel index"),
+      channelId: requiredFiniteNumber(item.channelId, "Waveform channel ID"),
+      rawChannelIndex: requiredFiniteNumber(item.rawChannelIndex, "Waveform raw channel index"),
+      xUm: requiredFiniteNumber(item.xUm, "Waveform channel x"),
+      yUm: requiredFiniteNumber(item.yUm, "Waveform channel y"),
+      shankId: requiredFiniteNumber(item.shankId, "Waveform shank ID"),
+    };
+  }) : [];
+  const bestChannelRow = requiredFiniteNumber(source.bestChannelRow, "Waveform best channel row");
+  if (
+    !timesMs.length
+    || timeEdgesMs.length !== timesMs.length + 1
+    || rows.length !== channels.length
+    || rows.length !== labels.length
+    || rows.some((row) => row.length !== timesMs.length)
+    || !Number.isInteger(bestChannelRow)
+    || bestChannelRow < 0
+    || bestChannelRow >= rows.length
+  ) {
+    throw new ApiError("Waveform artifact has inconsistent time or channel dimensions.");
+  }
+  return {
+    available: true,
+    sourcePath: String(source.sourcePath ?? ""),
+    unitId: requiredFiniteNumber(source.unitId, "Waveform unit ID"),
+    quality: String(source.quality ?? ""),
+    totalSpikeCount: requiredFiniteNumber(source.totalSpikeCount, "Waveform total spike count"),
+    selectedSpikeCount: requiredFiniteNumber(source.selectedSpikeCount, "Waveform selected spike count"),
+    timeCoveragePercent: requiredFiniteNumber(source.timeCoveragePercent, "Waveform time coverage"),
+    maxPtpUv: requiredFiniteNumber(source.maxPtpUv, "Waveform maximum peak-to-peak amplitude"),
+    mode,
+    localChannelCount: requiredFiniteNumber(source.localChannelCount, "Waveform local channel count"),
+    baselineEndMs: requiredFiniteNumber(source.baselineEndMs, "Waveform baseline end"),
+    timesMs,
+    timeEdgesMs,
+    valuesUv: rows,
+    channels,
+    channelLabels: labels,
+    bestChannelIndex: requiredFiniteNumber(source.bestChannelIndex, "Waveform best channel index"),
+    bestChannelRow,
+    amplitudeLimitUv: requiredFiniteNumber(source.amplitudeLimitUv, "Waveform amplitude limit"),
+  };
+}
+
+export async function getWaveformArtifact(
+  id: string,
+  clusterId: number,
+  mode: WaveformChannelMode,
+  signal?: AbortSignal,
+): Promise<WaveformArtifact> {
+  const url = new URL(
+    `datasets/${encodeURIComponent(id)}/waveform/${encodeURIComponent(String(clusterId))}`,
+    apiBase,
+  );
+  url.searchParams.set("mode", mode);
+  const response = await checked(await protectedFetch(url, { signal }));
+  return normalizeWaveformArtifact(await response.json());
 }
 
 function normalizeFigureSetting(payload: unknown): FigureSettingDefinition {
@@ -525,7 +611,9 @@ function normalizeFigureExportSpec(payload: unknown): FigureExportSpec {
       const item = record(raw);
       const id = String(item.id ?? "");
       if (!isFigureTypeId(id)) throw new ApiError(`Unknown figure type ${id || "(empty)"}.`);
-      const capability = item.capability === "hd" || item.capability === "probe"
+      const capability = item.capability === "hd"
+        || item.capability === "probe"
+        || item.capability === "waveform"
         ? item.capability
         : undefined;
       return {

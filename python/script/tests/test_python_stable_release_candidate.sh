@@ -5,6 +5,7 @@ TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT_DIR="$(cd "$TEST_DIR/.." && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 BUILD_SCRIPT="$SCRIPT_DIR/build_python_stable_macos_app.sh"
+INSTALLER="$SCRIPT_DIR/install_python_macos_app.sh"
 RELEASE_CONFIG="$SCRIPT_DIR/python_stable_macos_release.env"
 METADATA_AUDITOR="$SCRIPT_DIR/verify_python_stable_release_metadata.py"
 
@@ -42,10 +43,11 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
-for required in "$BUILD_SCRIPT" "$RELEASE_CONFIG" "$METADATA_AUDITOR"; do
+for required in "$BUILD_SCRIPT" "$INSTALLER" "$RELEASE_CONFIG" "$METADATA_AUDITOR"; do
   [[ -s "$required" ]] || fail_test "required stable release file is missing: $required"
 done
 /bin/bash -n "$BUILD_SCRIPT" || fail_test "stable build script failed Bash syntax validation"
+/bin/bash -n "$INSTALLER" || fail_test "macOS installer failed Bash syntax validation"
 python3 -m py_compile "$METADATA_AUDITOR" \
   || fail_test "stable metadata auditor failed Python syntax validation"
 pass_test "stable release helpers pass syntax validation"
@@ -56,13 +58,13 @@ pass_test "stable release helpers pass syntax validation"
   [[ "$RF_MAPPING_APP_NAME" == "RF Map Viewer" ]]
   [[ "$RF_MAPPING_EXECUTABLE_NAME" == "RF Map Viewer" ]]
   [[ "$RF_MAPPING_BUNDLE_ID" == "org.local.rfmapping.viewer" ]]
-  [[ "$RF_MAPPING_APP_VERSION" == "1.9.5" ]]
-  [[ "$RF_MAPPING_PACKAGE_VERSION" == "1.9.5" ]]
-  [[ "$RF_MAPPING_APP_BUILD" == "10906" ]]
+  [[ "$RF_MAPPING_APP_VERSION" == "1.9.6" ]]
+  [[ "$RF_MAPPING_PACKAGE_VERSION" == "1.9.6" ]]
+  [[ "$RF_MAPPING_APP_BUILD" == "10908" ]]
   [[ "$RF_MAPPING_RELEASE_EDITION" == "Full" ]]
   [[ "$RF_MAPPING_RELEASE_FLAVOR" == "full" ]]
 ) || fail_test "canonical stable Python metadata is incomplete or unexpected"
-pass_test "canonical metadata identifies Python stable 1.9.5 build 10906"
+pass_test "canonical metadata identifies Python stable 1.9.6 build 10908"
 
 for marker in \
   'source "$SCRIPT_DIR/python_stable_macos_release.env"' \
@@ -78,15 +80,57 @@ for marker in \
 done
 pass_test "stable builder targets the full viewer and retains its file contracts"
 
+for marker in \
+  'RF_MAPPING_RELEASE_CONFIG' \
+  'Full)' \
+  'CFBundleDocumentTypes:1:CFBundleTypeExtensions:0 json' \
+  'UTExportedTypeDeclarations:1:UTTypeIdentifier org.local.rfmapping.tc' \
+  'UTExportedTypeDeclarations:2:UTTypeIdentifier org.local.rfmapping.probe'; do
+  assert_file_contains "$INSTALLER" "$marker"
+done
+
+run_stable_document_contract_fixture() (
+  export RF_MAPPING_RELEASE_CONFIG="$RELEASE_CONFIG"
+  # shellcheck source=../install_python_macos_app.sh
+  source "$INSTALLER"
+  plist_value() {
+    local key="$2"
+    case "$key" in
+      CFBundleDocumentTypes:0:CFBundleTypeRole) printf '%s\n' Viewer ;;
+      CFBundleDocumentTypes:0:LSHandlerRank) printf '%s\n' Owner ;;
+      CFBundleDocumentTypes:0:LSItemContentTypes:0) printf '%s\n' org.local.rfmapping.rfmap ;;
+      CFBundleDocumentTypes:0:CFBundleTypeExtensions:0) printf '%s\n' rfmap ;;
+      CFBundleDocumentTypes:1:CFBundleTypeRole) printf '%s\n' Viewer ;;
+      CFBundleDocumentTypes:1:LSHandlerRank) printf '%s\n' "${STABLE_JSON_RANK:-Alternate}" ;;
+      CFBundleDocumentTypes:1:LSItemContentTypes:0) printf '%s\n' public.json ;;
+      CFBundleDocumentTypes:1:CFBundleTypeExtensions:0) printf '%s\n' json ;;
+      CFBundleDocumentTypes:2) return 1 ;;
+      UTExportedTypeDeclarations:0:UTTypeIdentifier) printf '%s\n' org.local.rfmapping.rfmap ;;
+      UTExportedTypeDeclarations:1:UTTypeIdentifier) printf '%s\n' org.local.rfmapping.tc ;;
+      UTExportedTypeDeclarations:2:UTTypeIdentifier) printf '%s\n' org.local.rfmapping.probe ;;
+      UTExportedTypeDeclarations:3) return 1 ;;
+      *) return 1 ;;
+    esac
+  }
+  validate_document_contract fixture.app
+)
+
+run_stable_document_contract_fixture >/dev/null \
+  || fail_test "installer rejected the stable Full document contract"
+if STABLE_JSON_RANK=Owner run_stable_document_contract_fixture >/dev/null 2>&1; then
+  fail_test "installer accepted an incorrect stable JSON handler rank"
+fi
+pass_test "installer selects and enforces the stable Full document contract"
+
 # shellcheck source=../build_python_stable_macos_app.sh
 source "$BUILD_SCRIPT"
-[[ "$ARCHIVE_NAME" == "RF_Map_Viewer-python-1.9.5-full-macos-arm64.zip" ]] \
+[[ "$ARCHIVE_NAME" == "RF_Map_Viewer-python-1.9.6-full-macos-arm64.zip" ]] \
   || fail_test "stable archive name does not encode component, version, and flavor"
-[[ "$CHECKSUM_NAME" == "SHA256SUMS-python-1.9.5-full.txt" ]] \
+[[ "$CHECKSUM_NAME" == "SHA256SUMS-python-1.9.6-full.txt" ]] \
   || fail_test "stable checksum name does not encode component, version, and flavor"
 pass_test "stable artifacts are independently named from the Free-Moving alpha"
 
-python3 "$METADATA_AUDITOR" "$ROOT_DIR" 1.9.5 Full >/dev/null \
+python3 "$METADATA_AUDITOR" "$ROOT_DIR" 1.9.6 Full >/dev/null \
   || fail_test "stable metadata auditor rejected the repository source"
 FIXTURE_ROOT="$(/usr/bin/mktemp -d /tmp/rfmapping-stable-release-test.XXXXXX)"
 /bin/mkdir -p "$FIXTURE_ROOT/source"
@@ -96,7 +140,7 @@ printf '%s\n' \
   'APP_EDITION = "FreeMovingAlpha"' \
   'DND_SMOKE_ARGUMENT = "--self-test-dnd"' \
   >"$FIXTURE_ROOT/source/rfmapping_gui.py"
-if python3 "$METADATA_AUDITOR" "$FIXTURE_ROOT/source" 1.9.5 Full >/dev/null 2>&1; then
+if python3 "$METADATA_AUDITOR" "$FIXTURE_ROOT/source" 1.9.6 Full >/dev/null 2>&1; then
   fail_test "stable metadata auditor accepted Free-Moving alpha identity"
 fi
 pass_test "stable metadata auditor rejects cross-edition source"

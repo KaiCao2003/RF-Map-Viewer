@@ -100,7 +100,7 @@ PROBE_POSITION_FILETYPES = (
     ("CSV document", "*.csv"),
     ("All files", "*.*"),
 )
-APP_VERSION = "1.9.5"
+APP_VERSION = "1.9.6"
 APP_EDITION = "Full"
 APP_DISPLAY_VERSION = APP_VERSION
 INNER_BLANK_ROWS = 4
@@ -115,6 +115,7 @@ SETTINGS_SCHEMA_VERSION = 1
 HD_RAW_BIN_COUNT = 180
 DEFAULT_HD_DISPLAY_BINS = 30
 DEFAULT_HD_SMOOTH_SIGMA = 1.5
+DEFAULT_TUNING_CURVE_SESSION = 1
 GAUSSIAN_TRUNCATE = 4.0
 MACOS_FULLSCREEN_MAX_SIZE = float.fromhex("0x1.fffffep+127")
 HD_BIN_DIVISORS = tuple(
@@ -971,6 +972,7 @@ class ViewerSettings:
     schema_version: int = SETTINGS_SCHEMA_VERSION
     show_tuning_curve: bool = True
     auto_load_tuning_curve: bool = True
+    tuning_curve_session: int = DEFAULT_TUNING_CURVE_SESSION
     show_waveform: bool = True
     show_probe_layout: bool = True
     auto_load_probe_layout: bool = True
@@ -1025,6 +1027,12 @@ class ViewerSettings:
                 return getattr(defaults, name)
             return max(low, min(high, value))
 
+        def positive_integer(name: str) -> int:
+            value = payload.get(name, getattr(defaults, name))
+            if type(value) is not int or value <= 0:
+                return getattr(defaults, name)
+            return value
+
         start_ms = finite_float("rf_sum_start_ms")
         end_ms = finite_float("rf_sum_end_ms")
         if start_ms >= end_ms:
@@ -1061,6 +1069,7 @@ class ViewerSettings:
         return cls(
             show_tuning_curve=boolean("show_tuning_curve"),
             auto_load_tuning_curve=boolean("auto_load_tuning_curve"),
+            tuning_curve_session=positive_integer("tuning_curve_session"),
             show_waveform=boolean("show_waveform"),
             show_probe_layout=boolean("show_probe_layout"),
             auto_load_probe_layout=boolean("auto_load_probe_layout"),
@@ -1605,8 +1614,21 @@ class TuningCurveData:
         )
 
 
-def discover_tuning_curve_path(rf_json_path: Path) -> Path | None:
-    """Find the first session's tuning curve for the RF document's day/probe."""
+def discover_tuning_curve_path(
+    rf_json_path: Path,
+    session_index: int | None = None,
+) -> Path | None:
+    """Find a tuning curve for the RF document's day/probe.
+
+    When ``session_index`` is provided, only that positive-numbered session is
+    considered.  ``None`` retains the legacy earliest-available lookup for
+    callers that do not expose the GUI's explicit session setting.
+    """
+
+    if session_index is not None and (
+        type(session_index) is not int or session_index <= 0
+    ):
+        raise ValueError("Tuning Curve Session must be a positive integer.")
 
     rf_json_path = Path(rf_json_path).expanduser()
     probe_name = probe_name_for_json(rf_json_path)
@@ -1637,7 +1659,9 @@ def discover_tuning_curve_path(rf_json_path: Path) -> Path | None:
         if match is None or match.group("date") != recording_date:
             continue
         sessions.append((int(match.group("index")), sibling))
-    for _index, session in sorted(sessions):
+    for index, session in sorted(sessions):
+        if session_index is not None and index != session_index:
+            continue
         directory = session / "data" / "tuning_curves" / probe_name
         for filename in TUNING_CURVE_FILENAMES:
             resolved = _resolve_existing_file(directory / filename)
@@ -2624,7 +2648,10 @@ class RFMappingData:
         self._zero_spike_bin_count_cache[key] = result
         return result
 
-    def hd_tuning(self) -> HDTuningData | TuningCurveData | None:
+    def hd_tuning(
+        self,
+        session_index: int | None = None,
+    ) -> HDTuningData | TuningCurveData | None:
         """Lazily discover and validate the companion HD tuning JSON."""
 
         if self._hd_tuning_checked:
@@ -2637,7 +2664,11 @@ class RFMappingData:
                 return self._hd_tuning
             tuning: HDTuningData | TuningCurveData | None = None
             error: str | None = None
-            tuning_path = discover_hd_tuning_path(self.path)
+            tuning_path = (
+                discover_hd_tuning_path(self.path)
+                if session_index is None
+                else discover_tuning_curve_path(self.path, session_index)
+            )
             identity: FrozenFileIdentity | None = None
             if tuning_path is not None:
                 try:
@@ -2662,13 +2693,22 @@ class RFMappingData:
 
         identity = FrozenFileIdentity.capture(path)
         tuning = TuningCurveData.load(identity.path)
+        self._publish_hd_tuning(identity, tuning)
+        return tuning
+
+    def _publish_hd_tuning(
+        self,
+        identity: FrozenFileIdentity,
+        tuning: TuningCurveData,
+    ) -> None:
+        """Publish a previously parsed, still-identical tuning document."""
+
         identity.verify_path()
         with self._hd_tuning_lock:
             self._hd_tuning = tuning
             self._hd_tuning_identity = identity
             self._hd_tuning_error = None
             self._hd_tuning_checked = True
-        return tuning
 
     @property
     def hd_tuning_error(self) -> str | None:
@@ -4082,6 +4122,9 @@ class SettingsWindow(tk.Toplevel):
     def _create_variables(self, settings: ViewerSettings) -> None:
         self.show_tuning_curve_var = tk.BooleanVar(value=settings.show_tuning_curve)
         self.auto_load_tuning_curve_var = tk.BooleanVar(value=settings.auto_load_tuning_curve)
+        self.tuning_curve_session_var = tk.StringVar(
+            value=str(settings.tuning_curve_session)
+        )
         self.show_waveform_var = tk.BooleanVar(value=settings.show_waveform)
         self.show_probe_layout_var = tk.BooleanVar(value=settings.show_probe_layout)
         self.auto_load_probe_layout_var = tk.BooleanVar(value=settings.auto_load_probe_layout)
@@ -4176,6 +4219,7 @@ class SettingsWindow(tk.Toplevel):
 
         for variable in (
             self.show_tuning_curve_var,
+            self.auto_load_tuning_curve_var,
             self.show_waveform_var,
             self.show_probe_layout_var,
             self.rf_filter_units_with_zero_bins_var,
@@ -4358,12 +4402,22 @@ class SettingsWindow(tk.Toplevel):
         self._section_label(tab, "Local average waveform", 0)
         ttk.Checkbutton(
             tab,
-            text="Show a compact waveform below Spike Time in the left sidebar",
+            text="Show a compact waveform in the left sidebar",
             variable=self.show_waveform_var,
         ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 8))
+        ttk.Label(
+            tab,
+            text=(
+                "Double-click the waveform to enlarge it; double-click again "
+                "or press Esc to return."
+            ),
+            foreground="#667085",
+            wraplength=500,
+            justify="left",
+        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(0, 8))
         self.waveform_channel_mode_combo = self._labeled_combo(
             tab,
-            2,
+            3,
             "Nearby channels",
             self.waveform_channel_mode_var,
             tuple(WAVEFORM_CHANNEL_MODE_LABELS.values()),
@@ -4378,13 +4432,31 @@ class SettingsWindow(tk.Toplevel):
             foreground="#667085",
             wraplength=500,
             justify="left",
-        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(12, 0))
+        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(12, 0))
 
     def _build_tuning_tab(self, tab: ttk.Frame) -> None:
-        self._section_label(tab, "Head-direction display", 0)
-        self._labeled_combo(
+        self._section_label(tab, "Data source", 0)
+        self.tuning_curve_session_entry = self._labeled_entry(
             tab,
             1,
+            "Tuning Curve Session",
+            self.tuning_curve_session_var,
+        )
+        ttk.Label(
+            tab,
+            text=(
+                "Automatic loading reads the same-date DATE_SESSION folder. "
+                "The session must be a positive integer."
+            ),
+            foreground="#667085",
+            wraplength=440,
+            justify="left",
+        ).grid(row=2, column=1, sticky="w", pady=(0, 12))
+
+        self._section_label(tab, "Head-direction display", 3)
+        self._labeled_combo(
+            tab,
+            4,
             "Plot style",
             self.tuning_plot_mode_var,
             TUNING_PLOT_MODES,
@@ -4394,34 +4466,34 @@ class SettingsWindow(tk.Toplevel):
             text="Auto follows the RF map's Rectangle or Polar layout.",
             foreground="#667085",
             wraplength=440,
-        ).grid(row=2, column=1, sticky="w", pady=(0, 10))
+        ).grid(row=5, column=1, sticky="w", pady=(0, 10))
         self._labeled_combo(
             tab,
-            3,
+            6,
             "RF + tuning arrangement",
             self.tuning_layout_var,
             TUNING_LAYOUTS,
         )
-        self._labeled_entry(tab, 4, "Displayed HD bins", self.tuning_display_bins_var)
+        self._labeled_entry(tab, 7, "Displayed HD bins", self.tuning_display_bins_var)
         ttk.Label(
             tab,
             text="On Save, the value is rounded down to a divisor of 180 (for example, 8 → 6).",
             foreground="#667085",
             wraplength=440,
             justify="left",
-        ).grid(row=5, column=1, sticky="w", pady=(0, 12))
+        ).grid(row=8, column=1, sticky="w", pady=(0, 12))
         ttk.Checkbutton(
             tab,
             text="Compare cells in this file on one shared 0–peak Hz scale",
             variable=self.tuning_compare_scale_var,
-        ).grid(row=6, column=0, columnspan=2, sticky="w", pady=(0, 10))
+        ).grid(row=9, column=0, columnspan=2, sticky="w", pady=(0, 10))
         ttk.Checkbutton(
             tab,
             text="Smooth the 180-bin source curve",
             variable=self.tuning_smoothing_var,
-        ).grid(row=7, column=0, columnspan=2, sticky="w", pady=(0, 6))
+        ).grid(row=10, column=0, columnspan=2, sticky="w", pady=(0, 6))
         ttk.Label(tab, text="Gaussian σ (degrees)").grid(
-            row=8,
+            row=11,
             column=0,
             sticky="w",
             pady=5,
@@ -4431,7 +4503,7 @@ class SettingsWindow(tk.Toplevel):
             textvariable=self.tuning_smooth_sigma_var,
             width=12,
         )
-        self.tuning_sigma_entry.grid(row=8, column=1, sticky="w", pady=5)
+        self.tuning_sigma_entry.grid(row=11, column=1, sticky="w", pady=5)
         ttk.Label(
             tab,
             text=(
@@ -4441,7 +4513,7 @@ class SettingsWindow(tk.Toplevel):
             foreground="#667085",
             wraplength=440,
             justify="left",
-        ).grid(row=9, column=0, columnspan=2, sticky="w", pady=(14, 0))
+        ).grid(row=12, column=0, columnspan=2, sticky="w", pady=(14, 0))
 
     def _select_remembered_tab(self) -> None:
         remembered = getattr(self._app_root, "_rfm_settings_tab", "General")
@@ -4507,6 +4579,12 @@ class SettingsWindow(tk.Toplevel):
     def _sync_dependent_controls(self) -> None:
         self.auto_tuning_check.state(
             ["!disabled"] if self.show_tuning_curve_var.get() else ["disabled"]
+        )
+        self.tuning_curve_session_entry.state(
+            ["!disabled"]
+            if self.show_tuning_curve_var.get()
+            and self.auto_load_tuning_curve_var.get()
+            else ["disabled"]
         )
         self.auto_probe_check.state(
             ["!disabled"] if self.show_probe_layout_var.get() else ["disabled"]
@@ -4613,6 +4691,19 @@ class SettingsWindow(tk.Toplevel):
                 "Waveform", "Choose Same x column or Same shank."
             )
 
+        try:
+            tuning_curve_session = int(self.tuning_curve_session_var.get().strip())
+        except ValueError as exc:
+            raise SettingsValidationError(
+                "Tuning Curve",
+                "Tuning Curve Session must be a positive integer.",
+            ) from exc
+        if tuning_curve_session <= 0:
+            raise SettingsValidationError(
+                "Tuning Curve",
+                "Tuning Curve Session must be a positive integer.",
+            )
+
         smoothing = bool(self.tuning_smoothing_var.get())
         try:
             sigma_degrees = self._positive_float(
@@ -4654,6 +4745,7 @@ class SettingsWindow(tk.Toplevel):
         return ViewerSettings(
             show_tuning_curve=bool(self.show_tuning_curve_var.get()),
             auto_load_tuning_curve=bool(self.auto_load_tuning_curve_var.get()),
+            tuning_curve_session=tuning_curve_session,
             show_waveform=bool(self.show_waveform_var.get()),
             show_probe_layout=bool(self.show_probe_layout_var.get()),
             auto_load_probe_layout=bool(self.auto_load_probe_layout_var.get()),
@@ -5320,7 +5412,16 @@ class RFMViewer(tk.Toplevel):
             )
         view_menu.add_separator()
         view_menu.add_command(label="Invert Y", accelerator="F", command=self._toggle_flip_y)
-        view_menu.add_command(label="Cycle Palette", accelerator="P", command=self._cycle_palette)
+        view_menu.add_command(
+            label="Toggle Polar Layout",
+            accelerator="P",
+            command=self._toggle_polar_layout,
+        )
+        view_menu.add_command(
+            label="Cycle Palette",
+            accelerator="⇧P",
+            command=self._cycle_palette,
+        )
         if sys.platform != "darwin":
             view_menu.add_separator()
             view_menu.add_command(
@@ -5372,6 +5473,7 @@ class RFMViewer(tk.Toplevel):
 
         self._build_sidebar(sidebar)
         self._build_main(main)
+        self._build_waveform_zoom_overlay()
 
     def _build_sidebar(self, parent: ttk.Frame) -> None:
         row = 0
@@ -5457,20 +5559,6 @@ class RFMViewer(tk.Toplevel):
         self.spatial_status_label.grid(row=2, column=0, sticky="ew", pady=(5, 10))
         row += 1
 
-        ttk.Label(parent, text="Spike Time", style="Section.TLabel").grid(
-            row=row, column=0, sticky="w", pady=(8, 5)
-        )
-        row += 1
-        self.cell_label = ttk.Label(
-            parent,
-            text="",
-            style="SidebarMuted.TLabel",
-            font=("TkFixedFont", 9),
-            wraplength=240,
-            justify="left",
-        )
-        self.cell_label.grid(row=row, column=0, sticky="ew")
-        row += 1
         self.waveform_host = ttk.Frame(
             parent,
             style="Sidebar.TFrame",
@@ -5707,7 +5795,42 @@ class RFMViewer(tk.Toplevel):
                     column=0,
                     sticky="ew",
                     padx=12,
+                    pady=(0, 8),
+                )
+                ttk.Separator(self.unit_info_pane, orient="horizontal").grid(
+                    row=3, column=0, sticky="ew"
+                )
+                spike_time_header = ttk.Frame(
+                    self.unit_info_pane,
+                    style="Panel.TFrame",
+                    padding=(12, 8),
+                )
+                spike_time_header.grid(row=4, column=0, sticky="ew")
+                self.spike_time_title_label = ttk.Label(
+                    spike_time_header,
+                    text="Spike Time",
+                    style="Title.TLabel",
+                )
+                self.spike_time_title_label.grid(row=0, column=0, sticky="w")
+                self.cell_label = ttk.Label(
+                    self.unit_info_pane,
+                    text="",
+                    style="Muted.TLabel",
+                    font=("TkFixedFont", 9),
+                    wraplength=330,
+                    justify="left",
+                )
+                self.cell_label.grid(
+                    row=5,
+                    column=0,
+                    sticky="ew",
+                    padx=12,
                     pady=(0, 10),
+                )
+                self.unit_info_pane.bind(
+                    "<Configure>",
+                    self._on_unit_info_pane_configure,
+                    add="+",
                 )
 
                 self.waveform_pane = ttk.Frame(
@@ -5776,8 +5899,73 @@ class RFMViewer(tk.Toplevel):
             self.canvases[key] = canvas
             self._tab_keys[str(frame)] = key
 
+    def _build_waveform_zoom_overlay(self) -> None:
+        """Build the reversible in-window waveform enlargement layer."""
+
+        self._waveform_zoomed = False
+        overlay = ttk.Frame(
+            self,
+            style="Panel.TFrame",
+            padding=(24, 18),
+        )
+        overlay.columnconfigure(0, weight=1)
+        overlay.rowconfigure(1, weight=1)
+
+        header = ttk.Frame(overlay, style="Panel.TFrame")
+        header.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        header.columnconfigure(0, weight=1)
+        ttk.Label(
+            header,
+            text="Local Average Waveform",
+            style="Title.TLabel",
+        ).grid(row=0, column=0, sticky="w")
+        self.waveform_zoom_subtitle_label = ttk.Label(
+            header,
+            text="",
+            style="Muted.TLabel",
+            font=("TkDefaultFont", 10),
+            justify="left",
+        )
+        self.waveform_zoom_subtitle_label.grid(
+            row=1,
+            column=0,
+            sticky="w",
+            pady=(2, 0),
+        )
+        ttk.Label(
+            header,
+            text="Double-click the waveform or press Esc to return",
+            style="Muted.TLabel",
+        ).grid(row=0, column=1, sticky="e", padx=(12, 10))
+        self.waveform_zoom_done_button = ttk.Button(
+            header,
+            text="Done",
+            command=self._close_waveform_zoom,
+        )
+        self.waveform_zoom_done_button.grid(
+            row=0,
+            column=2,
+            rowspan=2,
+            sticky="e",
+        )
+        self.waveform_zoom_canvas = tk.Canvas(
+            overlay,
+            background="#ffffff",
+            highlightthickness=1,
+            highlightbackground="#d7d9de",
+            takefocus=True,
+        )
+        self.waveform_zoom_canvas.grid(row=1, column=0, sticky="nsew")
+        self.waveform_zoom_overlay = overlay
+
+    def _on_unit_info_pane_configure(self, event: tk.Event) -> None:
+        wraplength = max(160, int(event.width) - 24)
+        for label in (self.unit_stats_label, self.cell_label):
+            if int(float(label.cget("wraplength"))) != wraplength:
+                label.configure(wraplength=wraplength)
+
     def _sync_auxiliary_sections(self) -> None:
-        """Place waveform in the sidebar and unit info below tuning."""
+        """Place waveform in the sidebar and both inspectors below tuning."""
 
         if not hasattr(self, "tuning_curve_section"):
             return
@@ -5894,7 +6082,7 @@ class RFMViewer(tk.Toplevel):
                 minsize=220,
             )
             container.rowconfigure(0, weight=1)
-            container.rowconfigure(1, weight=0, minsize=135)
+            container.rowconfigure(1, weight=0, minsize=230)
             self.tuning_fold_button.configure(
                 image=self._pane_icons["trailing"],
                 text="Collapse HD tuning curve",
@@ -6178,7 +6366,26 @@ class RFMViewer(tk.Toplevel):
         self.bind("<greater>", lambda event: self._run_navigation_shortcut(event, self._step_time_resolution, 1.0))
         self.bind("<Escape>", lambda event: self._run_navigation_shortcut(event, self._handle_escape))
         self.bind("<KeyPress-f>", lambda event: self._run_navigation_shortcut(event, self._toggle_flip_y))
-        self.bind("<KeyPress-p>", lambda event: self._run_navigation_shortcut(event, self._cycle_palette))
+        self.bind("<KeyPress-p>", lambda event: self._run_navigation_shortcut(event, self._toggle_polar_layout))
+        self.bind("<KeyPress-P>", lambda event: self._run_navigation_shortcut(event, self._cycle_palette))
+        # TNotebook handles letter traversal before a toplevel bindtag.  Own P
+        # on the notebook widget itself so Polar toggles before tab mnemonics.
+        self.notebook.bind(
+            "<KeyPress-p>",
+            lambda event: self._run_navigation_shortcut(
+                event,
+                self._toggle_polar_layout,
+            ),
+            add="+",
+        )
+        self.notebook.bind(
+            "<KeyPress-P>",
+            lambda event: self._run_navigation_shortcut(
+                event,
+                self._cycle_palette,
+            ),
+            add="+",
+        )
         self.bind("<question>", lambda event: self._run_navigation_shortcut(event, self._show_shortcuts))
         for tab_index in range(3):
             self.bind(
@@ -6210,6 +6417,16 @@ class RFMViewer(tk.Toplevel):
             "<Configure>", lambda _event: self._schedule_optional_redraw("tuning")
         )
         self.tuning_curve_canvas.bind("<Button-1>", self._on_tuning_curve_click)
+        self.waveform_canvas.bind(
+            "<Double-Button-1>",
+            self._toggle_waveform_zoom,
+            add="+",
+        )
+        self.waveform_zoom_canvas.bind(
+            "<Double-Button-1>",
+            self._toggle_waveform_zoom,
+        )
+        self.waveform_zoom_canvas.bind("<Configure>", self._schedule_redraw)
         self._install_optional_drop_targets()
 
     def _toggle_display_controls(self) -> None:
@@ -6225,7 +6442,39 @@ class RFMViewer(tk.Toplevel):
         else:
             self.display_controls_frame.grid_remove()
 
+    def _toggle_waveform_zoom(self, _event: object | None = None) -> str:
+        if self._waveform_zoomed:
+            self._close_waveform_zoom()
+        else:
+            self._open_waveform_zoom()
+        return "break"
+
+    def _open_waveform_zoom(self) -> None:
+        if self._waveform_zoomed or not self.show_waveform_var.get():
+            return
+        self._waveform_zoomed = True
+        self.waveform_zoom_overlay.place(
+            x=0,
+            y=0,
+            relwidth=1.0,
+            relheight=1.0,
+        )
+        self.waveform_zoom_overlay.tkraise()
+        self._draw_waveform()
+        self.after_idle(self.waveform_zoom_canvas.focus_set)
+
+    def _close_waveform_zoom(self, *, refocus: bool = True) -> None:
+        if not self._waveform_zoomed:
+            return
+        self._waveform_zoomed = False
+        self.waveform_zoom_overlay.place_forget()
+        if refocus and self.waveform_canvas.winfo_ismapped():
+            self.waveform_canvas.focus_set()
+
     def _handle_escape(self) -> None:
+        if self._waveform_zoomed:
+            self._close_waveform_zoom()
+            return
         if self.spatial_region is not None:
             self._clear_spatial_filter()
         else:
@@ -6260,6 +6509,10 @@ class RFMViewer(tk.Toplevel):
         self.flip_y_var.set(not self.flip_y_var.get())
         self._on_control_changed()
 
+    def _toggle_polar_layout(self) -> None:
+        self.polar_layout_var.set(not self.polar_layout_var.get())
+        self._on_spatial_format_changed()
+
     def _cycle_palette(self) -> None:
         try:
             index = PALETTES.index(self.palette_var.get())
@@ -6276,7 +6529,8 @@ class RFMViewer(tk.Toplevel):
             "Shift+, / Shift+.   Coarser / finer by one source bin\n"
             "1–3   Switch plot tab\n"
             "F   Invert Y\n"
-            "P   Cycle palette\n"
+            "P   Toggle Rectangle / Polar layout\n"
+            "Shift+P   Cycle palette\n"
             "Esc   Show Full Timeline Range\n"
             "[ / ]   Previous / next unit (legacy)\n"
             "Command-O   Open an RF map in a new window\n"
@@ -6931,7 +7185,10 @@ class RFMViewer(tk.Toplevel):
                     and self.tuning_curve_data is None
                     and self.settings.auto_load_tuning_curve
                 ):
-                    candidate = discover_tuning_curve_path(self.data.path)
+                    candidate = discover_tuning_curve_path(
+                        self.data.path,
+                        self.settings.tuning_curve_session,
+                    )
                     if candidate is not None:
                         self._load_tuning_curve_path(
                             candidate, show_error=False, redraw=False
@@ -7121,7 +7378,10 @@ class RFMViewer(tk.Toplevel):
         old_show_probe = bool(self.show_probe_layout_var.get())
         old_show_tuning = bool(self.show_tuning_curve_var.get())
         old_show_waveform = bool(self.show_waveform_var.get())
-        needs_optional_autoload = False
+        tuning_session_changed = (
+            settings.tuning_curve_session != previous.tuning_curve_session
+        )
+        needs_optional_autoload = tuning_session_changed
         previous_pair_apply = self._pair_apply_in_progress
         self._pair_apply_in_progress = True
         try:
@@ -7149,6 +7409,18 @@ class RFMViewer(tk.Toplevel):
             self.tuning_smoothing_var.set(settings.tuning_smoothing)
             self.tuning_smooth_sigma_var.set(settings.tuning_smooth_sigma)
             self.tuning_compare_scale_var.set(settings.tuning_compare_scale)
+            if tuning_session_changed:
+                with self.data._hd_tuning_lock:
+                    self.data._hd_tuning = None
+                    self.data._hd_tuning_identity = None
+                    self.data._hd_tuning_error = None
+                    # Prevent another consumer from falling back to a different
+                    # session while the exact configured session is reloaded.
+                    self.data._hd_tuning_checked = True
+                self.tuning_curve_data = None
+                self._tuning_curve_error = None
+                self._tuning_curve_candidate = None
+                self.tuning_collapsed_var.set(False)
             mode_changed = (
                 self.waveform_channel_mode_var.get()
                 != settings.waveform_channel_mode
@@ -7175,7 +7447,9 @@ class RFMViewer(tk.Toplevel):
                     needs_optional_autoload = True
             if settings.show_tuning_curve and self.tuning_curve_data is None:
                 should_load_tuning = settings.auto_load_tuning_curve and (
-                    not old_show_tuning or not previous.auto_load_tuning_curve
+                    tuning_session_changed
+                    or not old_show_tuning
+                    or not previous.auto_load_tuning_curve
                 )
                 if should_load_tuning:
                     needs_optional_autoload = True
@@ -7416,7 +7690,10 @@ class RFMViewer(tk.Toplevel):
             self.probe_geometry = self.data.probe_geometry()
             self._probe_static_signature = None
         if self.show_tuning_curve_var.get() and self.settings.auto_load_tuning_curve:
-            candidate = discover_tuning_curve_path(self.data.path)
+            candidate = discover_tuning_curve_path(
+                self.data.path,
+                self.settings.tuning_curve_session,
+            )
             if candidate is not None:
                 self._load_tuning_curve_path(
                     candidate, show_error=False, redraw=False
@@ -7446,6 +7723,7 @@ class RFMViewer(tk.Toplevel):
                 self.show_tuning_curve_var.get()
                 and self.settings.auto_load_tuning_curve
             ),
+            "tuning_session": int(self.settings.tuning_curve_session),
             "cluster_id": self._selected_unit_id_value(),
             "tuning_bins": normalize_hd_bin_count(
                 self.tuning_display_bins_var.get()
@@ -7469,6 +7747,7 @@ class RFMViewer(tk.Toplevel):
             "data_path": snapshot.get("data_path"),
             "probe_geometry": None,
             "tuning_path": None,
+            "tuning_identity": None,
             "tuning_signature": None,
             "tuning_data": None,
             "tuning_error": None,
@@ -7495,16 +7774,22 @@ class RFMViewer(tk.Toplevel):
                     )
                 result["probe_geometry"] = geometry
             if snapshot["load_tuning"]:
-                candidate = discover_tuning_curve_path(data_path)
+                candidate = discover_tuning_curve_path(
+                    data_path,
+                    int(
+                        snapshot.get(
+                            "tuning_session",
+                            DEFAULT_TUNING_CURVE_SESSION,
+                        )
+                    ),
+                )
                 result["tuning_path"] = candidate
                 if candidate is not None:
-                    tuning_data = data.attach_hd_tuning(candidate)
-                    identity = data._hd_tuning_identity
-                    result["tuning_signature"] = (
-                        (identity.mtime_ns, identity.size)
-                        if identity is not None
-                        else None
-                    )
+                    identity = FrozenFileIdentity.capture(candidate)
+                    tuning_data = TuningCurveData.load(identity.path)
+                    identity.verify_path()
+                    result["tuning_identity"] = identity
+                    result["tuning_signature"] = (identity.mtime_ns, identity.size)
                     result["tuning_data"] = tuning_data
                     raw_rates = tuning_data.rates_for(int(snapshot["cluster_id"]))
                     if raw_rates is not None:
@@ -7570,6 +7855,19 @@ class RFMViewer(tk.Toplevel):
             tuning_data = current_result.get("tuning_data")
             if isinstance(tuning_path, Path):
                 self._tuning_curve_candidate = tuning_path
+            if isinstance(tuning_data, TuningCurveData):
+                identity = current_result.get("tuning_identity")
+                if not isinstance(identity, FrozenFileIdentity):
+                    tuning_data = None
+                    current_result["tuning_error"] = (
+                        "Could not verify the discovered tuning-curve file."
+                    )
+                else:
+                    try:
+                        self.data._publish_hd_tuning(identity, tuning_data)
+                    except (OSError, ValueError) as exc:
+                        tuning_data = None
+                        current_result["tuning_error"] = str(exc)
             if isinstance(tuning_data, TuningCurveData):
                 self.tuning_curve_data = tuning_data
                 self._tuning_curve_error = None
@@ -7837,6 +8135,7 @@ class RFMViewer(tk.Toplevel):
             self._tuning_processed_cache = None
             self._tuning_scale_cache = None
         if not self.show_waveform_var.get():
+            self._close_waveform_zoom(refocus=False)
             had_waveform_state = any(
                 value is not None
                 for value in (
@@ -7856,6 +8155,8 @@ class RFMViewer(tk.Toplevel):
             self._waveform_error_key = None
             self.waveform_subtitle_label.configure(text="")
             self.waveform_canvas.delete("all")
+            self.waveform_zoom_subtitle_label.configure(text="")
+            self.waveform_zoom_canvas.delete("all")
         self._sync_auxiliary_sections()
         self._sync_tuning_collapsed_state(schedule_redraw=False)
         self._layout_rf_and_tuning()
@@ -8103,7 +8404,8 @@ class RFMViewer(tk.Toplevel):
                 self.tuning_provenance_button.grid_remove()
             detail = (
                 "No tuning_curves.tc or tuning_curves.json was found automatically for this "
-                "recording date. Generate it with the analysis pipeline, "
+                f"recording date in Tuning Curve Session "
+                f"{self.settings.tuning_curve_session}. Generate it with the analysis pipeline, "
                 "or attach a matching file.\nAttach head-direction data "
                 "for the selected RF unit."
             )
@@ -9142,10 +9444,19 @@ class RFMViewer(tk.Toplevel):
             if key == "rf":
                 self._draw_tuning_curve()
             if self.show_waveform_var.get():
-                self.waveform_subtitle_label.configure(
-                    text=f"Cluster {self._selected_unit_id_value()} · waveform unavailable"
+                unavailable_text = (
+                    f"Cluster {self._selected_unit_id_value()} · waveform unavailable"
                 )
+                self.waveform_subtitle_label.configure(text=unavailable_text)
                 self._draw_unavailable_unit("waveform")
+                if self._waveform_zoomed:
+                    self.waveform_zoom_subtitle_label.configure(
+                        text=unavailable_text
+                    )
+                    self._draw_unavailable_unit(
+                        "waveform",
+                        canvas=self.waveform_zoom_canvas,
+                    )
             return
         if key == "rf":
             self._draw_rf()
@@ -9275,10 +9586,27 @@ class RFMViewer(tk.Toplevel):
         )
 
     def _draw_waveform(self) -> None:
-        canvas = self.canvases["waveform"]
+        primary_canvas = getattr(
+            self,
+            "waveform_canvas",
+            self.canvases["waveform"],
+        )
+        targets = [(primary_canvas, self.waveform_subtitle_label)]
+        if getattr(self, "_waveform_zoomed", False):
+            targets.append(
+                (self.waveform_zoom_canvas, self.waveform_zoom_subtitle_label)
+            )
+        for canvas, subtitle_label in targets:
+            RFMViewer._draw_waveform_canvas(self, canvas, subtitle_label)
+
+    def _draw_waveform_canvas(
+        self,
+        canvas: tk.Canvas,
+        subtitle_label: ttk.Label,
+    ) -> None:
         canvas.delete("all")
         if not self.show_waveform_var.get():
-            self.waveform_subtitle_label.configure(text="")
+            subtitle_label.configure(text="")
             return
         key = (
             self._selected_unit_id_value(),
@@ -9286,7 +9614,7 @@ class RFMViewer(tk.Toplevel):
         )
         if self._waveform_payload_key != key:
             if getattr(self, "_waveform_error_key", None) == key:
-                self.waveform_subtitle_label.configure(
+                subtitle_label.configure(
                     text=f"Cluster {key[0]} · waveform unavailable"
                 )
                 self._draw_waveform_message(
@@ -9296,7 +9624,7 @@ class RFMViewer(tk.Toplevel):
                 )
                 return
             self._request_waveform_payload()
-            self.waveform_subtitle_label.configure(
+            subtitle_label.configure(
                 text=f"Cluster {key[0]} · loading waveform artifact…"
             )
             self._draw_waveform_message(
@@ -9518,17 +9846,23 @@ class RFMViewer(tk.Toplevel):
             and math.isfinite(float(max_ptp))
             else ""
         )
-        self.waveform_subtitle_label.configure(
+        subtitle_label.configure(
             text=(
                 f"Cluster {key[0]} · {mode_label} · "
                 f"best + {len(matrix) - 1} nearest{ptp_text}"
             )
         )
 
-    def _draw_unavailable_unit(self, key: str) -> None:
-        canvas = self.canvases[key]
+    def _draw_unavailable_unit(
+        self,
+        key: str,
+        *,
+        canvas: tk.Canvas | None = None,
+    ) -> None:
+        canvas = self.canvases[key] if canvas is None else canvas
         canvas.delete("all")
-        self._canvas_layouts.pop(key, None)
+        if canvas is self.canvases.get(key):
+            self._canvas_layouts.pop(key, None)
         if key == "timeline":
             self._timeline_cells = []
             self._timeline_cells_by_bin = {}
@@ -12421,6 +12755,7 @@ class FigureViewerSnapshot:
     hd_display_bins: int = DEFAULT_HD_DISPLAY_BINS
     hd_smoothing: bool = True
     hd_smooth_sigma: float = DEFAULT_HD_SMOOTH_SIGMA
+    tuning_curve_session: int = DEFAULT_TUNING_CURVE_SESSION
     unit_filter_enabled: bool = False
     zero_bin_threshold: int = 1
     visible_unit_ids: tuple[int, ...] | None = None
@@ -12454,6 +12789,7 @@ class FigureViewerSnapshot:
             ),
             hd_smoothing=bool(viewer.tuning_smoothing_var.get()),
             hd_smooth_sigma=float(viewer.tuning_smooth_sigma_var.get()),
+            tuning_curve_session=int(viewer.settings.tuning_curve_session),
             unit_filter_enabled=bool(
                 viewer.settings.rf_filter_units_with_zero_bins
             ),
@@ -12483,7 +12819,7 @@ class GUIFigureDataProvider:
         # different CSV after the parent viewer switches JSON documents.
         self.probe_geometry = data.probe_geometry()
         self.probe_geometry_error = data.probe_geometry_error
-        self.hd_tuning = data.hd_tuning()
+        self.hd_tuning = data.hd_tuning(snapshot.tuning_curve_session)
         self.hd_tuning_error = data.hd_tuning_error
         self.waveform_store = data.waveform_store()
         self.waveform_error = data.waveform_error
@@ -13122,6 +13458,7 @@ def _figure_snapshot_metadata(data: RFMappingData, snapshot: FigureViewerSnapsho
         "timelinePolar": snapshot.timeline_polar,
         "timelineRange": [snapshot.timeline_range_start, snapshot.timeline_range_end],
         "timelineActiveBin": snapshot.timeline_active_bin,
+        "tuningCurveSession": snapshot.tuning_curve_session,
         "waveformChannelMode": snapshot.waveform_channel_mode,
         "totalDegrees": snapshot.total_degrees,
         "selectedCell": list(snapshot.selected_cell) if snapshot.selected_cell is not None else None,

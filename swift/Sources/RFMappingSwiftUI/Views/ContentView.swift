@@ -21,7 +21,9 @@ struct ContentView: View {
             mainContent
         }
         .overlay {
-            if store.isLoadingData {
+            if store.isWaveformZoomed {
+                WaveformZoomOverlay(store: store)
+            } else if store.isLoadingData {
                 ZStack {
                     Rectangle()
                         .fill(.ultraThinMaterial)
@@ -336,10 +338,17 @@ private struct PlotTabsView: View {
             Group {
                 switch store.selectedTab {
                 case .rf:
-                    if store.spatialPlotFormat == .polar {
-                        PolarMapView(store: store, kind: .rf)
-                    } else {
-                        HeatmapView(store: store, kind: .rf)
+                    HSplitView {
+                        Group {
+                            if store.spatialPlotFormat == .polar {
+                                PolarMapView(store: store, kind: .rf)
+                            } else {
+                                HeatmapView(store: store, kind: .rf)
+                            }
+                        }
+                        .frame(minWidth: 460, maxWidth: .infinity, maxHeight: .infinity)
+                        HDTuningCompanionView(store: store)
+                            .frame(minWidth: 260, idealWidth: 330, maxWidth: 420)
                     }
                 case .delayRGB:
                     if store.delayRGBMode == .rgb {

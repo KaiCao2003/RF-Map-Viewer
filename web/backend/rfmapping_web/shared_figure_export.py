@@ -102,6 +102,7 @@ class PlotKind(str, Enum):
     HD_LINE = "hd.line"
     HD_POLAR = "hd.polar"
     PROBE_LAYOUT = "probe"
+    WAVEFORM_LOCAL_AVERAGE = "waveform.local_average"
 
     @classmethod
     def coerce(cls, value: PlotKind | str) -> PlotKind:
@@ -145,6 +146,11 @@ _PLOT_DEFINITIONS = (
         PlotKind.HD_POLAR, "HD tuning curve (polar)", "line", True
     ),
     PlotKindDefinition(PlotKind.PROBE_LAYOUT, "Probe layout", "points"),
+    PlotKindDefinition(
+        PlotKind.WAVEFORM_LOCAL_AVERAGE,
+        "Local average waveform",
+        "waveform_heatmap",
+    ),
 )
 
 # Registry keys are plain strings on purpose: both JSON clients and Python code
@@ -410,7 +416,15 @@ def _palette(value: float, low: float, high: float, name: str) -> tuple[int, int
     if name in {"gray", "grey", "grayscale"}:
         level = int(round(255.0 * fraction))
         return level, level, level
-    if name == "inferno":
+    if name in {"rdbu_r", "rdbu-r"}:
+        stops = (
+            (0.0, (5, 48, 97)),
+            (0.25, (67, 147, 195)),
+            (0.5, (247, 247, 247)),
+            (0.75, (214, 96, 77)),
+            (1.0, (103, 0, 31)),
+        )
+    elif name == "inferno":
         stops = (
             (0.0, (0, 0, 4)),
             (0.28, (87, 15, 109)),
@@ -1229,6 +1243,135 @@ def _draw_probe_layout(
         )
 
 
+def _waveform_payload(
+    data: Any,
+) -> tuple[list[list[float | None]], list[float], list[float], list[str], int]:
+    if not isinstance(data, Mapping):
+        raise FigureExportValidationError(
+            "waveform data must contain matrix, times_ms, channel_labels, and best_channel_row"
+        )
+    matrix = _scalar_matrix(_matrix_payload(data))
+    rows, columns = len(matrix), len(matrix[0])
+    times_source = _mapping_value(data, "times_ms", "timesMs", "time_ms")
+    labels_source = _mapping_value(data, "channel_labels", "channelLabels")
+    best_row = _mapping_value(data, "best_channel_row", "bestChannelRow")
+    if times_source is None or labels_source is None:
+        raise FigureExportValidationError("waveform times and channel labels are required")
+    times = [
+        _finite_float(value, label="waveform time")
+        for value in _sequence(times_source, label="waveform times")
+    ]
+    if len(times) != columns or any(b <= a for a, b in zip(times, times[1:])):
+        raise FigureExportValidationError(
+            "waveform times must match matrix columns and increase strictly"
+        )
+    edges_source = _mapping_value(data, "time_edges_ms", "timeEdgesMs")
+    if edges_source is None:
+        if len(times) == 1:
+            edges = [times[0] - 0.5, times[0] + 0.5]
+        else:
+            edges = [times[0] - (times[1] - times[0]) / 2]
+            edges.extend((a + b) / 2 for a, b in zip(times, times[1:]))
+            edges.append(times[-1] + (times[-1] - times[-2]) / 2)
+    else:
+        edges = [
+            _finite_float(value, label="waveform time edge")
+            for value in _sequence(edges_source, label="waveform time edges")
+        ]
+    if len(edges) != columns + 1 or any(b <= a for a, b in zip(edges, edges[1:])):
+        raise FigureExportValidationError("waveform time edges are invalid")
+    labels = [
+        str(value).strip()
+        for value in _sequence(labels_source, label="waveform channel labels")
+    ]
+    if len(labels) != rows or any(not label for label in labels):
+        raise FigureExportValidationError("waveform channel labels must match matrix rows")
+    if isinstance(best_row, bool) or not isinstance(best_row, int) or not 0 <= best_row < rows:
+        raise FigureExportValidationError("waveform best channel row is invalid")
+    return matrix, times, edges, labels, best_row
+
+
+def _draw_waveform_heatmap(
+    draw: ImageDraw.ImageDraw,
+    box: tuple[int, int, int, int],
+    spec: PlotSpec,
+) -> None:
+    matrix, times, edges, labels, best_row = _waveform_payload(spec.data)
+    rows, columns = len(matrix), len(matrix[0])
+    left, top, right, bottom = box
+    label_font = _font(max(9, round((bottom - top) * 0.04)))
+    label_width = max(
+        (draw.textbbox((0, 0), label, font=label_font)[2] for label in labels),
+        default=0,
+    )
+    grid = (
+        left + min(max(48, label_width + 14), max(48, (right - left) // 3)),
+        top + 6,
+        right - 66,
+        bottom - 32,
+    )
+    if grid[2] - grid[0] < columns or grid[3] - grid[1] < rows:
+        raise FigureExportValidationError("plot panel is too small for waveform data")
+    low, high = _bounds(matrix, spec.options)
+    amplitude = max(abs(low), abs(high), 1e-12)
+    low, high = -amplitude, amplitude
+    row_height = (grid[3] - grid[1]) / rows
+
+    def time_x(value: float) -> float:
+        return _scale(value, edges[0], edges[-1], grid[0], grid[2])
+
+    for row_index, row in enumerate(matrix):
+        y0 = round(grid[1] + row_height * row_index)
+        y1 = round(grid[1] + row_height * (row_index + 1))
+        for column_index, value in enumerate(row):
+            color = "#edf0f3" if value is None else _palette(value, low, high, "rdbu_r")
+            draw.rectangle(
+                (
+                    round(time_x(edges[column_index])),
+                    y0,
+                    round(time_x(edges[column_index + 1])),
+                    y1,
+                ),
+                fill=color,
+            )
+        draw.text(
+            (grid[0] - 7, (y0 + y1) / 2),
+            labels[row_index],
+            fill="#b42318" if row_index == best_row else "#475467",
+            font=label_font,
+            anchor="rm",
+        )
+    best_y0 = round(grid[1] + row_height * best_row)
+    best_y1 = round(grid[1] + row_height * (best_row + 1))
+    draw.rectangle((grid[0], best_y0, grid[2], best_y1), outline="#dc2626", width=2)
+    if edges[0] <= 0 <= edges[-1]:
+        zero_x = round(time_x(0))
+        draw.line((zero_x, grid[1], zero_x, grid[3]), fill="#111827", width=1)
+    draw.rectangle(grid, outline="#334155", width=2)
+    tick_indices = sorted({0, len(times) // 2, len(times) - 1})
+    for index in tick_indices:
+        x = round(time_x(times[index]))
+        draw.text(
+            (x, grid[3] + 5),
+            f"{times[index]:.4g}",
+            fill="#475467",
+            font=label_font,
+            anchor="ma",
+        )
+    bar_left = grid[2] + 18
+    bar_top, bar_bottom = grid[1], grid[3]
+    for pixel_y in range(bar_top, bar_bottom):
+        fraction = 1 - (pixel_y - bar_top) / max(1, bar_bottom - bar_top - 1)
+        value = low + fraction * (high - low)
+        draw.line(
+            (bar_left, pixel_y, bar_left + 12, pixel_y),
+            fill=_palette(value, low, high, "rdbu_r"),
+        )
+    draw.text((bar_left + 17, bar_top), f"{high:.3g}", fill="#475467", font=label_font, anchor="lm")
+    draw.text((bar_left + 17, bar_bottom), f"{low:.3g}", fill="#475467", font=label_font, anchor="lm")
+    draw.text((bar_left + 6, (bar_top + bar_bottom) / 2), "µV", fill="#475467", font=label_font, anchor="mm")
+
+
 class PillowFigureRenderer:
     """Deterministic off-screen renderer used by preview and export."""
 
@@ -1344,15 +1487,25 @@ class PillowFigureRenderer:
         draw.rounded_rectangle(panel, radius=10, fill="#f8fafc", outline="#cbd5e1", width=2)
         definition = PLOT_KIND_REGISTRY[spec.kind.value]
         title = spec.title.strip() if spec.title and spec.title.strip() else definition.label
-        title_height = max(30, round((bottom - top) * 0.11))
+        subtitle = str(spec.options.get("subtitle", "")).strip()
+        title_height = max(30, round((bottom - top) * (0.16 if subtitle else 0.11)))
         title_font = _font(max(13, round((bottom - top) * 0.048)), bold=True)
         draw.text(
-            (left + 12, top + title_height / 2),
+            (left + 12, top + (title_height * (0.34 if subtitle else 0.5))),
             title,
             fill="#0f172a",
             font=title_font,
             anchor="lm",
         )
+        if subtitle:
+            subtitle_font = _font(max(9, round((bottom - top) * 0.029)))
+            draw.text(
+                (left + 12, top + title_height * 0.72),
+                subtitle,
+                fill="#667085",
+                font=subtitle_font,
+                anchor="lm",
+            )
         plot_box = (left + 12, top + title_height, right - 12, bottom - 12)
 
         unavailable = _unavailable_message(spec)
@@ -1379,6 +1532,8 @@ class PillowFigureRenderer:
             _draw_polar_line(draw, plot_box, spec)
         elif spec.kind is PlotKind.PROBE_LAYOUT:
             _draw_probe_layout(draw, plot_box, spec)
+        elif spec.kind is PlotKind.WAVEFORM_LOCAL_AVERAGE:
+            _draw_waveform_heatmap(draw, plot_box, spec)
         else:  # Defensive against future Enum additions without renderer wiring.
             raise FigureExportValidationError(
                 f"plot kind {spec.kind.value!r} has no renderer"
