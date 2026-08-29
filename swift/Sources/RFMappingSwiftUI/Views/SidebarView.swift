@@ -15,7 +15,11 @@ struct SidebarView: View {
                 Divider()
                 pairingSection
                 Divider()
+                ProbeSidebarSection(store: store)
+                Divider()
                 unitSection
+                Divider()
+                WaveformSidebarSection(store: store)
                 Divider()
                 displaySection
                 Divider()
@@ -88,6 +92,17 @@ struct SidebarView: View {
             .disabled(store.isAwaitingStartupDocument || store.isLoadingData)
             Button("Open…") { store.isImporting = true }
                 .disabled(store.isLoadingData)
+            integerControl(
+                title: "Tuning session",
+                value: Binding(
+                    get: { store.tuningSessionIndex },
+                    set: store.setTuningSessionIndex
+                ),
+                range: 1...999
+            )
+            Text("Exact positive session; missing sessions do not fall back")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
 
@@ -229,7 +244,7 @@ struct SidebarView: View {
     }
 
     private var shortcutHint: some View {
-        Text("←/→ unit   ↑/↓ timeline\n⇧,/⇧. time resolution   1–3 views")
+        Text("←/→ unit   ↑/↓ timeline   1–3 views\nP rectangle/polar   ⇧P palette   Esc close/full range")
             .font(.caption)
             .foregroundStyle(.tertiary)
     }

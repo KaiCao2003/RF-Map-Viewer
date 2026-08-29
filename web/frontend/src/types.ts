@@ -34,6 +34,7 @@ export interface DatasetMeta {
   capabilities: {
     probe: boolean;
     hd: boolean;
+    waveform: boolean;
     occupancy: boolean;
   };
 }
@@ -86,6 +87,44 @@ export interface HdDatasetArtifact {
 }
 
 export type HdPlotMode = "auto" | "polar" | "line";
+
+export type WaveformChannelMode = "same_x_column" | "same_shank";
+
+export interface WaveformChannel {
+  channelIndex: number;
+  channelId: number;
+  rawChannelIndex: number;
+  xUm: number;
+  yUm: number;
+  shankId: number;
+}
+
+export type WaveformArtifact =
+  | {
+    available: false;
+    detail: string;
+  }
+  | {
+    available: true;
+    sourcePath: string;
+    unitId: number;
+    quality: string;
+    totalSpikeCount: number;
+    selectedSpikeCount: number;
+    timeCoveragePercent: number;
+    maxPtpUv: number;
+    mode: WaveformChannelMode;
+    localChannelCount: number;
+    baselineEndMs: number;
+    timesMs: number[];
+    timeEdgesMs: number[];
+    valuesUv: number[][];
+    channels: WaveformChannel[];
+    channelLabels: string[];
+    bestChannelIndex: number;
+    bestChannelRow: number;
+    amplitudeLimitUv: number;
+  };
 
 export interface HdViewSettings {
   plotMode: HdPlotMode;

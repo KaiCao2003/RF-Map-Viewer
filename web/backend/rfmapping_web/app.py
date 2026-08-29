@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt
 from .asgi_access_gate import install_access_gate
 from .companions import (
     companion_for_positions,
+    discover_tuning_curve_path,
     find_hd_image,
     load_probe_geometry,
     load_tuning_curve,
@@ -43,9 +44,15 @@ from .figure_exports import (
 )
 from .middleware import DirectAccessMiddleware
 from .paths import PathAccessError, list_directory, resolve_under
+from .waveforms import (
+    DEFAULT_WAVEFORM_CHANNEL_MODE,
+    WaveformArtifactError,
+    WaveformArtifactStore,
+    unavailable_waveform_payload,
+)
 
 
-WEB_VERSION = "1.9.5"
+WEB_VERSION = "1.9.6"
 
 
 class StrictRequest(BaseModel):
@@ -94,6 +101,10 @@ class FigurePlanRequest(StrictRequest):
     pages: list[FigurePageRequest] = Field(min_length=1, max_length=50)
     hdPath: str | None = Field(default=None, max_length=4096)
     probePositionsPath: str | None = Field(default=None, max_length=4096)
+    tuningSession: StrictInt = Field(default=1, ge=1)
+    waveformChannelMode: Literal["same_x_column", "same_shank"] = (
+        DEFAULT_WAVEFORM_CHANNEL_MODE
+    )
 
 
 class FigurePreviewRequest(FigurePlanRequest):
@@ -339,7 +350,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         tuning_path = (
             resolve_under(configured.rf_root, request.hdPath, expect="file")
             if request.hdPath is not None
-            else record.companions.tuning_path
+            else discover_tuning_curve_path(
+                record.source,
+                record.scope_root,
+                request.tuningSession,
+            )
         )
         if tuning_path is not None:
             try:
@@ -364,7 +379,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 )
             except (OSError, ValueError) as exc:
                 probe_error = f"Probe geometry could not be loaded: {exc}"
-        return tuning, probe, tuning_error, probe_error
+        waveform = None
+        waveform_error = None
+        if record.companions.waveform_dir is not None:
+            try:
+                waveform = WaveformArtifactStore(
+                    record.companions.waveform_dir,
+                    scope_root=record.scope_root,
+                )
+            except (OSError, ValueError) as exc:
+                waveform_error = f"Waveform artifact could not be loaded: {exc}"
+        return tuning, probe, waveform, tuning_error, probe_error, waveform_error
 
     def _normalized_figure_pages(record, request: FigurePlanRequest):
         if request.specVersion != FIGURE_SPEC_VERSION:
@@ -387,15 +412,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             unit_index, counts = services.datasets.unit_array(
                 record, request.clusterId
             )
-            tuning, probe, tuning_error, probe_error = _figure_companions(
+            (
+                tuning,
+                probe,
+                waveform,
+                tuning_error,
+                probe_error,
+                waveform_error,
+            ) = _figure_companions(
                 record, request
             )
             renderer = FigurePageRenderer(
                 record,
                 tuning=tuning,
                 probe=probe,
+                waveform=waveform,
                 tuning_error=tuning_error,
                 probe_error=probe_error,
+                waveform_error=waveform_error,
+                waveform_channel_mode=request.waveformChannelMode,
+                waveform_unit_ids=(request.clusterId,),
             )
             try:
                 rendered = renderer.render_png(
@@ -445,15 +481,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "Unknown clusterIds: " + ", ".join(str(value) for value in missing)
                 )
             jobs = expand_pages(request.clusterIds, pages, request.order)
-            tuning, probe, tuning_error, probe_error = _figure_companions(
+            (
+                tuning,
+                probe,
+                waveform,
+                tuning_error,
+                probe_error,
+                waveform_error,
+            ) = _figure_companions(
                 record, request
             )
             renderer = FigurePageRenderer(
                 record,
                 tuning=tuning,
                 probe=probe,
+                waveform=waveform,
                 tuning_error=tuning_error,
                 probe_error=probe_error,
+                waveform_error=waveform_error,
+                waveform_channel_mode=request.waveformChannelMode,
+                waveform_unit_ids=request.clusterIds,
             )
             arguments = {
                 "record": record,
@@ -509,12 +556,42 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="Probe geometry unavailable")
         return geometry
 
-    def tuning_data_for_record(record, path: str | None):
+    @application.get("/api/datasets/{dataset_id}/waveform/{cluster_id}")
+    def waveform_artifact(
+        dataset_id: str,
+        cluster_id: int,
+        mode: Literal["same_x_column", "same_shank"] = Query(
+            default=DEFAULT_WAVEFORM_CHANNEL_MODE
+        ),
+    ) -> dict[str, Any]:
+        record = _get_record(services, dataset_id)
+        directory = record.companions.waveform_dir
+        if directory is None:
+            return unavailable_waveform_payload(
+                "No companion data/waveform/Probe*/manifest.json was found for this RF dataset."
+            )
+        try:
+            store = WaveformArtifactStore(directory, scope_root=record.scope_root)
+            return store.payload_for(cluster_id, mode).as_dict()
+        except KeyError as exc:
+            return unavailable_waveform_payload(str(exc))
+        except (OSError, WaveformArtifactError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    def tuning_data_for_record(
+        record,
+        path: str | None,
+        session: int | None,
+    ):
         try:
             tuning_path = (
                 resolve_under(configured.rf_root, path, expect="file")
                 if path is not None
-                else record.companions.tuning_path
+                else discover_tuning_curve_path(
+                    record.source,
+                    record.scope_root,
+                    session,
+                )
             )
         except (PathAccessError, FileNotFoundError) as exc:
             raise _http_from_path_error(exc) from exc
@@ -531,10 +608,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @application.get("/api/datasets/{dataset_id}/hd")
     def hd_dataset(
-        dataset_id: str, path: str | None = Query(default=None)
+        dataset_id: str,
+        path: str | None = Query(default=None),
+        session: int = Query(default=1, ge=1),
     ) -> dict[str, Any]:
         record = _get_record(services, dataset_id)
-        data = tuning_data_for_record(record, path)
+        data = tuning_data_for_record(record, path, session)
         return (
             unavailable_tuning_dataset_payload()
             if data is None
@@ -546,9 +625,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         dataset_id: str,
         cluster_id: int,
         path: str | None = Query(default=None),
+        session: int = Query(default=1, ge=1),
     ) -> dict[str, Any]:
         record = _get_record(services, dataset_id)
-        data = tuning_data_for_record(record, path)
+        data = tuning_data_for_record(record, path, session)
         return (
             unavailable_tuning_cluster_payload()
             if data is None

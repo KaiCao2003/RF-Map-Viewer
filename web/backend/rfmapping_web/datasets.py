@@ -640,6 +640,7 @@ class DatasetStore:
             "capabilities": {
                 "probe": record.companions.has_probe,
                 "hd": record.companions.has_hd,
+                "waveform": record.companions.has_waveform,
                 "occupancy": True,
             },
         }

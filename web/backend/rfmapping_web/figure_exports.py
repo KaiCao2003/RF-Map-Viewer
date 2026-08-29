@@ -54,6 +54,13 @@ from .exports import (
     _snap_time_range,
 )
 from .paths import is_within
+from .waveforms import (
+    DEFAULT_WAVEFORM_CHANNEL_MODE,
+    WAVEFORM_CHANNEL_MODES,
+    WaveformArtifactError,
+    WaveformArtifactStore,
+    shared_amplitude_limit,
+)
 
 
 FIGURE_SPEC_VERSION = 1
@@ -193,6 +200,15 @@ _HD_SETTINGS = {
     ),
 }
 
+_WAVEFORM_SETTINGS = {
+    "channelMode": _setting(
+        "string",
+        DEFAULT_WAVEFORM_CHANNEL_MODE,
+        choices=WAVEFORM_CHANNEL_MODES,
+        description="Local channels selected around the unit's best channel.",
+    ),
+}
+
 
 FIGURE_TYPE_REGISTRY: dict[str, dict[str, Any]] = {
     "rf.cartesian": {
@@ -257,6 +273,13 @@ FIGURE_TYPE_REGISTRY: dict[str, dict[str, Any]] = {
         "projection": "cartesian",
         "settings": {},
         "capability": "probe",
+    },
+    "waveform.local_average": {
+        "label": "Local average waveform",
+        "family": "waveform",
+        "projection": "time-channel",
+        "settings": _WAVEFORM_SETTINGS,
+        "capability": "waveform",
     },
 }
 
@@ -878,16 +901,37 @@ class FigurePageRenderer:
         *,
         tuning: TuningCurveData | None,
         probe: Mapping[str, Any] | None,
+        waveform: WaveformArtifactStore | None = None,
         tuning_error: str | None = None,
         probe_error: str | None = None,
+        waveform_error: str | None = None,
+        waveform_channel_mode: str = DEFAULT_WAVEFORM_CHANNEL_MODE,
+        waveform_unit_ids: Sequence[int] = (),
     ):
         self.record = record
         self.metadata = record.cache.metadata
         self.tuning = tuning
         self.probe = probe
+        self.waveform = waveform
         self.tuning_error = tuning_error
         self.probe_error = probe_error
+        self.waveform_error = waveform_error
+        self.waveform_channel_mode = waveform_channel_mode
+        self.waveform_unit_ids = tuple(int(value) for value in waveform_unit_ids)
+        self._waveform_limits: dict[str, float | None] = {}
         self.shared_renderer = PillowFigureRenderer()
+
+    def _waveform_amplitude_limit(self, mode: str, cluster_id: int) -> float | None:
+        if self.waveform is None:
+            return None
+        if mode not in self._waveform_limits:
+            unit_ids = self.waveform_unit_ids or (cluster_id,)
+            self._waveform_limits[mode] = shared_amplitude_limit(
+                self.waveform,
+                unit_ids,
+                mode,
+            )
+        return self._waveform_limits[mode]
 
     def _total_degrees(self) -> float:
         positions = [float(value) for value in self.metadata["xPositions"]]
@@ -1149,6 +1193,54 @@ class FigurePageRenderer:
                     **({"missingPosition": True} if missing_position else {}),
                 },
                 title=f"{self.probe.get('probe', 'Probe')} layout",
+            )
+        if family == "waveform":
+            if self.waveform is None:
+                reason = self.waveform_error or (
+                    "Local average waveform data are unavailable for this dataset."
+                )
+                return self._unavailable(plot, reason, placeholders)
+            mode = str(settings.get("channelMode", self.waveform_channel_mode))
+            try:
+                payload = self.waveform.payload_for(cluster_id, mode)
+            except KeyError:
+                return self._unavailable(
+                    plot,
+                    f"No local average waveform for cluster {cluster_id}.",
+                    placeholders,
+                )
+            except (OSError, WaveformArtifactError) as exc:
+                return self._unavailable(
+                    plot,
+                    f"Local average waveform could not be loaded: {exc}",
+                    placeholders,
+                )
+            amplitude = self._waveform_amplitude_limit(mode, cluster_id)
+            if amplitude is None:
+                amplitude = payload.amplitude_limit_uv
+            return SharedPlotSpec(
+                plot.type_id,
+                {
+                    "matrix": payload.values_uv.tolist(),
+                    "times_ms": payload.time_ms.tolist(),
+                    "time_edges_ms": payload.time_edges_ms.tolist(),
+                    "channel_labels": [
+                        f"ch {channel.channel_id}" for channel in payload.channels
+                    ],
+                    "best_channel_row": payload.best_channel_row,
+                },
+                title="Local average waveform",
+                options={
+                    "palette": "rdbu_r",
+                    "vmin": -amplitude,
+                    "vmax": amplitude,
+                    "value_unit": "µV",
+                    "subtitle": (
+                        f"best + nearest {max(0, len(payload.channels) - 1)}; "
+                        f"{'Same x column' if mode == 'same_x_column' else 'Same shank'}; "
+                        f"baseline ≤ {payload.baseline_end_ms:g} ms"
+                    ),
+                },
             )
         raise FigureExportValidationError(f"Unknown renderer family: {family}")
 

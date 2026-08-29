@@ -270,7 +270,15 @@ enum HDTuningDiscovery {
         return nil
     }
 
-    static func discover(forRFURL sourceURL: URL, fileManager: FileManager = .default) -> URL? {
+    /// Resolves the requested positive tuning-curve session exactly. Passing
+    /// `nil` preserves the legacy earliest-session search used by callers that
+    /// have not opted into an explicit preference.
+    static func discover(
+        forRFURL sourceURL: URL,
+        fileManager: FileManager = .default,
+        sessionIndex: Int? = nil
+    ) -> URL? {
+        if let sessionIndex, sessionIndex < 1 { return nil }
         guard let probe = probeName(forRFURL: sourceURL) else { return nil }
         var sessionURL: URL?
         var recordingDate: String?
@@ -300,7 +308,10 @@ enum HDTuningDiscovery {
             return (components.index, sibling)
         }.sorted { $0.0 < $1.0 }
 
-        for (_, sibling) in matching {
+        let candidates = sessionIndex.map { requested in
+            matching.filter { $0.0 == requested }
+        } ?? matching
+        for (_, sibling) in candidates {
             let directory = sibling
                 .appendingPathComponent("data", isDirectory: true)
                 .appendingPathComponent("tuning_curves", isDirectory: true)
@@ -311,6 +322,10 @@ enum HDTuningDiscovery {
             }
         }
         return nil
+    }
+
+    static func isSessionName(_ name: String) -> Bool {
+        sessionComponents(name) != nil
     }
 
     private static func sessionComponents(_ name: String) -> (date: String, index: Int)? {

@@ -278,4 +278,33 @@ final class FileFormatCompatibilityTests: XCTestCase {
         try FileManager.default.removeItem(at: aliasURL)
         try assertSameFile(HDTuningDiscovery.discover(forRFURL: rfURL), legacyURL)
     }
+
+    func testHDTuningDiscoveryUsesExplicitSessionWithoutFallback() throws {
+        let root = try temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let currentSession = root.appendingPathComponent("260630_3", isDirectory: true)
+        let rfURL = currentSession
+            .appendingPathComponent("data/rfmapping/ProbeA", isDirectory: true)
+            .appendingPathComponent("map.rfmap")
+        try write("{}", to: rfURL)
+        let firstSessionCurve = root
+            .appendingPathComponent("260630_1/data/tuning_curves/ProbeA", isDirectory: true)
+            .appendingPathComponent("tuning_curves.tc")
+        let thirdSessionCurve = currentSession
+            .appendingPathComponent("data/tuning_curves/ProbeA", isDirectory: true)
+            .appendingPathComponent("tuning_curves.tc")
+        try write("{}", to: firstSessionCurve)
+        try write("{}", to: thirdSessionCurve)
+
+        try assertSameFile(
+            HDTuningDiscovery.discover(forRFURL: rfURL, sessionIndex: 1),
+            firstSessionCurve
+        )
+        try assertSameFile(
+            HDTuningDiscovery.discover(forRFURL: rfURL, sessionIndex: 3),
+            thirdSessionCurve
+        )
+        XCTAssertNil(HDTuningDiscovery.discover(forRFURL: rfURL, sessionIndex: 2))
+        XCTAssertNil(HDTuningDiscovery.discover(forRFURL: rfURL, sessionIndex: 0))
+    }
 }

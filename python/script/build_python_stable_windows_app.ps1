@@ -11,8 +11,8 @@ $ProgressPreference = "SilentlyContinue"
 
 $AppName = "RF Map Viewer"
 $ExecutableName = "RF Map Viewer.exe"
-$AppVersion = "1.9.5"
-$AppBuild = "10906"
+$AppVersion = "1.9.6"
+$AppBuild = "10908"
 $ReleaseEdition = "Full"
 $ReleaseFlavor = "full"
 $Architecture = "x64"
@@ -286,8 +286,8 @@ $VersionFile = Join-Path $BuildRoot "RFMapViewer-version-info.txt"
 $VersionResource = @"
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 9, 5, 10906),
-    prodvers=(1, 9, 5, 0),
+    filevers=(1, 9, 6, 10908),
+    prodvers=(1, 9, 6, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,

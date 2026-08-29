@@ -160,6 +160,58 @@ class TkViewerTests(unittest.TestCase):
         with self.assertRaisesRegex(gui.SettingsValidationError, "positive integer"):
             settings._validated_settings()
 
+    def test_tuning_curve_session_requires_positive_int_and_reloads(self) -> None:
+        settings_value = replace(
+            self.app.settings,
+            show_tuning_curve=True,
+            auto_load_tuning_curve=True,
+            tuning_curve_session=1,
+        )
+        self.app.settings = settings_value
+        self.app._app_root._rfm_settings = settings_value
+        self.app._show_settings()
+        settings = self.app._app_root._rfm_settings_window
+        self.assertIsInstance(settings, gui.SettingsWindow)
+        assert isinstance(settings, gui.SettingsWindow)
+        self.addCleanup(settings._close)
+
+        self.assertEqual(settings.tuning_curve_session_var.get(), "1")
+        self.assertTrue(settings.tuning_curve_session_entry.instate(["!disabled"]))
+        settings.auto_load_tuning_curve_var.set(False)
+        settings._sync_dependent_controls()
+        self.assertTrue(settings.tuning_curve_session_entry.instate(["disabled"]))
+        settings.auto_load_tuning_curve_var.set(True)
+
+        for invalid in ("", "0", "-2", "1.5"):
+            with self.subTest(session=invalid):
+                settings.tuning_curve_session_var.set(invalid)
+                with self.assertRaisesRegex(
+                    gui.SettingsValidationError,
+                    "Tuning Curve Session must be a positive integer",
+                ):
+                    settings._validated_settings()
+        settings.tuning_curve_session_var.set("3")
+        self.assertEqual(settings._validated_settings().tuning_curve_session, 3)
+        settings._close()
+
+        self.app.tuning_curve_data = mock.MagicMock()
+        self.app._tuning_curve_candidate = Path("old-session.tc")
+        self.app.data._hd_tuning = mock.MagicMock()
+        self.app.data._hd_tuning_checked = True
+        with mock.patch.object(self.app, "_schedule_optional_autoload") as schedule:
+            self.assertTrue(
+                self.app._apply_viewer_settings(
+                    replace(settings_value, tuning_curve_session=3),
+                    persist=False,
+                    broadcast=False,
+                )
+            )
+        schedule.assert_called_once_with()
+        self.assertEqual(self.app.settings.tuning_curve_session, 3)
+        self.assertIsNone(self.app.tuning_curve_data)
+        self.assertIsNone(self.app._tuning_curve_candidate)
+        self.assertIsNone(self.app.data._hd_tuning)
+
     def test_zero_spike_filter_tracks_rf_window_and_can_restore_all_units(self) -> None:
         payload = _current_rf_payload({
             "unitsSpikeCounts": [
@@ -448,9 +500,10 @@ class TkViewerTests(unittest.TestCase):
         self.assertEqual(int(self.app.unit_info_pane.grid_info()["row"]), 1)
         self.assertIs(self.app.waveform_pane.master, self.app.waveform_host)
         self.assertEqual(int(self.app.waveform_pane.grid_info()["row"]), 0)
-        self.assertGreaterEqual(
-            self.app.waveform_pane.winfo_rooty(),
-            self.app.cell_label.winfo_rooty() + self.app.cell_label.winfo_height(),
+        self.assertIs(self.app.cell_label.master, self.app.unit_info_pane)
+        self.assertGreater(
+            self.app.cell_label.winfo_rootx(),
+            self.app.waveform_pane.winfo_rootx(),
         )
         self.assertLessEqual(self.app.waveform_pane.winfo_height(), 200)
         self.assertFalse(self.app.tuning_curve_status_label.winfo_ismapped())
@@ -458,6 +511,26 @@ class TkViewerTests(unittest.TestCase):
         self.assertIn("cluster 7", self.app.unit_stats_label.cget("text"))
         self.assertGreater(len(self.app.canvases["waveform"].find_all()), 20)
         self.assertIn("Same x column", self.app.waveform_subtitle_label.cget("text"))
+        self.assertTrue(self.app.waveform_canvas.bind("<Double-Button-1>"))
+
+        self.app._toggle_waveform_zoom()
+        self.app.update()
+        self.assertTrue(self.app._waveform_zoomed)
+        self.assertEqual(self.app.waveform_zoom_overlay.winfo_manager(), "place")
+        self.assertTrue(self.app.waveform_zoom_canvas.winfo_ismapped())
+        self.assertGreater(
+            self.app.waveform_zoom_canvas.winfo_width(),
+            self.app.waveform_canvas.winfo_width(),
+        )
+        self.assertGreater(len(self.app.waveform_zoom_canvas.find_all()), 20)
+
+        self.app._toggle_waveform_zoom()
+        self.app.update_idletasks()
+        self.assertFalse(self.app._waveform_zoomed)
+        self.assertEqual(self.app.waveform_zoom_overlay.winfo_manager(), "")
+        self.app._open_waveform_zoom()
+        self.app._handle_escape()
+        self.assertFalse(self.app._waveform_zoomed)
 
         self.app._show_settings()
         settings = self.app._app_root._rfm_settings_window
@@ -495,6 +568,7 @@ class TkViewerTests(unittest.TestCase):
         self.assertEqual(composer.snapshot.waveform_channel_mode, "same_shank")
 
         request_count = len(requests)
+        self.app._open_waveform_zoom()
         hidden = replace(self.app.settings, show_waveform=False)
         self.assertTrue(
             self.app._apply_viewer_settings(
@@ -504,6 +578,8 @@ class TkViewerTests(unittest.TestCase):
             )
         )
         self.app.update()
+        self.assertFalse(self.app._waveform_zoomed)
+        self.assertEqual(self.app.waveform_zoom_overlay.winfo_manager(), "")
         self.assertFalse(self.app.waveform_pane.winfo_ismapped())
         self.app._step_unit(1)
         self.app.update()
@@ -814,7 +890,7 @@ class TkViewerTests(unittest.TestCase):
         self.assertIsNone(result)
         self.assertEqual(self.app.unit_idx.get(), 0)
 
-    def test_view_shortcuts_switch_tabs_flip_y_and_cycle_palette(self) -> None:
+    def test_view_shortcuts_switch_tabs_flip_y_toggle_polar_and_cycle_palette(self) -> None:
         event = SimpleNamespace(widget=self.app.canvases["rf"])
         self.app._run_navigation_shortcut(event, self.app._select_tab, 2)
         self.assertEqual(self.app._active_tab_key(), "timeline")
@@ -822,6 +898,27 @@ class TkViewerTests(unittest.TestCase):
         self.assertFalse(self.app.flip_y_var.get())
         self.app._run_navigation_shortcut(event, self.app._toggle_flip_y)
         self.assertTrue(self.app.flip_y_var.get())
+
+        self.app._select_tab(0)
+        self.app.polar_layout_var.set(False)
+        self.app._run_navigation_shortcut(event, self.app._toggle_polar_layout)
+        self.assertTrue(self.app.polar_layout_var.get())
+        self.assertEqual(self.app._active_tab_key(), "rf")
+
+        self.app.polar_layout_var.set(False)
+        self.assertEqual(
+            self.app.notebook.bindtags()[0],
+            str(self.app.notebook),
+        )
+        self.assertTrue(self.app.notebook.bind("<KeyPress-p>"))
+        notebook_event = SimpleNamespace(widget=self.app.notebook)
+        result = self.app._run_navigation_shortcut(
+            notebook_event,
+            self.app._toggle_polar_layout,
+        )
+        self.assertEqual(result, "break")
+        self.assertTrue(self.app.polar_layout_var.get())
+        self.assertEqual(self.app._active_tab_key(), "rf")
 
         self.app.palette_var.set("Gray")
         self.app._run_navigation_shortcut(event, self.app._cycle_palette)

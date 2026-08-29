@@ -116,6 +116,96 @@ final class FigureExportTests: XCTestCase {
         )
     }
 
+    private func makeWaveformArtifact(
+        unitIDs: [Int] = [22, 11]
+    ) throws -> (root: URL, store: WaveformArtifactStore) {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        let manifest: [String: Any] = [
+            "schema_name": WaveformArtifactStore.schemaName,
+            "schema_version": WaveformArtifactStore.schemaVersion,
+            "recording": [
+                "sampling_frequency_hz": 30_000.0,
+                "num_frames": 1_800_000,
+                "duration_minutes": 1.0,
+            ],
+            "units": ["scope": "good", "count": unitIDs.count],
+            "waveform": ["nbefore": 2, "num_samples": 4],
+            "files": ["units": "units.csv"],
+        ]
+        try JSONSerialization.data(withJSONObject: manifest).write(
+            to: root.appendingPathComponent("manifest.json")
+        )
+        try """
+        channel_index,channel_id,raw_channel_index,x_um,y_um,shank_id
+        0,100,0,0,20,0
+        1,101,1,0,40,0
+        2,102,2,0,60,0
+        """.write(
+            to: root.appendingPathComponent("channels.csv"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try """
+        sample_index,sample_offset,time_ms
+        0,-2,-0.5
+        1,-1,-0.25
+        2,0,0
+        3,1,0.25
+        """.write(
+            to: root.appendingPathComponent("waveform_time.csv"),
+            atomically: true,
+            encoding: .utf8
+        )
+        var unitRows = [
+            "unit_index,unit_id,quality,total_spike_count,selected_spike_count,time_coverage_percent,best_channel_index,best_channel_id,best_channel_x_um,best_channel_y_um,max_ptp_uv,unit_data_dir"
+        ]
+        for (index, unitID) in unitIDs.enumerated() {
+            let directoryName = "Unit\(unitID)"
+            let directory = root.appendingPathComponent(directoryName, isDirectory: true)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+            let scale = Double(index + 1)
+            let templateLines = [
+                "sample_index,chidx_000_uv,chidx_001_uv,chidx_002_uv",
+                "0,\(1 * scale),\(2 * scale),\(3 * scale)",
+                "1,\(2 * scale),\(4 * scale),\(6 * scale)",
+                "2,\(3 * scale),\(6 * scale),\(9 * scale)",
+                "3,\(4 * scale),\(8 * scale),\(12 * scale)",
+            ].joined(separator: "\n") + "\n"
+            try gzip(
+                Data(templateLines.utf8),
+                to: directory.appendingPathComponent("template_uv.csv.gz")
+            )
+            unitRows.append(
+                "\(index),\(unitID),good,1000,500,90,1,101,0,40,\(40 * scale),\(directoryName)"
+            )
+        }
+        try (unitRows.joined(separator: "\n") + "\n").write(
+            to: root.appendingPathComponent("units.csv"),
+            atomically: true,
+            encoding: .utf8
+        )
+        return (root, try WaveformArtifactStore(directory: root))
+    }
+
+    private func gzip(_ data: Data, to destination: URL) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/gzip")
+        process.arguments = ["-c"]
+        let input = Pipe()
+        let output = Pipe()
+        process.standardInput = input
+        process.standardOutput = output
+        try process.run()
+        input.fileHandleForWriting.write(data)
+        try input.fileHandleForWriting.close()
+        let compressed = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        XCTAssertEqual(process.terminationStatus, 0)
+        try compressed.write(to: destination)
+    }
+
     func testPlotKindStableIDsCoverEveryRequestedCapability() {
         XCTAssertEqual(
             Set(FigureExportPlotKind.allCases.map(\.rawValue)),
@@ -124,8 +214,23 @@ final class FigureExportTests: XCTestCase {
                 "delay.cartesian", "delay.polar",
                 "rgb.cartesian", "rgb.polar",
                 "timeline.current", "hd.line", "hd.polar", "probe",
+                "waveform.local_average",
             ])
         )
+    }
+
+    func testWaveformReaderMatchesBaselineAndLocalChannelContract() throws {
+        let waveform = try makeWaveformArtifact(unitIDs: [22])
+        defer { try? FileManager.default.removeItem(at: waveform.root) }
+
+        let payload = try waveform.store.payload(for: 22, mode: .sameXColumn)
+
+        XCTAssertEqual(payload.channels.map(\.channelID), [102, 101, 100])
+        XCTAssertEqual(payload.bestChannelRow, 1)
+        XCTAssertEqual(payload.baselineEndMilliseconds, -0.25)
+        XCTAssertEqual(payload.valuesMicrovolts[0], [-1.5, 1.5, 4.5, 7.5])
+        XCTAssertEqual(payload.amplitudeLimitMicrovolts, 7.5)
+        XCTAssertEqual(try waveform.store.sourceURLs(for: 22).count, 5)
     }
 
     func testUnitSelectionIsExplicitAndPreservesOriginalUnitPoolOrder() {
@@ -216,7 +321,7 @@ final class FigureExportTests: XCTestCase {
         XCTAssertEqual(descriptors.map(\.originalUnitIndex), [0, 0, 1, 1])
     }
 
-    func testMissingHDAndProbeCapabilitiesBecomeExplicitPlaceholders() throws {
+    func testMissingCompanionCapabilitiesBecomeExplicitPlaceholders() throws {
         let data = try makeData()
         let page = FigurePageTemplate(
             name: "Companions",
@@ -224,6 +329,7 @@ final class FigureExportTests: XCTestCase {
                 FigurePlotPlacement(kind: .hdLine),
                 FigurePlotPlacement(kind: .hdPolar),
                 FigurePlotPlacement(kind: .probe),
+                FigurePlotPlacement(kind: .waveformLocalAverage),
                 FigurePlotPlacement(kind: .rfCartesian),
             ]
         )
@@ -238,11 +344,14 @@ final class FigureExportTests: XCTestCase {
         XCTAssertTrue(descriptor.plots[0].placeholder?.contains("fixture missing") == true)
         XCTAssertTrue(descriptor.plots[1].placeholder?.contains("fixture missing") == true)
         XCTAssertTrue(descriptor.plots[2].placeholder?.contains("positions.csv") == true)
-        XCTAssertNil(descriptor.plots[3].placeholder)
+        XCTAssertTrue(descriptor.plots[3].placeholder?.contains("waveform") == true)
+        XCTAssertNil(descriptor.plots[4].placeholder)
     }
 
-    func testAvailableCompanionsResolveAllTenKindsToRealRendererPayloads() throws {
+    func testAvailableCompanionsResolveAllElevenKindsToRealRendererPayloads() throws {
         let data = try makeData()
+        let waveform = try makeWaveformArtifact()
+        defer { try? FileManager.default.removeItem(at: waveform.root) }
         let page = FigurePageTemplate(
             name: "Every view",
             plots: FigureExportPlotKind.allCases.map { FigurePlotPlacement(kind: $0) }
@@ -250,6 +359,7 @@ final class FigureExportTests: XCTestCase {
         var companions = FigureExportCompanions()
         companions.hdTuning = try makeHDTuningData(unitID: 22)
         companions.probeGeometry = makeProbeGeometry()
+        companions.waveformArtifact = waveform.store
 
         let descriptor = try XCTUnwrap(FigureExportRenderer().descriptors(
             configuration: configuration(unitIDs: [22], pages: [page]),
@@ -269,9 +379,15 @@ final class FigureExportTests: XCTestCase {
                 XCTAssertEqual(payload.unit.unitID, 22)
                 XCTAssertEqual(payload.channels.count, 2)
                 XCTAssertNil(plot.hdCurve)
+            case .waveformLocalAverage:
+                let payload = try XCTUnwrap(plot.waveformPayload)
+                XCTAssertEqual(payload.summary.unitID, 22)
+                XCTAssertEqual(payload.mode, .sameXColumn)
+                XCTAssertEqual(plot.waveformAmplitudeLimitMicrovolts, 7.5)
             default:
                 XCTAssertNil(plot.hdCurve)
                 XCTAssertNil(plot.probePayload)
+                XCTAssertNil(plot.waveformPayload)
             }
         }
     }
@@ -572,26 +688,29 @@ final class FigureExportTests: XCTestCase {
         )
     }
 
-    func testPDFPNGAndSVGActuallyRenderAllTenViewsWithoutPlaceholders() async throws {
+    func testPDFPNGAndSVGActuallyRenderAllElevenViewsWithoutPlaceholders() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
         defer { try? FileManager.default.removeItem(at: root) }
         let data = try makeData(unitIDs: [22])
+        let waveform = try makeWaveformArtifact(unitIDs: [22])
+        defer { try? FileManager.default.removeItem(at: waveform.root) }
         let page = FigurePageTemplate(
-            name: "All ten views",
+            name: "All eleven views",
             plots: FigureExportPlotKind.allCases.map { FigurePlotPlacement(kind: $0) }
         )
         var companions = FigureExportCompanions()
         companions.hdTuning = try makeHDTuningData(unitID: 22)
         companions.probeGeometry = makeProbeGeometry(unitIDs: [22])
+        companions.waveformArtifact = waveform.store
 
         for format in [FigureExportFormat.pdf, .png, .svg] {
             var value = configuration(unitIDs: [22], pages: [page])
             value.format = format
             value.pageSize = .widescreen
             value.destinationDirectory = root
-            value.baseName = "all-ten-\(format.rawValue)"
+            value.baseName = "all-eleven-\(format.rawValue)"
             value.outputScale = 1
 
             let result = try await FigureExportRenderer().export(

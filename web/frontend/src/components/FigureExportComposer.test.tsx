@@ -16,7 +16,7 @@ const meta: DatasetMeta = {
   occupancyTimeSec: [[1, 1], [1, 1]],
   responseUnits: "spike_count",
   responseNormalization: "none",
-  capabilities: { probe: false, hd: false, occupancy: true },
+  capabilities: { probe: false, hd: false, waveform: false, occupancy: true },
 };
 
 const view: ViewState = {
@@ -59,7 +59,13 @@ const spec: FigureExportSpec = {
     family: id.split(".")[0],
     projection: id.split(".")[1] ?? "cartesian",
     settings: {},
-    ...(id.startsWith("hd.") ? { capability: "hd" as const } : id === "probe" ? { capability: "probe" as const } : {}),
+    ...(id.startsWith("hd.")
+      ? { capability: "hd" as const }
+      : id === "probe"
+        ? { capability: "probe" as const }
+        : id === "waveform.local_average"
+          ? { capability: "waveform" as const }
+          : {}),
   })),
   pageOrders: ["unit-major", "page-major"],
   formats: ["pdf", "png"],
@@ -79,9 +85,11 @@ describe("FigureExportComposer", () => {
         selectedCell={[0, 0, 0, 0]}
         hdSettings={hd}
         probeFilteredUnitIds={[7, 88]}
-        availableCapabilities={{ hd: false, probe: false }}
+        availableCapabilities={{ hd: false, probe: false, waveform: false }}
         hdPath={null}
         probePositionsPath={null}
+        tuningSession={1}
+        waveformChannelMode="same_x_column"
         initialSpec={spec}
         onClose={() => undefined}
       />,
@@ -114,9 +122,11 @@ describe("FigureExportComposer", () => {
         selectedCell={null}
         hdSettings={hd}
         probeFilteredUnitIds={null}
-        availableCapabilities={{ hd: true, probe: true }}
+        availableCapabilities={{ hd: true, probe: true, waveform: true }}
         hdPath="/mnt/senzailab/session/tuning_curves.json"
         probePositionsPath="/mnt/senzailab/session/positions.csv"
+        tuningSession={2}
+        waveformChannelMode="same_shank"
         initialSpec={spec}
         onClose={() => undefined}
       />,

@@ -56,6 +56,13 @@ PROBE_POINTS = {
         {"x": 0.0, "y": 200.0, "label": "C"},
     ]
 }
+WAVEFORM_HEATMAP = {
+    "matrix": [[-3.0, 1.0, 4.0, 0.0], [-1.0, 2.0, 7.0, -2.0]],
+    "times_ms": [-0.5, -0.25, 0.0, 0.25],
+    "time_edges_ms": [-0.625, -0.375, -0.125, 0.125, 0.375],
+    "channel_labels": ["ch 2", "ch 1"],
+    "best_channel_row": 1,
+}
 
 
 def _data_for(unit_id: int, spec: PlotSpec):
@@ -75,6 +82,8 @@ def _data_for(unit_id: int, spec: PlotSpec):
         return HD_CURVE
     if spec.kind is PlotKind.PROBE_LAYOUT:
         return PROBE_POINTS
+    if spec.kind is PlotKind.WAVEFORM_LOCAL_AVERAGE:
+        return WAVEFORM_HEATMAP
     return [[value + unit_id for value in row] for row in SCALAR_MATRIX]
 
 
@@ -109,6 +118,7 @@ def test_plot_kind_registry_has_all_stable_view_identifiers() -> None:
         "hd.line",
         "hd.polar",
         "probe",
+        "waveform.local_average",
     }
     assert all(
         definition.kind.value == stable_id and definition.label
