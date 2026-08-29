@@ -4,6 +4,12 @@ import Observation
 
 @Observable
 final class RFMappingStore {
+    private enum PreferenceKey {
+        static let tuningSession = "rfmapping.tuningSession"
+        static let showWaveform = "rfmapping.showWaveform"
+        static let waveformChannelMode = "rfmapping.waveformChannelMode"
+    }
+
     private enum SpatialPlotKind: Int, Equatable {
         case current
         case delay
@@ -125,6 +131,7 @@ final class RFMappingStore {
     @ObservationIgnored private var loadRequestID: UUID?
     @ObservationIgnored private var activeDecodeTask: Task<RFMappingData, Error>?
     @ObservationIgnored var pairingDataDidChange: (() -> Void)?
+    private let preferences: UserDefaults
 
     var data: RFMappingData?
     var availableJSONURLs: [URL] = []
@@ -153,6 +160,20 @@ final class RFMappingStore {
     var smoothRadius = 0
     var selectedTab: PlotTab = .rf
 
+    private(set) var tuningSessionIndex = 1
+    private(set) var showWaveform = true
+    private(set) var waveformChannelMode: WaveformChannelMode = .sameXColumn
+    private(set) var hdTuning: HDTuningData?
+    private(set) var hdTuningURL: URL?
+    private(set) var hdTuningError: String?
+    private(set) var probeGeometry: ProbeGeometry?
+    private(set) var probeGeometryError: String?
+    private(set) var waveformArtifact: WaveformArtifactStore?
+    private(set) var waveformPayload: WaveformPayload?
+    private(set) var waveformError: String?
+    private(set) var probeFilteredUnitIDs: Set<Int>?
+    var isWaveformZoomed = false
+
     var selectedCell: CellRef?
     var hoverCell: CellRef?
     var hoverLocation: CGPoint?
@@ -173,8 +194,19 @@ final class RFMappingStore {
         initialURL: URL? = nil,
         initialData: RFMappingData? = nil,
         loadDefault: Bool = true,
-        discoverJSONChoices: Bool = true
+        discoverJSONChoices: Bool = true,
+        preferences: UserDefaults = .standard
     ) {
+        self.preferences = preferences
+        let storedSession = preferences.integer(forKey: PreferenceKey.tuningSession)
+        tuningSessionIndex = max(1, storedSession == 0 ? 1 : storedSession)
+        if preferences.object(forKey: PreferenceKey.showWaveform) != nil {
+            showWaveform = preferences.bool(forKey: PreferenceKey.showWaveform)
+        }
+        if let rawMode = preferences.string(forKey: PreferenceKey.waveformChannelMode),
+           let mode = WaveformChannelMode(rawValue: rawMode) {
+            waveformChannelMode = mode
+        }
         isAwaitingStartupDocument = initialURL == nil && initialData == nil && !loadDefault
         if discoverJSONChoices { refreshJSONChoices() }
         if let initialData {
@@ -219,7 +251,21 @@ final class RFMappingStore {
     }
 
     var navigationUnitIDs: [Int] {
-        pairedUnitIDs ?? data?.unitPool ?? []
+        let unitIDs = pairedUnitIDs ?? data?.unitPool ?? []
+        guard let probeFilteredUnitIDs else { return unitIDs }
+        return unitIDs.filter(probeFilteredUnitIDs.contains)
+    }
+
+    var figureExportCompanions: FigureExportCompanions {
+        FigureExportCompanions(
+            hdTuning: hdTuning,
+            hdError: hdTuningError,
+            probeGeometry: probeGeometry,
+            probeError: probeGeometryError,
+            waveformArtifact: waveformArtifact,
+            waveformError: waveformError,
+            waveformChannelMode: waveformChannelMode
+        )
     }
 
     var viewerSyncState: ViewerSyncState {
@@ -416,6 +462,7 @@ final class RFMappingStore {
         resetPlotRangeToDefault()
         normalizeControls()
         ensureSelectedCell()
+        discoverCompanions(for: loaded)
         if refreshChoices { refreshJSONChoices() }
         pairingDataDidChange?()
     }
@@ -551,6 +598,7 @@ final class RFMappingStore {
             clearHover()
             ensureSelectedCell()
         }
+        refreshWaveformPayload()
     }
 
     /// Configures the sorted cross-window union used by previous/next. Passing
@@ -559,6 +607,165 @@ final class RFMappingStore {
         pairedUnitIDs = unitIDs.map { Array(Set($0)).sorted() }
         if pairedUnitIDs == nil, !hasSelectedUnit, let first = data?.unitPool.first {
             selectUnitID(first)
+        }
+    }
+
+    func setTuningSessionIndex(_ sessionIndex: Int) {
+        let normalized = max(1, sessionIndex)
+        guard normalized != tuningSessionIndex else { return }
+        tuningSessionIndex = normalized
+        preferences.set(normalized, forKey: PreferenceKey.tuningSession)
+        reloadDiscoveredHDTuning()
+    }
+
+    func setShowWaveform(_ visible: Bool) {
+        guard visible != showWaveform else { return }
+        showWaveform = visible
+        preferences.set(visible, forKey: PreferenceKey.showWaveform)
+        if visible {
+            refreshWaveformPayload()
+        } else {
+            waveformPayload = nil
+            isWaveformZoomed = false
+        }
+    }
+
+    func setWaveformChannelMode(_ mode: WaveformChannelMode) {
+        guard mode != waveformChannelMode else { return }
+        waveformChannelMode = mode
+        preferences.set(mode.rawValue, forKey: PreferenceKey.waveformChannelMode)
+        refreshWaveformPayload()
+    }
+
+    func setProbeFilteredUnitIDs(_ unitIDs: Set<Int>?) {
+        probeFilteredUnitIDs = unitIDs
+        let choices = navigationUnitIDs
+        if choices.isEmpty {
+            selectedUnitID = nil
+            unitIndex = -1
+            waveformPayload = nil
+            isWaveformZoomed = false
+            clearDerivedCaches()
+            selectedCell = nil
+            clearHover()
+            return
+        }
+        if let selectedUnitID, choices.contains(selectedUnitID) { return }
+        if let first = choices.first { selectUnitID(first) }
+    }
+
+    func setHDTuningURL(_ url: URL) {
+        let accessing = url.startAccessingSecurityScopedResource()
+        defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+        do {
+            hdTuning = try HDTuningData(url: url)
+            hdTuningURL = url.standardizedFileURL
+            hdTuningError = nil
+        } catch {
+            hdTuning = nil
+            hdTuningURL = url.standardizedFileURL
+            hdTuningError = error.localizedDescription
+            errorMessage = "HD tuning data could not be loaded: \(error.localizedDescription)"
+        }
+    }
+
+    func setProbePositionsURL(_ url: URL) {
+        guard let data else { return }
+        let accessing = url.startAccessingSecurityScopedResource()
+        defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+        let probeName = HDTuningDiscovery.probeName(forRFURL: data.url)
+            ?? HDTuningDiscovery.probeName(forRFURL: url)
+            ?? "Probe"
+        let adjacentChannels = url.deletingLastPathComponent()
+            .appendingPathComponent("channels.csv")
+        let channelsURL = FileManager.default.fileExists(atPath: adjacentChannels.path)
+            ? adjacentChannels.standardizedFileURL
+            : nil
+        do {
+            probeGeometry = try ProbeGeometryDiscovery.load(
+                ProbeGeometryPaths(
+                    probeName: probeName,
+                    positionsURL: url.standardizedFileURL,
+                    channelsURL: channelsURL
+                ),
+                rfUnitIDs: data.unitPool
+            )
+            probeGeometryError = nil
+            setProbeFilteredUnitIDs(nil)
+        } catch {
+            probeGeometry = nil
+            probeGeometryError = error.localizedDescription
+            errorMessage = "Probe positions could not be loaded: \(error.localizedDescription)"
+        }
+    }
+
+    private func discoverCompanions(for loaded: RFMappingData) {
+        hdTuning = nil
+        hdTuningURL = nil
+        hdTuningError = nil
+        probeGeometry = nil
+        probeGeometryError = nil
+        waveformArtifact = nil
+        waveformPayload = nil
+        waveformError = nil
+        probeFilteredUnitIDs = nil
+        isWaveformZoomed = false
+        reloadDiscoveredHDTuning()
+        if let paths = ProbeGeometryDiscovery.discover(forRFURL: loaded.url) {
+            do {
+                probeGeometry = try ProbeGeometryDiscovery.load(
+                    paths,
+                    rfUnitIDs: loaded.unitPool
+                )
+            } catch {
+                probeGeometryError = error.localizedDescription
+            }
+        }
+        do {
+            waveformArtifact = try WaveformArtifactStore.discover(forRFURL: loaded.url)
+        } catch {
+            waveformError = error.localizedDescription
+        }
+        refreshWaveformPayload()
+    }
+
+    private func reloadDiscoveredHDTuning() {
+        guard let data else { return }
+        hdTuning = nil
+        hdTuningURL = nil
+        hdTuningError = nil
+        guard let url = HDTuningDiscovery.discover(
+            forRFURL: data.url,
+            sessionIndex: tuningSessionIndex
+        ) else {
+            hdTuningError = "No tuning curve was found for exact session \(tuningSessionIndex)."
+            return
+        }
+        hdTuningURL = url
+        do {
+            hdTuning = try HDTuningData(url: url)
+        } catch {
+            hdTuningError = error.localizedDescription
+        }
+    }
+
+    private func refreshWaveformPayload() {
+        waveformPayload = nil
+        guard showWaveform, let selectedUnitID, hasSelectedUnit else { return }
+        guard let waveformArtifact else {
+            if waveformError == nil {
+                waveformError = "No companion data/waveform/Probe*/manifest.json was found."
+            }
+            return
+        }
+        do {
+            waveformPayload = try waveformArtifact.payload(
+                for: selectedUnitID,
+                mode: waveformChannelMode
+            )
+            waveformError = nil
+        } catch {
+            waveformError = error.localizedDescription
         }
     }
 
@@ -585,7 +792,10 @@ final class RFMappingStore {
 
     func normalizeControls() {
         guard let data else { return }
-        if let selectedUnitID {
+        if probeFilteredUnitIDs?.isEmpty == true {
+            selectedUnitID = nil
+            unitIndex = -1
+        } else if let selectedUnitID {
             unitIndex = data.unitIndex(forUnitID: selectedUnitID) ?? -1
         } else {
             selectedUnitID = data.unitPool.first

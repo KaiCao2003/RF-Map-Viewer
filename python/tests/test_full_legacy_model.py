@@ -796,9 +796,19 @@ class TuningCurveModelTests(unittest.TestCase):
                 path.write_text("{}", encoding="utf-8")
 
             self.assertEqual(gui.discover_tuning_curve_path(rf_path), first_probe_a.resolve())
+            self.assertEqual(
+                gui.discover_tuning_curve_path(rf_path, 2),
+                later_probe_a.resolve(),
+            )
+            self.assertIsNone(gui.discover_tuning_curve_path(rf_path, 3))
+            for invalid in (0, -1, True):
+                with self.subTest(session=invalid):
+                    with self.assertRaisesRegex(ValueError, "positive integer"):
+                        gui.discover_tuning_curve_path(rf_path, invalid)
 
             first_probe_a.unlink()
             self.assertEqual(gui.discover_tuning_curve_path(rf_path), later_probe_a.resolve())
+            self.assertIsNone(gui.discover_tuning_curve_path(rf_path, 1))
 
             later_probe_a.unlink()
             self.assertIsNone(gui.discover_tuning_curve_path(rf_path))

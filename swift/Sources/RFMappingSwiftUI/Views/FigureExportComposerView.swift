@@ -286,6 +286,9 @@ struct FigureExportComposerView: View {
     private var companionSection: some View {
         VStack(alignment: .leading, spacing: 7) {
             Text("Companion views").font(.headline)
+            Text("Tuning session \(workspace.seed.tuningSessionIndex) · waveform \(workspace.companions.waveformChannelMode.label)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(workspace.companions.hdTuning == nil ? "HD tuning unavailable" : "HD tuning ready")
@@ -323,6 +326,28 @@ struct FigureExportComposerView: View {
                 }
                 Spacer()
                 Button("Choose Probe Positions…", action: chooseProbePositions)
+            }
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    if let waveform = workspace.companions.waveformArtifact {
+                        Label("Waveform artifact ready", systemImage: "checkmark.circle.fill")
+                            .font(.callout.weight(.semibold))
+                            .foregroundStyle(.green)
+                        Text(waveform.sourceDirectory.path)
+                            .font(.system(size: 9, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(3)
+                            .textSelection(.enabled)
+                        Text("\(waveform.unitSummaries.count) units · schema v\(WaveformArtifactStore.schemaVersion)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Label(workspace.companions.waveformUnavailableReason, systemImage: "info.circle")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Spacer()
             }
         }
     }

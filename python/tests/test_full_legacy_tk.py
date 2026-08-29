@@ -243,9 +243,10 @@ class TkViewerTests(unittest.TestCase):
             self.app.unit_stats_label.winfo_width(),
             self.app.unit_stats_label.winfo_reqwidth(),
         )
-        self.assertGreaterEqual(
-            self.app.waveform_pane.winfo_rooty(),
-            self.app.cell_label.winfo_rooty() + self.app.cell_label.winfo_height(),
+        self.assertIs(self.app.cell_label.master, self.app.unit_info_pane)
+        self.assertGreater(
+            self.app.cell_label.winfo_rootx(),
+            self.app.waveform_pane.winfo_rootx(),
         )
 
         stacked = replace(self.app.settings, tuning_layout="Stacked")
@@ -1374,6 +1375,8 @@ class TkViewerTests(unittest.TestCase):
         self.assertTrue(self.app.unit_stats_label.winfo_ismapped())
         self.assertIn("cluster", self.app.unit_stats_label.cget("text"))
         self.assertIs(self.app.unit_stats_label.master, self.app.unit_info_pane)
+        self.assertIs(self.app.cell_label.master, self.app.unit_info_pane)
+        self.assertEqual(int(self.app.cell_label.grid_info()["row"]), 5)
         self.app.selected_cell = (0, 0, 0, 0)
         self.app._update_cell_label()
         self.assertIn("xIdx 1", self.app.unit_stats_label.cget("text"))
@@ -1530,7 +1533,7 @@ class TkViewerTests(unittest.TestCase):
         self.assertIsNone(result)
         self.assertEqual(self.app.unit_idx.get(), 0)
 
-    def test_view_shortcuts_switch_tabs_flip_y_and_cycle_palette(self) -> None:
+    def test_view_shortcuts_switch_tabs_flip_y_toggle_polar_and_cycle_palette(self) -> None:
         event = SimpleNamespace(widget=self.app.canvases["rf"])
         self.app._run_navigation_shortcut(event, self.app._select_tab, 2)
         self.assertEqual(self.app._active_tab_key(), "timeline")
@@ -1538,6 +1541,27 @@ class TkViewerTests(unittest.TestCase):
         self.assertFalse(self.app.flip_y_var.get())
         self.app._run_navigation_shortcut(event, self.app._toggle_flip_y)
         self.assertTrue(self.app.flip_y_var.get())
+
+        self.app._select_tab(0)
+        self.app.polar_layout_var.set(False)
+        self.app._run_navigation_shortcut(event, self.app._toggle_polar_layout)
+        self.assertTrue(self.app.polar_layout_var.get())
+        self.assertEqual(self.app._active_tab_key(), "rf")
+
+        self.app.polar_layout_var.set(False)
+        self.assertEqual(
+            self.app.notebook.bindtags()[0],
+            str(self.app.notebook),
+        )
+        self.assertTrue(self.app.notebook.bind("<KeyPress-p>"))
+        notebook_event = SimpleNamespace(widget=self.app.notebook)
+        result = self.app._run_navigation_shortcut(
+            notebook_event,
+            self.app._toggle_polar_layout,
+        )
+        self.assertEqual(result, "break")
+        self.assertTrue(self.app.polar_layout_var.get())
+        self.assertEqual(self.app._active_tab_key(), "rf")
 
         self.app.palette_var.set("Gray")
         self.app._run_navigation_shortcut(event, self.app._cycle_palette)

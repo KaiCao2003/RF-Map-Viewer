@@ -55,13 +55,14 @@ function state() {
       view,
       selectedCell: [1, 2, 3, 4],
       hd,
+      waveformChannelMode: "same_x_column",
     }),
     baseName: "session_figures",
   });
 }
 
 describe("figure export plan reducer", () => {
-  it("uses all ten backend-stable figure IDs", () => {
+  it("uses all eleven backend-stable figure IDs", () => {
     expect(FIGURE_TYPE_IDS).toEqual([
       "rf.cartesian",
       "rf.polar",
@@ -73,6 +74,7 @@ describe("figure export plan reducer", () => {
       "hd.line",
       "hd.polar",
       "probe",
+      "waveform.local_average",
     ]);
   });
 
@@ -208,7 +210,12 @@ describe("figure export plan reducer", () => {
   });
 
   it("freezes timeline selection and lifted HD settings into plot snapshots", () => {
-    const context = { view, selectedCell: [1, 2, 3, 4] as const, hd };
+    const context = {
+      view,
+      selectedCell: [1, 2, 3, 4] as const,
+      hd,
+      waveformChannelMode: "same_shank" as const,
+    };
     expect(snapshotPlotSettings("timeline.current", context)).toMatchObject({
       timelineStartMs: -50,
       timelineEndMs: 250,
@@ -222,6 +229,9 @@ describe("figure export plan reducer", () => {
       smoothing: true,
       sigmaDeg: 12.5,
     });
+    expect(snapshotPlotSettings("waveform.local_average", context)).toEqual({
+      channelMode: "same_shank",
+    });
   });
 
   it("serializes the same manual companion paths for preview and final export", () => {
@@ -229,6 +239,8 @@ describe("figure export plan reducer", () => {
     const companions = {
       hdPath: "/mnt/senzailab/session/tuning_curves.json",
       probePositionsPath: "/mnt/senzailab/session/positions.csv",
+      tuningSession: 3,
+      waveformChannelMode: "same_shank" as const,
     };
     expect(buildFigurePreviewRequest(draft, 1, companions)).toMatchObject(companions);
     expect(buildFigureExportRequest(draft, 1, companions)).toMatchObject(companions);

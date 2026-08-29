@@ -1,4 +1,4 @@
-# SwiftUI Viewer 1.9.5
+# SwiftUI Viewer 1.9.6
 
 This is the native SwiftUI implementation for macOS 15 on Apple silicon. It
 parses RF/HD/probe files itself and has no Python dependency. RF mapping files
@@ -7,11 +7,11 @@ positions use `.probe` (CSV schema). `.json` and `.csv` remain filename aliases,
 but an RF map's extension never enables an older schema. RF maps are primary
 documents; tuning and probe files are attached
 to a loaded RF map in the figure composer so recorded unit IDs can be matched.
-Its `1.9.5` version places it in the same stable feature generation as the
+Its `1.9.6` version places it in the same stable feature generation as the
 Python `1.9.x` reference; `swift` remains an artifact/tag identity rather than
 a version suffix.
 
-Version 1.9.5 requires the current raw-count/occupancy RF schema. In addition to
+Version 1.9.6 requires the current raw-count/occupancy RF schema. In addition to
 the RF tensor, axes, and time edges, every RF map must contain:
 
 - `occupancyTimeSec` with declared shape `occupancyTimeSecSize == [nY, nX]`;
@@ -32,6 +32,16 @@ count divided by pooled occupancy seconds. Spatial reduction and smoothing pool
 counts and occupancy independently before division, so unequal occupancy does
 not bias the display or initial strongest-cell selection. Raw spike count
 remains available as the alternate response display.
+
+The main viewer discovers and independently parses the same read-only
+companions as Python: probe positions, an exact positive HD tuning session
+(default `1`, with no fallback to another session), and schema-v4 local-average
+waveforms. Probe drag-selection filters units, HD line/polar views follow the
+selected unit, and the compact waveform supports Same x column / Same shank
+selection plus double-click enlargement. Figure Composer includes all three
+companions and applies one symmetric microvolt scale across its selected units.
+Press `P` to toggle rectangular/polar spatial plots and `Shift-P` to cycle the
+palette.
 
 Singleton-y Cartesian maps keep a `30:7` footprint, and the sole Polar row spans
 seven radial units in main views, RGB maps, timelines, hit testing, selection,

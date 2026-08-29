@@ -138,8 +138,9 @@ assert_file_contains "$INSTALLER" 'EXPECTED_MINIMUM_MACOS_VERSION="$RF_MAPPING_M
 assert_file_contains "$INSTALLER" 'verify_plist_value "$bundle" RFMappingReleaseEdition "$EXPECTED_EDITION"'
 assert_file_contains "$INSTALLER" 'verify_plist_value "$bundle" LSMinimumSystemVersion "$EXPECTED_MINIMUM_MACOS_VERSION"'
 assert_file_contains "$INSTALLER" 'validate_release_contract "$bundle"'
+assert_file_contains "$INSTALLER" 'validate_document_contract "$bundle"'
 assert_file_contains "$INSTALLER" 'CFBundleDocumentTypes:0:CFBundleTypeExtensions:0 rfmap'
-assert_file_not_contains "$INSTALLER" 'CFBundleDocumentTypes:1:CFBundleTypeExtensions'
+assert_file_contains "$INSTALLER" 'FreeMovingAlpha)'
 assert_file_contains "$INSTALLER" 'verify_plist_missing "$bundle" CFBundleDocumentTypes:1'
 pass_test "build, run, and install scripts share canonical release metadata"
 
@@ -283,7 +284,13 @@ run_fixture_transaction() (
   bundle_version() { /bin/cat "$1/VERSION"; }
   bundle_build() { /bin/cat "$1/BUILD"; }
   bundle_cdhash() { /bin/cat "$1/CDHASH"; }
-  path_identity() { /usr/bin/stat -c '%d:%i' "$1"; }
+  path_identity() {
+    if [[ "$(/usr/bin/uname -s)" == "Darwin" ]]; then
+      /usr/bin/stat -f '%d:%i' "$1"
+    else
+      /usr/bin/stat -c '%d:%i' "$1"
+    fi
+  }
   validate_bundle() {
     local bundle="$1"
     local exact="$2"

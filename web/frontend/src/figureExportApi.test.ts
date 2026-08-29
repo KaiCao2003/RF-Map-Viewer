@@ -15,7 +15,13 @@ const specPayload = {
     family: id.split(".")[0],
     projection: id.split(".")[1] ?? "cartesian",
     settings: {},
-    ...(id.startsWith("hd.") ? { capability: "hd" } : id === "probe" ? { capability: "probe" } : {}),
+    ...(id.startsWith("hd.")
+      ? { capability: "hd" }
+      : id === "probe"
+        ? { capability: "probe" }
+        : id === "waveform.local_average"
+          ? { capability: "waveform" }
+          : {}),
   })),
   pageOrders: ["unit-major", "page-major"],
   formats: ["pdf", "png"],
@@ -85,6 +91,8 @@ describe("figure export API", () => {
       pageIndex: 0,
       pages: [{ title: "Page", plots: [{ type: "hd.line", settings: {} }] }],
       hdPath: "/mnt/senzailab/session/tuning_curves.json",
+      tuningSession: 1,
+      waveformChannelMode: "same_x_column",
     };
 
     const result = await previewFigureExport("dataset/id", request);
@@ -127,6 +135,8 @@ describe("figure export API", () => {
       order: "unit-major",
       format: "pdf",
       pages: [{ title: "Page", plots: [{ type: "rf.cartesian", settings: {} }] }],
+      tuningSession: 1,
+      waveformChannelMode: "same_x_column",
       destination: { directory: "session", baseName: "report", overwrite: false },
     };
 

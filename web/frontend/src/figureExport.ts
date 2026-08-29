@@ -1,4 +1,9 @@
-import type { CellRef, HdViewSettings, ViewState } from "./types";
+import type {
+  CellRef,
+  HdViewSettings,
+  ViewState,
+  WaveformChannelMode,
+} from "./types";
 
 export const FIGURE_TYPE_IDS = [
   "rf.cartesian",
@@ -11,6 +16,7 @@ export const FIGURE_TYPE_IDS = [
   "hd.line",
   "hd.polar",
   "probe",
+  "waveform.local_average",
 ] as const;
 
 export type FigureTypeId = typeof FIGURE_TYPE_IDS[number];
@@ -32,7 +38,7 @@ export interface FigureTypeDefinition {
   family: string;
   projection: string;
   settings: Record<string, FigureSettingDefinition>;
-  capability?: "hd" | "probe";
+  capability?: "hd" | "probe" | "waveform";
 }
 
 export interface FigureExportSpec {
@@ -64,6 +70,8 @@ export interface FigurePreviewRequest {
   pages: FigurePagePayload[];
   hdPath?: string;
   probePositionsPath?: string;
+  tuningSession: number;
+  waveformChannelMode: WaveformChannelMode;
 }
 
 export interface FigureDestinationPayload {
@@ -81,6 +89,8 @@ export interface FigureExportRequest {
   destination: FigureDestinationPayload;
   hdPath?: string;
   probePositionsPath?: string;
+  tuningSession: number;
+  waveformChannelMode: WaveformChannelMode;
 }
 
 export interface FigureManifestPage {
@@ -173,11 +183,14 @@ export interface PlotSettingsContext {
   view: ViewState;
   selectedCell: CellRef | null;
   hd: HdViewSettings;
+  waveformChannelMode: WaveformChannelMode;
 }
 
 export interface FigureCompanionPaths {
   hdPath?: string | null;
   probePositionsPath?: string | null;
+  tuningSession?: number;
+  waveformChannelMode?: WaveformChannelMode;
 }
 
 export function isFigureTypeId(value: string): value is FigureTypeId {
@@ -344,6 +357,9 @@ export function snapshotPlotSettings(
       smoothing: context.hd.smoothing,
       sigmaDeg: context.hd.sigmaDeg,
     };
+  }
+  if (type === "waveform.local_average") {
+    return { channelMode: context.waveformChannelMode };
   }
   return {};
 }
@@ -521,6 +537,8 @@ export function buildFigurePreviewRequest(
     clusterId: state.previewClusterId,
     pageIndex,
     pages: serializeFigurePages(state.pages),
+    tuningSession: companions.tuningSession ?? 1,
+    waveformChannelMode: companions.waveformChannelMode ?? "same_x_column",
     ...(companions.hdPath ? { hdPath: companions.hdPath } : {}),
     ...(companions.probePositionsPath ? { probePositionsPath: companions.probePositionsPath } : {}),
   };
@@ -537,6 +555,8 @@ export function buildFigureExportRequest(
     order: state.order,
     format: state.format,
     pages: serializeFigurePages(state.pages),
+    tuningSession: companions.tuningSession ?? 1,
+    waveformChannelMode: companions.waveformChannelMode ?? "same_x_column",
     destination: {
       directory: state.destinationDirectory,
       baseName: state.baseName.trim(),

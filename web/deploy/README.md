@@ -215,7 +215,7 @@ exactly `hd_class`, `rate_mvl`, `spike_angle_mrl`, `rayleigh_score`,
    curl -fsS http://127.0.0.1:3005/rfmapping/api/health
    ```
 
-   The health response must report `1.9.5`.
+   The health response must report `1.9.6`.
 
 4. If the optional Nginx include is active, validate it separately:
 

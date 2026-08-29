@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import errno
+import gzip
 import hashlib
 import io
 import json
@@ -365,7 +366,7 @@ def test_health_and_lazy_browse_are_root_confined(
         ]
         assert health.json() == {
             "status": "ok",
-            "version": "1.9.5",
+            "version": "1.9.6",
             "rfRoot": str(settings.rf_root),
             "rfRootAvailable": True,
             "outputRoot": str(settings.output_root),
@@ -468,13 +469,58 @@ def _create_remote_fixture(root: Path) -> Path:
     source = write_json(
         data_root / "rfmapping" / "good" / "window" / "ProbeA" / "rf.json"
     )
-    channels = data_root / "waveform" / "ProbeA" / "channels.csv"
-    channels.parent.mkdir(parents=True)
-    channels.write_text(
-        "channel_index,channel_id,raw_channel_index,x_um,y_um,shank_id\n"
-        "0,0,0,10,20,1\n1,1,1,12,24,1\n",
+    waveform_root = data_root / "waveform" / "ProbeA"
+    waveform_root.mkdir(parents=True)
+    (waveform_root / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_name": "rfmapping-spikeinterface-waveforms",
+                "schema_version": 4,
+                "recording": {
+                    "sampling_frequency_hz": 30_000.0,
+                    "num_frames": 1_800_000,
+                    "duration_minutes": 1.0,
+                },
+                "units": {"scope": "good", "count": 2},
+                "waveform": {"nbefore": 2, "num_samples": 4},
+                "files": {"units": "units.csv"},
+            }
+        ),
         encoding="utf-8",
     )
+    (waveform_root / "channels.csv").write_text(
+        "channel_index,channel_id,raw_channel_index,x_um,y_um,shank_id\n"
+        "0,0,0,10,20,1\n1,1,1,10,24,1\n",
+        encoding="utf-8",
+    )
+    (waveform_root / "waveform_time.csv").write_text(
+        "sample_index,sample_offset,time_ms\n"
+        "0,-2,-0.5\n1,-1,-0.25\n2,0,0\n3,1,0.25\n",
+        encoding="utf-8",
+    )
+    (waveform_root / "units.csv").write_text(
+        "unit_index,unit_id,quality,total_spike_count,selected_spike_count,"
+        "time_coverage_percent,best_channel_index,best_channel_id,"
+        "best_channel_x_um,best_channel_y_um,max_ptp_uv,unit_data_dir\n"
+        "0,11,good,1000,100,90,0,0,10,20,42,Unit11\n"
+        "1,22,good,1100,110,91,1,1,10,24,45,Unit22\n",
+        encoding="utf-8",
+    )
+    for unit_id in (11, 22):
+        unit_root = waveform_root / f"Unit{unit_id}"
+        unit_root.mkdir()
+        with gzip.open(
+            unit_root / "template_uv.csv.gz",
+            "wt",
+            encoding="utf-8",
+            newline="",
+        ) as handle:
+            writer = csv.writer(handle)
+            writer.writerow(("sample_index", "chidx_000_uv", "chidx_001_uv"))
+            for sample_index, scale in enumerate((1.0, 2.0, -4.0, 3.0)):
+                writer.writerow(
+                    (sample_index, scale + unit_id, 2 * scale + unit_id)
+                )
     positions = data_root / "spike_position" / "ProbeA" / "positions.csv"
     positions.parent.mkdir(parents=True)
     positions.write_text(
@@ -520,7 +566,12 @@ def test_open_metadata_binary_probe_and_hd(app, settings: Settings) -> None:
             "occupancyTimeSec": [[0.2, 0.3], [0.4, 0.5]],
             "responseUnits": "spike_count",
             "responseNormalization": "none",
-            "capabilities": {"probe": True, "hd": True, "occupancy": True},
+            "capabilities": {
+                "probe": True,
+                "hd": True,
+                "waveform": True,
+                "occupancy": True,
+            },
         }
         dataset_id = metadata["id"]
 
@@ -599,6 +650,32 @@ def test_open_metadata_binary_probe_and_hd(app, settings: Settings) -> None:
         assert missing_hd.json()["sourcePath"] == tuning["sourcePath"]
         assert missing_hd.json()["rates"] is None
 
+        waveform = client.get(
+            f"/api/datasets/{dataset_id}/waveform/11",
+            params={"mode": "same_x_column"},
+        )
+        assert waveform.status_code == 200, waveform.text
+        waveform_payload = waveform.json()
+        assert waveform_payload["available"] is True
+        assert waveform_payload["unitId"] == 11
+        assert waveform_payload["mode"] == "same_x_column"
+        assert waveform_payload["channelLabels"] == ["ch 1", "ch 0"]
+        assert waveform_payload["bestChannelRow"] == 1
+        assert waveform_payload["maxPtpUv"] == 42.0
+        assert len(waveform_payload["valuesUv"]) == 2
+        assert len(waveform_payload["valuesUv"][0]) == 4
+        assert waveform_payload["valuesUv"][0][:2] == [-1.0, 1.0]
+        missing_waveform = client.get(f"/api/datasets/{dataset_id}/waveform/999")
+        assert missing_waveform.status_code == 200
+        assert missing_waveform.json()["available"] is False
+        assert (
+            client.get(
+                f"/api/datasets/{dataset_id}/waveform/11",
+                params={"mode": "same_row"},
+            ).status_code
+            == 422
+        )
+
         image_url = f"/api/datasets/{dataset_id}/hd/11/image"
         image = client.get(image_url)
         assert image.status_code == 200
@@ -643,6 +720,19 @@ def test_current_extensions_open_and_win_companion_discovery(
     legacy_tuning = tuning_payload((11, 22))
     legacy_tuning["metadata"]["session"] = "legacy-json"  # type: ignore[index]
     write_json(tuning_root / "tuning_curves.json", legacy_tuning)
+    second_tuning = tuning_payload((22, 11))
+    second_tuning["metadata"]["session"] = "second-session"  # type: ignore[index]
+    write_json(
+        settings.rf_root
+        / "Kai"
+        / "260630"
+        / "260630_2"
+        / "data"
+        / "tuning_curves"
+        / "ProbeA"
+        / "tuning_curves.json",
+        second_tuning,
+    )
 
     with authenticated_client(app) as client:
         metadata = _open(client, source)
@@ -650,6 +740,7 @@ def test_current_extensions_open_and_win_companion_discovery(
         assert metadata["capabilities"] == {
             "probe": True,
             "hd": True,
+            "waveform": False,
             "occupancy": True,
         }
         probe = client.get(f"/api/datasets/{metadata['id']}/probe")
@@ -659,6 +750,17 @@ def test_current_extensions_open_and_win_companion_discovery(
         assert tuning.status_code == 200, tuning.text
         assert tuning.json()["sourcePath"].endswith("/tuning_curves.tc")
         assert tuning.json()["metadata"]["session"] == "current-tc"
+        session_two = client.get(
+            f"/api/datasets/{metadata['id']}/hd", params={"session": 2}
+        )
+        assert session_two.status_code == 200, session_two.text
+        assert session_two.json()["metadata"]["session"] == "second-session"
+        assert [unit["unitId"] for unit in session_two.json()["units"]] == [22, 11]
+        missing_session = client.get(
+            f"/api/datasets/{metadata['id']}/hd", params={"session": 3}
+        )
+        assert missing_session.status_code == 200
+        assert missing_session.json()["available"] is False
 
 
 def test_input_suffix_validation_accepts_aliases_and_rejects_other_files(
@@ -1657,6 +1759,7 @@ def test_figure_export_registry_covers_every_view_and_all_types_render(
         "hd.line",
         "hd.polar",
         "probe",
+        "waveform.local_average",
     }
     source = _create_remote_fixture(settings.rf_root)
     with authenticated_client(app) as client:

@@ -10,12 +10,22 @@ struct FigureExportCompanions: Sendable {
     var hdError: String?
     var probeGeometry: ProbeGeometry?
     var probeError: String?
+    var waveformArtifact: WaveformArtifactStore?
+    var waveformError: String?
+    var waveformChannelMode: WaveformChannelMode = .sameXColumn
 
     var probeUnavailableReason: String {
         if let probeError {
             return "Probe geometry could not be loaded: \(probeError)"
         }
         return "No companion positions.csv was found for this RF dataset."
+    }
+
+    var waveformUnavailableReason: String {
+        if let waveformError {
+            return "Waveform artifact could not be loaded: \(waveformError)"
+        }
+        return "No companion data/waveform/Probe*/manifest.json was found for this RF dataset."
     }
 }
 
@@ -25,19 +35,25 @@ struct FigurePlotRenderDescriptor: Identifiable, Equatable, Sendable {
     let placeholder: String?
     let hdCurve: ProcessedHDCurve?
     let probePayload: ProbePlotPayload?
+    let waveformPayload: WaveformPayload?
+    let waveformAmplitudeLimitMicrovolts: Double?
 
     init(
         id: UUID,
         kind: FigureExportPlotKind,
         placeholder: String? = nil,
         hdCurve: ProcessedHDCurve? = nil,
-        probePayload: ProbePlotPayload? = nil
+        probePayload: ProbePlotPayload? = nil,
+        waveformPayload: WaveformPayload? = nil,
+        waveformAmplitudeLimitMicrovolts: Double? = nil
     ) {
         self.id = id
         self.kind = kind
         self.placeholder = placeholder
         self.hdCurve = hdCurve
         self.probePayload = probePayload
+        self.waveformPayload = waveformPayload
+        self.waveformAmplitudeLimitMicrovolts = waveformAmplitudeLimitMicrovolts
     }
 }
 
@@ -97,6 +113,15 @@ struct FigureExportRenderer {
     ) -> [FigurePageRenderDescriptor] {
         var descriptors: [FigurePageRenderDescriptor] = []
         descriptors.reserveCapacity(configuration.selectedUnitIDs.count * configuration.pages.count)
+        let needsWaveform = configuration.pages.contains { page in
+            page.plots.contains { $0.kind.requiresWaveform }
+        }
+        let sharedWaveformLimit = needsWaveform
+            ? companions.waveformArtifact?.sharedAmplitudeLimit(
+                unitIDs: configuration.selectedUnitIDs,
+                mode: companions.waveformChannelMode
+            )
+            : nil
         var ordinal = 0
         // The loop order is an explicit invariant: unit-major, then page-major.
         for unitID in configuration.selectedUnitIDs {
@@ -110,7 +135,8 @@ struct FigureExportRenderer {
                     page: page,
                     viewerSnapshot: configuration.viewerSnapshot,
                     data: data,
-                    companions: companions
+                    companions: companions,
+                    sharedWaveformLimit: sharedWaveformLimit
                 ))
                 ordinal += 1
             }
@@ -130,6 +156,15 @@ struct FigureExportRenderer {
         guard let unitOffset = configuration.selectedUnitIDs.firstIndex(of: unitID),
               configuration.pages.indices.contains(pageIndex) else { return nil }
         let outputOrdinal = unitOffset * configuration.pages.count + pageIndex
+        let needsWaveform = configuration.pages[pageIndex].plots.contains {
+            $0.kind.requiresWaveform
+        }
+        let sharedWaveformLimit = needsWaveform
+            ? companions.waveformArtifact?.sharedAmplitudeLimit(
+                unitIDs: configuration.selectedUnitIDs,
+                mode: companions.waveformChannelMode
+            )
+            : nil
         return makeDescriptor(
             outputOrdinal: outputOrdinal,
             unitID: unitID,
@@ -138,7 +173,8 @@ struct FigureExportRenderer {
             page: configuration.pages[pageIndex],
             viewerSnapshot: configuration.viewerSnapshot,
             data: data,
-            companions: companions
+            companions: companions,
+            sharedWaveformLimit: sharedWaveformLimit
         )
     }
 
@@ -203,14 +239,16 @@ struct FigureExportRenderer {
         page: FigurePageTemplate,
         viewerSnapshot: ViewerSyncState,
         data: RFMappingData,
-        companions: FigureExportCompanions
+        companions: FigureExportCompanions,
+        sharedWaveformLimit: Double?
     ) -> FigurePageRenderDescriptor {
         let plots = page.plots.map { placement in
             makePlotDescriptor(
                 placement: placement,
                 unitID: unitID,
                 originalUnitIndex: originalUnitIndex,
-                companions: companions
+                companions: companions,
+                sharedWaveformLimit: sharedWaveformLimit
             )
         }
         return FigurePageRenderDescriptor(
@@ -230,7 +268,8 @@ struct FigureExportRenderer {
         placement: FigurePlotPlacement,
         unitID: Int,
         originalUnitIndex: Int,
-        companions: FigureExportCompanions
+        companions: FigureExportCompanions,
+        sharedWaveformLimit: Double?
     ) -> FigurePlotRenderDescriptor {
         if originalUnitIndex < 0 {
             return .init(
@@ -298,6 +337,35 @@ struct FigureExportRenderer {
                     unit: unit
                 )
             )
+        }
+        if placement.kind.requiresWaveform {
+            guard let artifact = companions.waveformArtifact else {
+                return .init(
+                    id: placement.id,
+                    kind: placement.kind,
+                    placeholder: companions.waveformUnavailableReason
+                )
+            }
+            do {
+                let payload = try artifact.payload(
+                    for: unitID,
+                    mode: companions.waveformChannelMode
+                )
+                return .init(
+                    id: placement.id,
+                    kind: placement.kind,
+                    waveformPayload: payload,
+                    waveformAmplitudeLimitMicrovolts: sharedWaveformLimit
+                        ?? payload.amplitudeLimitMicrovolts
+                )
+            } catch {
+                return .init(
+                    id: placement.id,
+                    kind: placement.kind,
+                    placeholder: "Waveform unavailable for unit ID \(unitID): "
+                        + error.localizedDescription
+                )
+            }
         }
         return .init(id: placement.id, kind: placement.kind)
     }
@@ -1039,6 +1107,12 @@ private struct FigureExportPlotView: View {
                 )
             } else if let probePayload = plot.probePayload {
                 ProbeGeometryExportView(payload: probePayload)
+            } else if let waveformPayload = plot.waveformPayload {
+                WaveformExportView(
+                    payload: waveformPayload,
+                    amplitudeLimitMicrovolts: plot.waveformAmplitudeLimitMicrovolts
+                        ?? waveformPayload.amplitudeLimitMicrovolts
+                )
             } else {
                 ExistingRFExportPlotView(
                     data: data,
@@ -1106,6 +1180,11 @@ private struct ExistingRFExportPlotView: View {
             FigureExportPlaceholderView(
                 title: kind.label,
                 message: "Probe renderer payload was not resolved."
+            )
+        case .waveformLocalAverage:
+            FigureExportPlaceholderView(
+                title: kind.label,
+                message: "Waveform renderer payload was not resolved."
             )
         }
     }
@@ -1228,6 +1307,174 @@ private struct HDCurveExportView: View {
             )
         }
     }
+}
+
+private struct WaveformExportView: View {
+    let payload: WaveformPayload
+    let amplitudeLimitMicrovolts: Double
+
+    var body: some View {
+        Canvas { context, size in
+            var context = context
+            drawTitle(
+                context: &context,
+                title: "Local average waveform",
+                subtitle: "Unit ID \(payload.summary.unitID); best + nearest "
+                    + "\(max(0, payload.channels.count - 1)); \(payload.mode.label); "
+                    + "baseline ≤ \(String(format: "%.3g", payload.baselineEndMilliseconds)) ms; "
+                    + "shared ±\(String(format: "%.1f", amplitudeLimitMicrovolts)) µV"
+            )
+            drawHeatmap(context: &context, size: size)
+        }
+        .background(Color(nsColor: .textBackgroundColor))
+    }
+
+    private func drawHeatmap(context: inout GraphicsContext, size: CGSize) {
+        let plotRect = CGRect(
+            x: 62,
+            y: 68,
+            width: max(10, size.width - 146),
+            height: max(10, size.height - 112)
+        )
+        guard !payload.valuesMicrovolts.isEmpty,
+              !payload.timesMilliseconds.isEmpty else { return }
+        let rowHeight = plotRect.height / CGFloat(payload.valuesMicrovolts.count)
+        let columnWidth = plotRect.width / CGFloat(payload.timesMilliseconds.count)
+        let limit = max(amplitudeLimitMicrovolts, Double.leastNonzeroMagnitude)
+        for row in payload.valuesMicrovolts.indices {
+            for column in payload.valuesMicrovolts[row].indices {
+                let value = payload.valuesMicrovolts[row][column]
+                let rect = CGRect(
+                    x: plotRect.minX + CGFloat(column) * columnWidth,
+                    y: plotRect.minY + CGFloat(row) * rowHeight,
+                    width: columnWidth + 0.5,
+                    height: rowHeight + 0.5
+                )
+                context.fill(
+                    Path(rect),
+                    with: .color(waveformDivergingColor(value / limit))
+                )
+            }
+        }
+        context.stroke(Path(plotRect), with: .color(.secondary.opacity(0.65)), lineWidth: 1)
+        let bestRect = CGRect(
+            x: plotRect.minX,
+            y: plotRect.minY + CGFloat(payload.bestChannelRow) * rowHeight,
+            width: plotRect.width,
+            height: rowHeight
+        )
+        context.stroke(Path(bestRect), with: .color(.red), lineWidth: 2)
+        for row in payload.channels.indices {
+            context.draw(
+                Text((row == payload.bestChannelRow ? "★ " : "")
+                    + "ch \(payload.channels[row].channelID)")
+                    .font(.system(size: 8, weight: row == payload.bestChannelRow ? .bold : .regular))
+                    .foregroundStyle(row == payload.bestChannelRow ? .red : .secondary),
+                at: CGPoint(
+                    x: plotRect.minX - 6,
+                    y: plotRect.minY + (CGFloat(row) + 0.5) * rowHeight
+                ),
+                anchor: .trailing
+            )
+        }
+        let timeLow = payload.timeEdgesMilliseconds.first
+            ?? payload.timesMilliseconds.first ?? 0
+        let timeHigh = payload.timeEdgesMilliseconds.last
+            ?? payload.timesMilliseconds.last ?? 0
+        let tickValues = [
+            payload.timesMilliseconds.first ?? timeLow,
+            0.0,
+            payload.timesMilliseconds.last ?? timeHigh,
+        ].filter { timeLow <= $0 && $0 <= timeHigh }
+        for value in tickValues {
+            let fraction = (value - timeLow) / max(timeHigh - timeLow, 1e-12)
+            context.draw(
+                Text(String(format: "%.2f", value))
+                    .font(.system(size: 8))
+                    .foregroundStyle(.secondary),
+                at: CGPoint(
+                    x: plotRect.minX + plotRect.width * CGFloat(fraction),
+                    y: plotRect.maxY + 13
+                ),
+                anchor: .center
+            )
+        }
+        context.draw(
+            Text("time (ms)").font(.system(size: 9)).foregroundStyle(.secondary),
+            at: CGPoint(x: plotRect.midX, y: plotRect.maxY + 29),
+            anchor: .center
+        )
+        let zeroFraction = (0 - timeLow) / max(timeHigh - timeLow, 1e-12)
+        if (0.0...1.0).contains(zeroFraction) {
+            let x = plotRect.minX + plotRect.width * CGFloat(zeroFraction)
+            var zeroPath = Path()
+            zeroPath.move(to: CGPoint(x: x, y: plotRect.minY))
+            zeroPath.addLine(to: CGPoint(x: x, y: plotRect.maxY))
+            context.stroke(zeroPath, with: .color(.black.opacity(0.5)), lineWidth: 0.8)
+        }
+        let barX = plotRect.maxX + 20
+        let barWidth: CGFloat = 13
+        let steps = 96
+        for step in 0..<steps {
+            let fraction = Double(step) / Double(steps - 1)
+            let rect = CGRect(
+                x: barX,
+                y: plotRect.minY + CGFloat(step) * plotRect.height / CGFloat(steps),
+                width: barWidth,
+                height: plotRect.height / CGFloat(steps) + 0.5
+            )
+            context.fill(
+                Path(rect),
+                with: .color(waveformDivergingColor(1 - 2 * fraction))
+            )
+        }
+        context.stroke(
+            Path(CGRect(x: barX, y: plotRect.minY, width: barWidth, height: plotRect.height)),
+            with: .color(.secondary),
+            lineWidth: 1
+        )
+        context.draw(
+            Text("µV").font(.system(size: 8)).foregroundStyle(.secondary),
+            at: CGPoint(x: barX, y: plotRect.minY - 7),
+            anchor: .bottomLeading
+        )
+        for (value, y) in [
+            (limit, plotRect.minY),
+            (0.0, plotRect.midY),
+            (-limit, plotRect.maxY),
+        ] {
+            context.draw(
+                Text(String(format: "%.3g", value))
+                    .font(.system(size: 8))
+                    .foregroundStyle(.secondary),
+                at: CGPoint(x: barX + barWidth + 4, y: y),
+                anchor: .leading
+            )
+        }
+    }
+}
+
+func waveformDivergingColor(_ normalized: Double) -> Color {
+    let value = max(-1, min(1, normalized.isFinite ? normalized : 0))
+    let fraction = (value + 1) / 2
+    let stops: [(position: Double, red: Double, green: Double, blue: Double)] = [
+        (0, 5, 48, 97),
+        (0.25, 67, 147, 195),
+        (0.5, 247, 247, 247),
+        (0.75, 214, 96, 77),
+        (1, 103, 0, 31),
+    ]
+    for index in 0..<(stops.count - 1) where fraction <= stops[index + 1].position {
+        let left = stops[index]
+        let right = stops[index + 1]
+        let segment = (fraction - left.position) / (right.position - left.position)
+        return Color(
+            red: (left.red + (right.red - left.red) * segment) / 255,
+            green: (left.green + (right.green - left.green) * segment) / 255,
+            blue: (left.blue + (right.blue - left.blue) * segment) / 255
+        )
+    }
+    return Color(red: 103.0 / 255.0, green: 0, blue: 31.0 / 255.0)
 }
 
 private struct ProbeGeometryExportView: View {

@@ -183,6 +183,7 @@ struct RFMappingCommandActions {
     let showFullRange: () -> Void
     let selectTab: (Int) -> Void
     let toggleFlipY: () -> Void
+    let toggleSpatialFormat: () -> Void
     let cyclePalette: () -> Void
 }
 
@@ -339,9 +340,20 @@ private struct RFMappingWindow: View {
             nextBin: { store.stepBin(1) },
             decreaseResolution: { store.stepTimeResolution(-1.0) },
             increaseResolution: { store.stepTimeResolution(1.0) },
-            showFullRange: store.clearTimelineSelection,
+            showFullRange: {
+                if store.isWaveformZoomed {
+                    store.isWaveformZoomed = false
+                } else {
+                    store.clearTimelineSelection()
+                }
+            },
             selectTab: store.selectTab,
             toggleFlipY: { store.flipY.toggle() },
+            toggleSpatialFormat: {
+                store.spatialPlotFormat = store.spatialPlotFormat == .rectangular
+                    ? .polar
+                    : .rectangular
+            },
             cyclePalette: store.cyclePalette
         )
     }
@@ -470,7 +482,8 @@ private struct RFMappingCommands: Commands {
             }
             Divider()
             Button("Invert Y (F)") { actions?.toggleFlipY() }
-            Button("Cycle Palette (P)") { actions?.cyclePalette() }
+            Button("Toggle Rectangle / Polar (P)") { actions?.toggleSpatialFormat() }
+            Button("Cycle Palette (Shift-P)") { actions?.cyclePalette() }
         }
 
         CommandGroup(after: .help) {
@@ -587,7 +600,7 @@ private struct WindowShortcutMonitor: NSViewRepresentable {
                 case "[": actions.previousUnit(); return true
                 case "]": actions.nextUnit(); return true
                 case "f": actions.toggleFlipY(); return true
-                case "p": actions.cyclePalette(); return true
+                case "p": actions.toggleSpatialFormat(); return true
                 case "?": showKeyboardShortcuts(); return true
                 case "1", "2", "3":
                     actions.selectTab(Int(character!)! - 1)
@@ -599,6 +612,7 @@ private struct WindowShortcutMonitor: NSViewRepresentable {
             if modifiers == [.shift] {
                 if character == "," { actions.decreaseResolution(); return true }
                 if character == "." { actions.increaseResolution(); return true }
+                if character == "p" { actions.cyclePalette(); return true }
                 if event.characters == "?" { showKeyboardShortcuts(); return true }
             }
             return false
@@ -622,8 +636,9 @@ private func showKeyboardShortcuts() {
     Shift+, / Shift+.   Time resolution −/+ 1 ms
     1–3   Switch plot tab
     F   Invert Y
-    P   Cycle palette
-    Esc   Show full time range
+    P   Toggle rectangular / polar layout
+    Shift-P   Cycle palette
+    Esc   Close waveform zoom, otherwise show full time range
     [ / ]   Previous / next unit
     Command-O   Open RF map in a new window
     Command-E   Open Figure Export Composer
