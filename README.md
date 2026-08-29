@@ -19,7 +19,7 @@ through versioned file contracts, principally the RF JSON described in
 ## Component versions
 
 Python, Swift, and Web implement the same stable feature generation and are
-versioned `1.9.5`.
+versioned `1.9.6`.
 The Free-Moving Python viewer begins the next generation as
 **`1.10.0-alpha.3`**. Component identity belongs in release tags and artifact
 names, not in a fourth version component. See
@@ -33,10 +33,10 @@ advance without inventing a platform-specific fourth version number.
 
 | Viewer | Channel | Download | Release notes |
 | --- | --- | --- | --- |
-| Python RF Map Viewer `1.9.5` | Stable | [macOS Apple-silicon ZIP](https://github.com/KaiCao2003/RF-Map-Viewer/releases/download/python-v1.9.5/RF_Map_Viewer-python-1.9.5-full-macos-arm64.zip) | [`python-v1.9.5`](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/python-v1.9.5) |
+| Python RF Map Viewer `1.9.6` | Stable | [macOS Apple-silicon ZIP](https://github.com/KaiCao2003/RF-Map-Viewer/releases/download/python-v1.9.6/RF_Map_Viewer-python-1.9.6-full-macos-arm64.zip) | [`python-v1.9.6`](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/python-v1.9.6) |
 | Python Free-Moving `1.10.0-alpha.3` | Alpha preview | [macOS Apple-silicon ZIP](https://github.com/KaiCao2003/RF-Map-Viewer/releases/download/python-v1.10.0-alpha.3/Free_Moving_RF_Viewer-python-1.10.0-alpha.3-freemoving-macos-arm64.zip) | [`python-v1.10.0-alpha.3`](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/python-v1.10.0-alpha.3) |
-| Swift `1.9.5` | Stable | [macOS Apple-silicon ZIP](https://github.com/KaiCao2003/RF-Map-Viewer/releases/download/swift-v1.9.5/RF_Map_Viewer-1.9.5-swift-macos-arm64.zip) | [`swift-v1.9.5`](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/swift-v1.9.5) |
-| Web `1.9.5` | Stable | [deployment source archive](https://github.com/KaiCao2003/RF-Map-Viewer/releases/download/web-v1.9.5/RF_Map_Viewer-1.9.5-web.tar.gz) | [`web-v1.9.5`](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/web-v1.9.5) |
+| Swift `1.9.6` | Stable | [macOS Apple-silicon ZIP](https://github.com/KaiCao2003/RF-Map-Viewer/releases/download/swift-v1.9.6/RF_Map_Viewer-1.9.6-swift-macos-arm64.zip) | [`swift-v1.9.6`](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/swift-v1.9.6) |
+| Web `1.9.6` | Stable | [deployment source archive](https://github.com/KaiCao2003/RF-Map-Viewer/releases/download/web-v1.9.6/RF_Map_Viewer-1.9.6-web.tar.gz) | [`web-v1.9.6`](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/web-v1.9.6) |
 
 Python and Web releases also include a SHA-256 checksum file. The Free-Moving
 build is a preview and is deliberately marked as a GitHub prerelease. Browse
@@ -56,11 +56,11 @@ the legacy `30:7` visual footprint; the physical 3D sphere is unchanged. Drag
 the sphere to rotate the viewing direction or double-click to reset it. Legacy
 JSON, tuning-curve, head-direction, and probe companions are intentionally
 outside this alpha app. The stable Python viewer remains available separately
-at `1.9.5`; Swift and Web use the same stable version.
+at `1.9.6`; Swift and Web use the same stable version.
 
 ## Current RF format and filename aliases
 
-Stable version 1.9.5 requires the current raw-count plus
+Stable version 1.9.6 requires the current raw-count plus
 `occupancyTimeSec` RF schema written by `Utils/RFmapping_core.m`. Earlier RF
 payloads without occupancy metadata, including the previously normalized
 vertical-bar format, are intentionally unsupported. Firing rate is the default
@@ -79,15 +79,16 @@ precedence over `tuning_curves.json` and `positions.csv`. Probe channel geometry
 continues to use `channels.csv`. An RF map is the primary document; tuning and
 probe files are opened as companions of a loaded RF map.
 
-Python, Swift, and Web `1.9.5` accept MATLAB numeric scalars
+Python, Swift, and Web `1.9.6` accept MATLAB numeric scalars
 for a declared singleton `xPositions` or `yPositions` axis. Singleton-y maps
 use a `30:7` Cartesian footprint and a seven-unit Polar ring; multirow data and
 all scientific indices remain unchanged.
 
-The refreshed Python `1.9.5` application also discovers the companion
-SpikeInterface waveform artifact and exposes its notebook-equivalent nearest
-channels in the viewer and Figure Composer. This Python-only patch does not
-change the Swift or Web applications.
+Python, Swift, and Web `1.9.6` discover the companion schema-v4
+SpikeInterface waveform artifact and expose its notebook-equivalent nearest
+channels in the viewer and Figure Composer. All three use exact positive
+tuning-session selection (default `1`), `P` for rectangle/polar layout, and
+`Shift-P` for palette cycling.
 
 ## Remote validation
 

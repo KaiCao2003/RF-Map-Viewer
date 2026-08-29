@@ -3,8 +3,17 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-# shellcheck source=python_macos_release.env
-source "$SCRIPT_DIR/python_macos_release.env"
+if [[ -n "${RF_MAPPING_RELEASE_CONFIG:-}" ]]; then
+  [[ "$RF_MAPPING_RELEASE_CONFIG" == /* && -f "$RF_MAPPING_RELEASE_CONFIG" ]] || {
+    echo "error: RF_MAPPING_RELEASE_CONFIG must name an existing absolute file" >&2
+    exit 1
+  }
+  # shellcheck disable=SC1090
+  source "$RF_MAPPING_RELEASE_CONFIG"
+else
+  # shellcheck source=python_macos_release.env
+  source "$SCRIPT_DIR/python_macos_release.env"
+fi
 
 APP_NAME="$RF_MAPPING_APP_NAME"
 EXECUTABLE_NAME="$RF_MAPPING_EXECUTABLE_NAME"
@@ -253,6 +262,36 @@ validate_release_contract() {
   verify_plist_value "$bundle" LSMinimumSystemVersion "$EXPECTED_MINIMUM_MACOS_VERSION"
 }
 
+validate_document_contract() {
+  local bundle="$1"
+
+  verify_plist_value "$bundle" CFBundleDocumentTypes:0:CFBundleTypeRole Viewer
+  verify_plist_value "$bundle" CFBundleDocumentTypes:0:LSHandlerRank Owner
+  verify_plist_value "$bundle" CFBundleDocumentTypes:0:LSItemContentTypes:0 org.local.rfmapping.rfmap
+  verify_plist_value "$bundle" CFBundleDocumentTypes:0:CFBundleTypeExtensions:0 rfmap
+  verify_plist_value "$bundle" UTExportedTypeDeclarations:0:UTTypeIdentifier org.local.rfmapping.rfmap
+
+  case "$EXPECTED_EDITION" in
+    FreeMovingAlpha)
+      verify_plist_missing "$bundle" CFBundleDocumentTypes:1
+      verify_plist_missing "$bundle" UTExportedTypeDeclarations:1
+      ;;
+    Full)
+      verify_plist_value "$bundle" CFBundleDocumentTypes:1:CFBundleTypeRole Viewer
+      verify_plist_value "$bundle" CFBundleDocumentTypes:1:LSHandlerRank Alternate
+      verify_plist_value "$bundle" CFBundleDocumentTypes:1:LSItemContentTypes:0 public.json
+      verify_plist_value "$bundle" CFBundleDocumentTypes:1:CFBundleTypeExtensions:0 json
+      verify_plist_missing "$bundle" CFBundleDocumentTypes:2
+      verify_plist_value "$bundle" UTExportedTypeDeclarations:1:UTTypeIdentifier org.local.rfmapping.tc
+      verify_plist_value "$bundle" UTExportedTypeDeclarations:2:UTTypeIdentifier org.local.rfmapping.probe
+      verify_plist_missing "$bundle" UTExportedTypeDeclarations:3
+      ;;
+    *)
+      fail "Unsupported release edition for document validation: $EXPECTED_EDITION"
+      ;;
+  esac
+}
+
 bundle_cdhash() {
   local bundle="$1"
   local details
@@ -313,12 +352,7 @@ validate_bundle() {
   if [[ "$require_release_version" -eq 1 ]]; then
     validate_release_contract "$bundle"
     verify_plist_value "$bundle" LSMultipleInstancesProhibited true
-    verify_plist_value "$bundle" CFBundleDocumentTypes:0:CFBundleTypeRole Viewer
-    verify_plist_value "$bundle" CFBundleDocumentTypes:0:LSItemContentTypes:0 org.local.rfmapping.rfmap
-    verify_plist_value "$bundle" CFBundleDocumentTypes:0:CFBundleTypeExtensions:0 rfmap
-    verify_plist_missing "$bundle" CFBundleDocumentTypes:1
-    verify_plist_value "$bundle" UTExportedTypeDeclarations:0:UTTypeIdentifier org.local.rfmapping.rfmap
-    verify_plist_missing "$bundle" UTExportedTypeDeclarations:1
+    validate_document_contract "$bundle"
   else
     [[ -n "$(bundle_version "$bundle")" ]] \
       || fail "Bundle has an empty CFBundleShortVersionString: $bundle"

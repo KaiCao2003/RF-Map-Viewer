@@ -2,7 +2,7 @@
   "schema_version": 1,
   "reference": {
     "component": "python_stable",
-    "version": "1.9.5",
+    "version": "1.9.6",
     "stable_series": "1.9"
   },
   "policy": {
@@ -11,20 +11,20 @@
   },
   "components": {
     "python_stable": {
-      "release_version": "1.9.5",
-      "marketing_version": "1.9.5",
-      "package_version": "1.9.5",
-      "build": "10906",
+      "release_version": "1.9.6",
+      "marketing_version": "1.9.6",
+      "package_version": "1.9.6",
+      "build": "10908",
       "channel": "stable",
       "feature_generation_offset": 0,
       "edition": "Full",
       "artifact_flavor": "full",
-      "artifact": "RF_Map_Viewer-python-1.9.5-full-macos-arm64.zip",
-      "checksum": "SHA256SUMS-python-1.9.5-full.txt",
-      "windows_portable_artifact": "RF_Map_Viewer-python-1.9.5-full-windows-x64-portable.zip",
-      "windows_installer_artifact": "RF_Map_Viewer-python-1.9.5-full-windows-x64-setup.exe",
-      "windows_checksum": "SHA256SUMS-python-1.9.5-full-windows-x64.txt",
-      "tag": "python-v1.9.5"
+      "artifact": "RF_Map_Viewer-python-1.9.6-full-macos-arm64.zip",
+      "checksum": "SHA256SUMS-python-1.9.6-full.txt",
+      "windows_portable_artifact": "RF_Map_Viewer-python-1.9.6-full-windows-x64-portable.zip",
+      "windows_installer_artifact": "RF_Map_Viewer-python-1.9.6-full-windows-x64-setup.exe",
+      "windows_checksum": "SHA256SUMS-python-1.9.6-full-windows-x64.txt",
+      "tag": "python-v1.9.6"
     },
     "python_freemoving": {
       "release_version": "1.10.0-alpha.3",
@@ -41,23 +41,23 @@
       "tag": "python-v1.10.0-alpha.3"
     },
     "swift": {
-      "release_version": "1.9.5",
-      "marketing_version": "1.9.5",
-      "build": "10905",
+      "release_version": "1.9.6",
+      "marketing_version": "1.9.6",
+      "build": "10908",
       "channel": "stable",
       "feature_generation_offset": 0,
-      "artifact": "RF_Map_Viewer-1.9.5-swift-macos-arm64.zip",
-      "tag": "swift-v1.9.5"
+      "artifact": "RF_Map_Viewer-1.9.6-swift-macos-arm64.zip",
+      "tag": "swift-v1.9.6"
     },
     "web": {
-      "release_version": "1.9.5",
-      "package_version": "1.9.5",
+      "release_version": "1.9.6",
+      "package_version": "1.9.6",
       "channel": "stable",
       "feature_generation_offset": 0,
       "artifact_flavor": "web",
-      "artifact": "RF_Map_Viewer-1.9.5-web.tar.gz",
-      "checksum": "SHA256SUMS-web-1.9.5.txt",
-      "tag": "web-v1.9.5"
+      "artifact": "RF_Map_Viewer-1.9.6-web.tar.gz",
+      "checksum": "SHA256SUMS-web-1.9.6.txt",
+      "tag": "web-v1.9.6"
     }
   }
 }

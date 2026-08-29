@@ -33,7 +33,7 @@ const meta: DatasetMeta = {
   occupancyTimeSec: [[2, 2, 2], [4, 4, 4]],
   responseUnits: "spike_count",
   responseNormalization: "none",
-  capabilities: { probe: false, hd: false, occupancy: true },
+  capabilities: { probe: false, hd: false, waveform: false, occupancy: true },
 };
 
 const counts = Float64Array.from([

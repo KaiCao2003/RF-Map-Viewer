@@ -5,6 +5,7 @@ import {
   getHdDataset,
   getProbeGeometry,
   getUnitCounts,
+  getWaveformArtifact,
   listRemoteFiles,
   openRemoteDataset,
 } from "./api";
@@ -14,6 +15,7 @@ import { SpatialPlot, TimelinePlot } from "./components/Plots";
 import ProbeLayout, { type ProbeSelection } from "./components/ProbeLayout";
 import RemoteBrowser from "./components/RemoteBrowser";
 import SaveArtifactDialog from "./components/SaveArtifactDialog";
+import WaveformPanel from "./components/WaveformPanel";
 import {
   jsonChoiceLabel,
   mergeJsonChoices,
@@ -51,11 +53,14 @@ import type {
   ProbeGeometry,
   ValueMode,
   ViewState,
+  WaveformArtifact,
+  WaveformChannelMode,
 } from "./types";
 import { DEFAULT_VALUE_MODE, PALETTES, POLAR_RADIUS_MODES, VALUE_MODES } from "./types";
 
 const RECENT_JSON_KEY = "rfmapping-recent-json-v1";
 const HD_LAYOUT_KEY = "rfmapping-hd-layout-v1";
+const COMPANION_PREFERENCES_KEY = "rfmapping-companion-preferences-v1";
 
 const INITIAL_HD_VIEW_SETTINGS: HdViewSettings = {
   plotMode: "auto",
@@ -69,6 +74,35 @@ type HdLayout = "side-by-side" | "stacked";
 
 function loadHdLayout(): HdLayout {
   return window.localStorage.getItem(HD_LAYOUT_KEY) === "stacked" ? "stacked" : "side-by-side";
+}
+
+interface CompanionPreferences {
+  tuningSession: number;
+  showWaveform: boolean;
+  waveformChannelMode: WaveformChannelMode;
+}
+
+function loadCompanionPreferences(): CompanionPreferences {
+  const fallback: CompanionPreferences = {
+    tuningSession: 1,
+    showWaveform: true,
+    waveformChannelMode: "same_x_column",
+  };
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(COMPANION_PREFERENCES_KEY) ?? "null");
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return fallback;
+    const source = parsed as Record<string, unknown>;
+    const rawSession = Number(source.tuningSession);
+    return {
+      tuningSession: Number.isInteger(rawSession) && rawSession >= 1 ? rawSession : 1,
+      showWaveform: typeof source.showWaveform === "boolean" ? source.showWaveform : true,
+      waveformChannelMode: source.waveformChannelMode === "same_shank"
+        ? "same_shank"
+        : "same_x_column",
+    };
+  } catch {
+    return fallback;
+  }
 }
 
 interface MessageDialogState {
@@ -209,6 +243,14 @@ export default function App() {
   const [hdLayout, setHdLayout] = useState<HdLayout>(loadHdLayout);
   const [hdSettings, setHdSettings] = useState<HdViewSettings>(INITIAL_HD_VIEW_SETTINGS);
   const [hdRefresh, setHdRefresh] = useState(0);
+  const [tuningSession, setTuningSession] = useState(() => loadCompanionPreferences().tuningSession);
+  const [showWaveform, setShowWaveform] = useState(() => loadCompanionPreferences().showWaveform);
+  const [waveformChannelMode, setWaveformChannelMode] = useState<WaveformChannelMode>(
+    () => loadCompanionPreferences().waveformChannelMode,
+  );
+  const [waveformArtifact, setWaveformArtifact] = useState<WaveformArtifact | null>(null);
+  const [waveformLoading, setWaveformLoading] = useState(false);
+  const [waveformError, setWaveformError] = useState("");
 
   const updateState = useCallback((patch: Partial<ViewState> | ((current: ViewState) => Partial<ViewState>)) => {
     setViewState((current) => current ? { ...current, ...(typeof patch === "function" ? patch(current) : patch) } : current);
@@ -247,6 +289,9 @@ export default function App() {
     setHdError("");
     setHdPath(null);
     setHdChooserOpen(false);
+    setWaveformArtifact(null);
+    setWaveformError("");
+    setWaveformLoading(false);
     setFigureComposerOpen(false);
     setError("");
     setRecentPaths((current) => {
@@ -275,6 +320,14 @@ export default function App() {
   useEffect(() => {
     document.title = meta ? `${meta.name} — RF Map Viewer` : "RF Map Viewer";
   }, [meta]);
+
+  useEffect(() => {
+    window.localStorage.setItem(COMPANION_PREFERENCES_KEY, JSON.stringify({
+      tuningSession,
+      showWaveform,
+      waveformChannelMode,
+    } satisfies CompanionPreferences));
+  }, [showWaveform, tuningSession, waveformChannelMode]);
 
   useEffect(() => {
     if (!meta) return;
@@ -391,7 +444,7 @@ export default function App() {
   }, [meta, probePositionsPath]);
 
   useEffect(() => {
-    if (!meta || (!meta.capabilities.hd && !hdPath)) {
+    if (!meta) {
       setHdArtifact(null);
       setHdLoading(false);
       return;
@@ -399,7 +452,7 @@ export default function App() {
     const controller = new AbortController();
     setHdLoading(true);
     setHdError("");
-    getHdDataset(meta.id, hdPath ?? undefined, controller.signal)
+    getHdDataset(meta.id, hdPath ?? undefined, tuningSession, controller.signal)
       .then((artifact) => { if (!controller.signal.aborted) setHdArtifact(artifact); })
       .catch((caught) => {
         if (!controller.signal.aborted) {
@@ -409,7 +462,50 @@ export default function App() {
       })
       .finally(() => { if (!controller.signal.aborted) setHdLoading(false); });
     return () => controller.abort();
-  }, [hdPath, hdRefresh, meta]);
+  }, [hdPath, hdRefresh, meta, tuningSession]);
+
+  useEffect(() => {
+    if (!meta || !viewState || !showWaveform) {
+      setWaveformArtifact(null);
+      setWaveformError("");
+      setWaveformLoading(false);
+      return;
+    }
+    if (!meta.capabilities.waveform) {
+      setWaveformArtifact({
+        available: false,
+        detail: "No companion data/waveform/Probe* artifact was found for this RF dataset.",
+      });
+      setWaveformError("");
+      setWaveformLoading(false);
+      return;
+    }
+    const controller = new AbortController();
+    setWaveformArtifact(null);
+    setWaveformError("");
+    setWaveformLoading(true);
+    getWaveformArtifact(
+      meta.id,
+      viewState.clusterId,
+      waveformChannelMode,
+      controller.signal,
+    )
+      .then((artifact) => {
+        if (!controller.signal.aborted) setWaveformArtifact(artifact);
+      })
+      .catch((caught) => {
+        if (!controller.signal.aborted) {
+          setWaveformArtifact(null);
+          setWaveformError(
+            caught instanceof Error ? caught.message : "Could not load the local average waveform.",
+          );
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setWaveformLoading(false);
+      });
+    return () => controller.abort();
+  }, [meta, showWaveform, viewState?.clusterId, waveformChannelMode]);
 
   const navigationPool = useMemo(() => {
     const base = meta?.unitPool ?? [];
@@ -638,7 +734,10 @@ export default function App() {
       else if (event.key === "<") stepResolution(-1);
       else if (event.key === ">") stepResolution(1);
       else if (event.key.toLowerCase() === "f") updateState({ flipY: !viewState.flipY });
-      else if (event.key.toLowerCase() === "p") updateState({ palette: PALETTES[(PALETTES.indexOf(viewState.palette) + 1) % PALETTES.length] });
+      else if (event.key.toLowerCase() === "p" && event.shiftKey) {
+        updateState({ palette: PALETTES[(PALETTES.indexOf(viewState.palette) + 1) % PALETTES.length] });
+      }
+      else if (event.key.toLowerCase() === "p") updateState({ polarLayout: !viewState.polarLayout });
       else if (event.key === "Escape") {
         if (probeSelection) {
           setProbeSelection(null);
@@ -706,6 +805,20 @@ export default function App() {
               </select>
               <button type="button" onClick={openChooser}>Open…</button>
             </div>
+            <label className="display-row tuning-session-row">
+              <span>Tuning session</span>
+              <input
+                type="number"
+                min={1}
+                step={1}
+                value={tuningSession}
+                onChange={(event) => {
+                  const requested = Number(event.target.value);
+                  if (Number.isInteger(requested) && requested >= 1) setTuningSession(requested);
+                }}
+                title="Load only the exact DATE_SESSION tuning-curve artifact"
+              />
+            </label>
           </section>
 
           <hr />
@@ -776,6 +889,19 @@ export default function App() {
               </>}
             </div>
           </section>
+
+          <hr />
+          <WaveformPanel
+            artifact={waveformArtifact}
+            clusterId={viewState.clusterId}
+            loading={waveformLoading}
+            error={waveformError}
+            visible={showWaveform}
+            mode={waveformChannelMode}
+            blocked={noProbeMatches}
+            onVisibleChange={setShowWaveform}
+            onModeChange={setWaveformChannelMode}
+          />
 
           <hr />
           <section className="sidebar-block display-block">
@@ -962,9 +1088,12 @@ export default function App() {
           availableCapabilities={{
             hd: Boolean(hdArtifact?.available),
             probe: probe != null,
+            waveform: meta.capabilities.waveform,
           }}
           hdPath={hdPath}
           probePositionsPath={probePositionsPath}
+          tuningSession={tuningSession}
+          waveformChannelMode={waveformChannelMode}
           onClose={() => setFigureComposerOpen(false)}
         />
       )}
@@ -972,7 +1101,7 @@ export default function App() {
         <div className="modal-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) setHelpOpen(false); }}>
           <div className="info-dialog" role="dialog" aria-modal="true" aria-label="Keyboard Shortcuts">
             <header><strong>Keyboard Shortcuts</strong><button type="button" aria-label="Close" onClick={() => setHelpOpen(false)}>×</button></header>
-            <pre>← / → or [ / ]   Previous / next unit{"\n"}↑ / ↓   Previous / next timeline bin{"\n"}Shift+, / Shift+.   Time resolution −/+ 1 ms{"\n"}1–3   Switch RF / Delay-RGB / Timeline{"\n"}F   Invert Y{"\n"}P   Cycle palette{"\n"}Esc   Clear Probe region; otherwise show full Timeline{"\n"}Command-O   Open an RF mapping file in this viewer{"\n"}Command-E   Open Figure Export Composer</pre>
+            <pre>← / → or [ / ]   Previous / next unit{"\n"}↑ / ↓   Previous / next timeline bin{"\n"}Shift+, / Shift+.   Time resolution −/+ 1 ms{"\n"}1–3   Switch RF / Delay-RGB / Timeline{"\n"}F   Invert Y{"\n"}P   Toggle rectangular / polar layout{"\n"}Shift+P   Cycle palette{"\n"}Double-click waveform   Enlarge local waveform{"\n"}Esc   Close waveform zoom; clear Probe region; otherwise show full Timeline{"\n"}Command-O   Open an RF mapping file in this viewer{"\n"}Command-E   Open Figure Export Composer</pre>
             <footer><button type="button" onClick={() => setHelpOpen(false)}>OK</button></footer>
           </div>
         </div>

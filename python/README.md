@@ -2,16 +2,16 @@
 
 This directory contains two separately versioned applications:
 
-- `rfmapping_gui.py`: the stable RF Map Viewer `1.9.5`;
+- `rfmapping_gui.py`: the stable RF Map Viewer `1.9.6`;
 - `rfmapping_fm_gui.py`: the Free-Moving RF Viewer `1.10.0-alpha.3`.
 
 They have distinct app names, bundle identifiers, release artifacts, and tags,
 so the alpha can be installed and released without replacing the stable app.
 
-## Stable viewer 1.9.5
+## Stable viewer 1.9.6
 
 The stable viewer opens the current JSON-text RF `.rfmap` contract and its
-tuning-curve, probe, and waveform companions. Version 1.9.5 requires raw non-negative
+tuning-curve, probe, and waveform companions. Version 1.9.6 requires raw non-negative
 integer `unitsSpikeCounts` together with the matching spatial
 `occupancyTimeSec` map and the current response-definition fields written by
 `RFmapping_core.m`. Older RF documents without occupancy metadata are rejected
@@ -28,8 +28,10 @@ footprint and seven-unit Polar ring across live plots, timeline thumbnails, hit
 testing, and figure exports.
 
 The RF tab can show a compact **Local Average Waveform** panel in the left
-sidebar, directly below **Spike Time**. **Unit Info** stays at the bottom-right
-below the HD tuning curve. The viewer auto-discovers the read-only schema-v4 SpikeInterface
+sidebar. Double-clicking the waveform opens a large, in-window view; another
+double-click, **Esc**, or **Done** restores the compact panel. **Unit Info** and
+**Spike Time** share the bottom-right inspector below the HD tuning curve. The
+viewer auto-discovers the read-only schema-v4 SpikeInterface
 artifact at `data/waveform/ProbeA` or `ProbeB` and shows the selected unit's
 baseline-corrected average template on the best-PTP channel plus the four
 nearest channels. **Settings → Waveform** controls whether the panel is shown
@@ -38,6 +40,15 @@ match the notebook's nearest-four selector rather than forcing two channels
 above and two below. Figure Composer exports the same payload with a shared
 symmetric µV scale across selected units and records the manifest, metadata
 tables, and selected template files in provenance.
+
+**Settings → Tuning Curve → Tuning Curve Session** selects the positive
+same-date session number used for automatic tuning-curve discovery. For an RF
+file below `260730_3`, for example, a value of `2` reads only from
+`260730_2/data/tuning_curves/ProbeA` or `ProbeB`; it does not fall back to a
+different session. The default is session `1`.
+
+Press **P** to switch the RF display between Rectangle and Polar layouts.
+Press **Shift+P** to cycle the color palette.
 
 Run it from source with:
 
@@ -49,7 +60,7 @@ Opening the app without a path shows the native file chooser. Release packages
 do not contain or auto-load sample RF data.
 
 Its macOS identity is `RF Map Viewer.app`, bundle ID
-`org.local.rfmapping.viewer`, and version/build `1.9.5` / `10906`. Build it with:
+`org.local.rfmapping.viewer`, and version/build `1.9.6` / `10908`. Build it with:
 
 ```sh
 script/build_python_stable_macos_app.sh

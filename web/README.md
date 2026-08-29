@@ -1,17 +1,25 @@
-# Web Viewer 1.9.5
+# Web Viewer 1.9.6
 
 The Web implementation contains a FastAPI backend in `backend/` and a
 React/Vite frontend in `frontend/`. The backend owns its figure renderer and
 does not import the analysis repository or the Python/Tk implementation.
-Its `1.9.5` version places it in the same stable feature generation as the
+Its `1.9.6` version places it in the same stable feature generation as the
 Python `1.9.x` reference; `web` remains an artifact/tag identity rather than a
 version suffix.
 
-Version 1.9.5 implements the occupancy-aware RF contract. Mean firing rate is
+Version 1.9.6 implements the occupancy-aware RF contract. Mean firing rate is
 the default display and export value: selected raw counts are divided by
 `occupancyTimeSec` in seconds. Count remains available. Spatial reduction and
 smoothing combine count and occupancy separately before dividing, and the
 default strongest cell is selected by firing rate rather than raw count.
+
+The viewer also discovers the read-only schema-v4 waveform artifact for the
+current probe, renders the selected unit's local average in the main workspace,
+and exports it from Figure Composer with a symmetric microvolt scale shared by
+the selected units. The channel selector matches Python's Same x column and
+Same shank modes. Automatic HD discovery uses one exact positive session
+(default `1`) without falling back to a different session. Press `P` to toggle
+rectangular/polar spatial views and `Shift-P` to cycle the palette.
 
 ## Input files
 

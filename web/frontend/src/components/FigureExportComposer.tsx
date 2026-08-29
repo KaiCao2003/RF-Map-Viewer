@@ -36,6 +36,7 @@ import type {
   DatasetMeta,
   HdViewSettings,
   ViewState,
+  WaveformChannelMode,
 } from "../types";
 
 interface FigureExportComposerProps {
@@ -44,9 +45,11 @@ interface FigureExportComposerProps {
   selectedCell: CellRef | null;
   hdSettings: HdViewSettings;
   probeFilteredUnitIds: ReadonlyArray<number> | null;
-  availableCapabilities: { hd: boolean; probe: boolean };
+  availableCapabilities: { hd: boolean; probe: boolean; waveform: boolean };
   hdPath: string | null;
   probePositionsPath: string | null;
+  tuningSession: number;
+  waveformChannelMode: WaveformChannelMode;
   initialSpec?: FigureExportSpec;
   onClose: () => void;
 }
@@ -445,6 +448,8 @@ export default function FigureExportComposer({
   availableCapabilities,
   hdPath,
   probePositionsPath,
+  tuningSession,
+  waveformChannelMode,
   initialSpec,
   onClose,
 }: FigureExportComposerProps) {
@@ -462,6 +467,7 @@ export default function FigureExportComposer({
         view: viewState,
         selectedCell,
         hd: hdSettings,
+        waveformChannelMode,
       }),
       baseName: safeExportBaseName(meta.name),
     }),
@@ -484,7 +490,8 @@ export default function FigureExportComposer({
     view: viewState,
     selectedCell,
     hd: hdSettings,
-  }), [hdSettings, selectedCell, viewState]);
+    waveformChannelMode,
+  }), [hdSettings, selectedCell, viewState, waveformChannelMode]);
   const settingsFor = (type: FigureTypeId) => snapshotPlotSettings(type, snapshotContext);
 
   useEffect(() => {
@@ -526,8 +533,13 @@ export default function FigureExportComposer({
 
   const previewRequest = useMemo(() => {
     if (!spec || !draft.selectedUnitIds.length) return null;
-    return buildFigurePreviewRequest(draft, spec.specVersion, { hdPath, probePositionsPath });
-  }, [draft, hdPath, probePositionsPath, spec]);
+    return buildFigurePreviewRequest(draft, spec.specVersion, {
+      hdPath,
+      probePositionsPath,
+      tuningSession,
+      waveformChannelMode,
+    });
+  }, [draft, hdPath, probePositionsPath, spec, tuningSession, waveformChannelMode]);
   const previewKey = previewRequest == null ? "" : JSON.stringify(previewRequest);
 
   useEffect(() => {
@@ -610,7 +622,12 @@ export default function FigureExportComposer({
     try {
       const result = await exportFigurePlan(
         meta.id,
-        buildFigureExportRequest(draft, spec.specVersion, { hdPath, probePositionsPath }),
+        buildFigureExportRequest(draft, spec.specVersion, {
+          hdPath,
+          probePositionsPath,
+          tuningSession,
+          waveformChannelMode,
+        }),
       );
       setExportResult(result);
       setExportStatus("complete");

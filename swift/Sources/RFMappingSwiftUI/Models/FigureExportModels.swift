@@ -12,6 +12,7 @@ enum FigureExportPlotKind: String, CaseIterable, Codable, Identifiable, Hashable
     case hdLine = "hd.line"
     case hdPolar = "hd.polar"
     case probe = "probe"
+    case waveformLocalAverage = "waveform.local_average"
 
     var id: String { rawValue }
 
@@ -27,6 +28,7 @@ enum FigureExportPlotKind: String, CaseIterable, Codable, Identifiable, Hashable
         case .hdLine: "HD tuning curve"
         case .hdPolar: "HD tuning curve (polar)"
         case .probe: "Probe"
+        case .waveformLocalAverage: "Local average waveform"
         }
     }
 
@@ -39,6 +41,8 @@ enum FigureExportPlotKind: String, CaseIterable, Codable, Identifiable, Hashable
     }
 
     var requiresProbe: Bool { self == .probe }
+
+    var requiresWaveform: Bool { self == .waveformLocalAverage }
 }
 
 struct FigurePlotPlacement: Identifiable, Equatable, Codable, Sendable {
@@ -328,6 +332,25 @@ struct FigureExportSeed: Sendable {
     let data: RFMappingData
     let viewerSnapshot: ViewerSyncState
     let currentUnitID: Int
+    let tuningSessionIndex: Int
+    let waveformChannelMode: WaveformChannelMode
+    let companions: FigureExportCompanions
+
+    init(
+        data: RFMappingData,
+        viewerSnapshot: ViewerSyncState,
+        currentUnitID: Int,
+        tuningSessionIndex: Int = 1,
+        waveformChannelMode: WaveformChannelMode = .sameXColumn,
+        companions: FigureExportCompanions = FigureExportCompanions()
+    ) {
+        self.data = data
+        self.viewerSnapshot = viewerSnapshot
+        self.currentUnitID = currentUnitID
+        self.tuningSessionIndex = max(1, tuningSessionIndex)
+        self.waveformChannelMode = waveformChannelMode
+        self.companions = companions
+    }
 }
 
 extension FigureExportPlotKind {
