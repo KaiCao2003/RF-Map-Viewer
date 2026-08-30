@@ -1305,9 +1305,17 @@ struct FigureExportRenderer {
     }
 
     private var applicationVersion: String {
-        Bundle.main.object(
-            forInfoDictionaryKey: "CFBundleShortVersionString"
-        ) as? String ?? "1.9.6"
+        let bundle = Bundle.main
+        guard bundle.bundleIdentifier == "org.local.rfmapping.viewer.swift",
+              let version = bundle.object(
+                forInfoDictionaryKey: "CFBundleShortVersionString"
+              ) as? String,
+              !version.isEmpty else {
+            // `Bundle.main` belongs to xctest when the renderer is exercised
+            // through SwiftPM, not to RF Map Viewer.
+            return "1.9.6"
+        }
+        return version
     }
 
     private var generatorName: String {
