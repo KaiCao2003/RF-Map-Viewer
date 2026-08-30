@@ -176,7 +176,7 @@ jobs:
         working-directory: swift
         run: |
           swift test --list-tests -c release
-          python3 -c 'import subprocess; subprocess.run(["xcrun", "xctest", "-XCTest", "RFMappingSwiftUITests.FigureExportTests/testAvailableCompanionsResolveAllElevenKindsToRealRendererPayloads", ".build/arm64-apple-macosx/release/RFMappingSwiftUIPackageTests.xctest"], check=True, timeout=30)'
+          python3 -c 'import subprocess; subprocess.run(["xcrun", "xctest", ".build/arm64-apple-macosx/release/RFMappingSwiftUIPackageTests.xctest"], check=True, timeout=180)'
       - name: Build Swift macOS archive
         working-directory: swift
         run: script/build_macos_app.sh

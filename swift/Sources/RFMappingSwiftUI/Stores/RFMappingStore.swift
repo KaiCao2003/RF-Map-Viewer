@@ -260,7 +260,11 @@ final class RFMappingStore {
         isAwaitingStartupDocument = initialURL == nil && initialData == nil && !loadDefault
         if discoverJSONChoices { refreshJSONChoices() }
         if let initialData {
+            figureExportHangTrace(
+                "store init adopt begin companions=\(discoversCompanionsAutomatically)"
+            )
             adopt(initialData, refreshChoices: discoverJSONChoices)
+            figureExportHangTrace("store init adopt end")
         } else if let url = initialURL {
             loadJSON(url)
         } else if loadDefault {
@@ -605,6 +609,7 @@ final class RFMappingStore {
     }
 
     private func adopt(_ loaded: RFMappingData, refreshChoices: Bool = true) {
+        figureExportHangTrace("store adopt enter")
         isAwaitingStartupDocument = false
         errorMessage = nil
         clearDerivedCaches()
@@ -624,10 +629,15 @@ final class RFMappingStore {
         timelineRangeAnchor = nil
         timelineScrollFraction = 0
         resetPlotRangeToDefault(notifyUnitVisibility: false)
+        figureExportHangTrace("store adopt reset range end")
         normalizeControls()
+        figureExportHangTrace("store adopt normalize end")
         ensureSelectedCell()
+        figureExportHangTrace("store adopt selected cell end")
         if discoversCompanionsAutomatically {
+            figureExportHangTrace("store adopt companions begin")
             discoverCompanions(for: loaded)
+            figureExportHangTrace("store adopt companions end")
         } else {
             clearDiscoveredCompanions()
         }
@@ -924,7 +934,10 @@ final class RFMappingStore {
 
     private func discoverCompanions(for loaded: RFMappingData) {
         clearDiscoveredCompanions()
+        figureExportHangTrace("store companions hd begin")
         reloadDiscoveredHDTuning()
+        figureExportHangTrace("store companions hd end")
+        figureExportHangTrace("store companions probe begin")
         if let paths = ProbeGeometryDiscovery.discover(forRFURL: loaded.url) {
             do {
                 probeGeometry = try ProbeGeometryDiscovery.load(
@@ -935,12 +948,17 @@ final class RFMappingStore {
                 probeGeometryError = error.localizedDescription
             }
         }
+        figureExportHangTrace("store companions probe end")
+        figureExportHangTrace("store companions waveform begin")
         do {
             waveformArtifact = try WaveformArtifactStore.discover(forRFURL: loaded.url)
         } catch {
             waveformError = error.localizedDescription
         }
+        figureExportHangTrace("store companions waveform end")
+        figureExportHangTrace("store companions payload begin")
         refreshWaveformPayload()
+        figureExportHangTrace("store companions payload end")
     }
 
     private func clearDiscoveredCompanions() {
