@@ -358,6 +358,7 @@ struct FigureExportSeed: Sendable {
     let unitQualityFilter: RFUnitQualityFilterSnapshot?
     let tuningSessionIndex: Int
     let waveformChannelMode: WaveformChannelMode
+    let discoversMissingCompanions: Bool
     let companions: FigureExportCompanions
 
     init(
@@ -368,6 +369,7 @@ struct FigureExportSeed: Sendable {
         unitQualityFilter: RFUnitQualityFilterSnapshot? = nil,
         tuningSessionIndex: Int = 1,
         waveformChannelMode: WaveformChannelMode = .sameXColumn,
+        discoversMissingCompanions: Bool = true,
         companions: FigureExportCompanions = FigureExportCompanions()
     ) {
         self.data = data
@@ -384,6 +386,7 @@ struct FigureExportSeed: Sendable {
         self.unitQualityFilter = unitQualityFilter
         self.tuningSessionIndex = max(1, tuningSessionIndex)
         self.waveformChannelMode = waveformChannelMode
+        self.discoversMissingCompanions = discoversMissingCompanions
         self.companions = companions
     }
 }

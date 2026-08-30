@@ -45,6 +45,7 @@ final class UnitQualityFilterTests: XCTestCase {
         let defaults = RFMappingStore(
             loadDefault: false,
             discoverJSONChoices: false,
+            discoverCompanions: false,
             preferences: preferences
         )
         XCTAssertTrue(defaults.rfFilterUnitsWithZeroBins)
@@ -56,6 +57,7 @@ final class UnitQualityFilterTests: XCTestCase {
         let restored = RFMappingStore(
             loadDefault: false,
             discoverJSONChoices: false,
+            discoverCompanions: false,
             preferences: preferences
         )
         XCTAssertFalse(restored.rfFilterUnitsWithZeroBins)
@@ -70,6 +72,7 @@ final class UnitQualityFilterTests: XCTestCase {
         let clampedStored = RFMappingStore(
             loadDefault: false,
             discoverJSONChoices: false,
+            discoverCompanions: false,
             preferences: preferences
         )
         XCTAssertEqual(clampedStored.rfZeroBinThreshold, 100_000)
@@ -77,6 +80,7 @@ final class UnitQualityFilterTests: XCTestCase {
         let clampedInjected = RFMappingStore(
             loadDefault: false,
             discoverJSONChoices: false,
+            discoverCompanions: false,
             unitQualityFilterEnabled: true,
             zeroSpikeBinThreshold: 500_000,
             preferences: preferences
@@ -90,6 +94,7 @@ final class UnitQualityFilterTests: XCTestCase {
             initialData: data,
             loadDefault: false,
             discoverJSONChoices: false,
+            discoverCompanions: false,
             unitQualityFilterEnabled: true,
             zeroSpikeBinThreshold: 1
         )
@@ -155,6 +160,7 @@ final class UnitQualityFilterTests: XCTestCase {
             initialData: try makeWindowSensitiveData(),
             loadDefault: false,
             discoverJSONChoices: false,
+            discoverCompanions: false,
             unitQualityFilterEnabled: true,
             preferences: preferences
         )
@@ -187,6 +193,7 @@ final class UnitQualityFilterTests: XCTestCase {
             initialData: data,
             loadDefault: false,
             discoverJSONChoices: false,
+            discoverCompanions: false,
             unitQualityFilterEnabled: true,
             zeroSpikeBinThreshold: 1
         )
@@ -221,6 +228,7 @@ final class UnitQualityFilterTests: XCTestCase {
             initialData: try makeWindowSensitiveData(),
             loadDefault: false,
             discoverJSONChoices: false,
+            discoverCompanions: false,
             unitQualityFilterEnabled: true,
             zeroSpikeBinThreshold: 1
         )

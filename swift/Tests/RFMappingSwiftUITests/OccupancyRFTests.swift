@@ -170,7 +170,8 @@ final class OccupancyRFTests: XCTestCase {
         let store = RFMappingStore(
             initialData: data,
             loadDefault: false,
-            discoverJSONChoices: false
+            discoverJSONChoices: false,
+            discoverCompanions: false
         )
 
         XCTAssertEqual(store.valueMode, .meanFiringRate)

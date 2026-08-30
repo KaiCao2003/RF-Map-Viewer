@@ -65,6 +65,7 @@ final class StartupBehaviorTests: XCTestCase {
         let store = RFMappingStore(
             loadDefault: false,
             discoverJSONChoices: false,
+            discoverCompanions: false,
             preferences: preferences
         )
 
@@ -86,6 +87,7 @@ final class StartupBehaviorTests: XCTestCase {
         let store = RFMappingStore(
             loadDefault: false,
             discoverJSONChoices: false,
+            discoverCompanions: false,
             preferences: preferences
         )
         let root = FileManager.default.temporaryDirectory

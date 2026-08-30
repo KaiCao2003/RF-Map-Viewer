@@ -27,6 +27,7 @@ final class FigureExportWindowRegistry {
             unitQualityFilter: store.unitQualityFilterSnapshot,
             tuningSessionIndex: store.tuningSessionIndex,
             waveformChannelMode: store.waveformChannelMode,
+            discoversMissingCompanions: false,
             companions: store.figureExportCompanions
         )
         return request
@@ -86,10 +87,18 @@ final class FigureExportWorkspace {
         selectedPageID = firstPage.id
         previewUnitID = seed.currentUnitID
         customSelectionAnchorIndex = seed.unitPool.firstIndex(of: seed.currentUnitID)
-        if companions.hdTuning == nil { discoverHDTuning() }
-        if companions.probeGeometry == nil { discoverProbeGeometry() }
-        if companions.waveformArtifact == nil { discoverWaveform() }
+        figureExportHangTrace(
+            "workspace companion discovery begin enabled=\(seed.discoversMissingCompanions)"
+        )
+        if seed.discoversMissingCompanions {
+            if companions.hdTuning == nil { discoverHDTuning() }
+            if companions.probeGeometry == nil { discoverProbeGeometry() }
+            if companions.waveformArtifact == nil { discoverWaveform() }
+        }
+        figureExportHangTrace("workspace companion discovery end")
+        figureExportHangTrace("workspace freeze begin")
         freezeCurrentCompanions()
+        figureExportHangTrace("workspace freeze end")
     }
 
     var resolvedUnitIDs: [Int] {

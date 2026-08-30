@@ -94,7 +94,8 @@ final class PlotLayoutTests: XCTestCase {
         let store = RFMappingStore(
             initialData: data,
             loadDefault: false,
-            discoverJSONChoices: false
+            discoverJSONChoices: false,
+            discoverCompanions: false
         )
         let plot = makePlot(columns: 30, rows: 1)
         let layout = makePolarLayout(
@@ -129,7 +130,8 @@ final class PlotLayoutTests: XCTestCase {
         let store = RFMappingStore(
             initialData: data,
             loadDefault: false,
-            discoverJSONChoices: false
+            discoverJSONChoices: false,
+            discoverCompanions: false
         )
         let layout = makePolarLayout(
             size: CGSize(width: 620, height: 420),
@@ -145,7 +147,8 @@ final class PlotLayoutTests: XCTestCase {
         let store = RFMappingStore(
             initialData: data,
             loadDefault: false,
-            discoverJSONChoices: false
+            discoverJSONChoices: false,
+            discoverCompanions: false
         )
         store.spatialPlotFormat = .rectangular
 

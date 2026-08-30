@@ -26,6 +26,8 @@ final class WindowPairingCoordinatorTests: XCTestCase {
         RFMappingStore(
             initialData: try makeData(unitIDs: unitIDs, name: name),
             loadDefault: false,
+            discoverJSONChoices: false,
+            discoverCompanions: false,
             unitQualityFilterEnabled: true,
             zeroSpikeBinThreshold: 1
         )
@@ -162,7 +164,12 @@ final class WindowPairingCoordinatorTests: XCTestCase {
             data: JSONSerialization.data(withJSONObject: object),
             url: URL(fileURLWithPath: "/tmp/default-range.json")
         )
-        let store = RFMappingStore(initialData: data, loadDefault: false)
+        let store = RFMappingStore(
+            initialData: data,
+            loadDefault: false,
+            discoverJSONChoices: false,
+            discoverCompanions: false
+        )
 
         XCTAssertEqual(store.plotRangeStartMS, 0.0, accuracy: 1e-9)
         XCTAssertEqual(store.plotRangeEndMS, 200.0, accuracy: 1e-9)
@@ -178,6 +185,8 @@ final class WindowPairingCoordinatorTests: XCTestCase {
                 name: "quality-first"
             ),
             loadDefault: false,
+            discoverJSONChoices: false,
+            discoverCompanions: false,
             unitQualityFilterEnabled: true,
             zeroSpikeBinThreshold: 1
         )
@@ -188,6 +197,8 @@ final class WindowPairingCoordinatorTests: XCTestCase {
                 name: "quality-second"
             ),
             loadDefault: false,
+            discoverJSONChoices: false,
+            discoverCompanions: false,
             unitQualityFilterEnabled: false,
             zeroSpikeBinThreshold: 1
         )
@@ -223,12 +234,16 @@ final class WindowPairingCoordinatorTests: XCTestCase {
         let first = RFMappingStore(
             initialData: try makeWindowQualityData(name: "range-quality-first"),
             loadDefault: false,
+            discoverJSONChoices: false,
+            discoverCompanions: false,
             unitQualityFilterEnabled: true,
             zeroSpikeBinThreshold: 1
         )
         let second = RFMappingStore(
             initialData: try makeWindowQualityData(name: "range-quality-second"),
             loadDefault: false,
+            discoverJSONChoices: false,
+            discoverCompanions: false,
             unitQualityFilterEnabled: true,
             zeroSpikeBinThreshold: 1
         )

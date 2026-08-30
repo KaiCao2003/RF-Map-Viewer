@@ -692,7 +692,8 @@ final class FigureExportTests: XCTestCase {
         let workspace = FigureExportWorkspace(seed: FigureExportSeed(
             data: data,
             viewerSnapshot: originalSnapshot,
-            currentUnitID: 22
+            currentUnitID: 22,
+            discoversMissingCompanions: false
         ))
 
         XCTAssertEqual(workspace.configuration.viewerSnapshot, originalSnapshot)
@@ -720,7 +721,8 @@ final class FigureExportTests: XCTestCase {
         let workspace = FigureExportWorkspace(seed: FigureExportSeed(
             data: data,
             viewerSnapshot: snapshot(),
-            currentUnitID: 22
+            currentUnitID: 22,
+            discoversMissingCompanions: false
         ))
         let hosting = NSHostingView(rootView:
             FigureExportComposerView(workspace: workspace)
@@ -756,7 +758,8 @@ final class FigureExportTests: XCTestCase {
         let workspace = FigureExportWorkspace(seed: FigureExportSeed(
             data: data,
             viewerSnapshot: snapshot(),
-            currentUnitID: 22
+            currentUnitID: 22,
+            discoversMissingCompanions: false
         ))
 
         workspace.setUnitSelectionMode(.custom)
@@ -944,7 +947,8 @@ final class FigureExportTests: XCTestCase {
         let store = RFMappingStore(
             initialData: data,
             loadDefault: false,
-            discoverJSONChoices: false
+            discoverJSONChoices: false,
+            discoverCompanions: false
         )
         store.applyViewerSyncState(snapshot(unitID: 22, timeResolutionMS: 1))
         store.selectUnitID(22, resetInteraction: false)
@@ -1318,6 +1322,7 @@ final class FigureExportTests: XCTestCase {
                 unitPool: [22],
                 viewerSnapshot: snapshot(),
                 currentUnitID: 22,
+                discoversMissingCompanions: false,
                 companions: companions
             ))
             let page = FigurePageTemplate(
@@ -1931,6 +1936,7 @@ final class FigureExportTests: XCTestCase {
             initialData: data,
             loadDefault: false,
             discoverJSONChoices: false,
+            discoverCompanions: false,
             unitQualityFilterEnabled: true,
             zeroSpikeBinThreshold: 1
         )
@@ -1940,6 +1946,7 @@ final class FigureExportTests: XCTestCase {
         let request = try XCTUnwrap(registry.prepare(from: store))
         defer { registry.release(request) }
         let seed = try XCTUnwrap(registry.seed(for: request))
+        XCTAssertFalse(seed.discoversMissingCompanions)
         XCTAssertEqual(seed.unitPool, [22, 90])
         XCTAssertEqual(seed.unitQualityFilter?.visibleUnitIDs, [22, 90])
         XCTAssertEqual(seed.unitQualityFilter?.excludedUnitIDs, [11])
