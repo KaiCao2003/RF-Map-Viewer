@@ -95,7 +95,9 @@ for marker in \
   '$TkinterRuntimeHookBackport = Join-Path $HooksDir "rthooks\pyi_rth__tkinter.py"' \
   '$TkinterRuntimeHookPatcher = Join-Path $ScriptDir "patch_pyinstaller_tk9_runtime_hook.py"' \
   '& $BuildPython $TkinterRuntimeHookPatcher $TkinterRuntimeHookBackport' \
-  'Assert-NativeSuccess "PyInstaller Tcl/Tk 9 runtime-hook backport"'; do
+  'Assert-NativeSuccess "PyInstaller Tcl/Tk 9 runtime-hook backport"' \
+  'function Normalize-WindowsVersionString' \
+  'TrimEnd([char[]]@([char]0, [char]32))'; do
   assert_file_contains "$WINDOWS_BUILD_SCRIPT" "$marker"
 done
 for marker in \

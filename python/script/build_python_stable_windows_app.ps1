@@ -73,6 +73,14 @@ function Assert-Equal([object]$Actual, [object]$Expected, [string]$Description) 
     }
 }
 
+function Normalize-WindowsVersionString([object]$Value) {
+    # Inno Setup pads some StringFileInfo values with trailing spaces in the
+    # setup executable's fixed-width resource. Preserve strict identity while
+    # ignoring only resource padding; leading and internal whitespace remain
+    # significant.
+    return ([string]$Value).TrimEnd([char[]]@([char]0, [char]32))
+}
+
 function Invoke-WindowedSmoke(
     [string]$Executable,
     [string[]]$Arguments,
@@ -219,9 +227,18 @@ function Invoke-FrozenSmoke(
 
 function Assert-WindowsVersionResource([string]$Path, [string]$Label) {
     $VersionInfo = (Get-Item -LiteralPath $Path).VersionInfo
-    Assert-Equal $VersionInfo.ProductName $AppName "$Label product name"
-    Assert-Equal $VersionInfo.ProductVersion $AppVersion "$Label product version"
-    Assert-Equal $VersionInfo.FileVersion "$AppVersion.$AppBuild" "$Label file version"
+    Assert-Equal `
+        (Normalize-WindowsVersionString $VersionInfo.ProductName) `
+        $AppName `
+        "$Label product name"
+    Assert-Equal `
+        (Normalize-WindowsVersionString $VersionInfo.ProductVersion) `
+        $AppVersion `
+        "$Label product version"
+    Assert-Equal `
+        (Normalize-WindowsVersionString $VersionInfo.FileVersion) `
+        "$AppVersion.$AppBuild" `
+        "$Label file version"
 }
 
 if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
