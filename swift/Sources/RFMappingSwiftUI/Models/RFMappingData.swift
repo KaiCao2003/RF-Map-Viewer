@@ -513,6 +513,27 @@ final class RFMappingData: @unchecked Sendable {
         }
     }
 
+    /// Counts native `(y, x)` RF bins that have no spikes in the inclusive
+    /// source-bin window, or have no occupancy. This deliberately precedes all
+    /// display rebinning and smoothing so it remains a data-quality test.
+    func zeroSpikeSpatialBinCount(
+        unitIndex: Int,
+        start: Int,
+        end: Int
+    ) -> Int {
+        let counts = countMatrix(unitIndex: unitIndex, start: start, end: end)
+        var zeroCount = 0
+        for yIndex in 0..<nY {
+            for xIndex in 0..<nX {
+                if counts[yIndex][xIndex] == 0
+                    || occupancyTimeSeconds[yIndex][xIndex] <= 0 {
+                    zeroCount += 1
+                }
+            }
+        }
+        return zeroCount
+    }
+
     func rangeCount(
         unitIndex: Int,
         yIndex: Int,

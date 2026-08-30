@@ -243,15 +243,10 @@ final class FileFormatCompatibilityTests: XCTestCase {
         let root = try temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
         let url = root.appendingPathComponent("tuning_curves.tc")
-        let payload: [String: Any] = [
-            "metadata": [String: Any](),
-            "angle_bin_edges_deg": (0...HDTuningData.rawBinCount).map { Double($0) * 2 },
-            "occupancy_time_s": Array(repeating: 1.0, count: HDTuningData.rawBinCount),
-            "unit_id": [17],
-            "spike_counts": [Array(repeating: 2.0, count: HDTuningData.rawBinCount)],
-            "firing_rate_hz": [Array(repeating: 2.0, count: HDTuningData.rawBinCount)],
-            "unit_data": [String: Any](),
-        ]
+        let payload = strictHDTuningPayload(
+            unitIDs: [17],
+            zeroOccupancyBin: nil
+        )
         try write(try JSONSerialization.data(withJSONObject: payload), to: url)
 
         let decoded = try HDTuningData(url: url)

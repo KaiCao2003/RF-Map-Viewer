@@ -1,6 +1,24 @@
 import CoreGraphics
 import Foundation
 
+struct FigureScalarRange: Equatable, Codable, Sendable {
+    let vmin: Double
+    let vmax: Double
+}
+
+/// Frozen zero-spike unit-quality contract used by the live viewer and every
+/// page generated from a figure-composer session.
+struct RFUnitQualityFilterSnapshot: Equatable, Codable, Sendable {
+    let enabled: Bool
+    let zeroSpikeSpatialBinThreshold: Int
+    /// Inclusive source-bin indices for the selected 2-D RF sum window.
+    let sourceStartBin: Int
+    let sourceEndBin: Int
+    let spatialBinCount: Int
+    let visibleUnitIDs: [Int]
+    let excludedUnitIDs: [Int]
+}
+
 enum FigureExportPlotKind: String, CaseIterable, Codable, Identifiable, Hashable, Sendable {
     case rfCartesian = "rf.cartesian"
     case rfPolar = "rf.polar"
@@ -158,6 +176,7 @@ struct FigureExportConfiguration: Sendable {
     var selectedUnitIDs: [Int]
     var pages: [FigurePageTemplate]
     var viewerSnapshot: ViewerSyncState
+    var unitQualityFilter: RFUnitQualityFilterSnapshot?
     var outputScale: CGFloat
 
     init(
@@ -169,6 +188,7 @@ struct FigureExportConfiguration: Sendable {
         selectedUnitIDs: [Int],
         pages: [FigurePageTemplate],
         viewerSnapshot: ViewerSyncState,
+        unitQualityFilter: RFUnitQualityFilterSnapshot? = nil,
         outputScale: CGFloat = 2
     ) {
         self.format = format
@@ -179,6 +199,7 @@ struct FigureExportConfiguration: Sendable {
         self.selectedUnitIDs = selectedUnitIDs
         self.pages = pages
         self.viewerSnapshot = viewerSnapshot
+        self.unitQualityFilter = unitQualityFilter
         self.outputScale = outputScale
     }
 
@@ -330,23 +351,37 @@ enum FigureExportValidation {
 
 struct FigureExportSeed: Sendable {
     let data: RFMappingData
+    /// Frozen source-order pool after the viewer's zero-spike quality filter.
+    let unitPool: [Int]
     let viewerSnapshot: ViewerSyncState
     let currentUnitID: Int
+    let unitQualityFilter: RFUnitQualityFilterSnapshot?
     let tuningSessionIndex: Int
     let waveformChannelMode: WaveformChannelMode
     let companions: FigureExportCompanions
 
     init(
         data: RFMappingData,
+        unitPool: [Int]? = nil,
         viewerSnapshot: ViewerSyncState,
         currentUnitID: Int,
+        unitQualityFilter: RFUnitQualityFilterSnapshot? = nil,
         tuningSessionIndex: Int = 1,
         waveformChannelMode: WaveformChannelMode = .sameXColumn,
         companions: FigureExportCompanions = FigureExportCompanions()
     ) {
         self.data = data
+        if let unitPool {
+            let requested = Set(unitPool)
+            self.unitPool = data.unitPool.filter(requested.contains)
+        } else {
+            self.unitPool = data.unitPool
+        }
         self.viewerSnapshot = viewerSnapshot
-        self.currentUnitID = currentUnitID
+        self.currentUnitID = self.unitPool.contains(currentUnitID)
+            ? currentUnitID
+            : (self.unitPool.first ?? currentUnitID)
+        self.unitQualityFilter = unitQualityFilter
         self.tuningSessionIndex = max(1, tuningSessionIndex)
         self.waveformChannelMode = waveformChannelMode
         self.companions = companions

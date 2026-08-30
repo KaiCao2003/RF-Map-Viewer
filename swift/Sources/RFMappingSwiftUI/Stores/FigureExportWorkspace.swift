@@ -13,13 +13,18 @@ final class FigureExportWindowRegistry {
 
     func prepare(from store: RFMappingStore) -> FigureExportRequest? {
         guard let data = store.data,
-              !data.unitPool.isEmpty,
-              let currentUnitID = store.selectedUnitID ?? data.unitPool.first else { return nil }
+              !store.qualityFilteredUnitIDs.isEmpty else { return nil }
+        let unitPool = store.qualityFilteredUnitIDs
+        let currentUnitID = store.selectedUnitID.flatMap {
+            unitPool.contains($0) ? $0 : nil
+        } ?? unitPool[0]
         let request = FigureExportRequest(id: UUID())
         seeds[request.id] = FigureExportSeed(
             data: data,
+            unitPool: unitPool,
             viewerSnapshot: store.viewerSyncState,
             currentUnitID: currentUnitID,
+            unitQualityFilter: store.unitQualityFilterSnapshot,
             tuningSessionIndex: store.tuningSessionIndex,
             waveformChannelMode: store.waveformChannelMode,
             companions: store.figureExportCompanions
@@ -80,18 +85,21 @@ final class FigureExportWorkspace {
         pages = [firstPage]
         selectedPageID = firstPage.id
         previewUnitID = seed.currentUnitID
-        customSelectionAnchorIndex = seed.data.unitPool.firstIndex(of: seed.currentUnitID)
+        customSelectionAnchorIndex = seed.unitPool.firstIndex(of: seed.currentUnitID)
         if companions.hdTuning == nil { discoverHDTuning() }
         if companions.probeGeometry == nil { discoverProbeGeometry() }
         if companions.waveformArtifact == nil { discoverWaveform() }
+        freezeCurrentCompanions()
     }
 
     var resolvedUnitIDs: [Int] {
         unitSelection.resolve(
-            unitPool: seed.data.unitPool,
+            unitPool: seed.unitPool,
             currentUnitID: seed.currentUnitID
         )
     }
+
+    var unitPool: [Int] { seed.unitPool }
 
     var selectedPageIndex: Int? {
         guard let selectedPageID else { return nil }
@@ -108,6 +116,7 @@ final class FigureExportWorkspace {
             selectedUnitIDs: resolvedUnitIDs,
             pages: pages,
             viewerSnapshot: seed.viewerSnapshot,
+            unitQualityFilter: seed.unitQualityFilter,
             outputScale: outputScale
         )
     }
@@ -136,10 +145,10 @@ final class FigureExportWorkspace {
         unitSelection.mode = mode
         if mode == .custom {
             let anchorIsValid = customSelectionAnchorIndex.map {
-                seed.data.unitPool.indices.contains($0)
+                seed.unitPool.indices.contains($0)
             } ?? false
             if !anchorIsValid {
-                customSelectionAnchorIndex = seed.data.unitPool.firstIndex {
+                customSelectionAnchorIndex = seed.unitPool.firstIndex {
                     unitSelection.customUnitIDs.contains($0)
                 }
             }
@@ -156,14 +165,14 @@ final class FigureExportWorkspace {
         modifiers: FigureUnitSelectionModifiers = []
     ) {
         guard unitSelection.mode == .custom,
-              seed.data.unitPool.indices.contains(index) else { return }
-        let unitID = seed.data.unitPool[index]
+              seed.unitPool.indices.contains(index) else { return }
+        let unitID = seed.unitPool[index]
         if modifiers.contains(.shift) {
             let anchor = customSelectionAnchorIndex.flatMap {
-                seed.data.unitPool.indices.contains($0) ? $0 : nil
+                seed.unitPool.indices.contains($0) ? $0 : nil
             } ?? index
             let bounds = min(anchor, index)...max(anchor, index)
-            let rangeIDs = Set(bounds.map { seed.data.unitPool[$0] })
+            let rangeIDs = Set(bounds.map { seed.unitPool[$0] })
             if modifiers.contains(.command) {
                 unitSelection.customUnitIDs.formUnion(rangeIDs)
             } else {
@@ -188,8 +197,8 @@ final class FigureExportWorkspace {
     /// keyboard modifiers. It also becomes the anchor for the next range.
     func setCustomUnitSelected(_ selected: Bool, at index: Int) {
         guard unitSelection.mode == .custom,
-              seed.data.unitPool.indices.contains(index) else { return }
-        let unitID = seed.data.unitPool[index]
+              seed.unitPool.indices.contains(index) else { return }
+        let unitID = seed.unitPool[index]
         if selected {
             unitSelection.customUnitIDs.insert(unitID)
         } else {
@@ -260,12 +269,15 @@ final class FigureExportWorkspace {
             companions.hdTuning = try HDTuningData(url: url)
             companions.hdError = nil
             hdTuningURL = url.standardizedFileURL
-            successMessage = "Loaded HD tuning data from \(url.lastPathComponent)."
+            if freezeCurrentCompanions() {
+                successMessage = "Loaded HD tuning data from \(url.lastPathComponent)."
+            }
         } catch {
             companions.hdTuning = nil
             companions.hdError = error.localizedDescription
             hdTuningURL = url.standardizedFileURL
             errorMessage = "HD tuning data could not be loaded: \(error.localizedDescription)"
+            _ = freezeCurrentCompanions()
         }
     }
 
@@ -288,14 +300,17 @@ final class FigureExportWorkspace {
         do {
             companions.probeGeometry = try ProbeGeometryDiscovery.load(
                 paths,
-                rfUnitIDs: seed.data.unitPool
+                rfUnitIDs: seed.unitPool
             )
             companions.probeError = nil
-            successMessage = "Loaded probe positions from \(url.lastPathComponent)."
+            if freezeCurrentCompanions() {
+                successMessage = "Loaded probe positions from \(url.lastPathComponent)."
+            }
         } catch {
             companions.probeGeometry = nil
             companions.probeError = error.localizedDescription
             errorMessage = "Probe positions could not be loaded: \(error.localizedDescription)"
+            _ = freezeCurrentCompanions()
         }
     }
 
@@ -370,7 +385,7 @@ final class FigureExportWorkspace {
         do {
             companions.probeGeometry = try ProbeGeometryDiscovery.load(
                 paths,
-                rfUnitIDs: seed.data.unitPool
+                rfUnitIDs: seed.unitPool
             )
             companions.probeError = nil
         } catch {
@@ -389,6 +404,37 @@ final class FigureExportWorkspace {
         } catch {
             companions.waveformArtifact = nil
             companions.waveformError = error.localizedDescription
+        }
+    }
+
+    /// Establishes the immutable scientific snapshot shared by preview and
+    /// final rendering. Failure clears decoded payloads and deliberately keeps
+    /// an empty frozen unit scope so export fails closed instead of rendering a
+    /// mixture of old and new companion files.
+    @discardableResult
+    private func freezeCurrentCompanions() -> Bool {
+        do {
+            companions = try renderer.freezeCompanions(
+                companions,
+                data: seed.data,
+                unitIDs: seed.unitPool
+            )
+            return true
+        } catch {
+            var unavailable = FigureExportCompanions()
+            unavailable.waveformChannelMode = companions.waveformChannelMode
+            unavailable.hdError = companions.hdError
+                ?? "HD tuning snapshot is unavailable because companion freezing failed."
+            unavailable.probeError = companions.probeError
+                ?? "Probe geometry snapshot is unavailable because companion freezing failed."
+            unavailable.waveformError = companions.waveformError
+                ?? "Waveform snapshot is unavailable because companion freezing failed."
+            unavailable.frozenInputs = []
+            unavailable.frozenUnitIDs = []
+            companions = unavailable
+            errorMessage = "Scientific companions could not be frozen for this composer: "
+                + error.localizedDescription
+            return false
         }
     }
 

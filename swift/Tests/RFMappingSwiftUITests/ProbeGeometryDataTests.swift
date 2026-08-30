@@ -185,4 +185,79 @@ final class ProbeGeometryDataTests: XCTestCase {
         XCTAssertTrue(geometry.channels.isEmpty)
         XCTAssertNil(geometry.channelsURL)
     }
+
+    func testNanPairKeepsMissingUnitAlongsidePositionedUnits() throws {
+        let root = try temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let positionsURL = root.appendingPathComponent("positions.csv")
+        try write(
+            "unit_index,unit_id,x_um,y_um\n"
+                + "0,17,7.5,120.0\n"
+                + "1,42,nan,nan\n",
+            to: positionsURL
+        )
+        let geometry = try ProbeGeometryDiscovery.load(
+            ProbeGeometryPaths(
+                probeName: "ProbeA",
+                positionsURL: positionsURL,
+                channelsURL: nil
+            ),
+            rfUnitIDs: [17, 42]
+        )
+
+        XCTAssertEqual(geometry.units.map(\.unitID), [17, 42])
+        XCTAssertEqual(geometry.positionedUnits.map(\.unitID), [17])
+        XCTAssertEqual(geometry.units[0].xMicrometers, 7.5)
+        XCTAssertEqual(geometry.units[0].yMicrometers, 120.0)
+        XCTAssertNil(geometry.units[1].xMicrometers)
+        XCTAssertNil(geometry.units[1].yMicrometers)
+    }
+
+    func testOnlyNanPairForRFUnitStillLoadsGeometry() throws {
+        let root = try temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let positionsURL = root.appendingPathComponent("positions.probe")
+        try write(
+            "unit_index,unit_id,x_um,y_um\n0,42,NaN,NaN\n",
+            to: positionsURL
+        )
+
+        let geometry = try ProbeGeometryDiscovery.load(
+            ProbeGeometryPaths(
+                probeName: "ProbeA",
+                positionsURL: positionsURL,
+                channelsURL: nil
+            ),
+            rfUnitIDs: [42]
+        )
+
+        XCTAssertEqual(geometry.units.map(\.unitID), [42])
+        XCTAssertTrue(geometry.positionedUnits.isEmpty)
+        XCTAssertNil(geometry.units[0].position)
+    }
+
+    func testPartialNanPairRemainsInvalid() throws {
+        let root = try temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let positionsURL = root.appendingPathComponent("positions.csv")
+        try write(
+            "unit_index,unit_id,x_um,y_um\n0,42,nan,120.0\n",
+            to: positionsURL
+        )
+
+        XCTAssertThrowsError(try ProbeGeometryDiscovery.load(
+            ProbeGeometryPaths(
+                probeName: "ProbeA",
+                positionsURL: positionsURL,
+                channelsURL: nil
+            ),
+            rfUnitIDs: [42]
+        )) { error in
+            guard case ProbeGeometryError.invalidCSV(let message) = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+            XCTAssertTrue(message.contains("row 2"))
+            XCTAssertTrue(message.contains("both be finite or both be nan"))
+        }
+    }
 }

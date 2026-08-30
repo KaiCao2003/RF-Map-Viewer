@@ -158,7 +158,7 @@ struct FigureExportComposerView: View {
             }
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 3) {
-                    ForEach(Array(workspace.seed.data.unitPool.enumerated()), id: \.offset) { index, unitID in
+                    ForEach(Array(workspace.unitPool.enumerated()), id: \.offset) { index, unitID in
                         HStack(spacing: 5) {
                             Toggle(isOn: Binding(
                                 get: { selectedForDisplay(unitID) },

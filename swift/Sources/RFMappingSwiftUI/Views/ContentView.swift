@@ -40,9 +40,19 @@ struct ContentView: View {
         ) { result in
             switch result {
             case .success(let urls):
-                urls.forEach(openRFMapInNewWindow)
+                if urls.isEmpty {
+                    if !store.hasData {
+                        WindowRouter.shared.expireColdInitialWindowClaim()
+                    }
+                } else {
+                    urls.forEach(openRFMapInNewWindow)
+                }
             case .failure(let error):
-                if (error as? CocoaError)?.code != .userCancelled {
+                if (error as? CocoaError)?.code == .userCancelled {
+                    if !store.hasData {
+                        WindowRouter.shared.expireColdInitialWindowClaim()
+                    }
+                } else {
                     store.errorMessage = error.localizedDescription
                 }
             }
@@ -119,12 +129,7 @@ struct ContentView: View {
                 if store.hasSelectedUnit {
                     PlotTabsView(store: store)
                 } else {
-                    ContentUnavailableView {
-                        Label("Unit not available", systemImage: "waveform.slash")
-                    } description: {
-                        Text("Cluster \(store.selectedUnitID.map { String($0) } ?? "unknown") is part of the paired unit-ID union but is not present in this file. Use Previous/Next Unit to continue through the shared union.")
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    unavailableUnitContent
                 }
             }
         } else {
@@ -138,6 +143,61 @@ struct ContentView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+    }
+
+    @ViewBuilder
+    private var unavailableUnitContent: some View {
+        switch store.unitUnavailableReason {
+        case .some(.noQualityVisibleUnits(let total)):
+            unavailableUnitView(
+                title: "No visible units",
+                systemImage: "line.3.horizontal.decrease.circle",
+                description: "0/\(total) units pass the zero-spike RF-bin filter for the current RF sum window. Change the RF sum range, threshold, or filter setting."
+            )
+        case .some(.qualityFiltered(let unitID)):
+            unavailableUnitView(
+                title: "Unit hidden by RF-bin filter",
+                systemImage: "line.3.horizontal.decrease.circle",
+                description: "Cluster \(unitID) is present in this file but does not pass its current zero-spike RF-bin filter. It can remain in the paired union when another window still shows it."
+            )
+        case .some(.noProbeVisibleUnits):
+            unavailableUnitView(
+                title: "No units in Probe selection",
+                systemImage: "scope",
+                description: "The current Probe region excludes every quality-visible unit. Clear or change the Probe selection to continue."
+            )
+        case .some(.probeFiltered(let unitID)):
+            unavailableUnitView(
+                title: "Unit outside Probe selection",
+                systemImage: "scope",
+                description: "Cluster \(unitID) is present and quality-visible in this file, but is outside the current Probe region."
+            )
+        case .some(.pairedMissing(let unitID)):
+            unavailableUnitView(
+                title: "Unit not available",
+                systemImage: "waveform.slash",
+                description: "Cluster \(unitID) is part of the paired unit-ID union but is not present in this file. Use Previous/Next Unit to continue through the shared union."
+            )
+        case .some(.noSelection), .none:
+            unavailableUnitView(
+                title: "No unit selected",
+                systemImage: "waveform.slash",
+                description: "Choose a visible unit or adjust the current unit filters."
+            )
+        }
+    }
+
+    private func unavailableUnitView(
+        title: String,
+        systemImage: String,
+        description: String
+    ) -> some View {
+        ContentUnavailableView {
+            Label(title, systemImage: systemImage)
+        } description: {
+            Text(description)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 

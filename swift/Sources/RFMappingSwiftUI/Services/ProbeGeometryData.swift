@@ -9,8 +9,16 @@ struct ProbeChannel: Equatable, Sendable {
 
 struct ProbeUnitPosition: Equatable, Sendable {
     let unitID: Int
-    let xMicrometers: Double
-    let yMicrometers: Double
+    /// SpikeInterface writes `nan,nan` when a sorted unit has no localized
+    /// position. Keep that unit in the companion table while representing its
+    /// missing coordinates explicitly, matching the Python viewer.
+    let xMicrometers: Double?
+    let yMicrometers: Double?
+
+    var position: (x: Double, y: Double)? {
+        guard let xMicrometers, let yMicrometers else { return nil }
+        return (xMicrometers, yMicrometers)
+    }
 }
 
 /// Immutable companion geometry captured when a figure composer is opened.
@@ -22,6 +30,10 @@ struct ProbeGeometry: Equatable, Sendable {
     let channelsURL: URL?
     let channels: [ProbeChannel]
     let units: [ProbeUnitPosition]
+
+    var positionedUnits: [ProbeUnitPosition] {
+        units.filter { $0.position != nil }
+    }
 }
 
 struct ProbePlotPayload: Equatable, Sendable {
@@ -152,8 +164,10 @@ enum ProbeGeometryDiscovery {
             do {
                 _ = try integer(row["unit_index"], label: "unit_index")
                 let unitID = try integer(row["unit_id"], label: "unit_id")
-                let x = try finiteDouble(row["x_um"], label: "unit x_um")
-                let y = try finiteDouble(row["y_um"], label: "unit y_um")
+                let (x, y) = try unitCoordinates(
+                    xValue: row["x_um"],
+                    yValue: row["y_um"]
+                )
                 guard seenUnitIDs.insert(unitID).inserted else {
                     throw ProbeGeometryError.invalidCSV(
                         "Duplicate unit_id \(unitID) in positions.csv."
@@ -262,6 +276,29 @@ enum ProbeGeometryDiscovery {
             throw ProbeGeometryError.invalidCSV("\(label) must be a finite number.")
         }
         return parsed
+    }
+
+    /// Accepts either two finite coordinates or SpikeInterface's explicit
+    /// `nan,nan` sentinel. Partial/malformed missing positions stay errors so
+    /// an invalid point cannot silently enter spatial filtering.
+    private static func unitCoordinates(
+        xValue: String?,
+        yValue: String?
+    ) throws -> (Double?, Double?) {
+        guard let xValue, let yValue,
+              let x = Double(xValue.trimmingCharacters(in: .whitespacesAndNewlines)),
+              let y = Double(yValue.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+            throw ProbeGeometryError.invalidCSV(
+                "unit x_um and y_um must be numeric."
+            )
+        }
+        if x.isNaN, y.isNaN { return (nil, nil) }
+        guard x.isFinite, y.isFinite else {
+            throw ProbeGeometryError.invalidCSV(
+                "unit x_um and y_um must both be finite or both be nan."
+            )
+        }
+        return (x, y)
     }
 
     private static func integer(_ value: String?, label: String) throws -> Int {
