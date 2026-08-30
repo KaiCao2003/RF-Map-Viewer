@@ -502,6 +502,24 @@ final class FigureExportTests: XCTestCase {
         XCTAssertNil(descriptor.plots[4].placeholder)
     }
 
+    func testIsolatedRendererStoreSkipsAutomaticCompanionDiscovery() throws {
+        let data = try makeData()
+        let store = RFMappingStore(
+            initialData: data,
+            loadDefault: false,
+            discoverJSONChoices: false,
+            discoverCompanions: false
+        )
+
+        let companions = store.figureExportCompanions
+        XCTAssertNil(companions.hdTuning)
+        XCTAssertNil(companions.hdError)
+        XCTAssertNil(companions.probeGeometry)
+        XCTAssertNil(companions.probeError)
+        XCTAssertNil(companions.waveformArtifact)
+        XCTAssertNil(companions.waveformError)
+    }
+
     func testAvailableCompanionsResolveAllElevenKindsToRealRendererPayloads() throws {
         figureExportHangTrace("test available enter")
         let data = try makeData()

@@ -500,6 +500,7 @@ struct FigureExportRenderer {
                 initialData: data,
                 loadDefault: false,
                 discoverJSONChoices: false,
+                discoverCompanions: false,
                 unitQualityFilterEnabled: false
             )
             figureExportHangTrace("shared-rf store init end unit=\(unitID)")
@@ -1276,6 +1277,7 @@ struct FigureExportRenderer {
             initialData: data,
             loadDefault: false,
             discoverJSONChoices: false,
+            discoverCompanions: false,
             unitQualityFilterEnabled: false
         )
         store.applyViewerSyncState(configuration.viewerSnapshot)
@@ -2242,6 +2244,7 @@ private struct ExistingRFExportPlotView: View {
             initialData: data,
             loadDefault: false,
             discoverJSONChoices: false,
+            discoverCompanions: false,
             unitQualityFilterEnabled: false
         )
         isolated.applyViewerSyncState(snapshot)

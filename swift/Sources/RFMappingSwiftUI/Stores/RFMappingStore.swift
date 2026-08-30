@@ -159,6 +159,7 @@ final class RFMappingStore {
     @ObservationIgnored var unitQualityVisibilityDidChange:
         ((UnitQualityVisibilityChangeReason) -> Void)?
     private let preferences: UserDefaults
+    private let discoversCompanionsAutomatically: Bool
 
     var data: RFMappingData?
     var availableJSONURLs: [URL] = []
@@ -224,11 +225,13 @@ final class RFMappingStore {
         initialData: RFMappingData? = nil,
         loadDefault: Bool = true,
         discoverJSONChoices: Bool = true,
+        discoverCompanions: Bool = true,
         unitQualityFilterEnabled: Bool? = nil,
         zeroSpikeBinThreshold: Int? = nil,
         preferences: UserDefaults = .standard
     ) {
         self.preferences = preferences
+        discoversCompanionsAutomatically = discoverCompanions
         let storedSession = preferences.integer(forKey: PreferenceKey.tuningSession)
         tuningSessionIndex = max(1, storedSession == 0 ? 1 : storedSession)
         if preferences.object(forKey: PreferenceKey.showWaveform) != nil {
@@ -623,7 +626,11 @@ final class RFMappingStore {
         resetPlotRangeToDefault(notifyUnitVisibility: false)
         normalizeControls()
         ensureSelectedCell()
-        discoverCompanions(for: loaded)
+        if discoversCompanionsAutomatically {
+            discoverCompanions(for: loaded)
+        } else {
+            clearDiscoveredCompanions()
+        }
         if refreshChoices { refreshJSONChoices() }
         pairingDataDidChange?()
     }
@@ -916,16 +923,7 @@ final class RFMappingStore {
     }
 
     private func discoverCompanions(for loaded: RFMappingData) {
-        hdTuning = nil
-        hdTuningURL = nil
-        hdTuningError = nil
-        probeGeometry = nil
-        probeGeometryError = nil
-        waveformArtifact = nil
-        waveformPayload = nil
-        waveformError = nil
-        probeFilteredUnitIDs = nil
-        isWaveformZoomed = false
+        clearDiscoveredCompanions()
         reloadDiscoveredHDTuning()
         if let paths = ProbeGeometryDiscovery.discover(forRFURL: loaded.url) {
             do {
@@ -943,6 +941,19 @@ final class RFMappingStore {
             waveformError = error.localizedDescription
         }
         refreshWaveformPayload()
+    }
+
+    private func clearDiscoveredCompanions() {
+        hdTuning = nil
+        hdTuningURL = nil
+        hdTuningError = nil
+        probeGeometry = nil
+        probeGeometryError = nil
+        waveformArtifact = nil
+        waveformPayload = nil
+        waveformError = nil
+        probeFilteredUnitIDs = nil
+        isWaveformZoomed = false
     }
 
     private func reloadDiscoveredHDTuning() {
