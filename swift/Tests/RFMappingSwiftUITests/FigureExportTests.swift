@@ -242,6 +242,11 @@ final class FigureExportTests: XCTestCase {
         process.standardInput = input
         process.standardOutput = output
         try process.run()
+        // `Process` inherits duplicates of these descriptors. Close the
+        // parent's unused ends so the stdout reader can observe EOF when gzip
+        // exits instead of waiting forever on our own still-open writer.
+        try? input.fileHandleForReading.close()
+        try? output.fileHandleForWriting.close()
         input.fileHandleForWriting.write(data)
         try input.fileHandleForWriting.close()
         let compressed = output.fileHandleForReading.readDataToEndOfFile()
@@ -275,6 +280,23 @@ final class FigureExportTests: XCTestCase {
         XCTAssertEqual(payload.valuesMicrovolts[0], [-1.5, 1.5, 4.5, 7.5])
         XCTAssertEqual(payload.amplitudeLimitMicrovolts, 7.5)
         XCTAssertEqual(try waveform.store.sourceURLs(for: 22).count, 5)
+    }
+
+    func testWaveformReaderReturnsFromCorruptGzipWithDecompressionError() throws {
+        let waveform = try makeWaveformArtifact(unitIDs: [22])
+        defer { try? FileManager.default.removeItem(at: waveform.root) }
+        let templateURL = waveform.root
+            .appendingPathComponent("Unit22", isDirectory: true)
+            .appendingPathComponent("template_uv.csv.gz")
+        try Data("not a gzip stream".utf8).write(to: templateURL, options: .atomic)
+
+        XCTAssertThrowsError(try waveform.store.payload(for: 22, mode: .sameXColumn)) { error in
+            guard let waveformError = error as? WaveformArtifactError,
+                  case .decompression(let message) = waveformError else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+            XCTAssertTrue(message.contains("Could not decompress"))
+        }
     }
 
     func testWaveformPreviewAndFinalUseOneSelectionScopedScale() throws {

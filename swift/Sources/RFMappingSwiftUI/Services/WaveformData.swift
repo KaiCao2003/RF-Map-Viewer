@@ -559,6 +559,11 @@ final class WaveformArtifactStore: @unchecked Sendable {
                 "Could not start gzip for \(url.lastPathComponent): \(error.localizedDescription)"
             )
         }
+        // The child owns duplicated write descriptors after `run()`. Close the
+        // parent's copies before reading to EOF; otherwise macOS can keep the
+        // pipes artificially open after gzip exits and block this read forever.
+        try? standardOutput.fileHandleForWriting.close()
+        try? standardError.fileHandleForWriting.close()
         let data = standardOutput.fileHandleForReading.readDataToEndOfFile()
         let errorData = standardError.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
