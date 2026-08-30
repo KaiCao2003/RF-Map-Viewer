@@ -545,11 +545,48 @@ final class WaveformArtifactStore: @unchecked Sendable {
         if let cached { return cached }
 
         let url = try templateURL(for: summary)
+        let fileManager = FileManager.default
+        let captureDirectory = fileManager.temporaryDirectory
+            .appendingPathComponent("rfmapping-waveform-\(UUID().uuidString)", isDirectory: true)
+        do {
+            try fileManager.createDirectory(
+                at: captureDirectory,
+                withIntermediateDirectories: false
+            )
+        } catch {
+            throw WaveformArtifactError.decompression(
+                "Could not prepare waveform decompression: \(error.localizedDescription)"
+            )
+        }
+        defer { try? fileManager.removeItem(at: captureDirectory) }
+        let standardOutputURL = captureDirectory.appendingPathComponent("stdout")
+        let standardErrorURL = captureDirectory.appendingPathComponent("stderr")
+        do {
+            try Data().write(to: standardOutputURL)
+            try Data().write(to: standardErrorURL)
+        } catch {
+            throw WaveformArtifactError.decompression(
+                "Could not prepare waveform decompression output: \(error.localizedDescription)"
+            )
+        }
+        let standardOutput: FileHandle
+        let standardError: FileHandle
+        do {
+            standardOutput = try FileHandle(forWritingTo: standardOutputURL)
+            standardError = try FileHandle(forWritingTo: standardErrorURL)
+        } catch {
+            throw WaveformArtifactError.decompression(
+                "Could not open waveform decompression output: \(error.localizedDescription)"
+            )
+        }
+        defer {
+            try? standardOutput.close()
+            try? standardError.close()
+        }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/gzip")
         process.arguments = ["-dc", "--", url.path]
-        let standardOutput = Pipe()
-        let standardError = Pipe()
+        process.standardInput = FileHandle.nullDevice
         process.standardOutput = standardOutput
         process.standardError = standardError
         do {
@@ -559,20 +596,37 @@ final class WaveformArtifactStore: @unchecked Sendable {
                 "Could not start gzip for \(url.lastPathComponent): \(error.localizedDescription)"
             )
         }
-        // The child owns duplicated write descriptors after `run()`. Close the
-        // parent's copies before reading to EOF; otherwise macOS can keep the
-        // pipes artificially open after gzip exits and block this read forever.
-        try? standardOutput.fileHandleForWriting.close()
-        try? standardError.fileHandleForWriting.close()
-        let data = standardOutput.fileHandleForReading.readDataToEndOfFile()
-        let errorData = standardError.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
+        do {
+            try standardOutput.close()
+            try standardError.close()
+        } catch {
+            throw WaveformArtifactError.decompression(
+                "Could not finish waveform decompression output: \(error.localizedDescription)"
+            )
+        }
+        let errorData: Data
+        do {
+            errorData = try Data(contentsOf: standardErrorURL)
+        } catch {
+            throw WaveformArtifactError.decompression(
+                "Could not read waveform decompression errors: \(error.localizedDescription)"
+            )
+        }
         guard process.terminationStatus == 0 else {
             let detail = String(data: errorData, encoding: .utf8)?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             throw WaveformArtifactError.decompression(
                 "Could not decompress \(url.lastPathComponent)"
                     + (detail?.isEmpty == false ? ": \(detail!)" : ".")
+            )
+        }
+        let data: Data
+        do {
+            data = try Data(contentsOf: standardOutputURL)
+        } catch {
+            throw WaveformArtifactError.decompression(
+                "Could not read decompressed waveform data: \(error.localizedDescription)"
             )
         }
         guard var text = String(data: data, encoding: .utf8) else {

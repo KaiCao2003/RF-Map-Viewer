@@ -234,24 +234,44 @@ final class FigureExportTests: XCTestCase {
     }
 
     private func gzip(_ data: Data, to destination: URL) throws {
+        let fileManager = FileManager.default
+        let captureDirectory = fileManager.temporaryDirectory
+            .appendingPathComponent("rfmapping-test-gzip-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: captureDirectory, withIntermediateDirectories: false)
+        defer { try? fileManager.removeItem(at: captureDirectory) }
+        let inputURL = captureDirectory.appendingPathComponent("input")
+        let outputURL = captureDirectory.appendingPathComponent("stdout")
+        let errorURL = captureDirectory.appendingPathComponent("stderr")
+        try data.write(to: inputURL)
+        try Data().write(to: outputURL)
+        try Data().write(to: errorURL)
+        let output = try FileHandle(forWritingTo: outputURL)
+        let error = try FileHandle(forWritingTo: errorURL)
+        defer {
+            try? output.close()
+            try? error.close()
+        }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/gzip")
-        process.arguments = ["-c"]
-        let input = Pipe()
-        let output = Pipe()
-        process.standardInput = input
+        process.arguments = ["-c", "--", inputURL.path]
+        process.standardInput = FileHandle.nullDevice
         process.standardOutput = output
+        process.standardError = error
         try process.run()
-        // `Process` inherits duplicates of these descriptors. Close the
-        // parent's unused ends so the stdout reader can observe EOF when gzip
-        // exits instead of waiting forever on our own still-open writer.
-        try? input.fileHandleForReading.close()
-        try? output.fileHandleForWriting.close()
-        input.fileHandleForWriting.write(data)
-        try input.fileHandleForWriting.close()
-        let compressed = output.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
-        XCTAssertEqual(process.terminationStatus, 0)
+        try output.close()
+        try error.close()
+        let errorData = try Data(contentsOf: errorURL)
+        guard process.terminationStatus == 0 else {
+            let detail = String(data: errorData, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            throw NSError(
+                domain: "FigureExportTests.gzip",
+                code: Int(process.terminationStatus),
+                userInfo: [NSLocalizedDescriptionKey: detail ?? "gzip failed"]
+            )
+        }
+        let compressed = try Data(contentsOf: outputURL)
         try compressed.write(to: destination)
     }
 
