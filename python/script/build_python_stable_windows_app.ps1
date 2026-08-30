@@ -74,23 +74,54 @@ function Assert-Equal([object]$Actual, [object]$Expected, [string]$Description) 
 function Invoke-WindowedSmoke(
     [string]$Executable,
     [string[]]$Arguments,
-    [string]$Description
+    [string]$Description,
+    [string]$ReportPath
 ) {
-    $Process = Start-Process `
-        -FilePath $Executable `
-        -ArgumentList $Arguments `
-        -PassThru
+    Remove-Item -LiteralPath $ReportPath -Force -ErrorAction SilentlyContinue
+    $PreviousReportExists = Test-Path Env:RF_MAPPING_WINDOWED_SMOKE_REPORT
+    $PreviousReport = if ($PreviousReportExists) {
+        $env:RF_MAPPING_WINDOWED_SMOKE_REPORT
+    } else {
+        $null
+    }
+    $env:RF_MAPPING_WINDOWED_SMOKE_REPORT = $ReportPath
+    $Process = $null
     try {
+        $Process = Start-Process `
+            -FilePath $Executable `
+            -ArgumentList $Arguments `
+            -PassThru
         if (-not $Process.WaitForExit(120000)) {
             Stop-Process -Id $Process.Id -Force -ErrorAction SilentlyContinue
             $Process.WaitForExit()
-            Fail "$Description timed out after 120 seconds"
+            $Detail = if (Test-Path -LiteralPath $ReportPath -PathType Leaf) {
+                Get-Content -LiteralPath $ReportPath -Raw
+            } else {
+                "no windowed smoke report was created"
+            }
+            Fail "$Description timed out after 120 seconds; report: $Detail"
+        }
+        Assert-File $ReportPath "$Description report"
+        try {
+            $Report = Get-Content -LiteralPath $ReportPath -Raw | ConvertFrom-Json
+        } catch {
+            Fail "$Description produced an invalid report: $($_.Exception.Message)"
         }
         if ($Process.ExitCode -ne 0) {
-            Fail "$Description exited with code $($Process.ExitCode)"
+            $Detail = Get-Content -LiteralPath $ReportPath -Raw
+            Fail "$Description exited with code $($Process.ExitCode); report: $Detail"
         }
+        Assert-Equal $Report.status "success" "$Description report status"
+        Assert-Equal $Report.exitCode 0 "$Description report exit code"
     } finally {
-        $Process.Dispose()
+        if ($null -ne $Process) {
+            $Process.Dispose()
+        }
+        if ($PreviousReportExists) {
+            $env:RF_MAPPING_WINDOWED_SMOKE_REPORT = $PreviousReport
+        } else {
+            Remove-Item Env:RF_MAPPING_WINDOWED_SMOKE_REPORT -ErrorAction SilentlyContinue
+        }
     }
 }
 
@@ -165,15 +196,18 @@ function Invoke-FrozenSmoke(
     Invoke-WindowedSmoke `
         $Executable `
         @("--self-test", "`"$Fixture`"") `
-        "$Label data self-test"
+        "$Label data self-test" `
+        "$ExportRoot-data-smoke-report.json"
     Invoke-WindowedSmoke `
         $Executable `
         @("--self-test-dnd") `
-        "$Label TkDND self-test"
+        "$Label TkDND self-test" `
+        "$ExportRoot-tkdnd-smoke-report.json"
     Invoke-WindowedSmoke `
         $Executable `
         @("--self-test-export", "`"$ExportRoot`"") `
-        "$Label figure export self-test"
+        "$Label figure export self-test" `
+        "$ExportRoot-figure-export-smoke-report.json"
     Assert-File (Join-Path $ExportRoot "figure-export-smoke.pdf") "$Label PDF export"
     Assert-File `
         (Join-Path $ExportRoot "figure-export-smoke\manifest.json") `

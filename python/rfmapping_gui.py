@@ -22,6 +22,7 @@ import stat
 import sys
 import tempfile
 import threading
+import traceback
 import uuid
 import webbrowser
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -14734,6 +14735,71 @@ def _cli_print(*values: object, error: bool = False) -> None:
         print(*values, file=stream)
 
 
+WINDOWED_SMOKE_REPORT_ENV = "RF_MAPPING_WINDOWED_SMOKE_REPORT"
+
+
+def _write_windowed_smoke_report(path: Path, payload: Mapping[str, object]) -> None:
+    """Write diagnostics for a frozen ``--windowed`` release smoke run.
+
+    A Windows noconsole executable shows an unhandled traceback in a modal
+    bootloader dialog. Headless release runners cannot dismiss that dialog,
+    so the packaging harness supplies an explicit report path and expects the
+    entrypoint to convert failures into a non-zero exit with useful evidence.
+    Normal interactive launches never set the environment variable and retain
+    the regular exception behavior.
+    """
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _run_main_entrypoint(argv: list[str] | None = None) -> int:
+    """Run :func:`main`, optionally reporting a windowed release smoke result."""
+
+    report_value = os.environ.get(WINDOWED_SMOKE_REPORT_ENV, "").strip()
+    report_path = Path(report_value) if report_value else None
+    effective_argv = list(sys.argv[1:] if argv is None else argv)
+    if report_path is not None:
+        _write_windowed_smoke_report(
+            report_path,
+            {
+                "status": "started",
+                "argv": effective_argv,
+                "executable": sys.executable,
+                "frozen": bool(getattr(sys, "frozen", False)),
+            },
+        )
+    try:
+        exit_code = int(main(effective_argv))
+    except BaseException as exc:
+        if report_path is None:
+            raise
+        _write_windowed_smoke_report(
+            report_path,
+            {
+                "status": "error",
+                "argv": effective_argv,
+                "exceptionType": type(exc).__name__,
+                "message": str(exc),
+                "traceback": traceback.format_exc(),
+            },
+        )
+        return 1
+    if report_path is not None:
+        _write_windowed_smoke_report(
+            report_path,
+            {
+                "status": "success" if exit_code == 0 else "exit",
+                "argv": effective_argv,
+                "exitCode": exit_code,
+            },
+        )
+    return exit_code
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Native GUI viewer for RF mapping data.")
     parser.add_argument(
@@ -14812,4 +14878,4 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(_run_main_entrypoint())
