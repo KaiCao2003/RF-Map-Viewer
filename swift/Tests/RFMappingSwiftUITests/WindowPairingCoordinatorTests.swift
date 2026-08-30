@@ -25,7 +25,51 @@ final class WindowPairingCoordinatorTests: XCTestCase {
     private func makeStore(unitIDs: [Int], name: String) throws -> RFMappingStore {
         RFMappingStore(
             initialData: try makeData(unitIDs: unitIDs, name: name),
-            loadDefault: false
+            loadDefault: false,
+            discoverJSONChoices: false,
+            discoverCompanions: false,
+            unitQualityFilterEnabled: true,
+            zeroSpikeBinThreshold: 1
+        )
+    }
+
+    private func makeQualityData(
+        unitIDs: [Int],
+        spatialCounts: [[Double]],
+        name: String
+    ) throws -> RFMappingData {
+        let counts = spatialCounts.map { unit in
+            [unit.map { [$0] }]
+        }
+        let object = currentRFSchemaPayload([
+            "unitsSpikeCounts": counts,
+            "unitsSpikeCountsSize": [unitIDs.count, 1, 2, 1],
+            "unitPool": unitIDs,
+            "xPositions": [-1.0, 1.0],
+            "yPositions": [0.0],
+            "timeBinEdges": [0.0, 0.1],
+        ], occupancyTimeSec: [0.1, 0.1], occupancyTimeSecSize: [1, 2])
+        return try RFMappingData(
+            data: JSONSerialization.data(withJSONObject: object),
+            url: URL(fileURLWithPath: "/tmp/\(name).json")
+        )
+    }
+
+    private func makeWindowQualityData(name: String) throws -> RFMappingData {
+        let object = currentRFSchemaPayload([
+            "unitsSpikeCounts": [
+                [[[1.0, 0.0]]],
+                [[[0.0, 1.0]]],
+            ],
+            "unitsSpikeCountsSize": [2, 1, 1, 2],
+            "unitPool": [7, 8],
+            "xPositions": [0.0],
+            "yPositions": [0.0],
+            "timeBinEdges": [0.0, 0.1, 0.2],
+        ], occupancyTimeSec: 0.2, occupancyTimeSecSize: [1, 1])
+        return try RFMappingData(
+            data: JSONSerialization.data(withJSONObject: object),
+            url: URL(fileURLWithPath: "/tmp/\(name).json")
         )
     }
 
@@ -120,11 +164,122 @@ final class WindowPairingCoordinatorTests: XCTestCase {
             data: JSONSerialization.data(withJSONObject: object),
             url: URL(fileURLWithPath: "/tmp/default-range.json")
         )
-        let store = RFMappingStore(initialData: data, loadDefault: false)
+        let store = RFMappingStore(
+            initialData: data,
+            loadDefault: false,
+            discoverJSONChoices: false,
+            discoverCompanions: false
+        )
 
         XCTAssertEqual(store.plotRangeStartMS, 0.0, accuracy: 1e-9)
         XCTAssertEqual(store.plotRangeEndMS, 200.0, accuracy: 1e-9)
         XCTAssertEqual(store.valueMode, .meanFiringRate)
         XCTAssertEqual(store.currentMatrix(), [[12.5]])
+    }
+
+    func testPairedUnionUsesEachWindowsQualityFilteredIDsAndReconcilesSelection() throws {
+        let first = RFMappingStore(
+            initialData: try makeQualityData(
+                unitIDs: [7, 8],
+                spatialCounts: [[1, 1], [0, 1]],
+                name: "quality-first"
+            ),
+            loadDefault: false,
+            discoverJSONChoices: false,
+            discoverCompanions: false,
+            unitQualityFilterEnabled: true,
+            zeroSpikeBinThreshold: 1
+        )
+        let second = RFMappingStore(
+            initialData: try makeQualityData(
+                unitIDs: [8],
+                spatialCounts: [[0, 1]],
+                name: "quality-second"
+            ),
+            loadDefault: false,
+            discoverJSONChoices: false,
+            discoverCompanions: false,
+            unitQualityFilterEnabled: false,
+            zeroSpikeBinThreshold: 1
+        )
+        XCTAssertEqual(first.qualityFilteredUnitIDs, [7])
+        XCTAssertEqual(second.qualityFilteredUnitIDs, [8])
+
+        let coordinator = WindowPairingCoordinator()
+        let firstID = UUID()
+        let secondID = UUID()
+        coordinator.register(first, id: firstID)
+        coordinator.register(second, id: secondID)
+        coordinator.setPairingEnabled(true, sourceID: secondID)
+
+        XCTAssertEqual(first.navigationUnitIDs, [7, 8])
+        XCTAssertEqual(second.navigationUnitIDs, [7, 8])
+        XCTAssertEqual(first.selectedUnitID, 8)
+        XCTAssertEqual(first.unitIndex, -1)
+        XCTAssertEqual(second.selectedUnitID, 8)
+        XCTAssertEqual(second.unitIndex, 0)
+
+        second.setRFUnitQualityFilterEnabled(true)
+
+        XCTAssertEqual(first.navigationUnitIDs, [7])
+        XCTAssertEqual(second.navigationUnitIDs, [7])
+        XCTAssertEqual(first.selectedUnitID, 7)
+        XCTAssertEqual(first.unitIndex, 0)
+        XCTAssertEqual(second.selectedUnitID, 7)
+        XCTAssertEqual(second.unitIndex, -1)
+        XCTAssertTrue(coordinator.statusText().contains("1 unit IDs"))
+    }
+
+    func testPlotRangeBroadcastRebuildsUnionAfterEveryTargetAppliesRange() throws {
+        let first = RFMappingStore(
+            initialData: try makeWindowQualityData(name: "range-quality-first"),
+            loadDefault: false,
+            discoverJSONChoices: false,
+            discoverCompanions: false,
+            unitQualityFilterEnabled: true,
+            zeroSpikeBinThreshold: 1
+        )
+        let second = RFMappingStore(
+            initialData: try makeWindowQualityData(name: "range-quality-second"),
+            loadDefault: false,
+            discoverJSONChoices: false,
+            discoverCompanions: false,
+            unitQualityFilterEnabled: true,
+            zeroSpikeBinThreshold: 1
+        )
+        let coordinator = WindowPairingCoordinator()
+        let firstID = UUID()
+        let secondID = UUID()
+        coordinator.register(first, id: firstID)
+        coordinator.register(second, id: secondID)
+        coordinator.setPairingEnabled(true, sourceID: firstID)
+
+        XCTAssertEqual(first.qualityFilteredUnitIDs, [7, 8])
+        XCTAssertEqual(second.qualityFilteredUnitIDs, [7, 8])
+        XCTAssertEqual(first.selectedUnitID, 7)
+        XCTAssertEqual(second.selectedUnitID, 7)
+
+        first.plotRangeStartMS = 100
+        first.plotRangeEndMS = 200
+        first.normalizePlotTimeRange()
+
+        // The source callback deliberately waits: the target still evaluates
+        // its old range until the synchronized viewer state is broadcast.
+        XCTAssertEqual(first.qualityFilteredUnitIDs, [8])
+        XCTAssertEqual(second.qualityFilteredUnitIDs, [7, 8])
+        XCTAssertEqual(first.navigationUnitIDs, [7, 8])
+
+        coordinator.synchronizedStateDidChange(first.viewerSyncState, from: firstID)
+
+        XCTAssertEqual(second.plotRangeStartMS, 100, accuracy: 1e-9)
+        XCTAssertEqual(second.plotRangeEndMS, 200, accuracy: 1e-9)
+        XCTAssertEqual(first.qualityFilteredUnitIDs, [8])
+        XCTAssertEqual(second.qualityFilteredUnitIDs, [8])
+        XCTAssertEqual(first.navigationUnitIDs, [8])
+        XCTAssertEqual(second.navigationUnitIDs, [8])
+        XCTAssertEqual(first.selectedUnitID, 8)
+        XCTAssertEqual(second.selectedUnitID, 8)
+        XCTAssertEqual(first.unitIndex, 1)
+        XCTAssertEqual(second.unitIndex, 1)
     }
 }

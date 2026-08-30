@@ -43,6 +43,21 @@ companions and applies one symmetric microvolt scale across its selected units.
 Press `P` to toggle rectangular/polar spatial plots and `Shift-P` to cycle the
 palette.
 
+The Python-compatible native zero-spike filter is enabled by default at a
+threshold of one bin. It evaluates the current 2-D RF sum window on the source
+`y × x` grid before display rebinning or smoothing; timeline views keep their
+independent full time axis. Paired windows navigate the sorted union of the
+units that pass each window's filter. Probe rows containing the explicit
+`nan,nan` missing-position sentinel remain valid units but do not create a
+spatial marker.
+
+Figure Composer freezes the eligible unit set and all read-only scientific
+inputs when it opens. RF Cartesian/Polar pages share one scalar range across
+the selected units, waveform pages share one symmetric microvolt range, and
+preview/final rendering use the same frozen payloads. PDF, PNG-directory, and
+SVG-directory exports record the RF source, companions, filter, rendering
+recipe, and output integrity in the versioned manifest or PDF metadata.
+
 Singleton-y Cartesian maps keep a `30:7` footprint, and the sole Polar row spans
 seven radial units in main views, RGB maps, timelines, hit testing, selection,
 and figure exports. Multirow geometry is unchanged.

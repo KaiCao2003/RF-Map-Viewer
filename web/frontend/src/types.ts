@@ -39,6 +39,20 @@ export interface DatasetMeta {
   };
 }
 
+export interface UnitFilterResult {
+  sourceBinRange: readonly [number, number];
+  rfTimeRangeMs: readonly [number, number];
+  zeroSpikeSpatialBinThreshold: number;
+  spatialBinCount: number;
+  comparison: string;
+  visibleUnitIds: number[];
+  excludedUnitIds: number[];
+  zeroSpikeSpatialBinCounts: Array<{
+    unitId: number;
+    zeroBinCount: number;
+  }>;
+}
+
 export interface FsEntry {
   name: string;
   path: string;

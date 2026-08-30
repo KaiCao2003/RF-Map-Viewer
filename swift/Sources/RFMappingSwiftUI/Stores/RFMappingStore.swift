@@ -2,12 +2,28 @@ import AppKit
 import Foundation
 import Observation
 
+enum UnitQualityVisibilityChangeReason: Equatable, Sendable {
+    case filterSettings
+    case plotRange
+}
+
+enum RFUnitUnavailableReason: Equatable, Sendable {
+    case noQualityVisibleUnits(total: Int)
+    case qualityFiltered(unitID: Int)
+    case noProbeVisibleUnits
+    case probeFiltered(unitID: Int)
+    case pairedMissing(unitID: Int)
+    case noSelection
+}
+
 @Observable
 final class RFMappingStore {
     private enum PreferenceKey {
         static let tuningSession = "rfmapping.tuningSession"
         static let showWaveform = "rfmapping.showWaveform"
         static let waveformChannelMode = "rfmapping.waveformChannelMode"
+        static let rfFilterUnitsWithZeroBins = "rfmapping.rfFilterUnitsWithZeroBins"
+        static let rfZeroBinThreshold = "rfmapping.rfZeroBinThreshold"
     }
 
     private enum SpatialPlotKind: Int, Equatable {
@@ -81,6 +97,13 @@ final class RFMappingStore {
         let endMS: Double
     }
 
+    private struct UnitQualityFilterCacheKey: Equatable {
+        let dataID: ObjectIdentifier
+        let sourceStart: Int
+        let sourceEnd: Int
+        let threshold: Int
+    }
+
     private struct GroupResponseCacheKey: Equatable {
         let dataID: ObjectIdentifier
         let unitIndex: Int
@@ -128,17 +151,22 @@ final class RFMappingStore {
     @ObservationIgnored private var plotSourceRangeCache: (key: SelectedSourceRangeCacheKey, value: AxisGroup)?
     @ObservationIgnored private var groupResponseCaches: [(key: GroupResponseCacheKey, value: [Double?])] = []
     @ObservationIgnored private var cellAnalysisCaches: [(key: CellAnalysisCacheKey, value: CellAnalysis)] = []
+    @ObservationIgnored private var unitQualityFilterCache:
+        (key: UnitQualityFilterCacheKey, unitIDs: [Int])?
     @ObservationIgnored private var loadRequestID: UUID?
     @ObservationIgnored private var activeDecodeTask: Task<RFMappingData, Error>?
     @ObservationIgnored var pairingDataDidChange: (() -> Void)?
+    @ObservationIgnored var unitQualityVisibilityDidChange:
+        ((UnitQualityVisibilityChangeReason) -> Void)?
     private let preferences: UserDefaults
+    private let discoversCompanionsAutomatically: Bool
 
     var data: RFMappingData?
     var availableJSONURLs: [URL] = []
     var selectedJSONPath = ""
 
-    /// File-local original index. `-1` means the paired union currently points
-    /// at a unit ID that this file does not contain.
+    /// File-local original index. `-1` means the shared selection is absent or
+    /// hidden by this window's quality/probe filters.
     private(set) var unitIndex = 0
     private(set) var selectedUnitID: Int?
     private(set) var pairedUnitIDs: [Int]?
@@ -163,6 +191,8 @@ final class RFMappingStore {
     private(set) var tuningSessionIndex = 1
     private(set) var showWaveform = true
     private(set) var waveformChannelMode: WaveformChannelMode = .sameXColumn
+    private(set) var rfFilterUnitsWithZeroBins = true
+    private(set) var rfZeroBinThreshold = 1
     private(set) var hdTuning: HDTuningData?
     private(set) var hdTuningURL: URL?
     private(set) var hdTuningError: String?
@@ -195,9 +225,13 @@ final class RFMappingStore {
         initialData: RFMappingData? = nil,
         loadDefault: Bool = true,
         discoverJSONChoices: Bool = true,
+        discoverCompanions: Bool = true,
+        unitQualityFilterEnabled: Bool? = nil,
+        zeroSpikeBinThreshold: Int? = nil,
         preferences: UserDefaults = .standard
     ) {
         self.preferences = preferences
+        discoversCompanionsAutomatically = discoverCompanions
         let storedSession = preferences.integer(forKey: PreferenceKey.tuningSession)
         tuningSessionIndex = max(1, storedSession == 0 ? 1 : storedSession)
         if preferences.object(forKey: PreferenceKey.showWaveform) != nil {
@@ -206,6 +240,22 @@ final class RFMappingStore {
         if let rawMode = preferences.string(forKey: PreferenceKey.waveformChannelMode),
            let mode = WaveformChannelMode(rawValue: rawMode) {
             waveformChannelMode = mode
+        }
+        if let unitQualityFilterEnabled {
+            rfFilterUnitsWithZeroBins = unitQualityFilterEnabled
+        } else if preferences.object(forKey: PreferenceKey.rfFilterUnitsWithZeroBins) != nil {
+            rfFilterUnitsWithZeroBins = preferences.bool(
+                forKey: PreferenceKey.rfFilterUnitsWithZeroBins
+            )
+        }
+        if let zeroSpikeBinThreshold {
+            rfZeroBinThreshold = max(1, min(100_000, zeroSpikeBinThreshold))
+        } else {
+            let storedThreshold = preferences.integer(forKey: PreferenceKey.rfZeroBinThreshold)
+            rfZeroBinThreshold = max(
+                1,
+                min(100_000, storedThreshold == 0 ? 1 : storedThreshold)
+            )
         }
         isAwaitingStartupDocument = initialURL == nil && initialData == nil && !loadDefault
         if discoverJSONChoices { refreshJSONChoices() }
@@ -246,14 +296,116 @@ final class RFMappingStore {
     }
 
     var selectedRFMap: RFMap? {
-        guard let data, let selectedUnitID else { return nil }
+        guard hasSelectedUnit, let data, let selectedUnitID else { return nil }
         return try? data.rfMap(byUnitID: selectedUnitID)
     }
 
-    var navigationUnitIDs: [Int] {
-        let unitIDs = pairedUnitIDs ?? data?.unitPool ?? []
+    /// Local source-order IDs that pass the native-grid zero-spike test for
+    /// the current 2-D RF sum window. Timeline selection and display
+    /// rebinning/smoothing do not participate in this calculation.
+    var qualityFilteredUnitIDs: [Int] {
+        guard let data else { return [] }
+        guard rfFilterUnitsWithZeroBins else { return data.unitPool }
+        let source = sourceBinsForPlotRange()
+        let key = UnitQualityFilterCacheKey(
+            dataID: ObjectIdentifier(data),
+            sourceStart: source.start,
+            sourceEnd: source.end,
+            threshold: rfZeroBinThreshold
+        )
+        if let unitQualityFilterCache, unitQualityFilterCache.key == key {
+            return unitQualityFilterCache.unitIDs
+        }
+        let unitIDs = data.unitPool.enumerated().compactMap { unitIndex, unitID in
+            data.zeroSpikeSpatialBinCount(
+                unitIndex: unitIndex,
+                start: source.start,
+                end: source.end
+            ) < rfZeroBinThreshold ? unitID : nil
+        }
+        unitQualityFilterCache = (key, unitIDs)
+        return unitIDs
+    }
+
+    var unitQualityFilterStatusText: String {
+        guard let data else { return "No RF map loaded" }
+        let visible = qualityFilteredUnitIDs.count
+        let total = data.unitPool.count
+        if !rfFilterUnitsWithZeroBins {
+            return "\(visible)/\(total) units visible · zero-spike filter off"
+        }
+        if visible == 0 {
+            return "0/\(total) units visible · no units pass the current RF window"
+        }
+        return "\(visible)/\(total) units visible · hide when zero-bin count ≥ \(rfZeroBinThreshold)"
+    }
+
+    /// Maximum value accepted from this window's live threshold control.
+    ///
+    /// Persisted values intentionally retain the application-wide 1...100,000
+    /// contract when a smaller RF file is opened. Such a value can therefore
+    /// exceed this file's native spatial-bin count and make every unit visible.
+    /// Only a new user edit is constrained to the active file, matching the
+    /// Python Settings window's save-time validation.
+    var rfZeroBinThresholdEditMaximum: Int {
+        guard let data else { return 100_000 }
+        return max(1, min(100_000, data.nY * data.nX))
+    }
+
+    var unitQualityFilterSnapshot: RFUnitQualityFilterSnapshot? {
+        guard let data else { return nil }
+        let source = sourceBinsForPlotRange()
+        let visible = qualityFilteredUnitIDs
+        let visibleSet = Set(visible)
+        return RFUnitQualityFilterSnapshot(
+            enabled: rfFilterUnitsWithZeroBins,
+            zeroSpikeSpatialBinThreshold: rfZeroBinThreshold,
+            sourceStartBin: source.start,
+            sourceEndBin: source.end,
+            spatialBinCount: data.nY * data.nX,
+            visibleUnitIDs: visible,
+            excludedUnitIDs: data.unitPool.filter { !visibleSet.contains($0) }
+        )
+    }
+
+    private var locallyNavigableUnitIDs: [Int] {
+        let unitIDs = qualityFilteredUnitIDs
         guard let probeFilteredUnitIDs else { return unitIDs }
         return unitIDs.filter(probeFilteredUnitIDs.contains)
+    }
+
+    var navigationUnitIDs: [Int] {
+        let unitIDs = pairedUnitIDs ?? qualityFilteredUnitIDs
+        guard let probeFilteredUnitIDs else { return unitIDs }
+        return unitIDs.filter(probeFilteredUnitIDs.contains)
+    }
+
+    /// Explains why the main plot cannot render the current shared selection.
+    /// Keeping this classification in the store prevents an all-filtered or
+    /// locally hidden unit from being mislabeled as absent from the file.
+    var unitUnavailableReason: RFUnitUnavailableReason? {
+        guard let data, !hasSelectedUnit else { return nil }
+        let qualityVisible = qualityFilteredUnitIDs
+        if qualityVisible.isEmpty {
+            return .noQualityVisibleUnits(total: data.unitPool.count)
+        }
+        guard let selectedUnitID else {
+            if probeFilteredUnitIDs != nil, locallyNavigableUnitIDs.isEmpty {
+                return .noProbeVisibleUnits
+            }
+            return .noSelection
+        }
+        guard data.unitIndex(forUnitID: selectedUnitID) != nil else {
+            return .pairedMissing(unitID: selectedUnitID)
+        }
+        guard qualityVisible.contains(selectedUnitID) else {
+            return .qualityFiltered(unitID: selectedUnitID)
+        }
+        if let probeFilteredUnitIDs,
+           !probeFilteredUnitIDs.contains(selectedUnitID) {
+            return .probeFiltered(unitID: selectedUnitID)
+        }
+        return .noSelection
     }
 
     var figureExportCompanions: FigureExportCompanions {
@@ -304,9 +456,17 @@ final class RFMappingStore {
     }
 
     var headerTitle: String {
-        guard data != nil else { return "RF Map Viewer" }
+        guard let data else { return "RF Map Viewer" }
+        if qualityFilteredUnitIDs.isEmpty {
+            return "No visible units — zero-spike RF-bin filter"
+        }
         guard hasSelectedUnit, let selectedUnitID else {
             let missingID = selectedUnitID.map { String($0) } ?? "unknown"
+            if let selectedUnitID,
+               data.unitIndex(forUnitID: selectedUnitID) != nil,
+               !qualityFilteredUnitIDs.contains(selectedUnitID) {
+                return "Unit N/A / cluster \(missingID) is hidden by the zero-spike RF-bin filter"
+            }
             return "Unit N/A / cluster \(missingID) is not present in this file"
         }
         return "Unit \(String(format: "%03d", unitIndex)) / cluster \(selectedUnitID)"
@@ -318,6 +478,7 @@ final class RFMappingStore {
 
     var statusText: String {
         guard let data else { return "Open an RF mapping .rfmap or JSON file." }
+        if qualityFilteredUnitIDs.isEmpty { return unitQualityFilterStatusText }
         if let hoverCell {
             let prefix = hoverExtra.isEmpty ? "Hover" : "Hover \(hoverExtra);"
             return "\(prefix) \(yGroupText(hoverCell.yStart, hoverCell.yEnd)), \(xGroupText(hoverCell.xStart, hoverCell.xEnd))"
@@ -330,6 +491,9 @@ final class RFMappingStore {
 
     var unitStatsText: String {
         guard let data, hasSelectedUnit else {
+            if self.data != nil, qualityFilteredUnitIDs.isEmpty {
+                return unitQualityFilterStatusText
+            }
             return selectedUnitID.map { "Cluster \($0): N/A in this file" } ?? ""
         }
         let metrics = data.metrics(for: unitIndex)
@@ -459,10 +623,14 @@ final class RFMappingStore {
         clearHover()
         timelineRangeAnchor = nil
         timelineScrollFraction = 0
-        resetPlotRangeToDefault()
+        resetPlotRangeToDefault(notifyUnitVisibility: false)
         normalizeControls()
         ensureSelectedCell()
-        discoverCompanions(for: loaded)
+        if discoversCompanionsAutomatically {
+            discoverCompanions(for: loaded)
+        } else {
+            clearDiscoveredCompanions()
+        }
         if refreshChoices { refreshJSONChoices() }
         pairingDataDidChange?()
     }
@@ -474,10 +642,9 @@ final class RFMappingStore {
         _ state: ViewerSyncState,
         fields: ViewerSyncFields = .all
     ) {
-        guard let data else { return }
+        guard data != nil else { return }
         let state = viewerSyncState.merging(state, fields: fields)
 
-        selectUnitID(state.unitID, resetInteraction: false)
         valueMode = ResponseValueMode.allCases.contains(state.valueMode)
             ? state.valueMode
             : .meanFiringRate
@@ -501,6 +668,7 @@ final class RFMappingStore {
         timelineRangeAnchor = nil
 
         normalizeControls()
+        selectUnitID(state.unitID, resetInteraction: false)
         binIndex = nearestTimeGroupIndex(to: state.activeTimeMS)
         timelineRangeAnchor = state.timelineRangeAnchorMS.map(nearestTimeGroupIndex)
         selectedCell = hasSelectedUnit ? state.selectedCell.map(normalizedCell) : nil
@@ -588,25 +756,47 @@ final class RFMappingStore {
 
     func selectUnitID(_ unitID: Int, resetInteraction: Bool = true) {
         guard let data else { return }
-        let localIndex = data.unitIndex(forUnitID: unitID)
-        guard localIndex != nil || pairedUnitIDs?.contains(unitID) == true else { return }
-        selectedUnitID = unitID
-        unitIndex = localIndex ?? -1
-        clearDerivedCaches()
-        if resetInteraction {
-            selectedCell = nil
-            clearHover()
-            ensureSelectedCell()
-        }
-        refreshWaveformPayload()
+        let locallyQualityVisible = qualityFilteredUnitIDs.contains(unitID)
+        guard locallyQualityVisible || pairedUnitIDs?.contains(unitID) == true else { return }
+        let localIndex = locallyNavigableUnitIDs.contains(unitID)
+            ? data.unitIndex(forUnitID: unitID)
+            : nil
+        applyResolvedUnitSelection(
+            unitID,
+            localIndex: localIndex,
+            resetInteraction: resetInteraction
+        )
     }
 
     /// Configures the sorted cross-window union used by previous/next. Passing
     /// nil leaves pairing and restores a valid local selection if necessary.
     func setPairedUnitIDs(_ unitIDs: [Int]?) {
         pairedUnitIDs = unitIDs.map { Array(Set($0)).sorted() }
-        if pairedUnitIDs == nil, !hasSelectedUnit, let first = data?.unitPool.first {
-            selectUnitID(first)
+        reconcileUnitSelection()
+    }
+
+    func setRFUnitQualityFilterEnabled(_ enabled: Bool) {
+        guard enabled != rfFilterUnitsWithZeroBins else { return }
+        let previous = qualityFilteredUnitIDs
+        rfFilterUnitsWithZeroBins = enabled
+        preferences.set(enabled, forKey: PreferenceKey.rfFilterUnitsWithZeroBins)
+        unitQualityFilterCache = nil
+        reconcileUnitSelection()
+        if previous != qualityFilteredUnitIDs {
+            unitQualityVisibilityDidChange?(.filterSettings)
+        }
+    }
+
+    func setRFZeroBinThreshold(_ threshold: Int) {
+        let normalized = max(1, min(rfZeroBinThresholdEditMaximum, threshold))
+        guard normalized != rfZeroBinThreshold else { return }
+        let previous = qualityFilteredUnitIDs
+        rfZeroBinThreshold = normalized
+        preferences.set(normalized, forKey: PreferenceKey.rfZeroBinThreshold)
+        unitQualityFilterCache = nil
+        reconcileUnitSelection()
+        if previous != qualityFilteredUnitIDs {
+            unitQualityVisibilityDidChange?(.filterSettings)
         }
     }
 
@@ -639,19 +829,52 @@ final class RFMappingStore {
 
     func setProbeFilteredUnitIDs(_ unitIDs: Set<Int>?) {
         probeFilteredUnitIDs = unitIDs
+        reconcileUnitSelection()
+    }
+
+    private func reconcileUnitSelection() {
+        guard let data else { return }
         let choices = navigationUnitIDs
-        if choices.isEmpty {
-            selectedUnitID = nil
-            unitIndex = -1
-            waveformPayload = nil
-            isWaveformZoomed = false
-            clearDerivedCaches()
-            selectedCell = nil
-            clearHover()
+        guard !choices.isEmpty else {
+            applyResolvedUnitSelection(nil, localIndex: nil, resetInteraction: true)
             return
         }
-        if let selectedUnitID, choices.contains(selectedUnitID) { return }
-        if let first = choices.first { selectUnitID(first) }
+        let target: Int
+        if let selectedUnitID, choices.contains(selectedUnitID) {
+            target = selectedUnitID
+        } else if let selectedUnitID {
+            target = choices.first(where: { $0 > selectedUnitID }) ?? choices[0]
+        } else {
+            target = choices[0]
+        }
+        let localIndex = locallyNavigableUnitIDs.contains(target)
+            ? data.unitIndex(forUnitID: target)
+            : nil
+        applyResolvedUnitSelection(
+            target,
+            localIndex: localIndex,
+            resetInteraction: target != selectedUnitID || localIndex != unitIndex
+        )
+    }
+
+    private func applyResolvedUnitSelection(
+        _ unitID: Int?,
+        localIndex: Int?,
+        resetInteraction: Bool
+    ) {
+        let resolvedIndex = localIndex ?? -1
+        let changed = selectedUnitID != unitID || unitIndex != resolvedIndex
+        selectedUnitID = unitID
+        unitIndex = resolvedIndex
+        guard changed else { return }
+        clearDerivedCaches()
+        if resetInteraction || resolvedIndex < 0 {
+            selectedCell = nil
+            clearHover()
+        }
+        if resolvedIndex >= 0 { ensureSelectedCell() }
+        refreshWaveformPayload()
+        if resolvedIndex < 0 { isWaveformZoomed = false }
     }
 
     func setHDTuningURL(_ url: URL) {
@@ -700,16 +923,7 @@ final class RFMappingStore {
     }
 
     private func discoverCompanions(for loaded: RFMappingData) {
-        hdTuning = nil
-        hdTuningURL = nil
-        hdTuningError = nil
-        probeGeometry = nil
-        probeGeometryError = nil
-        waveformArtifact = nil
-        waveformPayload = nil
-        waveformError = nil
-        probeFilteredUnitIDs = nil
-        isWaveformZoomed = false
+        clearDiscoveredCompanions()
         reloadDiscoveredHDTuning()
         if let paths = ProbeGeometryDiscovery.discover(forRFURL: loaded.url) {
             do {
@@ -727,6 +941,19 @@ final class RFMappingStore {
             waveformError = error.localizedDescription
         }
         refreshWaveformPayload()
+    }
+
+    private func clearDiscoveredCompanions() {
+        hdTuning = nil
+        hdTuningURL = nil
+        hdTuningError = nil
+        probeGeometry = nil
+        probeGeometryError = nil
+        waveformArtifact = nil
+        waveformPayload = nil
+        waveformError = nil
+        probeFilteredUnitIDs = nil
+        isWaveformZoomed = false
     }
 
     private func reloadDiscoveredHDTuning() {
@@ -792,15 +1019,6 @@ final class RFMappingStore {
 
     func normalizeControls() {
         guard let data else { return }
-        if probeFilteredUnitIDs?.isEmpty == true {
-            selectedUnitID = nil
-            unitIndex = -1
-        } else if let selectedUnitID {
-            unitIndex = data.unitIndex(forUnitID: selectedUnitID) ?? -1
-        } else {
-            selectedUnitID = data.unitPool.first
-            unitIndex = 0
-        }
         xBins = max(1, min(data.nX, xBins))
         yBins = max(1, min(data.nY, yBins))
         smoothRadius = max(0, min(3, smoothRadius))
@@ -831,20 +1049,39 @@ final class RFMappingStore {
         rangeEndMS = data.timeBinEdges[source.end + 1] * 1000.0
     }
 
-    func normalizePlotTimeRange() {
+    func normalizePlotTimeRange(notifyUnitVisibility: Bool = true) {
         guard let data else { return }
+        // Text-field bindings assign the requested millisecond value before
+        // asking the store to normalize it. Preserve the last computed
+        // source-window result so paired windows can detect that this edit
+        // changed the shared quality-filter union.
+        let previousVisibleUnitIDs: [Int]
+        if rfFilterUnitsWithZeroBins,
+           let cached = unitQualityFilterCache,
+           cached.key.dataID == ObjectIdentifier(data),
+           cached.key.threshold == rfZeroBinThreshold {
+            previousVisibleUnitIDs = cached.unitIDs
+        } else {
+            previousVisibleUnitIDs = qualityFilteredUnitIDs
+        }
         let source = sourceBinsForPlotRange()
         plotRangeStartMS = data.timeBinEdges[source.start] * 1000.0
         plotRangeEndMS = data.timeBinEdges[source.end + 1] * 1000.0
+        unitQualityFilterCache = nil
+        reconcileUnitSelection()
+        if notifyUnitVisibility,
+           previousVisibleUnitIDs != qualityFilteredUnitIDs {
+            unitQualityVisibilityDidChange?(.plotRange)
+        }
     }
 
-    func resetPlotRangeToDefault() {
+    func resetPlotRangeToDefault(notifyUnitVisibility: Bool = true) {
         guard data != nil else { return }
         let axisStart = timeAxisStartMS()
         let axisEnd = timeAxisEndMS()
         plotRangeStartMS = max(axisStart, min(axisEnd, 0.0))
         plotRangeEndMS = max(axisStart, min(axisEnd, 200.0))
-        normalizePlotTimeRange()
+        normalizePlotTimeRange(notifyUnitVisibility: notifyUnitVisibility)
     }
 
     func ensureSelectedCell() {

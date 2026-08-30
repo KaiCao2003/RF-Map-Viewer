@@ -596,6 +596,41 @@ class WaveformArtifactStore:
             self._template_path(summary),
         )
 
+    def source_paths_for_units(self, unit_ids: Sequence[int]) -> tuple[Path, ...]:
+        """Return every scientific file needed for the selected RF units.
+
+        Metadata files are always included.  A waveform artifact may cover a
+        broader or narrower unit set than the RF JSON, so units that are not in
+        the artifact deliberately contribute no template path and continue to
+        render through the normal unavailable placeholder contract.
+        """
+
+        paths: dict[Path, None] = {
+            self.manifest_path: None,
+            self.channels_path: None,
+            self.time_path: None,
+            self.units_path: None,
+        }
+        for unit_id in dict.fromkeys(int(value) for value in unit_ids):
+            try:
+                summary = self.summary_for(unit_id)
+            except KeyError:
+                continue
+            paths[self._template_path(summary)] = None
+        return tuple(paths)
+
+    def preload_units(self, unit_ids: Sequence[int]) -> tuple[int, ...]:
+        """Materialize selected templates so one export uses one frozen view."""
+
+        loaded: list[int] = []
+        for unit_id in dict.fromkeys(int(value) for value in unit_ids):
+            try:
+                self.load_unit_template(unit_id)
+            except KeyError:
+                continue
+            loaded.append(unit_id)
+        return tuple(loaded)
+
     def summary_for(self, unit_id: int) -> WaveformUnitSummary:
         try:
             return self.unit_summaries[int(unit_id)]
@@ -633,6 +668,7 @@ class WaveformArtifactStore:
             raise WaveformArtifactError(f"{path.name} is not a valid gzip CSV") from exc
         if row_count != len(self.time_ms):
             raise WaveformArtifactError(f"{path.name} row count does not match waveform_time.csv")
+        values.flags.writeable = False
         return values, path
 
     def load_unit_template(self, unit_id: int) -> tuple[WaveformUnitSummary, np.ndarray, Path]:

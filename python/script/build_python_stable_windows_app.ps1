@@ -32,6 +32,8 @@ $SmokeJson = Join-Path $RootDir "tests\fixtures\release_smoke_rf.json"
 $IconPath = Join-Path $RootDir "assets\rf-mapping-viewer-icon-1024.png"
 $HooksDir = Join-Path $RootDir "packaging\pyinstaller-hooks"
 $TkinterDnDHook = Join-Path $HooksDir "hook-tkinterdnd2.py"
+$TkinterRuntimeHookBackport = Join-Path $HooksDir "rthooks\pyi_rth__tkinter.py"
+$TkinterRuntimeHookPatcher = Join-Path $ScriptDir "patch_pyinstaller_tk9_runtime_hook.py"
 $InstallerScript = Join-Path $RootDir "packaging\windows\RFMapViewer.iss"
 $MetadataAuditor = Join-Path $ScriptDir "verify_python_stable_release_metadata.py"
 $VersionVerifier = Join-Path $RepoRoot "release\verify_versions.py"
@@ -71,26 +73,65 @@ function Assert-Equal([object]$Actual, [object]$Expected, [string]$Description) 
     }
 }
 
+function Normalize-WindowsVersionString([object]$Value) {
+    # Inno Setup pads some StringFileInfo values with trailing spaces in the
+    # setup executable's fixed-width resource. Preserve strict identity while
+    # ignoring only resource padding; leading and internal whitespace remain
+    # significant.
+    return ([string]$Value).TrimEnd([char[]]@([char]0, [char]32))
+}
+
 function Invoke-WindowedSmoke(
     [string]$Executable,
     [string[]]$Arguments,
-    [string]$Description
+    [string]$Description,
+    [string]$ReportPath
 ) {
-    $Process = Start-Process `
-        -FilePath $Executable `
-        -ArgumentList $Arguments `
-        -PassThru
+    Remove-Item -LiteralPath $ReportPath -Force -ErrorAction SilentlyContinue
+    $PreviousReportExists = Test-Path Env:RF_MAPPING_WINDOWED_SMOKE_REPORT
+    $PreviousReport = if ($PreviousReportExists) {
+        $env:RF_MAPPING_WINDOWED_SMOKE_REPORT
+    } else {
+        $null
+    }
+    $env:RF_MAPPING_WINDOWED_SMOKE_REPORT = $ReportPath
+    $Process = $null
     try {
+        $Process = Start-Process `
+            -FilePath $Executable `
+            -ArgumentList $Arguments `
+            -PassThru
         if (-not $Process.WaitForExit(120000)) {
             Stop-Process -Id $Process.Id -Force -ErrorAction SilentlyContinue
             $Process.WaitForExit()
-            Fail "$Description timed out after 120 seconds"
+            $Detail = if (Test-Path -LiteralPath $ReportPath -PathType Leaf) {
+                Get-Content -LiteralPath $ReportPath -Raw
+            } else {
+                "no windowed smoke report was created"
+            }
+            Fail "$Description timed out after 120 seconds; report: $Detail"
+        }
+        Assert-File $ReportPath "$Description report"
+        try {
+            $Report = Get-Content -LiteralPath $ReportPath -Raw | ConvertFrom-Json
+        } catch {
+            Fail "$Description produced an invalid report: $($_.Exception.Message)"
         }
         if ($Process.ExitCode -ne 0) {
-            Fail "$Description exited with code $($Process.ExitCode)"
+            $Detail = Get-Content -LiteralPath $ReportPath -Raw
+            Fail "$Description exited with code $($Process.ExitCode); report: $Detail"
         }
+        Assert-Equal $Report.status "success" "$Description report status"
+        Assert-Equal $Report.exitCode 0 "$Description report exit code"
     } finally {
-        $Process.Dispose()
+        if ($null -ne $Process) {
+            $Process.Dispose()
+        }
+        if ($PreviousReportExists) {
+            $env:RF_MAPPING_WINDOWED_SMOKE_REPORT = $PreviousReport
+        } else {
+            Remove-Item Env:RF_MAPPING_WINDOWED_SMOKE_REPORT -ErrorAction SilentlyContinue
+        }
     }
 }
 
@@ -165,15 +206,18 @@ function Invoke-FrozenSmoke(
     Invoke-WindowedSmoke `
         $Executable `
         @("--self-test", "`"$Fixture`"") `
-        "$Label data self-test"
+        "$Label data self-test" `
+        "$ExportRoot-data-smoke-report.json"
     Invoke-WindowedSmoke `
         $Executable `
         @("--self-test-dnd") `
-        "$Label TkDND self-test"
+        "$Label TkDND self-test" `
+        "$ExportRoot-tkdnd-smoke-report.json"
     Invoke-WindowedSmoke `
         $Executable `
         @("--self-test-export", "`"$ExportRoot`"") `
-        "$Label figure export self-test"
+        "$Label figure export self-test" `
+        "$ExportRoot-figure-export-smoke-report.json"
     Assert-File (Join-Path $ExportRoot "figure-export-smoke.pdf") "$Label PDF export"
     Assert-File `
         (Join-Path $ExportRoot "figure-export-smoke\manifest.json") `
@@ -183,9 +227,18 @@ function Invoke-FrozenSmoke(
 
 function Assert-WindowsVersionResource([string]$Path, [string]$Label) {
     $VersionInfo = (Get-Item -LiteralPath $Path).VersionInfo
-    Assert-Equal $VersionInfo.ProductName $AppName "$Label product name"
-    Assert-Equal $VersionInfo.ProductVersion $AppVersion "$Label product version"
-    Assert-Equal $VersionInfo.FileVersion "$AppVersion.$AppBuild" "$Label file version"
+    Assert-Equal `
+        (Normalize-WindowsVersionString $VersionInfo.ProductName) `
+        $AppName `
+        "$Label product name"
+    Assert-Equal `
+        (Normalize-WindowsVersionString $VersionInfo.ProductVersion) `
+        $AppVersion `
+        "$Label product version"
+    Assert-Equal `
+        (Normalize-WindowsVersionString $VersionInfo.FileVersion) `
+        "$AppVersion.$AppBuild" `
+        "$Label file version"
 }
 
 if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
@@ -199,6 +252,8 @@ foreach ($Required in @(
     $SmokeJson,
     $IconPath,
     $TkinterDnDHook,
+    $TkinterRuntimeHookBackport,
+    $TkinterRuntimeHookPatcher,
     $InstallerScript,
     $MetadataAuditor,
     $VersionVerifier,
@@ -281,6 +336,13 @@ print("Tk runtime:", tkinter.TkVersion)
 '@
 & $BuildPython -c $DependencyProbe
 Assert-NativeSuccess "pinned Windows packaging dependency verification"
+
+# PyInstaller 6.21.0 predates upstream support for Python 3.14's Windows
+# Tcl/Tk 9 layout, which keeps its script libraries in DLL-embedded zipfs
+# archives. The patcher refuses to touch any other PyInstaller version, Tcl
+# library layout, Tk major version, or installed-hook revision.
+& $BuildPython $TkinterRuntimeHookPatcher $TkinterRuntimeHookBackport
+Assert-NativeSuccess "PyInstaller Tcl/Tk 9 runtime-hook backport"
 
 $VersionFile = Join-Path $BuildRoot "RFMapViewer-version-info.txt"
 $VersionResource = @"

@@ -4,12 +4,14 @@ import type {
   HdDatasetArtifact,
   HdUnitArtifact,
   ProbeGeometry,
+  UnitFilterResult,
   WaveformArtifact,
   WaveformChannelMode,
 } from "./types";
 import type { RemoteFileKind } from "./fileFormats";
 import {
   FIGURE_TYPE_IDS,
+  anchoredScientificSnapshotToken,
   isFigureTypeId,
   type FigureDirectoryListing,
   type FigureExportRequest,
@@ -303,6 +305,75 @@ export async function getUnitCounts(
     throw new ApiError(`Unit ${clusterId} returned ${values.length} values; expected ${expected}.`);
   }
   return values;
+}
+
+function integerPair(value: unknown, label: string): readonly [number, number] {
+  if (!Array.isArray(value) || value.length !== 2) {
+    throw new ApiError(`${label} must contain two values.`);
+  }
+  const parsed = value.map(Number);
+  if (parsed.some((item) => !Number.isFinite(item))) {
+    throw new ApiError(`${label} must contain finite values.`);
+  }
+  return [parsed[0], parsed[1]];
+}
+
+function integerIds(value: unknown, label: string): number[] {
+  if (!Array.isArray(value)) throw new ApiError(`${label} must be a list.`);
+  const parsed = value.map(Number);
+  if (parsed.some((item) => !Number.isInteger(item))) {
+    throw new ApiError(`${label} must contain integer cluster IDs.`);
+  }
+  return parsed;
+}
+
+export async function getUnitFilter(
+  datasetId: string,
+  rfStartMs: number,
+  rfEndMs: number,
+  zeroSpikeSpatialBinThreshold: number,
+  signal?: AbortSignal,
+): Promise<UnitFilterResult> {
+  const url = new URL(`datasets/${encodeURIComponent(datasetId)}/unit-filter`, apiBase);
+  url.searchParams.set("rfStartMs", String(rfStartMs));
+  url.searchParams.set("rfEndMs", String(rfEndMs));
+  url.searchParams.set(
+    "zeroSpikeSpatialBinThreshold",
+    String(zeroSpikeSpatialBinThreshold),
+  );
+  const response = await checked(await protectedFetch(url, { signal }));
+  const payload = record(await response.json());
+  const counts = Array.isArray(payload.zeroSpikeSpatialBinCounts)
+    ? payload.zeroSpikeSpatialBinCounts.map((raw) => {
+      const item = record(raw);
+      const unitId = Number(item.unitId);
+      const zeroBinCount = Number(item.zeroBinCount);
+      if (!Number.isInteger(unitId) || !Number.isInteger(zeroBinCount) || zeroBinCount < 0) {
+        throw new ApiError("Unit filter zero-bin counts are invalid.");
+      }
+      return { unitId, zeroBinCount };
+    })
+    : [];
+  const threshold = Number(payload.zeroSpikeSpatialBinThreshold);
+  const spatialBinCount = Number(payload.spatialBinCount);
+  if (
+    !Number.isInteger(threshold)
+    || threshold < 1
+    || !Number.isInteger(spatialBinCount)
+    || spatialBinCount < 1
+  ) {
+    throw new ApiError("Unit filter threshold metadata is invalid.");
+  }
+  return {
+    sourceBinRange: integerPair(payload.sourceBinRange, "Unit filter source range"),
+    rfTimeRangeMs: integerPair(payload.rfTimeRangeMs, "Unit filter RF range"),
+    zeroSpikeSpatialBinThreshold: threshold,
+    spatialBinCount,
+    comparison: String(payload.comparison ?? ""),
+    visibleUnitIds: integerIds(payload.visibleUnitIds, "Visible units"),
+    excludedUnitIds: integerIds(payload.excludedUnitIds, "Excluded units"),
+    zeroSpikeSpatialBinCounts: counts,
+  };
 }
 
 export interface DisplayedCsvRequest {
@@ -636,7 +707,7 @@ function normalizeFigureExportSpec(payload: unknown): FigureExportSpec {
   if (missing.length) throw new ApiError(`Figure spec is missing: ${missing.join(", ")}.`);
   const page = record(source.page);
   const formats = Array.isArray(source.formats)
-    ? source.formats.filter((value): value is FigureOutputFormat => value === "pdf" || value === "png")
+    ? source.formats.filter((value): value is FigureOutputFormat => value === "pdf" || value === "png" || value === "svg")
     : [];
   const pageOrders = Array.isArray(source.pageOrders)
     ? source.pageOrders.filter((value): value is FigurePageOrder => value === "unit-major" || value === "page-major")
@@ -691,6 +762,7 @@ export interface FigurePreviewResult {
   placeholderCount: number;
   clusterId: number;
   pageIndex: number;
+  scientificSnapshotToken: string;
 }
 
 export async function previewFigureExport(
@@ -709,12 +781,17 @@ export async function previewFigureExport(
       },
     ),
   );
+  const scientificSnapshotToken = anchoredScientificSnapshotToken(
+    null,
+    response.headers.get("X-RF-Scientific-Snapshot-Token") ?? "",
+  );
   return {
     image: await response.blob(),
     sha256: response.headers.get("X-RF-Render-SHA256") ?? "",
     placeholderCount: Math.max(0, Math.trunc(finiteNumber(response.headers.get("X-RF-Placeholder-Count")))),
     clusterId: Math.trunc(finiteNumber(response.headers.get("X-RF-Cluster-Id"), request.clusterId)),
     pageIndex: Math.trunc(finiteNumber(response.headers.get("X-RF-Page-Index"), request.pageIndex)),
+    scientificSnapshotToken,
   };
 }
 
@@ -752,7 +829,9 @@ export async function exportFigurePlan(
   );
   const payload = record(await response.json());
   const manifest = record(payload.manifest);
-  const format: FigureOutputFormat = payload.format === "png" ? "png" : "pdf";
+  const format: FigureOutputFormat = payload.format === "png" || payload.format === "svg"
+    ? payload.format
+    : "pdf";
   const order: FigurePageOrder = manifest.order === "page-major" ? "page-major" : "unit-major";
   return {
     format,
@@ -762,7 +841,9 @@ export async function exportFigurePlan(
     overwritten: Boolean(payload.overwritten),
     manifest: {
       specVersion: Math.trunc(finiteNumber(manifest.specVersion)),
-      format: manifest.format === "png" ? "png" : "pdf",
+      format: manifest.format === "png" || manifest.format === "svg"
+        ? manifest.format
+        : "pdf",
       order,
       source: String(manifest.source ?? ""),
       pages: Array.isArray(manifest.pages)

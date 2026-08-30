@@ -454,7 +454,9 @@ final class WaveformArtifactStore: @unchecked Sendable {
         }
         let amplitude = max(
             corrected.lazy.flatMap { $0 }.map { abs($0) }.max() ?? 0,
-            Double.leastNonzeroMagnitude
+            // NumPy float64 epsilon, matching the Python/Web contract for a
+            // constant baseline-corrected waveform.
+            Double.ulpOfOne
         )
         return WaveformPayload(
             sourceDirectory: sourceDirectory,

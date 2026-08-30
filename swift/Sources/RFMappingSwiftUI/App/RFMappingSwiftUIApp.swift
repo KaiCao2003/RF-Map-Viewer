@@ -11,6 +11,54 @@ struct DocumentWindowRequest: Codable, Hashable {
     }
 }
 
+/// Owns the one-shot claim on the document-less initial window. Presenting the
+/// fallback picker must not consume that claim: the file chosen from that
+/// picker still belongs in the initial window, while the picker itself is only
+/// presented once automatically.
+@MainActor
+final class ColdLaunchInitialWindowState {
+    private var replacement: ((URL) async -> Bool)?
+    private var fallback: (() -> Void)?
+    private(set) var didPresentFallback = false
+
+    var canClaimInitialWindow: Bool { replacement != nil }
+    var shouldScheduleFallback: Bool {
+        replacement != nil && fallback != nil && !didPresentFallback
+    }
+
+    func install(
+        replacement: @escaping (URL) async -> Bool,
+        fallback: (() -> Void)?
+    ) {
+        self.replacement = replacement
+        self.fallback = fallback
+        didPresentFallback = false
+    }
+
+    func takeReplacement() -> ((URL) async -> Bool)? {
+        guard let replacement else { return nil }
+        self.replacement = nil
+        fallback = nil
+        return replacement
+    }
+
+    func takeFallbackPresentation() -> (() -> Void)? {
+        guard shouldScheduleFallback, let fallback else { return nil }
+        didPresentFallback = true
+        self.fallback = nil
+        return fallback
+    }
+
+    func abandon() {
+        replacement = nil
+        fallback = nil
+        // Abandonment is terminal for this initial scene. Keep the fallback
+        // marked as handled so a canceled picker can never be auto-presented
+        // again by a later lifecycle notification.
+        didPresentFallback = true
+    }
+}
+
 @MainActor
 final class WindowRouter {
     static let shared = WindowRouter()
@@ -23,8 +71,7 @@ final class WindowRouter {
     private var opener: ((DocumentWindowRequest) -> Void)?
     private var pending: [DocumentWindowRequest] = []
     private var pendingExternalOpens: [PendingExternalOpen] = []
-    private var coldLaunchReplacement: ((URL) async -> Bool)?
-    private var coldLaunchFallback: (() -> Void)?
+    private let coldLaunchState = ColdLaunchInitialWindowState()
     private var coldLaunchExpiration: Task<Void, Never>?
     private var didOfferColdLaunchReplacement = false
     private var preparedDocuments: [UUID: RFMappingData] = [:]
@@ -38,8 +85,7 @@ final class WindowRouter {
 
         if let replacement, !didOfferColdLaunchReplacement {
             didOfferColdLaunchReplacement = true
-            coldLaunchReplacement = replacement
-            coldLaunchFallback = fallback
+            coldLaunchState.install(replacement: replacement, fallback: fallback)
             scheduleColdLaunchFallback()
         }
 
@@ -78,9 +124,7 @@ final class WindowRouter {
     }
 
     func claimColdInitialWindow(for url: URL) -> Bool {
-        guard let replacement = coldLaunchReplacement else { return false }
-        coldLaunchReplacement = nil
-        coldLaunchFallback = nil
+        guard let replacement = coldLaunchState.takeReplacement() else { return false }
         coldLaunchExpiration?.cancel()
         coldLaunchExpiration = nil
         Task { @MainActor in
@@ -90,14 +134,21 @@ final class WindowRouter {
     }
 
     func pauseColdInitialWindowFallback() {
-        guard coldLaunchReplacement != nil else { return }
+        guard coldLaunchState.canClaimInitialWindow else { return }
         coldLaunchExpiration?.cancel()
         coldLaunchExpiration = nil
     }
 
     func resumeColdInitialWindowFallback() {
-        guard coldLaunchReplacement != nil, coldLaunchExpiration == nil else { return }
+        guard coldLaunchState.shouldScheduleFallback,
+              coldLaunchExpiration == nil else { return }
         scheduleColdLaunchFallback()
+    }
+
+    func expireColdInitialWindowClaim() {
+        coldLaunchExpiration?.cancel()
+        coldLaunchExpiration = nil
+        coldLaunchState.abandon()
     }
 
     /// Finder/Launch Services should populate the otherwise-empty initial
@@ -125,9 +176,8 @@ final class WindowRouter {
     private func processExternal(_ urls: [URL]) async -> Bool {
         var allSucceeded = true
         var remaining = urls[...]
-        if let replacement = coldLaunchReplacement, let first = remaining.first {
-            coldLaunchReplacement = nil
-            coldLaunchFallback = nil
+        if let first = remaining.first,
+           let replacement = coldLaunchState.takeReplacement() {
             coldLaunchExpiration?.cancel()
             coldLaunchExpiration = nil
             allSucceeded = await replacement(first) && allSucceeded
@@ -157,15 +207,16 @@ final class WindowRouter {
     }
 
     private func scheduleColdLaunchFallback() {
+        guard coldLaunchState.shouldScheduleFallback else { return }
         coldLaunchExpiration?.cancel()
         coldLaunchExpiration = Task { @MainActor [weak self] in
             try? await Task.sleep(for: .milliseconds(150))
-            guard !Task.isCancelled, let self, self.coldLaunchReplacement != nil else { return }
-            let fallback = self.coldLaunchFallback
-            self.coldLaunchReplacement = nil
-            self.coldLaunchFallback = nil
+            guard !Task.isCancelled, let self,
+                  let fallback = self.coldLaunchState.takeFallbackPresentation() else {
+                return
+            }
             self.coldLaunchExpiration = nil
-            fallback?()
+            fallback()
         }
     }
 }
@@ -185,6 +236,27 @@ struct RFMappingCommandActions {
     let toggleFlipY: () -> Void
     let toggleSpatialFormat: () -> Void
     let cyclePalette: () -> Void
+}
+
+/// Completes a document-less launch without consulting bundled or discovered
+/// sample data. The native importer is presented after Launch Services has had
+/// a chance to deliver an explicit Finder/CLI document-open request.
+@MainActor
+func presentColdLaunchDocumentPicker(in store: RFMappingStore) {
+    store.isAwaitingStartupDocument = false
+    store.isImporting = true
+}
+
+/// A Finder/Launch Services open can arrive after the document-less launch
+/// fallback has already presented the importer. Dismiss that importer before
+/// loading into the claimed initial window so the same URL is not opened by a
+/// stale picker completion in a second window.
+@MainActor
+@discardableResult
+func loadColdLaunchReplacement(_ url: URL, in store: RFMappingStore) async -> Bool {
+    store.isImporting = false
+    store.isAwaitingStartupDocument = false
+    return await store.loadJSONAsync(url)
 }
 
 private struct RFMappingCommandKey: FocusedValueKey {
@@ -294,12 +366,18 @@ private struct RFMappingWindow: View {
         .background(WindowShortcutMonitor(actions: commandActions))
         .background(WindowCloseObserver {
             pairingCoordinator.unregister(id: pairingWindowID)
+            if isInitialWindow, !store.hasData {
+                WindowRouter.shared.expireColdInitialWindowClaim()
+            }
         })
         .onAppear {
             pairingCoordinator.register(store, id: pairingWindowID)
         }
         .onDisappear {
             pairingCoordinator.unregister(id: pairingWindowID)
+            if isInitialWindow, !store.hasData {
+                WindowRouter.shared.expireColdInitialWindowClaim()
+            }
         }
         .onChange(of: store.viewerSyncState) { _, state in
             pairingCoordinator.synchronizedStateDidChange(state, from: pairingWindowID)
@@ -308,7 +386,7 @@ private struct RFMappingWindow: View {
             WindowRouter.shared.install(
                 openWindow,
                 coldLaunchReplacement: isInitialWindow ? { url in
-                    guard await store.loadJSONAsync(url) else {
+                    guard await loadColdLaunchReplacement(url, in: store) else {
                         let error = RFMappingError.invalidData(store.errorMessage ?? "Unknown document error")
                         WindowRouter.shared.showOpenError(error, url: url)
                         store.errorMessage = nil
@@ -318,9 +396,7 @@ private struct RFMappingWindow: View {
                     return true
                 } : nil,
                 coldLaunchFallback: isInitialWindow ? {
-                    Task { @MainActor in
-                        await store.loadLatestJSONAsync()
-                    }
+                    presentColdLaunchDocumentPicker(in: store)
                 } : nil
             )
             if let initialURL, !store.hasData {

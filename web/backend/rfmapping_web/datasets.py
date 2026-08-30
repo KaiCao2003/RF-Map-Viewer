@@ -703,3 +703,55 @@ class DatasetStore:
                 self._records.pop(record.dataset_id, None)
                 raise DatasetChangedError("Dataset cache was evicted; reopen it") from exc
             return unit_index, values
+
+    def zero_spike_unit_filter(
+        self,
+        record: DatasetRecord,
+        start_bin: int,
+        end_bin: int,
+        threshold: int,
+    ) -> tuple[list[int], list[int]]:
+        """Return visible unit IDs and native zero-spike spatial-bin counts.
+
+        The inclusive source-bin range is summed on the original ``y*x`` RF
+        grid.  Display rebinning and smoothing are intentionally absent from
+        this quality filter, matching the Python 1.9.6 viewer contract.
+        """
+
+        with self._lock:
+            if self._records.get(record.dataset_id) is not record:
+                raise DatasetChangedError("Dataset cache was evicted; reopen it")
+            metadata = record.cache.metadata
+            n_units, n_y, n_x, n_bins = metadata["shape"]
+            start = max(0, min(n_bins - 1, min(int(start_bin), int(end_bin))))
+            end = max(0, min(n_bins - 1, max(int(start_bin), int(end_bin))))
+            if type(threshold) is not int or threshold < 1:
+                raise ValueError("Zero-spike spatial-bin threshold must be positive")
+            try:
+                mapped = np.memmap(
+                    record.cache.data_path,
+                    dtype="<f8",
+                    mode="r",
+                    shape=(n_units, n_y, n_x, n_bins),
+                    order="C",
+                )
+                totals = np.asarray(mapped[..., start : end + 1]).sum(axis=3)
+                zero_counts = np.count_nonzero(totals == 0, axis=(1, 2)).astype(
+                    np.int64,
+                    copy=False,
+                )
+                result = [int(value) for value in zero_counts]
+                del totals
+                del zero_counts
+                del mapped
+            except OSError as exc:
+                self._records.pop(record.dataset_id, None)
+                raise DatasetChangedError("Dataset cache was evicted; reopen it") from exc
+            visible = [
+                int(unit_id)
+                for unit_id, zero_count in zip(
+                    metadata["unitPool"], result, strict=True
+                )
+                if zero_count < threshold
+            ]
+            return visible, result

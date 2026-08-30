@@ -68,7 +68,7 @@ const spec: FigureExportSpec = {
           : {}),
   })),
   pageOrders: ["unit-major", "page-major"],
-  formats: ["pdf", "png"],
+  formats: ["pdf", "png", "svg"],
   page: {
     minPlots: 1,
     maxPlots: 12,
@@ -81,6 +81,8 @@ describe("FigureExportComposer", () => {
     const html = renderToStaticMarkup(
       <FigureExportComposer
         meta={meta}
+        visibleUnitIds={[7, 88]}
+        unitFilter={{ enabled: true, rfStartMs: 0, rfEndMs: 200, zeroSpikeSpatialBinThreshold: 1, visibleUnitIds: [7, 88] }}
         viewState={view}
         selectedCell={[0, 0, 0, 0]}
         hdSettings={hd}
@@ -100,13 +102,16 @@ describe("FigureExportComposer", () => {
     expect(html).toContain("Probe filtered (2)");
     expect(html).toContain('role="listbox"');
     expect(html).toContain('aria-multiselectable="true"');
-    expect(html).toContain('aria-label="000 cluster 41"');
+    expect(html).toContain('aria-label="001 cluster 7"');
+    expect(html).not.toContain('aria-label="000 cluster 41"');
     expect(html).toContain("Command/Ctrl-click toggles; Shift-click selects a range");
     expect(html).toContain("Page templates");
     expect(html).toContain('aria-label="Move Page 1 earlier"');
     expect(html).toContain('aria-label="Move Page 1 later"');
     expect(html).toContain("Live server preview");
     expect(html).toContain("Same renderer as final export");
+    expect(html).toContain("Native zero-bin count &lt; 1");
+    expect(html).toContain('<option value="svg">SVG</option>');
     expect(html).toContain("/mnt/senzailab");
     expect(html).toContain("Replace existing output");
     for (const id of FIGURE_TYPE_IDS) expect(html).toContain(`value="${id}"`);
@@ -118,6 +123,8 @@ describe("FigureExportComposer", () => {
     const html = renderToStaticMarkup(
       <FigureExportComposer
         meta={meta}
+        visibleUnitIds={meta.unitPool}
+        unitFilter={{ enabled: false, rfStartMs: 0, rfEndMs: 200, zeroSpikeSpatialBinThreshold: 1, visibleUnitIds: meta.unitPool }}
         viewState={view}
         selectedCell={null}
         hdSettings={hd}
@@ -135,5 +142,6 @@ describe("FigureExportComposer", () => {
     expect(html).toContain("Live preview and final export use the same manually attached companion files");
     expect(html).toContain("tuning_curves.json");
     expect(html).toContain("positions.csv");
+    expect(html).toContain("native zero-bin filter was disabled when this composer opened");
   });
 });

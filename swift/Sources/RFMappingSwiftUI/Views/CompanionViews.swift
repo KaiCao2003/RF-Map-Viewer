@@ -20,6 +20,7 @@ struct ProbeSidebarSection: View {
                 GeometryReader { proxy in
                     let transform = ProbeDisplayTransform(
                         geometry: geometry,
+                        unitIDs: Set(store.qualityFilteredUnitIDs),
                         size: proxy.size
                     )
                     Canvas { context, _ in
@@ -92,8 +93,10 @@ struct ProbeSidebarSection: View {
                 with: .color(Color(red: 0.58, green: 0.64, blue: 0.72).opacity(0.75))
             )
         }
-        for unit in geometry.units {
-            let point = transform.point(x: unit.xMicrometers, y: unit.yMicrometers)
+        let qualityVisibleIDs = Set(store.qualityFilteredUnitIDs)
+        for unit in geometry.positionedUnits where qualityVisibleIDs.contains(unit.unitID) {
+            guard let position = unit.position else { continue }
+            let point = transform.point(x: position.x, y: position.y)
             let selected = unit.unitID == store.selectedUnitID
             let included = store.probeFilteredUnitIDs?.contains(unit.unitID) ?? true
             let radius: CGFloat = selected ? 5.5 : 3.7
@@ -127,8 +130,11 @@ struct ProbeSidebarSection: View {
     ) {
         let rect = normalizedRect(from: start, to: end)
         guard rect.width >= 3 || rect.height >= 3 else { return }
-        let selected = Set(geometry.units.compactMap { unit in
-            rect.contains(transform.point(x: unit.xMicrometers, y: unit.yMicrometers))
+        let qualityVisibleIDs = Set(store.qualityFilteredUnitIDs)
+        let selected: Set<Int> = Set(geometry.units.compactMap { unit -> Int? in
+            guard qualityVisibleIDs.contains(unit.unitID) else { return nil }
+            guard let position = unit.position else { return nil }
+            return rect.contains(transform.point(x: position.x, y: position.y))
                 ? unit.unitID
                 : nil
         })
@@ -140,27 +146,37 @@ struct ProbeSidebarSection: View {
         geometry: ProbeGeometry,
         transform: ProbeDisplayTransform
     ) {
-        let nearest = geometry.units.min { left, right in
-            distance(
-                transform.point(x: left.xMicrometers, y: left.yMicrometers),
-                location
-            ) < distance(
-                transform.point(x: right.xMicrometers, y: right.yMicrometers),
-                location
-            )
-        }
-        guard let nearest,
-              distance(
-                  transform.point(x: nearest.xMicrometers, y: nearest.yMicrometers),
-                  location
-              ) <= 14 else { return }
-        store.selectUnitID(nearest.unitID)
+        let qualityVisibleIDs = Set(store.qualityFilteredUnitIDs)
+        let candidates: [(unit: ProbeUnitPosition, point: CGPoint)] = geometry.positionedUnits
+            .compactMap { unit -> (unit: ProbeUnitPosition, point: CGPoint)? in
+                guard qualityVisibleIDs.contains(unit.unitID),
+                      let position = unit.position else { return nil }
+                return (
+                    unit: unit,
+                    point: transform.point(x: position.x, y: position.y)
+                )
+            }
+        guard let nearest = candidates.min(by: {
+            distance($0.point, location) < distance($1.point, location)
+        }), distance(nearest.point, location) <= 14 else { return }
+        store.selectUnitID(nearest.unit.unitID)
     }
 
     private func probeStatus(_ geometry: ProbeGeometry) -> String {
-        let filteredCount = store.probeFilteredUnitIDs?.count
-        let suffix = filteredCount.map { " · \($0) selected" } ?? ""
-        return "\(geometry.units.count) RF units · drag to filter, click to select\(suffix)"
+        let qualityVisibleIDs = Set(store.qualityFilteredUnitIDs)
+        let qualityUnits = geometry.units.filter { qualityVisibleIDs.contains($0.unitID) }
+        let positionedCount = qualityUnits.filter { $0.position != nil }.count
+        let filteredCount = store.probeFilteredUnitIDs.map {
+            $0.intersection(qualityVisibleIDs).count
+        }
+        var suffix = filteredCount.map { " · \($0) selected" } ?? ""
+        if let selectedUnitID = store.selectedUnitID,
+           let selected = geometry.units.first(where: { $0.unitID == selectedUnitID }),
+           selected.position == nil {
+            suffix += " · unit \(selectedUnitID) position is nan,nan"
+        }
+        return "\(positionedCount)/\(qualityUnits.count) visible RF units positioned"
+            + " · drag to filter, click to select\(suffix)"
     }
 
     private func chooseProbePositions() {
@@ -548,10 +564,16 @@ private struct ProbeDisplayTransform {
     let xRange: ClosedRange<Double>
     let yRange: ClosedRange<Double>
 
-    init(geometry: ProbeGeometry, size: CGSize) {
+    init(geometry: ProbeGeometry, unitIDs: Set<Int>, size: CGSize) {
         plotRect = CGRect(x: 12, y: 10, width: max(10, size.width - 24), height: max(10, size.height - 20))
-        let xValues = geometry.channels.map(\.xMicrometers) + geometry.units.map(\.xMicrometers)
-        let yValues = geometry.channels.map(\.yMicrometers) + geometry.units.map(\.yMicrometers)
+        let xValues = geometry.channels.map(\.xMicrometers)
+            + geometry.units.compactMap {
+                unitIDs.contains($0.unitID) ? $0.xMicrometers : nil
+            }
+        let yValues = geometry.channels.map(\.yMicrometers)
+            + geometry.units.compactMap {
+                unitIDs.contains($0.unitID) ? $0.yMicrometers : nil
+            }
         xRange = Self.padded(low: xValues.min() ?? 0, high: xValues.max() ?? 1)
         yRange = Self.padded(low: yValues.min() ?? 0, high: yValues.max() ?? 1)
     }

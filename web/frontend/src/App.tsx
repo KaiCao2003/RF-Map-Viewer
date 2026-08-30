@@ -4,6 +4,7 @@ import {
   exportDisplayedCsv,
   getHdDataset,
   getProbeGeometry,
+  getUnitFilter,
   getUnitCounts,
   getWaveformArtifact,
   listRemoteFiles,
@@ -39,9 +40,16 @@ import {
   valueModeUnit,
 } from "./math";
 import { DEFAULT_HD_DISPLAY_BINS, DEFAULT_HD_SMOOTH_SIGMA } from "./hdMath";
-import { nearestProbeUnitToRegionCenter } from "./probeSelection";
+import { exportShortcutAction, steppedTimeResolutionMs } from "./appShortcuts";
+import { nearestProbeUnitToRegionCenter, probeUnitsInRegion } from "./probeSelection";
 import { resolutionChangePatch, timelineSelectionPatch } from "./viewStateMath";
 import { VIEWER_TABS } from "./viewTabs";
+import {
+  navigationUnitIds,
+  orderedQualityVisibleUnitIds,
+  reconciledClusterId,
+  userEnteredZeroSpikeSpatialBinThreshold,
+} from "./unitFilter";
 import type {
   CellRef,
   DatasetMeta,
@@ -61,6 +69,7 @@ import { DEFAULT_VALUE_MODE, PALETTES, POLAR_RADIUS_MODES, VALUE_MODES } from ".
 const RECENT_JSON_KEY = "rfmapping-recent-json-v1";
 const HD_LAYOUT_KEY = "rfmapping-hd-layout-v1";
 const COMPANION_PREFERENCES_KEY = "rfmapping-companion-preferences-v1";
+const UNIT_FILTER_PREFERENCES_KEY = "rfmapping-zero-bin-unit-filter-v1";
 
 const INITIAL_HD_VIEW_SETTINGS: HdViewSettings = {
   plotMode: "auto",
@@ -99,6 +108,29 @@ function loadCompanionPreferences(): CompanionPreferences {
       waveformChannelMode: source.waveformChannelMode === "same_shank"
         ? "same_shank"
         : "same_x_column",
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+interface UnitFilterPreferences {
+  enabled: boolean;
+  zeroSpikeSpatialBinThreshold: number;
+}
+
+function loadUnitFilterPreferences(): UnitFilterPreferences {
+  const fallback = { enabled: true, zeroSpikeSpatialBinThreshold: 1 };
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(UNIT_FILTER_PREFERENCES_KEY) ?? "null");
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return fallback;
+    const source = parsed as Record<string, unknown>;
+    const threshold = Number(source.zeroSpikeSpatialBinThreshold);
+    return {
+      enabled: typeof source.enabled === "boolean" ? source.enabled : true,
+      zeroSpikeSpatialBinThreshold: Number.isInteger(threshold) && threshold >= 1
+        ? threshold
+        : 1,
     };
   } catch {
     return fallback;
@@ -216,6 +248,15 @@ export default function App() {
   const initialQueryHandled = useRef(false);
   const lastLocalCluster = useRef<number | null>(null);
   const [unitStatus, setUnitStatus] = useState<"loading" | "ready" | "unavailable" | "error">("loading");
+  const [unitFilterEnabled, setUnitFilterEnabled] = useState(
+    () => loadUnitFilterPreferences().enabled,
+  );
+  const [zeroSpikeSpatialBinThreshold, setZeroSpikeSpatialBinThreshold] = useState(
+    () => loadUnitFilterPreferences().zeroSpikeSpatialBinThreshold,
+  );
+  const [qualityVisibleUnitIds, setQualityVisibleUnitIds] = useState<number[]>([]);
+  const [unitFilterStatus, setUnitFilterStatus] = useState<"loading" | "ready" | "error">("loading");
+  const [unitFilterError, setUnitFilterError] = useState("");
   const [error, setError] = useState("");
   const [sourceOpen, setSourceOpen] = useState(false);
   const [sourceBusy, setSourceBusy] = useState(false);
@@ -233,7 +274,6 @@ export default function App() {
   const [probePositionsPath, setProbePositionsPath] = useState<string | null>(null);
   const [probeCollapsed, setProbeCollapsed] = useState(false);
   const [probeSelection, setProbeSelection] = useState<ProbeSelection | null>(null);
-  const [probeFilter, setProbeFilter] = useState<number[] | null>(null);
   const [hdArtifact, setHdArtifact] = useState<HdDatasetArtifact | null>(null);
   const [hdError, setHdError] = useState("");
   const [hdLoading, setHdLoading] = useState(false);
@@ -278,13 +318,15 @@ export default function App() {
       };
     });
     setUnitStatus("loading");
+    setQualityVisibleUnitIds([]);
+    setUnitFilterStatus("loading");
+    setUnitFilterError("");
     setSourceOpen(false);
     setProbe(null);
     setProbeError("");
     setProbePositionsPath(null);
     setProbeChooserOpen(false);
     setProbeSelection(null);
-    setProbeFilter(null);
     setHdArtifact(null);
     setHdError("");
     setHdPath(null);
@@ -330,6 +372,13 @@ export default function App() {
   }, [showWaveform, tuningSession, waveformChannelMode]);
 
   useEffect(() => {
+    window.localStorage.setItem(UNIT_FILTER_PREFERENCES_KEY, JSON.stringify({
+      enabled: unitFilterEnabled,
+      zeroSpikeSpatialBinThreshold,
+    } satisfies UnitFilterPreferences));
+  }, [unitFilterEnabled, zeroSpikeSpatialBinThreshold]);
+
+  useEffect(() => {
     if (!meta) return;
     const controller = new AbortController();
     const folder = parentDirectory(meta.sourcePath);
@@ -370,15 +419,68 @@ export default function App() {
 
   useEffect(() => {
     if (!meta || !viewState) return;
-    if (meta.unitPool.includes(viewState.clusterId)) {
-      lastLocalCluster.current = viewState.clusterId;
+    const threshold = clamp(
+      Math.round(zeroSpikeSpatialBinThreshold),
+      1,
+      100_000,
+    );
+    if (threshold !== zeroSpikeSpatialBinThreshold) {
+      setZeroSpikeSpatialBinThreshold(threshold);
       return;
     }
-    const fallback = lastLocalCluster.current != null && meta.unitPool.includes(lastLocalCluster.current)
-      ? lastLocalCluster.current
-      : meta.unitPool[0];
-    updateState({ clusterId: fallback, selectedCellXMidpoint: null, selectedCellYMidpoint: null });
-  }, [meta, updateState, viewState]);
+    if (!unitFilterEnabled) {
+      setQualityVisibleUnitIds([...meta.unitPool]);
+      setUnitFilterStatus("ready");
+      setUnitFilterError("");
+      return;
+    }
+    if (!Number.isFinite(viewState.rfStartMs) || !Number.isFinite(viewState.rfEndMs)) {
+      setQualityVisibleUnitIds([]);
+      setUnitFilterStatus("error");
+      setUnitFilterError("RF filter range must contain finite times.");
+      return;
+    }
+    const controller = new AbortController();
+    setQualityVisibleUnitIds([]);
+    setUnitFilterStatus("loading");
+    setUnitFilterError("");
+    const timer = window.setTimeout(() => {
+      getUnitFilter(
+        meta.id,
+        viewState.rfStartMs,
+        viewState.rfEndMs,
+        threshold,
+        controller.signal,
+      )
+        .then((result) => {
+          if (controller.signal.aborted) return;
+          setQualityVisibleUnitIds(orderedQualityVisibleUnitIds(
+            meta.unitPool,
+            result.visibleUnitIds,
+            true,
+          ));
+          setUnitFilterStatus("ready");
+        })
+        .catch((caught) => {
+          if (controller.signal.aborted) return;
+          setQualityVisibleUnitIds([]);
+          setUnitFilterStatus("error");
+          setUnitFilterError(
+            caught instanceof Error ? caught.message : "Could not filter RF units.",
+          );
+        });
+    }, 120);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [
+    meta,
+    unitFilterEnabled,
+    viewState?.rfEndMs,
+    viewState?.rfStartMs,
+    zeroSpikeSpatialBinThreshold,
+  ]);
 
   useEffect(() => {
     if (!meta || !viewState) return;
@@ -390,7 +492,11 @@ export default function App() {
       countsCache.current.set(datasetId, datasetCache);
     }
     const localIndex = meta.unitPool.indexOf(viewState.clusterId);
-    if (localIndex < 0) {
+    if (
+      localIndex < 0
+      || unitFilterStatus !== "ready"
+      || !qualityVisibleUnitIds.includes(viewState.clusterId)
+    ) {
       setCounts(null);
       setUnitStatus("unavailable");
       return () => controller.abort();
@@ -416,9 +522,10 @@ export default function App() {
           }
         });
     }
-    const neighbors = [localIndex - 1, localIndex + 1]
-      .filter((index) => 0 <= index && index < meta.unitPool.length)
-      .map((index) => meta.unitPool[index]);
+    const qualityIndex = qualityVisibleUnitIds.indexOf(viewState.clusterId);
+    const neighbors = [qualityIndex - 1, qualityIndex + 1]
+      .filter((index) => 0 <= index && index < qualityVisibleUnitIds.length)
+      .map((index) => qualityVisibleUnitIds[index]);
     neighbors.forEach((clusterId) => {
       if (!datasetCache.has(clusterId)) {
         void getUnitCounts(meta, clusterId, controller.signal).then((values) => {
@@ -429,7 +536,7 @@ export default function App() {
       }
     });
     return () => controller.abort();
-  }, [meta, viewState?.clusterId]);
+  }, [meta, qualityVisibleUnitIds, unitFilterStatus, viewState?.clusterId]);
 
   useEffect(() => {
     if (!meta?.capabilities.probe || probePositionsPath) return;
@@ -507,12 +614,32 @@ export default function App() {
     return () => controller.abort();
   }, [meta, showWaveform, viewState?.clusterId, waveformChannelMode]);
 
+  const probeFilter = useMemo(() => {
+    if (probe == null || probeSelection == null) return null;
+    return probeUnitsInRegion(probe, probeSelection, qualityVisibleUnitIds);
+  }, [probe, probeSelection, qualityVisibleUnitIds]);
+
   const navigationPool = useMemo(() => {
-    const base = meta?.unitPool ?? [];
-    if (!probeFilter) return base;
-    const allowed = new Set(probeFilter);
-    return base.filter((unit) => allowed.has(unit));
-  }, [meta, probeFilter]);
+    return navigationUnitIds(qualityVisibleUnitIds, probeFilter);
+  }, [probeFilter, qualityVisibleUnitIds]);
+
+  useEffect(() => {
+    if (!viewState || unitFilterStatus !== "ready") return;
+    const nextClusterId = reconciledClusterId(viewState.clusterId, navigationPool);
+    if (nextClusterId == null) {
+      setCounts(null);
+      setUnitStatus("unavailable");
+      return;
+    }
+    lastLocalCluster.current = nextClusterId;
+    if (nextClusterId !== viewState.clusterId) {
+      updateState({
+        clusterId: nextClusterId,
+        selectedCellXMidpoint: null,
+        selectedCellYMidpoint: null,
+      });
+    }
+  }, [navigationPool, unitFilterStatus, updateState, viewState]);
 
   const stepUnit = useCallback((delta: number) => {
     if (!viewState || !navigationPool.length) return;
@@ -541,10 +668,10 @@ export default function App() {
     updateState((current) => resolutionChangePatch(meta, current, requested));
   }, [meta, updateState]);
 
-  const stepResolution = useCallback((delta: number) => {
-    if (!viewState) return;
-    changeResolution(viewState.timeResolutionMs + delta);
-  }, [changeResolution, viewState]);
+  const stepResolution = useCallback((direction: -1 | 1) => {
+    if (!meta || !viewState) return;
+    changeResolution(steppedTimeResolutionMs(meta, viewState.timeResolutionMs, direction));
+  }, [changeResolution, meta, viewState]);
 
   const showFullTimeline = useCallback(() => {
     if (!meta) return;
@@ -627,8 +754,19 @@ export default function App() {
 
   const openFigureComposer = useCallback(() => {
     if (!meta || !viewState) return;
+    if (unitFilterStatus !== "ready" || !qualityVisibleUnitIds.length) {
+      setMessageDialog({
+        title: "No visible units",
+        text: unitFilterStatus === "error"
+          ? unitFilterError
+          : unitFilterStatus === "loading"
+            ? "The native RF-bin unit filter is still updating."
+            : "No units pass the native RF-bin filter for the current RF window.",
+      });
+      return;
+    }
     setFigureComposerOpen(true);
-  }, [meta, viewState]);
+  }, [meta, qualityVisibleUnitIds, unitFilterError, unitFilterStatus, viewState]);
 
   const exportCsv = useCallback(async (overwrite: boolean) => {
     if (!meta || !viewState || !counts || !exportDialog) return;
@@ -689,7 +827,6 @@ export default function App() {
       setProbe(geometry);
       setProbePositionsPath(path);
       setProbeSelection(null);
-      setProbeFilter(null);
       setProbeChooserOpen(false);
     } catch (caught) {
       setProbeError(caught instanceof Error ? caught.message : "Could not load probe geometry.");
@@ -721,9 +858,11 @@ export default function App() {
         openChooser();
         return;
       }
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "e") {
+      const exportAction = exportShortcutAction(event);
+      if (exportAction) {
         event.preventDefault();
-        openFigureComposer();
+        if (exportAction === "displayed-csv") openExportDialog();
+        else openFigureComposer();
         return;
       }
       if (editing || !meta || !viewState) return;
@@ -741,7 +880,6 @@ export default function App() {
       else if (event.key === "Escape") {
         if (probeSelection) {
           setProbeSelection(null);
-          setProbeFilter(null);
         } else {
           showFullTimeline();
         }
@@ -754,7 +892,7 @@ export default function App() {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [figureComposerOpen, meta, openChooser, openFigureComposer, probeSelection, showFullTimeline, stepResolution, stepTimeline, stepUnit, updateState, viewState]);
+  }, [figureComposerOpen, meta, openChooser, openExportDialog, openFigureComposer, probeSelection, showFullTimeline, stepResolution, stepTimeline, stepUnit, updateState, viewState]);
 
   if (!meta || !viewState) {
     return (
@@ -774,7 +912,24 @@ export default function App() {
   const axisEndMs = meta.timeBinEdges.at(-1)! * 1000;
   const bestDelay = bestTemporal?.delayMs ?? null;
   const visibleTabs = VIEWER_TABS;
-  const noProbeMatches = probeFilter != null && navigationPool.length === 0;
+  const noQualityMatches = unitFilterStatus === "ready"
+    && unitFilterEnabled
+    && qualityVisibleUnitIds.length === 0;
+  const noNavigationUnits = unitFilterStatus !== "ready" || navigationPool.length === 0;
+  const emptyUnitTitle = unitFilterStatus === "loading"
+    ? "Updating native RF-bin unit filter"
+    : unitFilterStatus === "error"
+      ? "Unit filter unavailable"
+      : noQualityMatches
+        ? "No units pass the current RF window"
+        : "No units in selected Probe region";
+  const emptyUnitDetail = unitFilterStatus === "loading"
+    ? "Counting zero-spike native spatial bins for the current RF selection window."
+    : unitFilterStatus === "error"
+      ? unitFilterError
+      : noQualityMatches
+        ? `Increase the zero-bin threshold, change the RF sum range, or disable the filter. Visible requires zero-bin count < ${zeroSpikeSpatialBinThreshold}.`
+        : "Clear or redraw the Probe region to continue unit navigation.";
   const unit = valueModeUnit(viewState.valueMode);
   const selectionRange = snapTimeRange(meta, viewState.rfStartMs, viewState.rfEndMs);
   const selectionBounds = timeBounds(meta, selectionRange);
@@ -830,16 +985,16 @@ export default function App() {
             {probe ? (
               <ProbeLayout
                 geometry={probe}
-                availableUnitIds={meta.unitPool}
+                availableUnitIds={qualityVisibleUnitIds}
                 currentClusterId={viewState.clusterId}
                 selection={probeSelection}
                 onCluster={(clusterId) => {
+                  if (!qualityVisibleUnitIds.includes(clusterId)) return;
                   if (probeFilter != null && !probeFilter.includes(clusterId)) return;
                   updateState({ clusterId, selectedCellXMidpoint: null, selectedCellYMidpoint: null });
                 }}
                 onSelection={(selection, units) => {
                   setProbeSelection(selection);
-                  setProbeFilter(selection ? units : null);
                   if (selection && units.length && !units.includes(viewState.clusterId)) {
                     const target = nearestProbeUnitToRegionCenter(probe, selection, units) ?? units[0];
                     updateState({ clusterId: target, selectedCellXMidpoint: null, selectedCellYMidpoint: null });
@@ -859,6 +1014,45 @@ export default function App() {
           <hr />
           <section className="sidebar-block">
             <h2>Unit</h2>
+            <label className="check-row">
+              <input
+                type="checkbox"
+                checked={unitFilterEnabled}
+                onChange={(event) => setUnitFilterEnabled(event.target.checked)}
+              />
+              <span>Hide units with zero-spike RF bins</span>
+            </label>
+            <label className="display-row">
+              <span>Zero-bin threshold</span>
+              <input
+                type="number"
+                min={1}
+                max={Math.min(100_000, meta.shape[1] * meta.shape[2])}
+                step={1}
+                disabled={!unitFilterEnabled}
+                value={zeroSpikeSpatialBinThreshold}
+                onChange={(event) => {
+                  const value = userEnteredZeroSpikeSpatialBinThreshold(
+                    Number(event.target.value),
+                    meta.shape[1] * meta.shape[2],
+                  );
+                  if (value != null) setZeroSpikeSpatialBinThreshold(value);
+                }}
+                aria-label="Zero-spike spatial-bin threshold"
+              />
+            </label>
+            <div className="unit-stats" aria-live="polite">
+              {unitFilterStatus === "loading" && <span>Checking native y × x bins…</span>}
+              {unitFilterStatus === "error" && <span>{unitFilterError}</span>}
+              {unitFilterStatus === "ready" && (
+                <span>
+                  {unitFilterEnabled
+                    ? `${qualityVisibleUnitIds.length} / ${meta.unitPool.length} units pass the current RF window`
+                    : `Filter disabled; all ${meta.unitPool.length} units are available`}
+                </span>
+              )}
+              <span>Filter uses source bins before display rebinning or smoothing.</span>
+            </div>
             <div className="unit-picker">
               <button type="button" aria-label="Previous unit" onClick={() => stepUnit(-1)} disabled={!navigationPool.length}>&lt;</button>
               <select
@@ -866,7 +1060,7 @@ export default function App() {
                 onChange={(event) => updateState({ clusterId: Number(event.target.value), selectedCellXMidpoint: null, selectedCellYMidpoint: null })}
                 aria-label="Current unit"
               >
-                {!navigationPool.includes(viewState.clusterId) && <option value="">{noProbeMatches ? "No units in selected probe region" : `Cluster ${viewState.clusterId} excluded by probe region`}</option>}
+                {!navigationPool.includes(viewState.clusterId) && <option value="">{emptyUnitTitle}</option>}
                 {navigationPool.map((clusterId) => {
                   const index = meta.unitPool.indexOf(clusterId);
                   return (
@@ -880,9 +1074,9 @@ export default function App() {
             </div>
             <div className="unit-stats">
               {unitStatus === "loading" && <span>Loading cluster…</span>}
-              {noProbeMatches && <><strong>No units in region</strong><span>Clear the Probe filter to restore all units.</span></>}
+              {noNavigationUnits && <><strong>{emptyUnitTitle}</strong><span>{emptyUnitDetail}</span></>}
               {unitStatus === "error" && <span>Unit data failed to load.</span>}
-              {metrics && !noProbeMatches && <>
+              {metrics && !noNavigationUnits && <>
                 <span>Summed RF counts: {metrics.totalSpikes.toFixed(0)}</span>
                 <span>Strongest rate cell: yIdx {metrics.bestY + 1}, xIdx {metrics.bestX + 1} ({formatResponse(metrics.bestRateHz, "Mean firing rate (Hz)")} Hz)</span>
                 <span>Count-rate peak delay: {bestDelay == null ? "n/a" : `${formatNumber(bestDelay, 1)} ms`}</span>
@@ -898,7 +1092,7 @@ export default function App() {
             error={waveformError}
             visible={showWaveform}
             mode={waveformChannelMode}
-            blocked={noProbeMatches}
+            blocked={noNavigationUnits}
             onVisibleChange={setShowWaveform}
             onModeChange={setWaveformChannelMode}
           />
@@ -917,7 +1111,7 @@ export default function App() {
           <hr />
           <section className="sidebar-block selected-block">
             <h2>Selected cell</h2>
-            {!noProbeMatches && selectedCell && selectedDetails ? (
+            {!noNavigationUnits && selectedCell && selectedDetails ? (
               <div className="selected-cell-text">
                 <span>cluster {viewState.clusterId}</span>
                 <span>yIdx {selectedCell[0] + 1}{selectedCell[1] !== selectedCell[0] ? `-${selectedCell[1] + 1}` : ""}; y {formatNumber(meta.yPositions[selectedCell[0]], 3)}{selectedCell[1] !== selectedCell[0] ? `..${formatNumber(meta.yPositions[selectedCell[1]], 3)}` : ""},</span>
@@ -932,8 +1126,8 @@ export default function App() {
               </div>
             ) : <span className="muted-copy">N/A for this session</span>}
             <div className="export-button-stack">
-              <button className="export-button figure-button" type="button" onClick={openFigureComposer}>Compose figures…</button>
-              <button className="export-button" type="button" onClick={openExportDialog} disabled={!counts || noProbeMatches}>Export displayed data…</button>
+              <button className="export-button figure-button" type="button" onClick={openFigureComposer} disabled={unitFilterStatus !== "ready" || !qualityVisibleUnitIds.length}>Compose figures…</button>
+              <button className="export-button" type="button" onClick={openExportDialog} disabled={!counts || noNavigationUnits}>Export displayed data…</button>
             </div>
           </section>
 
@@ -943,10 +1137,10 @@ export default function App() {
 
       <main className="workspace">
         <header className="workspace-heading">
-          <h1>{noProbeMatches ? "No units in selected Probe region" : `Unit ${String(localIndex).padStart(3, "0")} / cluster ${viewState.clusterId}`}</h1>
+          <h1>{noNavigationUnits ? emptyUnitTitle : `Unit ${String(localIndex).padStart(3, "0")} / cluster ${viewState.clusterId}`}</h1>
           <p>
-            {noProbeMatches
-              ? "Clear or redraw the Probe region to continue unit navigation."
+            {noNavigationUnits
+              ? emptyUnitDetail
               : `x: ${formatNumber(meta.xPositions[0], 3)}..${formatNumber(meta.xPositions.at(-1)!, 3)}  y: ${formatNumber(meta.yPositions[0], 3)}..${formatNumber(meta.yPositions.at(-1)!, 3)}  time: ${formatNumber(axisStartMs)}..${formatNumber(axisEndMs)} ms  value: ${viewState.valueMode}`}
           </p>
         </header>
@@ -983,10 +1177,10 @@ export default function App() {
           <section className="view-surface">
             <div className={`rf-hd-layout hd-layout-${hdLayout} ${hdCollapsed ? "hd-is-collapsed" : ""}`} hidden={viewState.selectedTab !== "rf"}>
               <div className="rf-primary-pane">
-                {noProbeMatches && <div className="view-empty"><strong>No units in region</strong><span>Clear the Probe filter or select another region.</span></div>}
-                {!noProbeMatches && unitStatus === "loading" && <div className="view-empty"><span className="spinner" /> Loading cluster {viewState.clusterId}…</div>}
-                {!noProbeMatches && unitStatus === "error" && <div className="view-empty error-state"><strong>Unit data could not be loaded</strong><span>{error}</span></div>}
-                {!noProbeMatches && counts && selectedCell && <SpatialPlot kind="rf" meta={meta} counts={counts} state={viewState} unitIndex={localIndex} selectedCell={selectedCell} onSelectCell={selectCell} />}
+                {noNavigationUnits && <div className={`view-empty${unitFilterStatus === "error" ? " error-state" : ""}`}><strong>{emptyUnitTitle}</strong><span>{emptyUnitDetail}</span></div>}
+                {!noNavigationUnits && unitStatus === "loading" && <div className="view-empty"><span className="spinner" /> Loading cluster {viewState.clusterId}…</div>}
+                {!noNavigationUnits && unitStatus === "error" && <div className="view-empty error-state"><strong>Unit data could not be loaded</strong><span>{error}</span></div>}
+                {!noNavigationUnits && counts && selectedCell && <SpatialPlot kind="rf" meta={meta} counts={counts} state={viewState} unitIndex={localIndex} selectedCell={selectedCell} onSelectCell={selectCell} />}
               </div>
               <HdPanel
                 artifact={hdArtifact}
@@ -994,7 +1188,7 @@ export default function App() {
                 loading={hdLoading}
                 error={hdError}
                 rfPolarLayout={viewState.polarLayout}
-                blocked={noProbeMatches}
+                blocked={noNavigationUnits}
                 collapsed={hdCollapsed}
                 settings={hdSettings}
                 onSettingsChange={setHdSettings}
@@ -1003,8 +1197,8 @@ export default function App() {
               />
             </div>
             {viewState.selectedTab === "delay" && (
-              noProbeMatches
-                ? <div className="view-empty"><strong>No units in region</strong><span>Clear the Probe filter or select another region.</span></div>
+              noNavigationUnits
+                ? <div className="view-empty"><strong>{emptyUnitTitle}</strong><span>{emptyUnitDetail}</span></div>
                 : unitStatus === "loading"
                   ? <div className="view-empty"><span className="spinner" /> Loading cluster {viewState.clusterId}…</div>
                   : unitStatus === "error"
@@ -1012,8 +1206,8 @@ export default function App() {
                     : counts && selectedCell && <SpatialPlot kind="delay" meta={meta} counts={counts} state={viewState} unitIndex={localIndex} selectedCell={selectedCell} onSelectCell={selectCell} />
             )}
             {viewState.selectedTab === "timeline" && (
-              noProbeMatches
-                ? <div className="view-empty"><strong>No units in region</strong><span>Clear the Probe filter or select another region.</span></div>
+              noNavigationUnits
+                ? <div className="view-empty"><strong>{emptyUnitTitle}</strong><span>{emptyUnitDetail}</span></div>
                 : unitStatus === "loading"
                   ? <div className="view-empty"><span className="spinner" /> Loading cluster {viewState.clusterId}…</div>
                   : unitStatus === "error"
@@ -1081,6 +1275,14 @@ export default function App() {
       {figureComposerOpen && (
         <FigureExportComposer
           meta={meta}
+          visibleUnitIds={qualityVisibleUnitIds}
+          unitFilter={{
+            enabled: unitFilterEnabled,
+            rfStartMs: viewState.rfStartMs,
+            rfEndMs: viewState.rfEndMs,
+            zeroSpikeSpatialBinThreshold,
+            visibleUnitIds: [...qualityVisibleUnitIds],
+          }}
           viewState={viewState}
           selectedCell={selectedCell}
           hdSettings={hdSettings}
@@ -1101,7 +1303,7 @@ export default function App() {
         <div className="modal-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) setHelpOpen(false); }}>
           <div className="info-dialog" role="dialog" aria-modal="true" aria-label="Keyboard Shortcuts">
             <header><strong>Keyboard Shortcuts</strong><button type="button" aria-label="Close" onClick={() => setHelpOpen(false)}>×</button></header>
-            <pre>← / → or [ / ]   Previous / next unit{"\n"}↑ / ↓   Previous / next timeline bin{"\n"}Shift+, / Shift+.   Time resolution −/+ 1 ms{"\n"}1–3   Switch RF / Delay-RGB / Timeline{"\n"}F   Invert Y{"\n"}P   Toggle rectangular / polar layout{"\n"}Shift+P   Cycle palette{"\n"}Double-click waveform   Enlarge local waveform{"\n"}Esc   Close waveform zoom; clear Probe region; otherwise show full Timeline{"\n"}Command-O   Open an RF mapping file in this viewer{"\n"}Command-E   Open Figure Export Composer</pre>
+            <pre>← / → or [ / ]   Previous / next unit{"\n"}↑ / ↓   Previous / next timeline bin{"\n"}Shift+, / Shift+.   Time resolution −/+ one source bin{"\n"}1–3   Switch RF / Delay-RGB / Timeline{"\n"}F   Invert Y{"\n"}P   Toggle rectangular / polar layout{"\n"}Shift+P   Cycle palette{"\n"}Double-click waveform   Enlarge local waveform{"\n"}Esc   Close waveform zoom; clear Probe region; otherwise show full Timeline{"\n"}Command/Ctrl-O   Open an RF mapping file in this viewer{"\n"}Command/Ctrl-E   Open Figure Export Composer{"\n"}Command/Ctrl-Shift-E   Export displayed data CSV</pre>
             <footer><button type="button" onClick={() => setHelpOpen(false)}>OK</button></footer>
           </div>
         </div>

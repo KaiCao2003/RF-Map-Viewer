@@ -112,6 +112,7 @@ struct SidebarView: View {
             HStack(spacing: 6) {
                 Button { store.stepUnit(-1) } label: { Image(systemName: "chevron.left") }
                     .help("Previous unit (← or [)")
+                    .disabled(store.navigationUnitIDs.isEmpty)
 
                 Picker("Unit", selection: Binding(
                     get: { store.selectedUnitID ?? store.navigationUnitIDs.first ?? 0 },
@@ -130,10 +131,38 @@ struct SidebarView: View {
                     }
                 }
                 .labelsHidden()
+                .disabled(store.navigationUnitIDs.isEmpty)
 
                 Button { store.stepUnit(1) } label: { Image(systemName: "chevron.right") }
                     .help("Next unit (→ or ])")
+                    .disabled(store.navigationUnitIDs.isEmpty)
             }
+
+            Toggle(
+                "Hide units with zero-spike RF bins",
+                isOn: Binding(
+                    get: { store.rfFilterUnitsWithZeroBins },
+                    set: store.setRFUnitQualityFilterEnabled
+                )
+            )
+            .help("Uses native spatial bins summed over the current RF sum range before display rebinning or smoothing")
+
+            integerControl(
+                title: "Zero-bin threshold",
+                value: Binding(
+                    get: { store.rfZeroBinThreshold },
+                    set: store.setRFZeroBinThreshold
+                ),
+                range: 1...store.rfZeroBinThresholdEditMaximum
+            )
+            .disabled(!store.rfFilterUnitsWithZeroBins)
+
+            Text(store.unitQualityFilterStatusText)
+                .font(.caption)
+                .foregroundStyle(
+                    store.qualityFilteredUnitIDs.isEmpty ? Color.orange : Color.secondary
+                )
+                .fixedSize(horizontal: false, vertical: true)
 
             Text(store.unitStatsText)
                 .font(.callout.weight(.semibold))
@@ -233,7 +262,7 @@ struct SidebarView: View {
     private var actionSection: some View {
         VStack(alignment: .leading, spacing: 7) {
             Button("Export Figures…", action: openFigureExporter)
-                .disabled(!store.hasData)
+                .disabled(!store.hasData || store.qualityFilteredUnitIDs.isEmpty)
             HStack {
                 Button("Export displayed CSV") { store.prepareExport() }
                     .disabled(!store.hasSelectedUnit)
