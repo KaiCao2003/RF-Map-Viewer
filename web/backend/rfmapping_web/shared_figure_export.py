@@ -48,7 +48,8 @@ SVG_RENDERING_CONTRACT = (
 )
 EXPORT_MANIFEST_NAME = "manifest.json"
 EXPORT_MANIFEST_VERSION = 1
-EXPORT_PRODUCER = "rfmapping.python.figure-export"
+EXPORT_PRODUCER = "rfmapping.web.shared-figure-export"
+LEGACY_EXPORT_PRODUCERS = frozenset({"rfmapping.python.figure-export"})
 SINGLETON_Y_REFERENCE_COLUMNS = 30
 SINGLETON_Y_REFERENCE_ROWS = 7
 
@@ -161,6 +162,34 @@ PLOT_KIND_REGISTRY: Mapping[str, PlotKindDefinition] = MappingProxyType(
 )
 
 
+def _freeze_json_safe(value: Any, *, label: str) -> Any:
+    """Validate and recursively freeze a JSON-compatible value."""
+
+    if isinstance(value, Enum):
+        return _freeze_json_safe(value.value, label=label)
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise FigureExportValidationError(f"{label} must contain finite numbers")
+        return value
+    if isinstance(value, Mapping):
+        converted: dict[str, Any] = {}
+        for key in sorted(value):
+            if not isinstance(key, str):
+                raise FigureExportValidationError(f"{label} keys must be strings")
+            converted[key] = _freeze_json_safe(value[key], label=f"{label}.{key}")
+        return MappingProxyType(converted)
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return tuple(
+            _freeze_json_safe(item, label=f"{label}[{index}]")
+            for index, item in enumerate(value)
+        )
+    raise FigureExportValidationError(
+        f"{label} contains unsupported value type {type(value).__name__}"
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class PlotSpec:
     """A reusable plot template.
@@ -182,7 +211,13 @@ class PlotSpec:
             raise FigureExportValidationError("plot title must be a string or None")
         if not isinstance(self.options, Mapping):
             raise FigureExportValidationError("plot options must be a mapping")
-        object.__setattr__(self, "options", MappingProxyType(dict(self.options)))
+        options = _freeze_json_safe(self.options, label="plot options")
+        subtitle = options.get("subtitle")
+        if subtitle is not None and not isinstance(subtitle, str):
+            raise FigureExportValidationError(
+                "plot subtitle must be a string or None"
+            )
+        object.__setattr__(self, "options", options)
 
 
 @dataclass(frozen=True, slots=True)
@@ -410,6 +445,78 @@ def _scalar_matrix(matrix: Sequence[Sequence[Any]]) -> list[list[float | None]]:
     return [[_map_float(value) for value in row] for row in matrix]
 
 
+def shared_scalar_scale(
+    matrices: Sequence[Any],
+    *,
+    vmin: float | None = None,
+    vmax: float | None = None,
+) -> Mapping[str, float]:
+    """Return immutable ``vmin``/``vmax`` options shared by scalar maps.
+
+    Callers can merge the result into every related :class:`PlotSpec` to make
+    cross-page or cross-unit color comparisons quantitative.
+    """
+
+    sources = _sequence(matrices, label="shared scalar matrices")
+    if not sources:
+        raise FigureExportValidationError(
+            "shared scalar scale requires at least one matrix"
+        )
+    values = [
+        value
+        for source in sources
+        for row in _scalar_matrix(_matrix_payload(source))
+        for value in row
+        if value is not None
+    ]
+    low = min(values) if values else 0.0
+    high = max(values) if values else 1.0
+    if vmin is not None:
+        low = _finite_float(vmin, label="vmin")
+    if vmax is not None:
+        high = _finite_float(vmax, label="vmax")
+    if high < low:
+        raise FigureExportValidationError(
+            "vmax must be greater than or equal to vmin"
+        )
+    return MappingProxyType({"vmin": low, "vmax": high})
+
+
+def shared_symmetric_scale(
+    matrices: Sequence[Any],
+    *,
+    limit: float | None = None,
+) -> Mapping[str, float]:
+    """Return a zero-centered scale reusable across waveform plots.
+
+    ``matrices`` accepts the same raw matrices or ``{"matrix": ...}``
+    payloads as :func:`shared_scalar_scale`.  The returned immutable mapping
+    can be merged into every related :class:`PlotSpec` so previews and all
+    exported units use one quantitative amplitude scale.
+    """
+
+    sources = _sequence(matrices, label="shared symmetric matrices")
+    if not sources:
+        raise FigureExportValidationError(
+            "shared symmetric scale requires at least one matrix"
+        )
+    values = [
+        value
+        for source in sources
+        for row in _scalar_matrix(_matrix_payload(source))
+        for value in row
+        if value is not None
+    ]
+    amplitude = max((abs(value) for value in values), default=0.0)
+    if limit is not None:
+        amplitude = _finite_float(limit, label="symmetric scale limit")
+        if amplitude < 0.0:
+            raise FigureExportValidationError(
+                "symmetric scale limit must be greater than or equal to zero"
+            )
+    return MappingProxyType({"vmin": -amplitude, "vmax": amplitude})
+
+
 def _palette(value: float, low: float, high: float, name: str) -> tuple[int, int, int]:
     fraction = 0.5 if high <= low else (value - low) / (high - low)
     fraction = max(0.0, min(1.0, fraction))
@@ -417,15 +524,7 @@ def _palette(value: float, low: float, high: float, name: str) -> tuple[int, int
     if name in {"gray", "grey", "grayscale"}:
         level = int(round(255.0 * fraction))
         return level, level, level
-    if name in {"rdbu_r", "rdbu-r"}:
-        stops = (
-            (0.0, (5, 48, 97)),
-            (0.25, (67, 147, 195)),
-            (0.5, (247, 247, 247)),
-            (0.75, (214, 96, 77)),
-            (1.0, (103, 0, 31)),
-        )
-    elif name == "inferno":
+    if name == "inferno":
         stops = (
             (0.0, (0, 0, 4)),
             (0.28, (87, 15, 109)),
@@ -439,6 +538,20 @@ def _palette(value: float, low: float, high: float, name: str) -> tuple[int, int
             (0.35, (44, 171, 184)),
             (0.68, (246, 204, 89)),
             (1.0, (203, 71, 45)),
+        )
+    elif name in {"rdbu_r", "rdbu-r"}:
+        # Compact approximation of matplotlib's ``RdBu_r``.  Waveform
+        # amplitudes are always rendered on symmetric bounds, so zero lands
+        # on the neutral midpoint while negative/positive deflections retain
+        # the notebook's blue/red convention.
+        stops = (
+            (0.0, (5, 48, 97)),
+            (0.2, (33, 102, 172)),
+            (0.4, (146, 197, 222)),
+            (0.5, (247, 247, 247)),
+            (0.6, (244, 165, 130)),
+            (0.8, (178, 24, 43)),
+            (1.0, (103, 0, 31)),
         )
     else:  # Compact viridis approximation.
         stops = (
@@ -473,6 +586,143 @@ def _bounds(
     return low, high
 
 
+def _tick_indices(count: int, *, maximum: int = 6) -> tuple[int, ...]:
+    if count <= maximum:
+        return tuple(range(count))
+    return tuple(
+        sorted({round(index * (count - 1) / (maximum - 1)) for index in range(maximum)})
+    )
+
+
+def _non_overlapping_tick_indices(
+    positions: Sequence[float],
+    label_widths: Sequence[float],
+    *,
+    maximum: int = 6,
+    padding: float = 8.0,
+) -> tuple[int, ...]:
+    """Keep evenly distributed endpoint ticks without colliding labels."""
+
+    count = len(positions)
+    if count != len(label_widths):
+        raise ValueError("tick positions and label widths must have equal length")
+    if count <= 1:
+        return tuple(range(count))
+    for candidate_count in range(min(maximum, count), 1, -1):
+        indices = _tick_indices(count, maximum=candidate_count)
+        previous_right = -math.inf
+        fits = True
+        for index in indices:
+            left = float(positions[index]) - float(label_widths[index]) / 2.0
+            right = float(positions[index]) + float(label_widths[index]) / 2.0
+            if left < previous_right + padding:
+                fits = False
+                break
+            previous_right = right
+        if fits:
+            return indices
+    return (min(range(count), key=lambda index: abs(index - (count - 1) / 2.0)),)
+
+
+def _axis_values(spec: PlotSpec, axis: str, count: int) -> list[float]:
+    keys = (
+        f"{axis}_values",
+        f"{axis}_positions",
+        f"{axis}_coordinates",
+    )
+    source = _mapping_value(spec.data, *keys)
+    if source is None:
+        source = next((spec.options[key] for key in keys if key in spec.options), None)
+    if source is None:
+        return [float(index) for index in range(count)]
+    values = [
+        _finite_float(value, label=f"{axis}-axis coordinate")
+        for value in _sequence(source, label=f"{axis}-axis coordinates")
+    ]
+    if len(values) != count:
+        raise FigureExportValidationError(
+            f"{axis}-axis coordinates must contain exactly {count} values"
+        )
+    return values
+
+
+def _draw_scalar_colorbar(
+    draw: ImageDraw.ImageDraw,
+    box: tuple[int, int, int, int],
+    low: float,
+    high: float,
+    palette: str,
+    unit: str,
+) -> None:
+    left, top, right, bottom = box
+    steps = max(24, bottom - top)
+    for index in range(steps):
+        fraction = index / max(steps - 1, 1)
+        value = high - (high - low) * fraction
+        y0 = round(top + (bottom - top) * index / steps)
+        y1 = round(top + (bottom - top) * (index + 1) / steps)
+        draw.rectangle((left, y0, right, y1), fill=_palette(value, low, high, palette))
+    draw.rectangle(box, outline="#475467", width=1)
+    font = _font(max(8, round((bottom - top) * 0.055)))
+    suffix = f" {unit}" if unit else ""
+    draw.text((right + 4, top), f"{high:.4g}{suffix}", fill="#475467", font=font, anchor="la")
+    draw.text((right + 4, bottom), f"{low:.4g}{suffix}", fill="#475467", font=font, anchor="ld")
+
+
+def _draw_cartesian_axes(
+    draw: ImageDraw.ImageDraw,
+    grid_box: tuple[float, float, float, float],
+    x_values: Sequence[float],
+    y_values: Sequence[float],
+    *,
+    x_unit: str,
+    y_unit: str,
+) -> None:
+    left, top, right, bottom = grid_box
+    font = _font(max(8, round(min(right - left, bottom - top) * 0.045)))
+    color = "#475467"
+    for index in _tick_indices(len(x_values)):
+        x = left + (index + 0.5) * (right - left) / len(x_values)
+        draw.line((x, bottom, x, bottom + 4), fill=color, width=1)
+        draw.text((x, bottom + 6), f"{x_values[index]:.4g}", fill=color, font=font, anchor="ma")
+    for index in _tick_indices(len(y_values)):
+        y = top + (index + 0.5) * (bottom - top) / len(y_values)
+        draw.line((left - 4, y, left, y), fill=color, width=1)
+        draw.text((left - 6, y), f"{y_values[index]:.4g}", fill=color, font=font, anchor="rm")
+    x_label = "x" + (f" ({x_unit})" if x_unit else "")
+    y_label = "y" + (f" ({y_unit})" if y_unit else "")
+    draw.text(((left + right) / 2.0, bottom + 22), x_label, fill=color, font=font, anchor="ma")
+    draw.text((left, top - 3), y_label, fill=color, font=font, anchor="ld")
+
+
+def _draw_text_inside(
+    draw: ImageDraw.ImageDraw,
+    bounds: tuple[int, int, int, int],
+    xy: tuple[float, float],
+    text: str,
+    *,
+    fill: str,
+    font: ImageFont.ImageFont,
+    anchor: str = "mm",
+) -> None:
+    """Draw text while keeping its measured bounding box inside ``bounds``."""
+
+    text_bounds = draw.textbbox(xy, text, font=font, anchor=anchor)
+    shift_x = max(0, bounds[0] - text_bounds[0]) + min(
+        0, bounds[2] - text_bounds[2]
+    )
+    shift_y = max(0, bounds[1] - text_bounds[1]) + min(
+        0, bounds[3] - text_bounds[3]
+    )
+    draw.text(
+        (xy[0] + shift_x, xy[1] + shift_y),
+        text,
+        fill=fill,
+        font=font,
+        anchor=anchor,
+    )
+
+
 def _draw_cartesian_map(
     draw: ImageDraw.ImageDraw,
     box: tuple[int, int, int, int],
@@ -483,9 +733,19 @@ def _draw_cartesian_map(
     matrix = _matrix_payload(spec.data)
     rows, columns = len(matrix), len(matrix[0])
     left, top, right, bottom = box
+    show_axes = _boolean_option(spec.options, "show_axes", default=True)
+    show_colorbar = _boolean_option(
+        spec.options, "show_colorbar", default=not rgb
+    )
+    if rgb and show_colorbar:
+        raise FigureExportValidationError(
+            "RGB maps do not have one scalar colorbar"
+        )
     missing_color = _color(
         spec.options.get("missing_color", "#edf0f3"), label="missing_color"
     )
+    low = high = 0.0
+    palette = "viridis"
     if rgb:
         colors = [
             [missing_color if value is None else _rgb(value) for value in row]
@@ -507,22 +767,41 @@ def _draw_cartesian_map(
             ]
             for row in scalar
         ]
-    # Multi-row RF coordinates preserve square cells. A singleton y axis has
+    axis_left = max(42, round((right - left) * 0.11)) if show_axes else 0
+    axis_bottom = max(34, round((bottom - top) * 0.13)) if show_axes else 0
+    colorbar_space = max(72, round((right - left) * 0.18)) if show_colorbar else 0
+    available = (
+        left + axis_left,
+        top + (8 if show_axes or show_colorbar else 0),
+        right - colorbar_space,
+        bottom - axis_bottom,
+    )
+    if available[2] - available[0] < columns or available[3] - available[1] < rows:
+        raise FigureExportValidationError(
+            "plot panel is too small for map axes and colorbar"
+        )
+    # Multi-row RF coordinates preserve square cells.  A singleton y axis has
     # no physical height increment, so match the live viewer's legacy 30:7
-    # footprint instead of exporting an unreadable horizontal strip.
+    # visual footprint instead of exporting an unreadable 120:1 strip.
     if rows == 1:
         target_aspect = SINGLETON_Y_REFERENCE_COLUMNS / SINGLETON_Y_REFERENCE_ROWS
-        grid_width = min(right - left, (bottom - top) * target_aspect)
+        grid_width = min(
+            available[2] - available[0],
+            (available[3] - available[1]) * target_aspect,
+        )
         grid_height = grid_width / target_aspect
         cell_width = grid_width / columns
         cell_height = grid_height
     else:
-        cell_width = min((right - left) / columns, (bottom - top) / rows)
+        cell_width = min(
+            (available[2] - available[0]) / columns,
+            (available[3] - available[1]) / rows,
+        )
         cell_height = cell_width
         grid_width = cell_width * columns
         grid_height = cell_height * rows
-    grid_left = (left + right - grid_width) / 2.0
-    grid_top = (top + bottom - grid_height) / 2.0
+    grid_left = (available[0] + available[2] - grid_width) / 2.0
+    grid_top = (available[1] + available[3] - grid_height) / 2.0
     for y_index, row in enumerate(colors):
         y0 = round(grid_top + cell_height * y_index)
         y1 = round(grid_top + cell_height * (y_index + 1))
@@ -540,6 +819,344 @@ def _draw_cartesian_map(
         outline="#334155",
         width=2,
     )
+    grid_box = (
+        grid_left,
+        grid_top,
+        grid_left + grid_width,
+        grid_top + grid_height,
+    )
+    if show_axes:
+        _draw_cartesian_axes(
+            draw,
+            grid_box,
+            _axis_values(spec, "x", columns),
+            _axis_values(spec, "y", rows),
+            x_unit=str(spec.options.get("x_unit", "")),
+            y_unit=str(spec.options.get("y_unit", "")),
+        )
+    if show_colorbar:
+        colorbar_left = min(right - 58, round(grid_left + grid_width + 16))
+        _draw_scalar_colorbar(
+            draw,
+            (
+                colorbar_left,
+                round(grid_top),
+                colorbar_left + 12,
+                round(grid_top + grid_height),
+            ),
+            low,
+            high,
+            palette,
+            str(spec.options.get("value_unit", "")),
+        )
+
+
+def _waveform_payload(
+    data: Any,
+) -> tuple[
+    list[list[float | None]],
+    list[float],
+    list[float],
+    list[str],
+    int,
+]:
+    """Validate the normalized local-waveform renderer payload.
+
+    The matrix is channel-major: one row per selected channel and one column
+    per waveform time sample.  This is intentionally a small target-local
+    contract so both the Tk view and Figure Composer can consume the same
+    baseline-corrected data without importing scientific analysis code.
+    """
+
+    if not isinstance(data, Mapping):
+        raise FigureExportValidationError(
+            "waveform data must be a mapping with matrix, times_ms, "
+            "channel_labels, and best_channel_row"
+        )
+    matrix = _scalar_matrix(_matrix_payload(data))
+    rows, columns = len(matrix), len(matrix[0])
+
+    times_source = _mapping_value(data, "times_ms", "time_ms")
+    if times_source is None:
+        raise FigureExportValidationError("waveform times_ms is required")
+    times = [
+        _finite_float(value, label="waveform time")
+        for value in _sequence(times_source, label="waveform times_ms")
+    ]
+    if len(times) != columns:
+        raise FigureExportValidationError(
+            f"waveform times_ms must contain exactly {columns} values"
+        )
+    if any(right <= left for left, right in zip(times, times[1:])):
+        raise FigureExportValidationError(
+            "waveform times_ms must be strictly increasing"
+        )
+    time_edges_source = _mapping_value(data, "time_edges_ms")
+    if time_edges_source is None:
+        time_edges = _waveform_time_boundaries(times)
+    else:
+        time_edges = [
+            _finite_float(value, label="waveform time edge")
+            for value in _sequence(
+                time_edges_source, label="waveform time_edges_ms"
+            )
+        ]
+        if len(time_edges) != columns + 1:
+            raise FigureExportValidationError(
+                "waveform time_edges_ms must contain exactly one more value "
+                "than times_ms"
+            )
+        if any(
+            right <= left for left, right in zip(time_edges, time_edges[1:])
+        ):
+            raise FigureExportValidationError(
+                "waveform time_edges_ms must be strictly increasing"
+            )
+        if any(
+            center < time_edges[index] or center > time_edges[index + 1]
+            for index, center in enumerate(times)
+        ):
+            raise FigureExportValidationError(
+                "each waveform time must fall inside its time_edges_ms interval"
+            )
+
+    labels_source = _mapping_value(data, "channel_labels", "channel_ids")
+    if labels_source is None:
+        raise FigureExportValidationError("waveform channel_labels is required")
+    labels = [
+        str(value).strip()
+        for value in _sequence(labels_source, label="waveform channel_labels")
+    ]
+    if len(labels) != rows:
+        raise FigureExportValidationError(
+            f"waveform channel_labels must contain exactly {rows} values"
+        )
+    if any(not label for label in labels):
+        raise FigureExportValidationError(
+            "waveform channel_labels must not contain empty labels"
+        )
+
+    best_row = _mapping_value(data, "best_channel_row", "best_row_index")
+    if isinstance(best_row, bool) or not isinstance(best_row, int):
+        raise FigureExportValidationError(
+            "waveform best_channel_row must be an integer"
+        )
+    if best_row < 0 or best_row >= rows:
+        raise FigureExportValidationError(
+            f"waveform best_channel_row must be inside 0..{rows - 1}"
+        )
+    return matrix, times, time_edges, labels, best_row
+
+
+def _waveform_time_boundaries(times: Sequence[float]) -> list[float]:
+    if len(times) == 1:
+        return [times[0] - 0.5, times[0] + 0.5]
+    boundaries = [times[0] - (times[1] - times[0]) / 2.0]
+    boundaries.extend(
+        (left + right) / 2.0 for left, right in zip(times, times[1:])
+    )
+    boundaries.append(times[-1] + (times[-1] - times[-2]) / 2.0)
+    return boundaries
+
+
+def _draw_waveform_heatmap(
+    draw: ImageDraw.ImageDraw,
+    box: tuple[int, int, int, int],
+    spec: PlotSpec,
+) -> None:
+    """Draw a channel-by-time waveform heatmap without square-cell scaling."""
+
+    matrix, times, time_boundaries, channel_labels, best_row = (
+        _waveform_payload(spec.data)
+    )
+    rows, columns = len(matrix), len(matrix[0])
+    left, top, right, bottom = box
+    show_axes = _boolean_option(spec.options, "show_axes", default=True)
+    show_colorbar = _boolean_option(spec.options, "show_colorbar", default=True)
+    show_zero_time = _boolean_option(
+        spec.options, "show_zero_time", default=True
+    )
+    missing_color = _color(
+        spec.options.get("missing_color", "#edf0f3"), label="missing_color"
+    )
+    palette = str(spec.options.get("palette", "rdbu_r")).strip().lower()
+    if palette not in {"rdbu_r", "rdbu-r"}:
+        raise FigureExportValidationError(
+            "waveform palette must be 'rdbu_r'"
+        )
+
+    low, high = _bounds(matrix, spec.options)
+    amplitude = max(abs(low), abs(high))
+    low, high = -amplitude, amplitude
+    colors = [
+        [
+            missing_color if value is None else _palette(value, low, high, palette)
+            for value in row
+        ]
+        for row in matrix
+    ]
+
+    panel_width = right - left
+    panel_height = bottom - top
+    axis_font = _font(max(8, round(panel_height * 0.035)))
+    best_axis_font = _font(max(8, round(panel_height * 0.035)), bold=True)
+    if show_axes:
+        measured_label_width = max(
+            (
+                draw.textbbox((0, 0), label, font=axis_font)[2]
+                for label in channel_labels
+            ),
+            default=0,
+        )
+        axis_left = max(
+            50,
+            min(round(panel_width * 0.34), measured_label_width + 20),
+        )
+        axis_bottom = max(34, round(panel_height * 0.13))
+    else:
+        axis_left = axis_bottom = 0
+    colorbar_space = max(76, round(panel_width * 0.17)) if show_colorbar else 0
+    grid_box = (
+        left + axis_left,
+        top + (6 if show_axes or show_colorbar else 0),
+        right - colorbar_space,
+        bottom - axis_bottom,
+    )
+    grid_width = grid_box[2] - grid_box[0]
+    grid_height = grid_box[3] - grid_box[1]
+    if grid_width < columns or grid_height < rows:
+        raise FigureExportValidationError(
+            "plot panel is too small for waveform axes and colorbar"
+        )
+
+    # Time samples and channels have different physical dimensions.  Filling
+    # the available rectangle (rather than forcing square spatial-map cells)
+    # keeps the 5 x 60 artifact legible in narrow multi-panel pages.
+    cell_height = grid_height / rows
+
+    def time_x(value: float) -> float:
+        return _scale(
+            value,
+            time_boundaries[0],
+            time_boundaries[-1],
+            grid_box[0],
+            grid_box[2],
+        )
+
+    for row_index, row in enumerate(colors):
+        y0 = round(grid_box[1] + cell_height * row_index)
+        y1 = round(grid_box[1] + cell_height * (row_index + 1))
+        for column_index, color in enumerate(row):
+            x0 = round(time_x(time_boundaries[column_index]))
+            x1 = round(time_x(time_boundaries[column_index + 1]))
+            draw.rectangle((x0, y0, x1, y1), fill=color)
+        if row_index:
+            draw.line(
+                (grid_box[0], y0, grid_box[2], y0),
+                fill="#ffffff",
+                width=1,
+            )
+
+    if show_zero_time and time_boundaries[0] <= 0.0 <= time_boundaries[-1]:
+        zero_x = time_x(0.0)
+        dash = max(3, round(grid_height * 0.025))
+        gap = max(2, dash // 2)
+        y = grid_box[1]
+        while y < grid_box[3]:
+            draw.line(
+                (zero_x, y, zero_x, min(grid_box[3], y + dash)),
+                fill="#111827",
+                width=1,
+            )
+            y += dash + gap
+
+    best_y0 = round(grid_box[1] + cell_height * best_row)
+    best_y1 = round(grid_box[1] + cell_height * (best_row + 1))
+    draw.rectangle(
+        (grid_box[0], best_y0, grid_box[2], best_y1),
+        outline="#dc2626",
+        width=2,
+    )
+    draw.rectangle(grid_box, outline="#334155", width=2)
+
+    if show_axes:
+        axis_color = "#475467"
+        for row_index, label in enumerate(channel_labels):
+            center_y = grid_box[1] + cell_height * (row_index + 0.5)
+            marker_radius = max(3, min(7, round(cell_height * 0.12)))
+            marker_x = grid_box[0] - marker_radius - 3
+            draw.ellipse(
+                (
+                    marker_x - marker_radius,
+                    center_y - marker_radius,
+                    marker_x + marker_radius,
+                    center_y + marker_radius,
+                ),
+                fill="#dc2626" if row_index == best_row else "#ffffff",
+                outline="#b42318" if row_index == best_row else "#667085",
+                width=2 if row_index == best_row else 1,
+            )
+            draw.text(
+                (marker_x - marker_radius - 5, center_y),
+                label,
+                fill="#b42318" if row_index == best_row else axis_color,
+                font=best_axis_font if row_index == best_row else axis_font,
+                anchor="rm",
+            )
+        tick_labels = [f"{value:.4g}" for value in times]
+        tick_positions = [time_x(value) for value in times]
+        tick_widths = [
+            draw.textbbox((0, 0), label, font=axis_font)[2]
+            for label in tick_labels
+        ]
+        for index in _non_overlapping_tick_indices(
+            tick_positions,
+            tick_widths,
+            padding=max(6.0, panel_height * 0.012),
+        ):
+            x = time_x(times[index])
+            draw.line(
+                (x, grid_box[3], x, grid_box[3] + 4),
+                fill=axis_color,
+                width=1,
+            )
+            draw.text(
+                (x, grid_box[3] + 6),
+                tick_labels[index],
+                fill=axis_color,
+                font=axis_font,
+                anchor="ma",
+            )
+        draw.text(
+            ((grid_box[0] + grid_box[2]) / 2.0, bottom - 2),
+            "Time from spike alignment (ms)",
+            fill=axis_color,
+            font=axis_font,
+            anchor="md",
+        )
+        draw.text(
+            (left + 2, grid_box[1]),
+            "channel",
+            fill=axis_color,
+            font=axis_font,
+            anchor="la",
+        )
+
+    if show_colorbar:
+        colorbar_left = min(right - 58, round(grid_box[2] + 16))
+        _draw_scalar_colorbar(
+            draw,
+            (
+                colorbar_left,
+                round(grid_box[1]),
+                colorbar_left + 12,
+                round(grid_box[3]),
+            ),
+            low,
+            high,
+            palette,
+            str(spec.options.get("value_unit", "µV")),
+        )
 
 
 def _draw_polar_map(
@@ -564,9 +1181,19 @@ def _draw_polar_map(
     if reverse_rings:
         matrix = list(reversed(matrix))
     rows, columns = len(matrix), len(matrix[0])
+    show_axes = _boolean_option(spec.options, "show_axes", default=True)
+    show_colorbar = _boolean_option(
+        spec.options, "show_colorbar", default=not rgb
+    )
+    if rgb and show_colorbar:
+        raise FigureExportValidationError(
+            "RGB maps do not have one scalar colorbar"
+        )
     missing_color = _color(
         spec.options.get("missing_color", "#edf0f3"), label="missing_color"
     )
+    low = high = 0.0
+    palette = "viridis"
     if rgb:
         colors = [
             [missing_color if value is None else _rgb(value) for value in row]
@@ -590,9 +1217,21 @@ def _draw_polar_map(
         ]
 
     left, top, right, bottom = box
-    diameter = max(2, min(right - left, bottom - top))
-    center_x = (left + right) / 2.0
-    center_y = (top + bottom) / 2.0
+    axis_padding = max(30, round(min(right - left, bottom - top) * 0.09)) if show_axes else 0
+    colorbar_space = max(70, round((right - left) * 0.18)) if show_colorbar else 0
+    map_bounds = (
+        left + axis_padding,
+        top + axis_padding,
+        right - colorbar_space - axis_padding,
+        bottom - axis_padding,
+    )
+    if map_bounds[2] - map_bounds[0] < 4 or map_bounds[3] - map_bounds[1] < 4:
+        raise FigureExportValidationError(
+            "plot panel is too small for polar axes and colorbar"
+        )
+    diameter = max(2, min(map_bounds[2] - map_bounds[0], map_bounds[3] - map_bounds[1]))
+    center_x = (map_bounds[0] + map_bounds[2]) / 2.0
+    center_y = (map_bounds[1] + map_bounds[3]) / 2.0
     outer_radius = diameter / 2.0
     inner_blank_rows = _finite_float(
         spec.options.get("inner_blank_rows", 0.0), label="inner_blank_rows"
@@ -683,6 +1322,84 @@ def _draw_polar_map(
                 fill="#334155",
                 width=2,
             )
+    if show_colorbar:
+        bar_left = right - max(58, round((right - left) * 0.15))
+        bar_height = max(20, round(diameter * 0.72))
+        bar_top = round(center_y - bar_height / 2.0)
+        _draw_scalar_colorbar(
+            draw,
+            (bar_left, bar_top, bar_left + 12, bar_top + bar_height),
+            low,
+            high,
+            palette,
+            str(spec.options.get("value_unit", "")),
+        )
+    if show_axes:
+        axis_font = _font(max(8, round(diameter * 0.035)))
+        axis_color = "#475467"
+        x_values = _axis_values(spec, "x", columns)
+        y_values = _axis_values(spec, "y", rows)
+        if reverse_rings:
+            y_values = list(reversed(y_values))
+        x_unit = str(spec.options.get("x_unit", ""))
+        y_unit = str(spec.options.get("y_unit", ""))
+        x_suffix = f" {x_unit}" if x_unit else ""
+        y_suffix = f" {y_unit}" if y_unit else ""
+        for angle_index in sorted({0, columns // 2, columns - 1}):
+            fraction = (angle_index + 0.5) / columns
+            angle = (
+                arc_start + fraction * total_degrees
+                if clockwise
+                else arc_end - fraction * total_degrees
+            )
+            theta = math.radians(angle)
+            label_radius = outer_radius + max(10, axis_padding * 0.42)
+            _draw_text_inside(
+                draw,
+                box,
+                (
+                    center_x + label_radius * math.cos(theta),
+                    center_y + label_radius * math.sin(theta),
+                ),
+                f"{x_values[angle_index]:.4g}{x_suffix}",
+                fill=axis_color,
+                font=axis_font,
+            )
+        radial_angle = 0.0
+        radial_theta = math.radians(radial_angle)
+        for ring_index in sorted({0, rows - 1}):
+            radius = (
+                outer_radius
+                * (inner_blank_rows + (ring_index + 0.5) * ring_span)
+                / radial_units
+            )
+            point_x = center_x + radius * math.cos(radial_theta)
+            point_y = center_y + radius * math.sin(radial_theta)
+            draw.line(
+                (point_x, point_y - 3, point_x, point_y + 3),
+                fill=axis_color,
+                width=1,
+            )
+            _draw_text_inside(
+                draw,
+                box,
+                (point_x, point_y - 7),
+                f"{y_values[ring_index]:.4g}{y_suffix}",
+                fill=axis_color,
+                font=axis_font,
+                anchor="ms",
+            )
+        direction = "clockwise" if clockwise else "counterclockwise"
+        ring_note = "outer to inner" if reverse_rings else "inner to outer"
+        _draw_text_inside(
+            draw,
+            box,
+            ((left + right) / 2.0, bottom - 2),
+            f"angle: {direction}; rings: {ring_note}",
+            fill=axis_color,
+            font=axis_font,
+            anchor="md",
+        )
 
 
 def _xy_payload(data: Any) -> tuple[list[float], list[float]]:
@@ -721,8 +1438,14 @@ def _draw_line(
 ) -> None:
     x_values, y_values = _xy_payload(spec.data)
     left, top, right, bottom = box
-    padding = max(8, round(min(right - left, bottom - top) * 0.08))
-    plot_box = (left + padding, top + padding, right - padding, bottom - padding)
+    show_axes = _boolean_option(spec.options, "show_axes", default=True)
+    span = min(right - left, bottom - top)
+    plot_box = (
+        left + (max(46, round(span * 0.13)) if show_axes else 8),
+        top + 12,
+        right - 12,
+        bottom - (max(38, round(span * 0.12)) if show_axes else 8),
+    )
     x_low, x_high = min(x_values), max(x_values)
     y_low, y_high = min(y_values), max(y_values)
     draw.line(
@@ -747,6 +1470,73 @@ def _draw_line(
         draw.ellipse((x - 4, y - 4, x + 4, y + 4), fill="#2563eb")
     else:
         draw.line(points, fill=str(spec.options.get("color", "#2563eb")), width=4)
+    if show_axes:
+        axis_font = _font(max(8, round(span * 0.032)))
+        axis_color = "#475467"
+        x_unit = str(
+            spec.options.get(
+                "x_unit",
+                "deg" if spec.kind is PlotKind.HD_LINE else "",
+            )
+        )
+        y_unit = str(
+            spec.options.get(
+                "y_unit",
+                "Hz" if spec.kind is PlotKind.HD_LINE else "",
+            )
+        )
+        for tick_index in range(5):
+            fraction = tick_index / 4.0
+            x_value = x_low + (x_high - x_low) * fraction
+            pixel_x = plot_box[0] + (plot_box[2] - plot_box[0]) * fraction
+            draw.line(
+                (pixel_x, plot_box[3], pixel_x, plot_box[3] + 4),
+                fill=axis_color,
+                width=1,
+            )
+            _draw_text_inside(
+                draw,
+                box,
+                (pixel_x, plot_box[3] + 6),
+                f"{x_value:.4g}",
+                fill=axis_color,
+                font=axis_font,
+                anchor="ma",
+            )
+            y_value = y_low + (y_high - y_low) * fraction
+            pixel_y = plot_box[3] - (plot_box[3] - plot_box[1]) * fraction
+            draw.line(
+                (plot_box[0] - 4, pixel_y, plot_box[0], pixel_y),
+                fill=axis_color,
+                width=1,
+            )
+            _draw_text_inside(
+                draw,
+                box,
+                (plot_box[0] - 6, pixel_y),
+                f"{y_value:.4g}",
+                fill=axis_color,
+                font=axis_font,
+                anchor="rm",
+            )
+        _draw_text_inside(
+            draw,
+            box,
+            ((plot_box[0] + plot_box[2]) / 2.0, bottom - 2),
+            f"x ({x_unit})" if x_unit else "x",
+            fill=axis_color,
+            font=axis_font,
+            anchor="md",
+        )
+        _draw_text_inside(
+            draw,
+            box,
+            (left + 2, top + 2),
+            f"y ({y_unit})" if y_unit else "y",
+            fill=axis_color,
+            font=axis_font,
+            anchor="la",
+        )
 
 
 def _timeline_index(
@@ -762,6 +1552,52 @@ def _timeline_index(
             f"timeline {key} must be inside 0..{count - 1}"
         )
     return value
+
+
+def _timeline_boundaries(times: Sequence[float]) -> list[float]:
+    if not times:
+        raise FigureExportValidationError("timeline times must not be empty")
+    if any(right <= left for left, right in zip(times, times[1:])):
+        raise FigureExportValidationError(
+            "timeline times must be strictly increasing"
+        )
+    if len(times) == 1:
+        return [times[0] - 0.5, times[0] + 0.5]
+    boundaries = [times[0] - (times[1] - times[0]) / 2.0]
+    boundaries.extend(
+        (left + right) / 2.0 for left, right in zip(times, times[1:])
+    )
+    boundaries.append(times[-1] + (times[-1] - times[-2]) / 2.0)
+    return boundaries
+
+
+def _timeline_edges(
+    data: Mapping[str, Any],
+    times: Sequence[float],
+) -> list[float]:
+    source = data.get("time_edges")
+    if source is None:
+        return _timeline_boundaries(times)
+    edges = [
+        _finite_float(value, label="timeline time edge")
+        for value in _sequence(source, label="timeline time edges")
+    ]
+    if len(edges) != len(times) + 1:
+        raise FigureExportValidationError(
+            "timeline time_edges must contain exactly one more value than times"
+        )
+    if any(right <= left for left, right in zip(edges, edges[1:])):
+        raise FigureExportValidationError(
+            "timeline time_edges must be strictly increasing"
+        )
+    if any(
+        center < edges[index] or center > edges[index + 1]
+        for index, center in enumerate(times)
+    ):
+        raise FigureExportValidationError(
+            "each timeline time must fall inside its time_edges interval"
+        )
+    return edges
 
 
 def _draw_timeline_curves(
@@ -788,6 +1624,7 @@ def _draw_timeline_curves(
         raise FigureExportValidationError(
             "timeline times and totals must have equal lengths"
         )
+    time_boundaries = _timeline_edges(data, times)
 
     selected_source = data.get("selected")
     selected: list[float] | None = None
@@ -831,16 +1668,28 @@ def _draw_timeline_curves(
     )
     plot_width = plot_box[2] - plot_box[0]
     plot_height = plot_box[3] - plot_box[1]
+    time_low, time_high = time_boundaries[0], time_boundaries[-1]
+
+    def time_x(value: float) -> float:
+        return _scale(value, time_low, time_high, plot_box[0], plot_box[2])
+
     if selection_start != 0 or selection_end != len(times) - 1:
-        selection_x0 = plot_box[0] + plot_width * selection_start / len(times)
-        selection_x1 = plot_box[0] + plot_width * (selection_end + 1) / len(times)
+        selection_x0 = time_x(time_boundaries[selection_start])
+        selection_x1 = time_x(time_boundaries[selection_end + 1])
         draw.rectangle(
             (selection_x0, plot_box[1], selection_x1, plot_box[3]),
             outline="#16a34a",
             width=2,
         )
     if active_index is not None:
-        active_x = plot_box[0] + plot_width * (active_index + 0.5) / len(times)
+        active_x0 = time_x(time_boundaries[active_index])
+        active_x1 = time_x(time_boundaries[active_index + 1])
+        draw.rectangle(
+            (active_x0, plot_box[1], active_x1, plot_box[3]),
+            outline="#7c3aed",
+            width=1,
+        )
+        active_x = time_x(times[active_index])
         draw.line(
             (active_x, plot_box[1], active_x, plot_box[3]),
             fill="#7c3aed",
@@ -852,6 +1701,13 @@ def _draw_timeline_curves(
         fill="#64748b",
         width=2,
     )
+    if time_low <= 0.0 <= time_high:
+        zero_x = time_x(0.0)
+        draw.line(
+            (zero_x, plot_box[1], zero_x, plot_box[3]),
+            fill="#94a3b8",
+            width=1,
+        )
     draw.line(
         (plot_box[2], plot_box[1], plot_box[2], plot_box[3]),
         fill="#2563eb",
@@ -876,7 +1732,7 @@ def _draw_timeline_curves(
     for label, values, color, maximum in curves:
         points = [
             (
-                round(plot_box[0] + plot_width * (index + 0.5) / len(times)),
+                round(time_x(times[index])),
                 round(plot_box[3] - plot_height * value / maximum),
             )
             for index, value in enumerate(values)
@@ -902,6 +1758,28 @@ def _draw_timeline_curves(
         legend_x += 28 + text_box[2] - text_box[0]
 
     axis_font = _font(max(8, round((bottom - top) * 0.065)))
+    for index in _tick_indices(len(time_boundaries), maximum=5):
+        tick_x = time_x(time_boundaries[index])
+        draw.line(
+            (tick_x, plot_box[3], tick_x, plot_box[3] + 4),
+            fill="#64748b",
+            width=1,
+        )
+        draw.text(
+            (tick_x, plot_box[3] + 5),
+            f"{time_boundaries[index]:.4g}",
+            fill="#475467",
+            font=axis_font,
+            anchor="ma",
+        )
+    time_unit = str(data.get("time_unit", "ms"))
+    draw.text(
+        ((plot_box[0] + plot_box[2]) / 2.0, bottom),
+        f"time ({time_unit})" if time_unit else "time",
+        fill="#475467",
+        font=axis_font,
+        anchor="md",
+    )
     blue_maximum = curves[0][3]
     draw.text(
         (plot_box[2] + 4, plot_box[1]),
@@ -942,7 +1820,8 @@ def _draw_polar_line(
 ) -> None:
     angles, values = _xy_payload(spec.data)
     left, top, right, bottom = box
-    radius = min(right - left, bottom - top) * 0.43
+    show_axes = _boolean_option(spec.options, "show_axes", default=True)
+    radius = min(right - left, bottom - top) * (0.37 if show_axes else 0.43)
     center_x = (left + right) / 2.0
     center_y = (top + bottom) / 2.0
     maximum = max(max(values), 0.0)
@@ -991,6 +1870,43 @@ def _draw_polar_line(
             width=4,
             joint="curve",
         )
+    if show_axes:
+        axis_font = _font(max(8, round(radius * 0.09)))
+        axis_color = "#475467"
+        for cardinal in (0, 90, 180, 270):
+            theta = math.radians(cardinal - 90.0)
+            label_radius = radius + max(12, radius * 0.12)
+            _draw_text_inside(
+                draw,
+                box,
+                (
+                    center_x + label_radius * math.cos(theta),
+                    center_y + label_radius * math.sin(theta),
+                ),
+                f"{cardinal}°",
+                fill=axis_color,
+                font=axis_font,
+            )
+        y_unit = str(spec.options.get("y_unit", "Hz"))
+        suffix = f" {y_unit}" if y_unit else ""
+        _draw_text_inside(
+            draw,
+            box,
+            (center_x + 4, center_y + 4),
+            f"{minimum:.4g}{suffix}",
+            fill=axis_color,
+            font=axis_font,
+            anchor="la",
+        )
+        _draw_text_inside(
+            draw,
+            box,
+            (center_x + radius, center_y - 5),
+            f"{maximum:.4g}{suffix}",
+            fill=axis_color,
+            font=axis_font,
+            anchor="rd",
+        )
 
 
 def _draw_timeline(
@@ -1029,6 +1945,14 @@ def _draw_timeline(
     frame_options = dict(spec.options)
     frame_options.setdefault("vmin", 0.0)
     frame_options.setdefault("vmax", max(max(frame_values, default=0.0), 1.0))
+    # A timeline is one categorical atlas, not hundreds of independent plots.
+    # Per-frame axes/colorbars are both misleading and prohibitively expensive
+    # for real 500-bin sessions.  Draw one shared quantitative legend below.
+    frame_options["show_axes"] = False
+    frame_options["show_colorbar"] = False
+    shared_low, shared_high = _bounds([frame_values], frame_options)
+    palette = str(frame_options.get("palette", "viridis"))
+    value_unit = str(frame_options.get("value_unit", ""))
 
     selection_start = _timeline_index(
         spec.data,
@@ -1058,6 +1982,7 @@ def _draw_timeline(
     )
     times_source = spec.data.get("times")
     frame_times: list[float] | None = None
+    time_edges: list[float] | None = None
     if times_source is not None:
         parsed_times = [
             _finite_float(value, label="timeline time")
@@ -1065,15 +1990,51 @@ def _draw_timeline(
         ]
         if len(parsed_times) == len(frame_list):
             frame_times = parsed_times
+            time_edges = _timeline_edges(spec.data, frame_times)
+
+    time_unit = str(
+        spec.data.get("time_unit", spec.options.get("time_unit", "ms"))
+    )
+    unit_suffix = f" {time_unit}" if time_unit else ""
+    if time_edges is not None:
+        atlas_bounds = (
+            f"[{time_edges[0]:.4g}, {time_edges[-1]:.4g}){unit_suffix}"
+        )
+    elif frame_times is not None:
+        atlas_bounds = (
+            f"centers {frame_times[0]:.4g}..{frame_times[-1]:.4g}{unit_suffix}"
+        )
+    else:
+        atlas_bounds = f"indices 0..{len(frame_list) - 1}"
+    caption_font = _font(max(8, round((bottom - top) * 0.025)))
+    caption_height = max(14, int(getattr(caption_font, "size", 10)) + 4)
+    draw.text(
+        (left, top),
+        f"categorical time-bin atlas; bounds {atlas_bounds}; "
+        "equal-width tiles, row-major time order",
+        fill="#475467",
+        font=caption_font,
+        anchor="la",
+    )
+    top += caption_height
+
+    colorbar_space = max(58, round((right - left) * 0.1))
+    grid_right = right - colorbar_space
+    if grid_right <= left:
+        raise FigureExportValidationError(
+            "timeline panel is too small for its shared colorbar"
+        )
 
     rows, columns = automatic_grid(len(frame_list))
-    gap = max(2, round(min(right - left, bottom - top) * 0.01))
+    nominal_cell_width = (grid_right - left) / columns
+    nominal_cell_height = (bottom - top) / rows
+    gap = max(1, round(min(nominal_cell_width, nominal_cell_height) * 0.08))
     for index, frame in enumerate(frame_list):
         row, column = divmod(index, columns)
         frame_box = (
-            left + round((right - left) * column / columns) + gap,
+            left + round((grid_right - left) * column / columns) + gap,
             top + round((bottom - top) * row / rows) + gap,
-            left + round((right - left) * (column + 1) / columns) - gap,
+            left + round((grid_right - left) * (column + 1) / columns) - gap,
             top + round((bottom - top) * (row + 1) / rows) - gap,
         )
         label_height = (
@@ -1094,9 +2055,19 @@ def _draw_timeline(
             _draw_cartesian_map(draw, map_box, frame_spec, rgb=False)
         if label_height and frame_times is not None:
             label_font = _font(max(7, label_height - 2))
+            center_label = f"{frame_times[index]:.3g}{unit_suffix}"
+            label = center_label
+            if time_edges is not None:
+                bounds_label = (
+                    f"[{time_edges[index]:.3g}, "
+                    f"{time_edges[index + 1]:.3g}){unit_suffix}"
+                )
+                bounds_box = draw.textbbox((0, 0), bounds_label, font=label_font)
+                if bounds_box[2] - bounds_box[0] <= frame_box[2] - frame_box[0] - 2:
+                    label = bounds_label
             draw.text(
                 ((frame_box[0] + frame_box[2]) / 2.0, frame_box[3]),
-                f"{frame_times[index]:.3g} ms",
+                label,
                 fill="#475467",
                 font=label_font,
                 anchor="mb",
@@ -1108,6 +2079,21 @@ def _draw_timeline(
             and selection_start <= index <= selection_end
         ):
             draw.rectangle(frame_box, outline="#16a34a", width=2)
+
+    colorbar_left = right - colorbar_space + max(10, round(colorbar_space * 0.18))
+    _draw_scalar_colorbar(
+        draw,
+        (
+            colorbar_left,
+            top + 4,
+            colorbar_left + 12,
+            bottom - 4,
+        ),
+        shared_low,
+        shared_high,
+        palette,
+        value_unit,
+    )
 
 
 def _unavailable_message(spec: PlotSpec) -> str | None:
@@ -1162,7 +2148,9 @@ def _draw_unavailable(
 
 
 def _point_payload(
-    data: Any, *, allow_empty: bool = False
+    data: Any,
+    *,
+    allow_empty: bool = False,
 ) -> list[tuple[float, float, str, str]]:
     source = _mapping_value(data, "points", "sites", "values")
     if source is None:
@@ -1195,20 +2183,52 @@ def _draw_probe_layout(
     box: tuple[int, int, int, int],
     spec: PlotSpec,
 ) -> None:
-    missing_position = _mapping_value(
-        spec.data, "missingPosition", "missing_position"
-    ) is True
+    missing_position = (
+        isinstance(spec.data, Mapping)
+        and spec.data.get("missingPosition") is True
+    )
     points = _point_payload(spec.data, allow_empty=missing_position)
     left, top, right, bottom = box
-    padding = max(12, round(min(right - left, bottom - top) * 0.08))
+    show_axes = _boolean_option(spec.options, "show_axes", default=True)
+    show_scale_bar = _boolean_option(
+        spec.options, "show_scale_bar", default=True
+    )
+    unit = str(spec.options.get("coordinate_unit", "µm"))
+    left_margin = max(46, round((right - left) * 0.12)) if show_axes else 12
+    bottom_margin = max(38, round((bottom - top) * 0.14)) if show_axes else 12
+    plot_box = (
+        left + left_margin,
+        top + 16,
+        right - 20,
+        bottom - bottom_margin,
+    )
     x_values = [point[0] for point in points] or [-1.0, 1.0]
     y_values = [point[1] for point in points] or [0.0, 1.0]
     x_low, x_high = min(x_values), max(x_values)
     y_low, y_high = min(y_values), max(y_values)
+    physical_span = max(x_high - x_low, y_high - y_low, 1.0)
+    physical_padding = physical_span * 0.08
+    display_x_low, display_x_high = x_low - physical_padding, x_high + physical_padding
+    display_y_low, display_y_high = y_low - physical_padding, y_high + physical_padding
+    pixels_per_unit = min(
+        (plot_box[2] - plot_box[0]) / (display_x_high - display_x_low),
+        (plot_box[3] - plot_box[1]) / (display_y_high - display_y_low),
+    )
+    rendered_width = (display_x_high - display_x_low) * pixels_per_unit
+    rendered_height = (display_y_high - display_y_low) * pixels_per_unit
+    origin_x = (plot_box[0] + plot_box[2] - rendered_width) / 2.0
+    origin_y = (plot_box[1] + plot_box[3] - rendered_height) / 2.0
+
+    def point_x(value: float) -> float:
+        return origin_x + (value - display_x_low) * pixels_per_unit
+
+    def point_y(value: float) -> float:
+        return origin_y + (display_y_high - value) * pixels_per_unit
+
     label_font = _font(max(10, round((bottom - top) * 0.035)))
     for x, y, label, color in points:
-        pixel_x = round(_scale(x, x_low, x_high, left + padding, right - padding))
-        pixel_y = round(_scale(y, y_low, y_high, bottom - padding, top + padding))
+        pixel_x = round(point_x(x))
+        pixel_y = round(point_y(y))
         point_radius = max(4, round(min(right - left, bottom - top) * 0.015))
         draw.ellipse(
             (
@@ -1242,135 +2262,121 @@ def _draw_probe_layout(
             stroke_fill="#ffffff",
             anchor="mm",
         )
-
-
-def _waveform_payload(
-    data: Any,
-) -> tuple[list[list[float | None]], list[float], list[float], list[str], int]:
-    if not isinstance(data, Mapping):
-        raise FigureExportValidationError(
-            "waveform data must contain matrix, times_ms, channel_labels, and best_channel_row"
-        )
-    matrix = _scalar_matrix(_matrix_payload(data))
-    rows, columns = len(matrix), len(matrix[0])
-    times_source = _mapping_value(data, "times_ms", "timesMs", "time_ms")
-    labels_source = _mapping_value(data, "channel_labels", "channelLabels")
-    best_row = _mapping_value(data, "best_channel_row", "bestChannelRow")
-    if times_source is None or labels_source is None:
-        raise FigureExportValidationError("waveform times and channel labels are required")
-    times = [
-        _finite_float(value, label="waveform time")
-        for value in _sequence(times_source, label="waveform times")
-    ]
-    if len(times) != columns or any(b <= a for a, b in zip(times, times[1:])):
-        raise FigureExportValidationError(
-            "waveform times must match matrix columns and increase strictly"
-        )
-    edges_source = _mapping_value(data, "time_edges_ms", "timeEdgesMs")
-    if edges_source is None:
-        if len(times) == 1:
-            edges = [times[0] - 0.5, times[0] + 0.5]
-        else:
-            edges = [times[0] - (times[1] - times[0]) / 2]
-            edges.extend((a + b) / 2 for a, b in zip(times, times[1:]))
-            edges.append(times[-1] + (times[-1] - times[-2]) / 2)
-    else:
-        edges = [
-            _finite_float(value, label="waveform time edge")
-            for value in _sequence(edges_source, label="waveform time edges")
-        ]
-    if len(edges) != columns + 1 or any(b <= a for a, b in zip(edges, edges[1:])):
-        raise FigureExportValidationError("waveform time edges are invalid")
-    labels = [
-        str(value).strip()
-        for value in _sequence(labels_source, label="waveform channel labels")
-    ]
-    if len(labels) != rows or any(not label for label in labels):
-        raise FigureExportValidationError("waveform channel labels must match matrix rows")
-    if isinstance(best_row, bool) or not isinstance(best_row, int) or not 0 <= best_row < rows:
-        raise FigureExportValidationError("waveform best channel row is invalid")
-    return matrix, times, edges, labels, best_row
-
-
-def _draw_waveform_heatmap(
-    draw: ImageDraw.ImageDraw,
-    box: tuple[int, int, int, int],
-    spec: PlotSpec,
-) -> None:
-    matrix, times, edges, labels, best_row = _waveform_payload(spec.data)
-    rows, columns = len(matrix), len(matrix[0])
-    left, top, right, bottom = box
-    label_font = _font(max(9, round((bottom - top) * 0.04)))
-    label_width = max(
-        (draw.textbbox((0, 0), label, font=label_font)[2] for label in labels),
-        default=0,
+    axis_box = (
+        round(origin_x),
+        round(origin_y),
+        round(origin_x + rendered_width),
+        round(origin_y + rendered_height),
     )
-    grid = (
-        left + min(max(48, label_width + 14), max(48, (right - left) // 3)),
-        top + 6,
-        right - 66,
-        bottom - 32,
-    )
-    if grid[2] - grid[0] < columns or grid[3] - grid[1] < rows:
-        raise FigureExportValidationError("plot panel is too small for waveform data")
-    low, high = _bounds(matrix, spec.options)
-    amplitude = max(abs(low), abs(high), 1e-12)
-    low, high = -amplitude, amplitude
-    row_height = (grid[3] - grid[1]) / rows
-
-    def time_x(value: float) -> float:
-        return _scale(value, edges[0], edges[-1], grid[0], grid[2])
-
-    for row_index, row in enumerate(matrix):
-        y0 = round(grid[1] + row_height * row_index)
-        y1 = round(grid[1] + row_height * (row_index + 1))
-        for column_index, value in enumerate(row):
-            color = "#edf0f3" if value is None else _palette(value, low, high, "rdbu_r")
-            draw.rectangle(
-                (
-                    round(time_x(edges[column_index])),
-                    y0,
-                    round(time_x(edges[column_index + 1])),
-                    y1,
-                ),
-                fill=color,
-            )
+    if show_axes:
+        draw.rectangle(axis_box, outline="#64748b", width=1)
+        axis_font = _font(max(8, round((bottom - top) * 0.03)))
+        suffix = f" {unit}" if unit else ""
         draw.text(
-            (grid[0] - 7, (y0 + y1) / 2),
-            labels[row_index],
-            fill="#b42318" if row_index == best_row else "#475467",
-            font=label_font,
-            anchor="rm",
-        )
-    best_y0 = round(grid[1] + row_height * best_row)
-    best_y1 = round(grid[1] + row_height * (best_row + 1))
-    draw.rectangle((grid[0], best_y0, grid[2], best_y1), outline="#dc2626", width=2)
-    if edges[0] <= 0 <= edges[-1]:
-        zero_x = round(time_x(0))
-        draw.line((zero_x, grid[1], zero_x, grid[3]), fill="#111827", width=1)
-    draw.rectangle(grid, outline="#334155", width=2)
-    tick_indices = sorted({0, len(times) // 2, len(times) - 1})
-    for index in tick_indices:
-        x = round(time_x(times[index]))
-        draw.text(
-            (x, grid[3] + 5),
-            f"{times[index]:.4g}",
+            (axis_box[0], axis_box[3] + 5),
+            f"{display_x_low:.4g}",
             fill="#475467",
+            font=axis_font,
+            anchor="la",
+        )
+        draw.text(
+            (axis_box[2], axis_box[3] + 5),
+            f"{display_x_high:.4g}",
+            fill="#475467",
+            font=axis_font,
+            anchor="ra",
+        )
+        draw.text(
+            ((axis_box[0] + axis_box[2]) / 2.0, bottom),
+            f"x ({unit})" if unit else "x",
+            fill="#475467",
+            font=axis_font,
+            anchor="md",
+        )
+        draw.text(
+            (axis_box[0] - 5, axis_box[1]),
+            f"{display_y_high:.4g}{suffix}",
+            fill="#475467",
+            font=axis_font,
+            anchor="ra",
+        )
+        draw.text(
+            (axis_box[0] - 5, axis_box[3]),
+            f"{display_y_low:.4g}{suffix}",
+            fill="#475467",
+            font=axis_font,
+            anchor="rd",
+        )
+    if show_scale_bar:
+        target = physical_span / 5.0
+        magnitude = 10.0 ** math.floor(math.log10(target))
+        scale_length = max(
+            candidate * magnitude
+            for candidate in (1.0, 2.0, 5.0, 10.0)
+            if candidate * magnitude <= target
+        )
+        bar_pixels = max(1, round(scale_length * pixels_per_unit))
+        bar_x1 = axis_box[2] - 8
+        bar_x0 = bar_x1 - bar_pixels
+        bar_y = axis_box[1] + 12
+        draw.line((bar_x0, bar_y, bar_x1, bar_y), fill="#0f172a", width=3)
+        draw.line((bar_x0, bar_y - 3, bar_x0, bar_y + 3), fill="#0f172a", width=1)
+        draw.line((bar_x1, bar_y - 3, bar_x1, bar_y + 3), fill="#0f172a", width=1)
+        draw.text(
+            ((bar_x0 + bar_x1) / 2.0, bar_y + 4),
+            f"{scale_length:g} {unit}".rstrip(),
+            fill="#0f172a",
             font=label_font,
             anchor="ma",
         )
-    bar_left = grid[2] + 18
-    bar_top, bar_bottom = grid[1], grid[3]
-    for pixel_y in range(bar_top, bar_bottom):
-        fraction = 1 - (pixel_y - bar_top) / max(1, bar_bottom - bar_top - 1)
-        value = low + fraction * (high - low)
-        draw.line(
-            (bar_left, pixel_y, bar_left + 12, pixel_y),
-            fill=_palette(value, low, high, "rdbu_r"),
-        )
-    draw.text((bar_left + 17, bar_top), f"{high:.3g}", fill="#475467", font=label_font, anchor="lm")
-    draw.text((bar_left + 17, bar_bottom), f"{low:.3g}", fill="#475467", font=label_font, anchor="lm")
-    draw.text((bar_left + 6, (bar_top + bar_bottom) / 2), "µV", fill="#475467", font=label_font, anchor="mm")
+
+
+def _ellipsize_text(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    font: ImageFont.ImageFont,
+    maximum_width: float,
+) -> str:
+    if draw.textlength(text, font=font) <= maximum_width:
+        return text
+    ellipsis = "…"
+    if draw.textlength(ellipsis, font=font) > maximum_width:
+        return ""
+    low, high = 0, len(text)
+    while low < high:
+        middle = (low + high + 1) // 2
+        candidate = text[:middle].rstrip() + ellipsis
+        if draw.textlength(candidate, font=font) <= maximum_width:
+            low = middle
+        else:
+            high = middle - 1
+    return text[:low].rstrip() + ellipsis
+
+
+def _wrapped_subtitle_lines(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    font: ImageFont.ImageFont,
+    maximum_width: float,
+) -> tuple[str, ...]:
+    """Wrap a subtitle at spaces into at most two measured lines."""
+
+    words = text.split()
+    if not words or maximum_width <= 0:
+        return ()
+    first_words: list[str] = []
+    while words:
+        candidate = " ".join((*first_words, words[0]))
+        if first_words and draw.textlength(candidate, font=font) > maximum_width:
+            break
+        first_words.append(words.pop(0))
+        if draw.textlength(candidate, font=font) > maximum_width:
+            break
+    first = _ellipsize_text(draw, " ".join(first_words), font, maximum_width)
+    if not words:
+        return (first,) if first else ()
+    second = _ellipsize_text(draw, " ".join(words), font, maximum_width)
+    return tuple(line for line in (first, second) if line)
 
 
 class PillowFigureRenderer:
@@ -1420,7 +2426,7 @@ class PillowFigureRenderer:
         title_font = _font(max(18, round(height * 0.026)), bold=True)
         draw.text(
             (margin, margin),
-            f"Unit {unit_id} — {page.name}",
+            f"Unit {unit_id} - {page.name}",
             fill="#0f172a",
             font=title_font,
             anchor="la",
@@ -1489,21 +2495,34 @@ class PillowFigureRenderer:
         definition = PLOT_KIND_REGISTRY[spec.kind.value]
         title = spec.title.strip() if spec.title and spec.title.strip() else definition.label
         subtitle = str(spec.options.get("subtitle", "")).strip()
-        title_height = max(30, round((bottom - top) * (0.16 if subtitle else 0.11)))
+        title_line_height = max(30, round((bottom - top) * 0.11))
         title_font = _font(max(13, round((bottom - top) * 0.048)), bold=True)
+        subtitle_font = _font(max(10, round((bottom - top) * 0.032)))
+        subtitle_lines = _wrapped_subtitle_lines(
+            draw,
+            subtitle,
+            subtitle_font,
+            max(1, right - left - 24),
+        )
+        subtitle_line_height = max(18, round((bottom - top) * 0.055))
+        title_height = title_line_height + subtitle_line_height * len(subtitle_lines)
         draw.text(
-            (left + 12, top + (title_height * (0.34 if subtitle else 0.5))),
+            (left + 12, top + title_line_height / 2),
             title,
             fill="#0f172a",
             font=title_font,
             anchor="lm",
         )
-        if subtitle:
-            subtitle_font = _font(max(9, round((bottom - top) * 0.029)))
+        for line_index, line in enumerate(subtitle_lines):
             draw.text(
-                (left + 12, top + title_height * 0.72),
-                subtitle,
-                fill="#667085",
+                (
+                    left + 12,
+                    top
+                    + title_line_height
+                    + subtitle_line_height * (line_index + 0.5),
+                ),
+                line,
+                fill="#64748b",
                 font=subtitle_font,
                 anchor="lm",
             )
@@ -1963,7 +2982,7 @@ def _validate_export_directory(
             raise FigureExportError("export manifest has an invalid top-level structure")
         if document["manifestVersion"] != EXPORT_MANIFEST_VERSION:
             raise FigureExportError("export manifest version is not supported")
-        if document["producer"] != EXPORT_PRODUCER:
+        if document["producer"] not in {EXPORT_PRODUCER, *LEGACY_EXPORT_PRODUCERS}:
             raise FigureExportError("export manifest producer marker does not match")
         figure_format = document["format"]
         if figure_format not in {FigureFormat.PNG.value, FigureFormat.SVG.value}:
@@ -3440,4 +4459,6 @@ __all__ = [
     "export_figures",
     "iter_generated_pages",
     "render_live_preview",
+    "shared_scalar_scale",
+    "shared_symmetric_scale",
 ]

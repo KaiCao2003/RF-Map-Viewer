@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import errno
+import base64
 import hashlib
 import io
 import json
@@ -16,6 +17,7 @@ import numpy as np
 from PIL import Image
 
 from .shared_figure_export import (
+    SVG_RENDERING_CONTRACT,
     DestinationExistsError as SharedDestinationExistsError,
     ExportPage as SharedExportPage,
     FigureExportError as SharedFigureExportError,
@@ -55,6 +57,7 @@ from .exports import (
 )
 from .paths import is_within
 from .waveforms import (
+    DEFAULT_BASELINE_END_MS,
     DEFAULT_WAVEFORM_CHANNEL_MODE,
     WAVEFORM_CHANNEL_MODES,
     WaveformArtifactError,
@@ -68,7 +71,7 @@ FIGURE_EXPORT_PRODUCER = "rfmapping.web.figure-export"
 FIGURE_MANIFEST_VERSION = 2
 FIGURE_PROVENANCE_VERSION = 1
 PAGE_ORDERS = {"unit-major", "page-major"}
-OUTPUT_FORMATS = {"pdf", "png"}
+OUTPUT_FORMATS = {"pdf", "png", "svg"}
 
 _PALETTE_NAMES = {
     "Gray": "gray",
@@ -245,7 +248,44 @@ class FigureInputSnapshot:
         for _kind, identity in self.companions:
             identity.verify()
 
-    def provenance(self, *, application_version: str) -> dict[str, Any]:
+    def scientific_snapshot_token(self) -> str:
+        """Return a compact canonical identity for every scientific file.
+
+        The token deliberately covers file membership, resolved paths, bytes,
+        and filesystem identities, but not mutable figure recipe choices.  A
+        composer can therefore change pages or selected units while retaining
+        one frozen scientific-input identity.
+        """
+
+        companions = sorted(
+            (
+                {"kind": kind, **identity.metadata()}
+                for kind, identity in self.companions
+            ),
+            key=lambda item: (str(item["kind"]), str(item["path"])),
+        )
+        document = {
+            "identityVersion": 1,
+            "source": self.source.metadata(),
+            "companions": companions,
+        }
+        canonical = json.dumps(
+            document,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+        return f"rf1.{hashlib.sha256(canonical).hexdigest()}"
+
+    def provenance(
+        self,
+        *,
+        application_version: str,
+        shared_rf_scale_values: Sequence[Mapping[str, Any]] = (),
+        shared_waveform_scale_values: Sequence[Mapping[str, Any]] = (),
+    ) -> dict[str, Any]:
+        waveform_scales = [dict(scale) for scale in shared_waveform_scale_values]
         return {
             "provenanceVersion": FIGURE_PROVENANCE_VERSION,
             "application": {
@@ -260,9 +300,15 @@ class FigureInputSnapshot:
                 for kind, identity in self.companions
             ],
             "companionStatus": dict(self.companion_status),
+            "sharedRFScales": [dict(scale) for scale in shared_rf_scale_values],
+            "sharedWaveformScale": (
+                waveform_scales[0] if len(waveform_scales) == 1 else None
+            ),
+            "sharedWaveformScales": waveform_scales,
             "renderingContract": {
                 "preview": "same-page-renderer",
                 "publication": "all scientific inputs reverified before atomic publish",
+                "svg": SVG_RENDERING_CONTRACT,
             },
         }
 
@@ -478,7 +524,7 @@ def figure_spec_registry() -> dict[str, Any]:
             for type_id, definition in FIGURE_TYPE_REGISTRY.items()
         ],
         "pageOrders": ["unit-major", "page-major"],
-        "formats": ["pdf", "png"],
+        "formats": ["pdf", "png", "svg"],
         "page": {
             "minPlots": 1,
             "maxPlots": 12,
@@ -509,7 +555,7 @@ class ExpandedPage:
 
 @dataclass(frozen=True)
 class RenderedPage:
-    png: bytes
+    contents: bytes
     sha256: str
     placeholders: tuple[str, ...]
 
@@ -956,6 +1002,126 @@ def _prepared_response(
     )
 
 
+def shared_rf_scales(
+    record: DatasetRecord,
+    pages: Sequence[FigurePage],
+    unit_ids: Sequence[int],
+    unit_loader: Callable[[int], tuple[int, np.ndarray]],
+) -> tuple[dict[str, Any], ...]:
+    """Compute Python-compatible scalar bounds across selected RF units.
+
+    Every RF Cartesian/Polar recipe using the same response unit contributes
+    to one min/max range.  This keeps projections and pages comparable while
+    never mixing spike counts with firing rates.
+    """
+
+    if not unit_ids:
+        raise FigureExportValidationError(
+            "shared RF scale requires at least one selected unit"
+        )
+    recipes: dict[str, list[Mapping[str, Any]]] = {}
+    recipe_keys: dict[str, set[str]] = {}
+    for page in pages:
+        for plot in page.plots:
+            if FIGURE_TYPE_REGISTRY[plot.type_id]["family"] != "rf":
+                continue
+            value_mode = str(plot.settings["valueMode"])
+            key = json.dumps(
+                plot.settings,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            seen = recipe_keys.setdefault(value_mode, set())
+            if key in seen:
+                continue
+            seen.add(key)
+            recipes.setdefault(value_mode, []).append(plot.settings)
+    if not recipes:
+        return ()
+
+    bounds = {
+        value_mode: [math.inf, -math.inf]
+        for value_mode in recipes
+    }
+    expected_pool = record.cache.metadata["unitPool"]
+    for unit_id in unit_ids:
+        unit_index, counts = unit_loader(int(unit_id))
+        try:
+            if expected_pool[unit_index] != int(unit_id):
+                raise FigureExportValidationError(
+                    "Dataset unit index changed while computing shared RF scale"
+                )
+            for value_mode, settings_list in recipes.items():
+                low, high = bounds[value_mode]
+                for settings in settings_list:
+                    matrix, _x, _y, _time_bounds = _prepared_response(
+                        counts,
+                        record.cache.metadata,
+                        settings,
+                    )
+                    finite = matrix[np.isfinite(matrix)]
+                    if finite.size:
+                        low = min(low, float(np.min(finite)))
+                        high = max(high, float(np.max(finite)))
+                bounds[value_mode] = [low, high]
+        finally:
+            del counts
+
+    result: list[dict[str, Any]] = []
+    for value_mode in recipes:
+        low, high = bounds[value_mode]
+        if not math.isfinite(low) or not math.isfinite(high):
+            low, high = 0.0, 1.0
+        result.append(
+            {
+                "valueMode": value_mode,
+                "valueUnit": "spikes" if value_mode == VALUE_MODE_COUNT else "Hz",
+                "vmin": float(low),
+                "vmax": float(high),
+                "unitIds": [int(value) for value in unit_ids],
+            }
+        )
+    return tuple(result)
+
+
+def shared_waveform_scales(
+    waveform: WaveformArtifactStore | None,
+    pages: Sequence[FigurePage],
+    unit_ids: Sequence[int],
+) -> tuple[dict[str, Any], ...]:
+    """Freeze every selected-unit waveform scale used by the page recipe."""
+
+    if waveform is None:
+        return ()
+    modes: list[str] = []
+    for page in pages:
+        for plot in page.plots:
+            if FIGURE_TYPE_REGISTRY[plot.type_id]["family"] != "waveform":
+                continue
+            mode = str(plot.settings["channelMode"])
+            if mode not in modes:
+                modes.append(mode)
+    result: list[dict[str, Any]] = []
+    frozen_unit_ids = [int(value) for value in unit_ids]
+    for mode in modes:
+        limit = shared_amplitude_limit(waveform, frozen_unit_ids, mode)
+        if limit is None:
+            continue
+        amplitude = abs(float(limit))
+        result.append(
+            {
+                "vmin": -amplitude,
+                "vmax": amplitude,
+                "unit": "µV",
+                "unitIds": frozen_unit_ids,
+                "baselineEndMs": DEFAULT_BASELINE_END_MS,
+                "channelMode": mode,
+            }
+        )
+    return tuple(result)
+
+
 def _prepared_temporal(
     counts: np.ndarray, metadata: Mapping[str, Any], settings: Mapping[str, Any]
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[tuple[int, int]], list[tuple[int, int]]]:
@@ -1044,6 +1210,11 @@ def _rgb_values(response: np.ndarray, delays: np.ndarray, entropy: np.ndarray) -
     return rgba
 
 
+def _normalize_hd_display_bins(value: int) -> int:
+    requested = max(1, min(180, int(value)))
+    return max(candidate for candidate in range(1, requested + 1) if 180 % candidate == 0)
+
+
 def _hd_curve(
     data: TuningCurveData, cluster_id: int, settings: Mapping[str, Any]
 ) -> tuple[np.ndarray, np.ndarray] | None:
@@ -1052,9 +1223,7 @@ def _hd_curve(
         return None
     raw_counts = np.asarray(unit.spike_counts, dtype=np.float64)
     occupancy = np.asarray(data.occupancy_time_s, dtype=np.float64)
-    requested = int(settings["displayBins"])
-    divisors = [value for value in range(1, 181) if 180 % value == 0]
-    display_bins = min(divisors, key=lambda value: (abs(value - requested), -value))
+    display_bins = _normalize_hd_display_bins(int(settings["displayBins"]))
     group_size = 180 // display_bins
     if settings["smoothing"]:
         # Match the live Web view and Python viewer: smooth the 2-degree raw
@@ -1098,6 +1267,8 @@ class FigurePageRenderer:
         waveform_error: str | None = None,
         waveform_channel_mode: str = DEFAULT_WAVEFORM_CHANNEL_MODE,
         waveform_unit_ids: Sequence[int] = (),
+        shared_rf_scale_values: Sequence[Mapping[str, Any]] = (),
+        shared_waveform_scale_values: Sequence[Mapping[str, Any]] = (),
     ):
         self.record = record
         self.metadata = record.cache.metadata
@@ -1109,7 +1280,21 @@ class FigurePageRenderer:
         self.waveform_error = waveform_error
         self.waveform_channel_mode = waveform_channel_mode
         self.waveform_unit_ids = tuple(int(value) for value in waveform_unit_ids)
-        self._waveform_limits: dict[str, float | None] = {}
+        self.shared_rf_scales = {
+            str(scale["valueMode"]): (
+                float(scale["vmin"]),
+                float(scale["vmax"]),
+                str(scale["valueUnit"]),
+            )
+            for scale in shared_rf_scale_values
+        }
+        self._waveform_limits: dict[str, float | None] = {
+            str(scale["channelMode"]): max(
+                abs(float(scale["vmin"])),
+                abs(float(scale["vmax"])),
+            )
+            for scale in shared_waveform_scale_values
+        }
         self.shared_renderer = PillowFigureRenderer()
 
     def _waveform_amplitude_limit(self, mode: str, cluster_id: int) -> float | None:
@@ -1136,13 +1321,53 @@ class FigurePageRenderer:
             total = abs(positions[-1] - positions[0])
         return min(360.0, max(total, np.finfo(float).eps))
 
-    def _map_options(self, settings: Mapping[str, Any]) -> dict[str, Any]:
+    def _map_options(
+        self,
+        settings: Mapping[str, Any],
+        x_groups: Sequence[tuple[int, int]],
+        y_groups: Sequence[tuple[int, int]],
+    ) -> dict[str, Any]:
+        x_positions = [float(value) for value in self.metadata["xPositions"]]
+        y_positions = [float(value) for value in self.metadata["yPositions"]]
         return {
             "palette": _PALETTE_NAMES[settings["palette"]],
             "total_degrees": self._total_degrees(),
-            "reverse_rings": settings["polarRadius"] != "MATLAB row 1 inner",
+            # ``MATLAB row 1 inner`` is source-row based, so a flipped
+            # Cartesian display must be reversed back before assigning polar
+            # radii. ``Display bottom inner`` is display-row based and always
+            # reverses the prepared display order.
+            "reverse_rings": (
+                settings["polarRadius"] != "MATLAB row 1 inner"
+                or bool(settings["flipY"])
+            ),
             "inner_blank_rows": 4,
+            "clockwise": True,
+            "x_values": [
+                (x_positions[start] + x_positions[end]) / 2.0
+                for start, end in x_groups
+            ],
+            "y_values": [
+                (y_positions[start] + y_positions[end]) / 2.0
+                for start, end in y_groups
+            ],
+            "x_unit": "°",
+            "y_unit": "°",
+            "show_axes": True,
         }
+
+    def _spatial_context(
+        self,
+        settings: Mapping[str, Any],
+        *,
+        prefix: str,
+    ) -> str:
+        n_y = int(self.metadata["shape"][1])
+        n_x = int(self.metadata["shape"][2])
+        return (
+            f"{prefix}; {n_x}×{n_y} to "
+            f"{int(settings['xBins'])}×{int(settings['yBins'])}; "
+            f"smooth r={int(settings['smoothRadius'])}"
+        )
 
     @staticmethod
     def _unavailable(
@@ -1240,6 +1465,15 @@ class FigurePageRenderer:
             spatial_frames.append(frame.tolist())
         payload: dict[str, Any] = {
             "times": centers,
+            "time_edges": [
+                float(edges_ms[start]) for start, _end in groups
+            ] + [float(edges_ms[groups[-1][1] + 1])],
+            "time_unit": "ms",
+            "value_unit": (
+                "spikes"
+                if settings["valueMode"] == VALUE_MODE_COUNT
+                else "Hz"
+            ),
             "totals": totals,
             "selected": selected,
             "frames": spatial_frames,
@@ -1260,27 +1494,54 @@ class FigurePageRenderer:
         settings = plot.settings
         family = FIGURE_TYPE_REGISTRY[plot.type_id]["family"]
         if family == "rf":
-            matrix, _x, _y, bounds = _prepared_response(
+            matrix, x_groups, y_groups, bounds = _prepared_response(
                 counts, self.metadata, settings
+            )
+            options = self._map_options(settings, x_groups, y_groups)
+            scale = self.shared_rf_scales.get(str(settings["valueMode"]))
+            if scale is not None:
+                options.update(
+                    {
+                        "vmin": scale[0],
+                        "vmax": scale[1],
+                        "value_unit": scale[2],
+                        "show_colorbar": True,
+                    }
+                )
+            value_unit = (
+                "spikes" if settings["valueMode"] == VALUE_MODE_COUNT else "Hz"
+            )
+            options["subtitle"] = self._spatial_context(
+                settings,
+                prefix=(
+                    f"{bounds[0]:g} to {bounds[1]:g} ms; "
+                    f"{settings['valueMode']} ({value_unit})"
+                ),
             )
             return SharedPlotSpec(
                 plot.type_id,
                 matrix.tolist(),
-                title=f"RF map {bounds[0]:g}–{bounds[1]:g} ms",
-                options=self._map_options(settings),
+                title="RF map",
+                options=options,
             )
         if family in {"delay", "rgb"}:
-            delays, entropy, response, _x, _y = _prepared_temporal(
+            delays, entropy, response, x_groups, y_groups = _prepared_temporal(
                 counts, self.metadata, settings
             )
-            options = self._map_options(settings)
+            options = self._map_options(settings, x_groups, y_groups)
+            edges_ms = np.asarray(
+                self.metadata["timeBinEdges"], dtype=np.float64
+            ) * 1000.0
+            options["subtitle"] = self._spatial_context(
+                settings,
+                prefix=f"full timeline {edges_ms[0]:g} to {edges_ms[-1]:g} ms",
+            )
             if family == "delay":
                 options["palette"] = "delay"
-                edges_ms = np.asarray(
-                    self.metadata["timeBinEdges"], dtype=np.float64
-                ) * 1000.0
                 options["vmin"] = float(edges_ms[0])
                 options["vmax"] = float(edges_ms[-1])
+                options["value_unit"] = "ms"
+                options["show_colorbar"] = True
                 return SharedPlotSpec(
                     plot.type_id,
                     delays.tolist(),
@@ -1303,12 +1564,18 @@ class FigurePageRenderer:
                 plot.type_id,
                 rgb_data,
                 title="RGB: response / delay / entropy",
-                options=options,
+                options={**options, "show_colorbar": False},
             )
         if family == "timeline":
             data, title = self._timeline_data(counts, settings)
-            options = self._map_options(settings)
+            x_groups = _axis_groups(self.metadata["shape"][2], settings["xBins"])
+            y_groups = _axis_groups(self.metadata["shape"][1], settings["yBins"])
+            if settings["flipY"]:
+                y_groups.reverse()
+            options = self._map_options(settings, x_groups, y_groups)
             options["polar"] = settings["polarLayout"]
+            options["value_unit"] = data["value_unit"]
+            options["time_unit"] = "ms"
             return SharedPlotSpec(plot.type_id, data, title=title, options=options)
         if family == "hd":
             if self.tuning is None:
@@ -1335,7 +1602,13 @@ class FigurePageRenderer:
                     "angles_deg": angles[valid].tolist(),
                     "rates": rates[valid].tolist(),
                 },
-                options={"color": "#7c3aed", "clockwise": False},
+                options={
+                    "color": "#7c3aed",
+                    "clockwise": False,
+                    "x_unit": "°",
+                    "y_unit": "Hz",
+                    "show_axes": True,
+                },
             )
         if family == "probe":
             if self.probe is None:
@@ -1384,6 +1657,11 @@ class FigurePageRenderer:
                     **({"missingPosition": True} if missing_position else {}),
                 },
                 title=f"{self.probe.get('probe', 'Probe')} layout",
+                options={
+                    "coordinate_unit": "µm",
+                    "show_axes": True,
+                    "show_scale_bar": True,
+                },
             )
         if family == "waveform":
             if self.waveform is None:
@@ -1426,6 +1704,8 @@ class FigurePageRenderer:
                     "vmin": -amplitude,
                     "vmax": amplitude,
                     "value_unit": "µV",
+                    "show_axes": True,
+                    "show_colorbar": True,
                     "subtitle": (
                         f"best + nearest {max(0, len(payload.channels) - 1)}; "
                         f"{'Same x column' if mode == 'same_x_column' else 'Same shank'}; "
@@ -1467,6 +1747,22 @@ class FigurePageRenderer:
         image.close()
         payload = output.getvalue()
         return RenderedPage(payload, hashlib.sha256(payload).hexdigest(), placeholders)
+
+
+def _svg_with_embedded_png(png: bytes) -> bytes:
+    """Wrap the exact renderer PNG in SVG without re-encoding any pixels."""
+
+    with Image.open(io.BytesIO(png)) as image:
+        width, height = image.size
+    encoded = base64.b64encode(png).decode("ascii")
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" '
+        f'height="{height}" viewBox="0 0 {width} {height}">\n'
+        f'  <image width="{width}" height="{height}" '
+        f'href="data:image/png;base64,{encoded}"/>\n'
+        '</svg>\n'
+    ).encode("utf-8")
 
 
 def _safe_relative_directory(root: Path, requested: str) -> tuple[Path, str]:
@@ -1588,12 +1884,13 @@ def _web_manifest_header(
     jobs: Sequence[ExpandedPage],
     order: str,
     provenance: Mapping[str, Any],
+    output_format: str = "png",
 ) -> dict[str, Any]:
     return {
         "manifestVersion": FIGURE_MANIFEST_VERSION,
         "specVersion": FIGURE_SPEC_VERSION,
         "producer": FIGURE_EXPORT_PRODUCER,
-        "format": "png",
+        "format": output_format,
         "order": order,
         "source": str(record.source),
         "sourceSignature": dict(record.source_signature),
@@ -1605,6 +1902,7 @@ def _web_manifest_header(
 def _web_page_metadata(
     record: DatasetRecord,
     job: ExpandedPage,
+    output_format: str = "png",
 ) -> dict[str, Any]:
     unit_index = record.cache.metadata["unitPool"].index(job.cluster_id)
     return {
@@ -1615,7 +1913,7 @@ def _web_page_metadata(
         "title": job.page.title,
         "file": (
             f"{job.output_index + 1:04d}_unit_{unit_index:03d}_"
-            f"cluster_{job.cluster_id}_page_{job.page_index + 1:02d}.png"
+            f"cluster_{job.cluster_id}_page_{job.page_index + 1:02d}.{output_format}"
         ),
     }
 
@@ -1715,7 +2013,16 @@ def _validate_web_provenance(value: Any) -> None:
         "companionStatus",
         "renderingContract",
     }
-    if not isinstance(value, dict) or set(value) != required:
+    optional = {
+        "sharedRFScales",
+        "sharedWaveformScale",
+        "sharedWaveformScales",
+    }
+    if (
+        not isinstance(value, dict)
+        or not required.issubset(value)
+        or set(value) - required - optional
+    ):
         raise FigureOutputPathError("Figure export provenance is invalid")
     if (
         type(value["provenanceVersion"]) is not int
@@ -1750,10 +2057,100 @@ def _validate_web_provenance(value: Any) -> None:
     rendering = value["renderingContract"]
     if (
         not isinstance(rendering, dict)
-        or set(rendering) != {"preview", "publication"}
+        or set(rendering) not in (
+            {"preview", "publication"},
+            {"preview", "publication", "svg"},
+        )
         or any(not isinstance(item, str) or not item for item in rendering.values())
     ):
         raise FigureOutputPathError("Figure export rendering provenance is invalid")
+    shared_scales = value.get("sharedRFScales", [])
+    if not isinstance(shared_scales, list):
+        raise FigureOutputPathError("Figure export shared RF scale provenance is invalid")
+    for scale in shared_scales:
+        if not isinstance(scale, dict) or set(scale) != {
+            "valueMode",
+            "valueUnit",
+            "vmin",
+            "vmax",
+            "unitIds",
+        }:
+            raise FigureOutputPathError("Figure export shared RF scale provenance is invalid")
+        if (
+            scale["valueMode"] not in VALUE_MODES
+            or scale["valueUnit"] not in {"spikes", "Hz"}
+            or isinstance(scale["vmin"], bool)
+            or not isinstance(scale["vmin"], (int, float))
+            or not math.isfinite(float(scale["vmin"]))
+            or isinstance(scale["vmax"], bool)
+            or not isinstance(scale["vmax"], (int, float))
+            or not math.isfinite(float(scale["vmax"]))
+            or float(scale["vmax"]) < float(scale["vmin"])
+            or not isinstance(scale["unitIds"], list)
+            or not scale["unitIds"]
+            or any(type(unit_id) is not int for unit_id in scale["unitIds"])
+            or len(set(scale["unitIds"])) != len(scale["unitIds"])
+        ):
+            raise FigureOutputPathError("Figure export shared RF scale provenance is invalid")
+    waveform_scales = value.get("sharedWaveformScales", [])
+    if not isinstance(waveform_scales, list):
+        raise FigureOutputPathError(
+            "Figure export shared waveform scale provenance is invalid"
+        )
+    expected_waveform_keys = {
+        "vmin",
+        "vmax",
+        "unit",
+        "unitIds",
+        "baselineEndMs",
+        "channelMode",
+    }
+    for scale in waveform_scales:
+        if not isinstance(scale, dict) or set(scale) != expected_waveform_keys:
+            raise FigureOutputPathError(
+                "Figure export shared waveform scale provenance is invalid"
+            )
+        if (
+            scale["unit"] != "µV"
+            or scale["channelMode"] not in WAVEFORM_CHANNEL_MODES
+            or isinstance(scale["vmin"], bool)
+            or not isinstance(scale["vmin"], (int, float))
+            or not math.isfinite(float(scale["vmin"]))
+            or isinstance(scale["vmax"], bool)
+            or not isinstance(scale["vmax"], (int, float))
+            or not math.isfinite(float(scale["vmax"]))
+            or float(scale["vmin"]) > 0.0
+            or float(scale["vmax"]) < 0.0
+            or not math.isclose(
+                abs(float(scale["vmin"])),
+                abs(float(scale["vmax"])),
+                rel_tol=1e-12,
+                abs_tol=1e-12,
+            )
+            or isinstance(scale["baselineEndMs"], bool)
+            or not isinstance(scale["baselineEndMs"], (int, float))
+            or not math.isfinite(float(scale["baselineEndMs"]))
+            or not isinstance(scale["unitIds"], list)
+            or not scale["unitIds"]
+            or any(type(unit_id) is not int for unit_id in scale["unitIds"])
+            or len(set(scale["unitIds"])) != len(scale["unitIds"])
+        ):
+            raise FigureOutputPathError(
+                "Figure export shared waveform scale provenance is invalid"
+            )
+    if len({scale["channelMode"] for scale in waveform_scales}) != len(
+        waveform_scales
+    ):
+        raise FigureOutputPathError(
+            "Figure export shared waveform scale provenance is invalid"
+        )
+    singular_waveform_scale = value.get("sharedWaveformScale")
+    if singular_waveform_scale is not None and (
+        len(waveform_scales) != 1 or singular_waveform_scale != waveform_scales[0]
+    ):
+        raise FigureOutputPathError(
+            "Figure export shared waveform scale provenance is invalid"
+        )
     if not isinstance(value["snapshot"], dict) or not _is_finite_json(value["snapshot"]):
         raise FigureOutputPathError("Figure export snapshot provenance is invalid")
 
@@ -1796,7 +2193,7 @@ def _validate_web_export_directory(
             type(manifest["specVersion"]) is not int
             or manifest["specVersion"] != FIGURE_SPEC_VERSION
             or manifest["producer"] != FIGURE_EXPORT_PRODUCER
-            or manifest["format"] != "png"
+            or manifest["format"] not in {"png", "svg"}
             or manifest["order"] not in PAGE_ORDERS
             or not isinstance(manifest["source"], str)
             or not isinstance(manifest["sourceSignature"], dict)
@@ -1857,7 +2254,8 @@ def _validate_web_export_directory(
                 raise FigureOutputPathError("Figure export manifest page order is invalid")
             expected_filename = (
                 f"{index + 1:04d}_unit_{entry['unitIndex']:03d}_"
-                f"cluster_{entry['clusterId']}_page_{entry['pageIndex'] + 1:02d}.png"
+                f"cluster_{entry['clusterId']}_page_{entry['pageIndex'] + 1:02d}."
+                f"{manifest['format']}"
             )
             if entry["file"] != expected_filename or Path(entry["file"]).name != entry["file"]:
                 raise FigureOutputPathError("Figure export manifest filename is invalid")
@@ -2068,11 +2466,74 @@ class FigureExportService:
         overwrite: bool,
         order: str,
     ) -> dict[str, Any]:
+        return self._export_image_directory(
+            record=record,
+            jobs=jobs,
+            renderer=renderer,
+            unit_loader=unit_loader,
+            validate_source=validate_source,
+            provenance=provenance,
+            directory=directory,
+            base_name=base_name,
+            overwrite=overwrite,
+            order=order,
+            output_format="png",
+        )
+
+    def export_svgs(
+        self,
+        *,
+        record: DatasetRecord,
+        jobs: Sequence[ExpandedPage],
+        renderer: FigurePageRenderer,
+        unit_loader: Callable[[int], tuple[int, np.ndarray]],
+        validate_source: Callable[[], None],
+        provenance: Mapping[str, Any],
+        directory: str,
+        base_name: str,
+        overwrite: bool,
+        order: str,
+    ) -> dict[str, Any]:
+        return self._export_image_directory(
+            record=record,
+            jobs=jobs,
+            renderer=renderer,
+            unit_loader=unit_loader,
+            validate_source=validate_source,
+            provenance=provenance,
+            directory=directory,
+            base_name=base_name,
+            overwrite=overwrite,
+            order=order,
+            output_format="svg",
+        )
+
+    def _export_image_directory(
+        self,
+        *,
+        record: DatasetRecord,
+        jobs: Sequence[ExpandedPage],
+        renderer: FigurePageRenderer,
+        unit_loader: Callable[[int], tuple[int, np.ndarray]],
+        validate_source: Callable[[], None],
+        provenance: Mapping[str, Any],
+        directory: str,
+        base_name: str,
+        overwrite: bool,
+        order: str,
+        output_format: str,
+    ) -> dict[str, Any]:
+        if output_format not in {"png", "svg"}:
+            raise FigureExportValidationError("Image directory format must be PNG or SVG")
         destination = self._destination(directory)
         safe_name = _safe_base_name(base_name)
         target = destination / safe_name
-        manifest_header = _web_manifest_header(record, jobs, order, provenance)
-        expected_pages = tuple(_web_page_metadata(record, job) for job in jobs)
+        manifest_header = _web_manifest_header(
+            record, jobs, order, provenance, output_format
+        )
+        expected_pages = tuple(
+            _web_page_metadata(record, job, output_format) for job in jobs
+        )
         with _shared_open_parent_directory(destination) as parent:
             _recover_web_directory_publish(parent, target)
             existing_stat = _shared_entry_lstat(parent, target.name)
@@ -2102,7 +2563,7 @@ class FigureExportService:
                             "Dataset unit index changed while rendering Figure export"
                         )
                     try:
-                        rendered = renderer.render_png(
+                        rendered_png = renderer.render_png(
                             job.cluster_id,
                             unit_index,
                             counts,
@@ -2110,9 +2571,19 @@ class FigureExportService:
                         )
                     finally:
                         del counts
+                    contents = (
+                        rendered_png.contents
+                        if output_format == "png"
+                        else _svg_with_embedded_png(rendered_png.contents)
+                    )
+                    rendered = RenderedPage(
+                        contents,
+                        hashlib.sha256(contents).hexdigest(),
+                        rendered_png.placeholders,
+                    )
                     filename = expected_page["file"]
-                    _shared_atomic_write_bytes_at(staged_fd, filename, rendered.png)
-                    page_bytes += len(rendered.png)
+                    _shared_atomic_write_bytes_at(staged_fd, filename, contents)
+                    page_bytes += len(contents)
                     manifest_entries.append(
                         self._manifest_entry(
                             job,
@@ -2122,7 +2593,7 @@ class FigureExportService:
                             placeholders=rendered.placeholders,
                         )
                     )
-                    del rendered
+                    del rendered, rendered_png, contents
                 manifest = {**manifest_header, "pages": manifest_entries}
                 manifest_bytes = (
                     json.dumps(manifest, indent=2, allow_nan=False) + "\n"
@@ -2149,7 +2620,7 @@ class FigureExportService:
                     expected_identity=expected_identity,
                 )
                 return {
-                    "format": "png",
+                    "format": output_format,
                     "path": str(target),
                     "pageCount": len(manifest_entries),
                     "bytes": page_bytes + len(manifest_bytes),
@@ -2183,6 +2654,12 @@ class FigureExportService:
         manifest_header = {
             **_web_manifest_header(record, jobs, order, provenance),
             "format": "pdf",
+            "rendering": {
+                "widthPixels": renderer.shared_renderer.page_size[0],
+                "heightPixels": renderer.shared_renderer.page_size[1],
+                "resolutionDpi": 150.0,
+                "encoding": "FlateDecode DeviceRGB 8-bit",
+            },
         }
         embedded_manifest = {
             **manifest_header,

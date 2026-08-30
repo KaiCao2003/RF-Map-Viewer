@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { nearestProbeUnitToRegionCenter, probeUnitsInRegion } from "./probeSelection";
+import { navigationUnitIds } from "./unitFilter";
 import type { ProbeGeometry } from "./types";
 
 const geometry: ProbeGeometry = {
@@ -37,5 +38,15 @@ describe("probe selection", () => {
 
   it("restores the complete RF unit pool when the region is cleared", () => {
     expect(probeUnitsInRegion(geometry, null, [11, 22, 44])).toEqual([11, 22, 44]);
+  });
+
+  it("re-derives region navigation when the quality-visible pool widens", () => {
+    const region = { xMin: -10, xMax: 150, yMin: -10, yMax: 150 };
+    const narrow = probeUnitsInRegion(geometry, region, [11]);
+    const widened = probeUnitsInRegion(geometry, region, [11, 22, 33]);
+
+    expect(narrow).toEqual([11]);
+    expect(widened).toEqual([11, 22]);
+    expect(navigationUnitIds([11, 22, 33], widened)).toEqual([11, 22]);
   });
 });

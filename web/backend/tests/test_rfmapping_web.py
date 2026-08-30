@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import csv
 import errno
 import gzip
@@ -1777,7 +1778,7 @@ def test_figure_export_registry_covers_every_view_and_all_types_render(
             "description": "Displayed response normalization.",
             "choices": ["Mean firing rate (Hz)", "Spike count"],
         }
-        assert registry["formats"] == ["pdf", "png"]
+        assert registry["formats"] == ["pdf", "png", "svg"]
         assert registry["pageOrders"] == ["unit-major", "page-major"]
 
         metadata = _open(client, source)
@@ -1797,6 +1798,418 @@ def test_figure_export_registry_covers_every_view_and_all_types_render(
         assert response.headers["x-rf-render-sha256"] == hashlib.sha256(
             response.content
         ).hexdigest()
+
+
+def test_native_zero_spike_spatial_bin_filter_tracks_rf_window_and_threshold(
+    app, settings: Settings
+) -> None:
+    payload = sample_payload()
+    payload["unitsSpikeCounts"] = [
+        [[[0, 5], [3, 0]], [[4, 1], [2, 1]]],
+        [[[1, 1], [2, 2]], [[3, 3], [4, 4]]],
+    ]
+    payload["unitsSpikeCountsSize"] = [2, 2, 2, 2]
+    payload["timeBinEdges"] = [0.0, 0.1, 0.2]
+    source = write_json(settings.rf_root / "zero-filter.json", payload)
+
+    with authenticated_client(app) as client:
+        metadata = _open(client, source)
+        endpoint = f"/api/datasets/{metadata['id']}/unit-filter"
+        first_bin = client.get(
+            endpoint,
+            params={
+                "rfStartMs": 0,
+                "rfEndMs": 100,
+                "zeroSpikeSpatialBinThreshold": 1,
+            },
+        )
+        full_window = client.get(
+            endpoint,
+            params={
+                "rfStartMs": 0,
+                "rfEndMs": 200,
+                "zeroSpikeSpatialBinThreshold": 1,
+            },
+        )
+        relaxed = client.get(
+            endpoint,
+            params={
+                "rfStartMs": 0,
+                "rfEndMs": 100,
+                "zeroSpikeSpatialBinThreshold": 2,
+            },
+        )
+        above_spatial_count = client.get(
+            endpoint,
+            params={
+                "rfStartMs": 0,
+                "rfEndMs": 100,
+                "zeroSpikeSpatialBinThreshold": 5,
+            },
+        )
+        too_large = client.get(
+            endpoint,
+            params={
+                "rfStartMs": 0,
+                "rfEndMs": 100,
+                "zeroSpikeSpatialBinThreshold": 100_001,
+            },
+        )
+
+    assert first_bin.status_code == 200, first_bin.text
+    assert first_bin.json()["sourceBinRange"] == [0, 0]
+    assert first_bin.json()["visibleUnitIds"] == [22]
+    assert first_bin.json()["excludedUnitIds"] == [11]
+    assert first_bin.json()["zeroSpikeSpatialBinCounts"] == [
+        {"unitId": 11, "zeroBinCount": 1},
+        {"unitId": 22, "zeroBinCount": 0},
+    ]
+    assert full_window.json()["visibleUnitIds"] == [11, 22]
+    assert relaxed.json()["visibleUnitIds"] == [11, 22]
+    assert above_spatial_count.status_code == 200
+    assert above_spatial_count.json()["visibleUnitIds"] == [11, 22]
+    assert too_large.status_code == 422
+
+
+def test_figure_export_revalidates_frozen_unit_filter_and_rejects_hidden_units(
+    app, settings: Settings
+) -> None:
+    (settings.figure_export_root / "session").mkdir()
+    payload = sample_payload()
+    payload["unitsSpikeCounts"] = [
+        [[[0, 5], [3, 0]], [[4, 1], [2, 1]]],
+        [[[1, 1], [2, 2]], [[3, 3], [4, 4]]],
+    ]
+    payload["unitsSpikeCountsSize"] = [2, 2, 2, 2]
+    payload["timeBinEdges"] = [0.0, 0.1, 0.2]
+    source = write_json(settings.rf_root / "zero-filter-export.json", payload)
+    pages = _figure_pages("rf.cartesian")
+
+    with authenticated_client(app) as client:
+        metadata = _open(client, source)
+        unit_filter = {
+            "enabled": True,
+            "rfStartMs": 0,
+            "rfEndMs": 100,
+            "zeroSpikeSpatialBinThreshold": 1,
+            "visibleUnitIds": [22],
+        }
+        hidden = client.post(
+            f"/api/datasets/{metadata['id']}/figure-exports",
+            json={
+                "specVersion": 1,
+                "clusterIds": [11],
+                "pages": pages,
+                "unitFilter": unit_filter,
+                "destination": {
+                    "directory": "session",
+                    "baseName": "hidden",
+                    "overwrite": False,
+                },
+            },
+        )
+        stale = client.post(
+            f"/api/datasets/{metadata['id']}/figure-exports",
+            json={
+                "specVersion": 1,
+                "clusterIds": [22],
+                "pages": pages,
+                "unitFilter": {**unit_filter, "visibleUnitIds": [11, 22]},
+                "destination": {
+                    "directory": "session",
+                    "baseName": "stale",
+                    "overwrite": False,
+                },
+            },
+        )
+        visible = client.post(
+            f"/api/datasets/{metadata['id']}/figure-exports",
+            json={
+                "specVersion": 1,
+                "clusterIds": [22],
+                "pages": pages,
+                "unitFilter": unit_filter,
+                "destination": {
+                    "directory": "session",
+                    "baseName": "visible",
+                    "overwrite": False,
+                },
+            },
+        )
+        disabled = client.post(
+            f"/api/datasets/{metadata['id']}/figure-exports",
+            json={
+                "specVersion": 1,
+                "clusterIds": [11, 22],
+                "pages": pages,
+                "unitFilter": {
+                    "enabled": False,
+                    "rfStartMs": 0,
+                    "rfEndMs": 100,
+                    "zeroSpikeSpatialBinThreshold": 5,
+                    "visibleUnitIds": [11, 22],
+                },
+                "destination": {
+                    "directory": "session",
+                    "baseName": "filter-disabled",
+                    "overwrite": False,
+                },
+            },
+        )
+
+    assert hidden.status_code == 422
+    assert "hidden by the zero-spike" in hidden.json()["detail"]
+    assert stale.status_code == 422
+    assert "no longer match" in stale.json()["detail"]
+    assert visible.status_code == 200, visible.text
+    assert visible.json()["manifest"]["provenance"]["snapshot"]["unitFilter"] == {
+        "enabled": True,
+        "zeroSpikeSpatialBinThreshold": 1,
+        "sourceBinRange": [0, 0],
+        "rfTimeRangeMs": [0.0, 100.0],
+        "spatialBinCount": 4,
+        "comparison": (
+            "hide when zero-bin count is greater than or equal to threshold"
+        ),
+        "visibleUnitIds": [22],
+        "excludedUnitIds": [11],
+    }
+    assert disabled.status_code == 200, disabled.text
+    disabled_filter = disabled.json()["manifest"]["provenance"]["snapshot"][
+        "unitFilter"
+    ]
+    assert disabled_filter["enabled"] is False
+    assert disabled_filter["zeroSpikeSpatialBinThreshold"] == 5
+    assert disabled_filter["spatialBinCount"] == 4
+    assert disabled_filter["visibleUnitIds"] == [11, 22]
+    assert disabled_filter["excludedUnitIds"] == []
+
+
+def test_shared_rf_scales_cover_selected_units_and_keep_value_units_separate() -> None:
+    metadata = {
+        "shape": [2, 1, 2, 2],
+        "unitPool": [11, 22],
+        "timeBinEdges": [0.0, 0.1, 0.2],
+        "occupancyTimeSec": [[1.0, 1.0]],
+        "xPositions": [-10.0, 10.0],
+        "yPositions": [0.0],
+        "isVerticalBar": False,
+    }
+    record = SimpleNamespace(cache=SimpleNamespace(metadata=metadata))
+    pages = figure_exports_module.normalize_pages(
+        [
+            {
+                "title": "Shared",
+                "plots": [
+                    {
+                        "type": "rf.cartesian",
+                        "settings": {
+                            "rfStartMs": 0,
+                            "rfEndMs": 200,
+                            "valueMode": "Spike count",
+                        },
+                    },
+                    {
+                        "type": "rf.polar",
+                        "settings": {
+                            "rfStartMs": 0,
+                            "rfEndMs": 200,
+                            "valueMode": "Mean firing rate (Hz)",
+                        },
+                    },
+                ],
+            }
+        ],
+        metadata,
+    )
+    arrays = {
+        11: np.asarray([[[1.0, 2.0], [3.0, 4.0]]]),
+        22: np.asarray([[[10.0, 20.0], [30.0, 40.0]]]),
+    }
+
+    scales = figure_exports_module.shared_rf_scales(
+        record,
+        pages,
+        [11, 22],
+        lambda unit_id: (metadata["unitPool"].index(unit_id), arrays[unit_id]),
+    )
+
+    assert scales == (
+        {
+            "valueMode": "Spike count",
+            "valueUnit": "spikes",
+            "vmin": 3.0,
+            "vmax": 70.0,
+            "unitIds": [11, 22],
+        },
+        {
+            "valueMode": "Mean firing rate (Hz)",
+            "valueUnit": "Hz",
+            "vmin": 3.0,
+            "vmax": 70.0,
+            "unitIds": [11, 22],
+        },
+    )
+
+
+def test_web_page_specs_supply_canonical_physical_axes_context_and_time_edges() -> None:
+    metadata = {
+        "shape": [1, 2, 3, 3],
+        "unitPool": [11],
+        "timeBinEdges": [-0.1, 0.0, 0.1, 0.2],
+        "occupancyTimeSec": [[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]],
+        "xPositions": [-30.0, 0.0, 30.0],
+        "yPositions": [-10.0, 10.0],
+        "isVerticalBar": False,
+    }
+    record = SimpleNamespace(cache=SimpleNamespace(metadata=metadata))
+    pages = figure_exports_module.normalize_pages(
+        [
+            {
+                "title": "Canonical",
+                "plots": [
+                    {
+                        "type": "rf.cartesian",
+                        "settings": {
+                            "rfStartMs": 0,
+                            "rfEndMs": 200,
+                            "valueMode": "Spike count",
+                            "xBins": 2,
+                            "yBins": 1,
+                        },
+                    },
+                    {
+                        "type": "timeline.current",
+                        "settings": {
+                            "timelineStartMs": 0,
+                            "timelineEndMs": 100,
+                            "timeResolutionMs": 100,
+                            "valueMode": "Spike count",
+                            "xBins": 2,
+                            "yBins": 1,
+                        },
+                    },
+                    {"type": "probe", "settings": {}},
+                ],
+            }
+        ],
+        metadata,
+    )
+    renderer = figure_exports_module.FigurePageRenderer(
+        record,
+        tuning=None,
+        probe={
+            "probe": "ProbeA",
+            "channels": [{"x": 0.0, "y": 0.0}],
+            "units": [{"unitId": 11, "x": 20.0, "y": 100.0}],
+        },
+        shared_rf_scale_values=(
+            {
+                "valueMode": "Spike count",
+                "valueUnit": "spikes",
+                "vmin": 0.0,
+                "vmax": 20.0,
+                "unitIds": [11],
+            },
+        ),
+    )
+    counts = np.arange(18, dtype=np.float64).reshape(2, 3, 3)
+    placeholders: list[str] = []
+
+    rf_spec = renderer._shared_spec(11, counts, pages[0].plots[0], placeholders)
+    timeline_spec = renderer._shared_spec(
+        11, counts, pages[0].plots[1], placeholders
+    )
+    probe_spec = renderer._shared_spec(
+        11, counts, pages[0].plots[2], placeholders
+    )
+
+    assert rf_spec.options["x_values"] == (-30.0, 15.0)
+    assert rf_spec.options["y_values"] == (0.0,)
+    assert rf_spec.options["x_unit"] == "°"
+    assert rf_spec.options["y_unit"] == "°"
+    assert rf_spec.options["value_unit"] == "spikes"
+    assert rf_spec.options["show_colorbar"] is True
+    assert "0 to 200 ms" in rf_spec.options["subtitle"]
+    assert "3×2 to 2×1" in rf_spec.options["subtitle"]
+    assert timeline_spec.data["time_edges"] == [-100.0, 0.0, 100.0, 200.0]
+    assert timeline_spec.data["time_unit"] == "ms"
+    assert timeline_spec.data["value_unit"] == "spikes"
+    assert timeline_spec.options["value_unit"] == "spikes"
+    assert probe_spec.options == {
+        "coordinate_unit": "µm",
+        "show_axes": True,
+        "show_scale_bar": True,
+    }
+    assert placeholders == []
+
+
+@pytest.mark.parametrize("flip_y", [False, True])
+@pytest.mark.parametrize(
+    "radius_mode",
+    ["MATLAB row 1 inner", "Display bottom inner"],
+)
+def test_web_polar_rows_and_labels_match_python_radius_modes_with_flip(
+    flip_y: bool,
+    radius_mode: str,
+) -> None:
+    metadata = {
+        "shape": [1, 3, 1, 1],
+        "unitPool": [11],
+        "timeBinEdges": [0.0, 0.1],
+        "occupancyTimeSec": [[1.0], [1.0], [1.0]],
+        "xPositions": [0.0],
+        "yPositions": [-20.0, 0.0, 20.0],
+        "isVerticalBar": False,
+    }
+    record = SimpleNamespace(cache=SimpleNamespace(metadata=metadata))
+    page = figure_exports_module.normalize_pages(
+        [
+            {
+                "title": "Polar",
+                "plots": [
+                    {
+                        "type": "rf.polar",
+                        "settings": {
+                            "rfStartMs": 0.0,
+                            "rfEndMs": 100.0,
+                            "valueMode": "Spike count",
+                            "flipY": flip_y,
+                            "polarRadius": radius_mode,
+                        },
+                    }
+                ],
+            }
+        ],
+        metadata,
+    )[0]
+    renderer = figure_exports_module.FigurePageRenderer(
+        record,
+        tuning=None,
+        probe=None,
+    )
+    spec = renderer._shared_spec(
+        11,
+        np.asarray([[[1.0]], [[2.0]], [[3.0]]]),
+        page.plots[0],
+        [],
+    )
+
+    rendered_rows = [float(row[0]) for row in spec.data]
+    rendered_labels = list(spec.options["y_values"])
+    if spec.options["reverse_rings"]:
+        rendered_rows.reverse()
+        rendered_labels.reverse()
+
+    if radius_mode == "MATLAB row 1 inner":
+        expected_indices = [0, 1, 2]
+    else:
+        display_indices = [2, 1, 0] if flip_y else [0, 1, 2]
+        expected_indices = list(reversed(display_indices))
+    assert rendered_rows == [float(index + 1) for index in expected_indices]
+    assert rendered_labels == [
+        metadata["yPositions"][index] for index in expected_indices
+    ]
 
 
 def test_figure_response_preparation_matches_live_pooled_observations() -> None:
@@ -1856,6 +2269,26 @@ def test_figure_response_preparation_matches_live_pooled_observations() -> None:
         smoothed,
         [[1.0398009950248756, 1.1568627450980392]],
     )
+
+
+def test_figure_hd_display_bins_use_greatest_supported_divisor_below_request() -> None:
+    raw_counts = np.arange(1, 181, dtype=np.float64)
+    data = SimpleNamespace(
+        units_by_id={7: SimpleNamespace(spike_counts=tuple(raw_counts))},
+        occupancy_time_s=tuple(np.ones(180, dtype=np.float64)),
+    )
+
+    curve = figure_exports_module._hd_curve(
+        data,
+        7,
+        {"displayBins": 55, "smoothing": False, "sigmaDeg": 18.0},
+    )
+
+    assert curve is not None
+    centers, rates = curve
+    assert len(centers) == 45
+    assert len(rates) == 45
+    np.testing.assert_allclose(centers, (np.arange(45) + 0.5) * 8.0)
 
 
 def test_figure_hd_smoothing_matches_raw_observation_pipeline() -> None:
@@ -2319,6 +2752,7 @@ def test_multi_unit_png_export_order_preview_parity_and_missing_hd_placeholder(
     preview_payload = {
         "specVersion": 1,
         "clusterId": 22,
+        "scaleUnitIds": [22, 11],
         "pageIndex": 0,
         "pages": payload["pages"],
     }
@@ -2348,6 +2782,8 @@ def test_multi_unit_png_export_order_preview_parity_and_missing_hd_placeholder(
         ]
         assert "HD tuning" in manifest["pages"][0]["placeholders"][0]
         assert json.loads((target / "manifest.json").read_text(encoding="utf-8")) == manifest
+        assert manifest["provenance"]["sharedRFScales"][0]["unitIds"] == [22, 11]
+        assert manifest["provenance"]["sharedRFScales"][0]["valueUnit"] == "Hz"
         assert all(
             (target / page["file"]).read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
             for page in manifest["pages"]
@@ -2361,6 +2797,251 @@ def test_multi_unit_png_export_order_preview_parity_and_missing_hd_placeholder(
     assert source.read_bytes() == source_before
     assert not list((settings.figure_export_root / "session").glob(".*.tmp"))
     assert not list((settings.figure_export_root / "session").glob(".*.backup"))
+
+
+def test_multi_unit_waveform_preview_and_final_share_frozen_scale_and_provenance(
+    app, settings: Settings
+) -> None:
+    (settings.figure_export_root / "session").mkdir()
+    source = _create_remote_fixture(settings.rf_root)
+    unit_22_template = next(
+        path
+        for path in settings.rf_root.rglob("template_uv.csv.gz")
+        if path.parent.name == "Unit22"
+    )
+    with gzip.open(
+        unit_22_template,
+        "wt",
+        encoding="utf-8",
+        newline="",
+    ) as handle:
+        writer = csv.writer(handle)
+        writer.writerow(("sample_index", "chidx_000_uv", "chidx_001_uv"))
+        for sample_index, scale in enumerate((1.0, 2.0, -4.0, 3.0)):
+            writer.writerow(
+                (sample_index, 100.0 * scale + 22, 200.0 * scale + 22)
+            )
+
+    pages = _figure_pages("waveform.local_average")
+    payload = _figure_export_payload(
+        clusterIds=[11, 22],
+        order="unit-major",
+        pages=pages,
+    )
+    with authenticated_client(app) as client:
+        metadata = _open(client, source)
+        endpoint = f"/api/datasets/{metadata['id']}/figure-exports"
+        preview = client.post(
+            f"{endpoint}/preview",
+            json={
+                "specVersion": 1,
+                "clusterId": 11,
+                "scaleUnitIds": [11, 22],
+                "pageIndex": 0,
+                "pages": pages,
+            },
+        )
+        exported = client.post(endpoint, json=payload)
+
+    assert preview.status_code == 200, preview.text
+    assert exported.status_code == 200, exported.text
+    body = exported.json()
+    target = settings.figure_export_root / "session" / "selected_units"
+    first_page = target / body["manifest"]["pages"][0]["file"]
+    assert first_page.read_bytes() == preview.content
+    provenance = body["manifest"]["provenance"]
+    expected_scale = {
+        "vmin": -1100.0,
+        "vmax": 1100.0,
+        "unit": "µV",
+        "unitIds": [11, 22],
+        "baselineEndMs": -0.25,
+        "channelMode": "same_x_column",
+    }
+    assert provenance["sharedWaveformScale"] == expected_scale
+    assert provenance["sharedWaveformScales"] == [expected_scale]
+    waveform_templates = {
+        (Path(item["path"]).parent.name, Path(item["path"]).name)
+        for item in provenance["companions"]
+        if item["kind"] == "waveform"
+    }
+    assert ("Unit11", "template_uv.csv.gz") in waveform_templates
+    assert ("Unit22", "template_uv.csv.gz") in waveform_templates
+
+
+def test_scientific_snapshot_token_stays_fixed_when_composer_selection_changes(
+    app, settings: Settings
+) -> None:
+    (settings.figure_export_root / "session").mkdir()
+    source = _create_remote_fixture(settings.rf_root)
+    pages = _figure_pages("waveform.local_average")
+    with authenticated_client(app) as client:
+        metadata = _open(client, source)
+        endpoint = f"/api/datasets/{metadata['id']}/figure-exports"
+        first = client.post(
+            f"{endpoint}/preview",
+            json={
+                "specVersion": 1,
+                "clusterId": 11,
+                "scaleUnitIds": [11],
+                "snapshotUnitIds": [11, 22],
+                "pageIndex": 0,
+                "pages": pages,
+            },
+        )
+        assert first.status_code == 200, first.text
+        token = first.headers["x-rf-scientific-snapshot-token"]
+        assert re.fullmatch(r"rf1\.[0-9a-f]{64}", token)
+
+        second = client.post(
+            f"{endpoint}/preview",
+            json={
+                "specVersion": 1,
+                "clusterId": 22,
+                "scaleUnitIds": [11, 22],
+                "snapshotUnitIds": [11, 22],
+                "scientificSnapshotToken": token,
+                "pageIndex": 0,
+                "pages": pages,
+            },
+        )
+        assert second.status_code == 200, second.text
+        assert second.headers["x-rf-scientific-snapshot-token"] == token
+
+        exported = client.post(
+            endpoint,
+            json={
+                "specVersion": 1,
+                "clusterIds": [11, 22],
+                "snapshotUnitIds": [11, 22],
+                "scientificSnapshotToken": token,
+                "format": "png",
+                "pages": pages,
+                "destination": {
+                    "directory": "session",
+                    "baseName": "snapshot-selection",
+                    "overwrite": False,
+                },
+            },
+        )
+
+    assert exported.status_code == 200, exported.text
+    snapshot = exported.json()["manifest"]["provenance"]["snapshot"]
+    assert snapshot["scientificSnapshotToken"] == token
+    assert snapshot["snapshotUnitIds"] == [11, 22]
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["rf", "hd", "probe", "waveform", "waveform-membership", "explicit-hd-delete"],
+)
+def test_scientific_snapshot_token_rejects_changed_inputs_without_output(
+    app, settings: Settings, mutation: str
+) -> None:
+    (settings.figure_export_root / "session").mkdir()
+    source = _create_remote_fixture(settings.rf_root)
+    data_root = next(parent for parent in source.parents if parent.name == "data")
+    hd_path = (
+        settings.rf_root
+        / "Kai"
+        / "260630"
+        / "260630_1"
+        / "data"
+        / "tuning_curves"
+        / "ProbeA"
+        / "tuning_curves.json"
+    )
+    positions_path = data_root / "spike_position" / "ProbeA" / "positions.csv"
+    waveform_root = data_root / "waveform" / "ProbeA"
+    template_path = waveform_root / "Unit22" / "template_uv.csv.gz"
+    pages = _figure_pages("rf.cartesian")
+    explicit_hd = mutation == "explicit-hd-delete"
+    preview_payload: dict[str, object] = {
+        "specVersion": 1,
+        "clusterId": 11,
+        "scaleUnitIds": [11],
+        "snapshotUnitIds": [11, 22],
+        "pageIndex": 0,
+        "pages": pages,
+    }
+    if explicit_hd:
+        preview_payload["hdPath"] = str(hd_path)
+
+    with authenticated_client(app) as client:
+        metadata = _open(client, source)
+        endpoint = f"/api/datasets/{metadata['id']}/figure-exports"
+        first = client.post(f"{endpoint}/preview", json=preview_payload)
+        assert first.status_code == 200, first.text
+        token = first.headers["x-rf-scientific-snapshot-token"]
+
+        if mutation == "rf":
+            source.write_text(source.read_text(encoding="utf-8") + " ", encoding="utf-8")
+        elif mutation == "hd":
+            hd_path.write_text(hd_path.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+        elif mutation == "probe":
+            positions_path.write_text(
+                positions_path.read_text(encoding="utf-8") + "\n",
+                encoding="utf-8",
+            )
+        elif mutation == "waveform":
+            with template_path.open("ab") as handle:
+                handle.write(b"changed")
+        elif mutation == "waveform-membership":
+            template_path.unlink()
+        else:
+            hd_path.unlink()
+
+        stale_preview_payload = {
+            **preview_payload,
+            "scientificSnapshotToken": token,
+        }
+        stale_preview = client.post(
+            f"{endpoint}/preview", json=stale_preview_payload
+        )
+        final_payload: dict[str, object] = {
+            "specVersion": 1,
+            "clusterIds": [11],
+            "snapshotUnitIds": [11, 22],
+            "scientificSnapshotToken": token,
+            "format": "png",
+            "pages": pages,
+            "destination": {
+                "directory": "session",
+                "baseName": f"stale-{mutation}",
+                "overwrite": False,
+            },
+        }
+        if explicit_hd:
+            final_payload["hdPath"] = str(hd_path)
+        stale_final = client.post(endpoint, json=final_payload)
+
+    assert stale_preview.status_code == 409, stale_preview.text
+    assert stale_final.status_code == 409, stale_final.text
+    assert not (settings.figure_export_root / "session" / f"stale-{mutation}").exists()
+
+
+def test_scientific_snapshot_token_format_is_strict_but_legacy_requests_remain_valid(
+    app, settings: Settings
+) -> None:
+    source = write_json(settings.rf_root / "rf.json")
+    payload = {
+        "specVersion": 1,
+        "clusterId": 11,
+        "pageIndex": 0,
+        "pages": _figure_pages("rf.cartesian"),
+    }
+    with authenticated_client(app) as client:
+        metadata = _open(client, source)
+        endpoint = f"/api/datasets/{metadata['id']}/figure-exports/preview"
+        legacy = client.post(endpoint, json=payload)
+        malformed = client.post(
+            endpoint,
+            json={**payload, "scientificSnapshotToken": "not-a-token"},
+        )
+
+    assert legacy.status_code == 200, legacy.text
+    assert "x-rf-scientific-snapshot-token" in legacy.headers
+    assert malformed.status_code == 422
 
 
 def test_figure_manifest_records_hashed_frozen_source_and_companions(
@@ -2401,7 +3082,9 @@ def test_figure_manifest_records_hashed_frozen_source_and_companions(
         "headDirectionPath": None,
         "probePositionsPath": None,
         "waveformChannelMode": "same_x_column",
+        "unitFilter": None,
     }
+    assert provenance["sharedRFScales"] == []
     assert provenance["companionStatus"] == {
         "headDirection": "available",
         "probeGeometry": "available",
@@ -2436,6 +3119,108 @@ def test_figure_manifest_records_hashed_frozen_source_and_companions(
         ).read_text(encoding="utf-8")
     )
     assert written == manifest
+
+
+def test_web_directory_overwrite_accepts_previous_v2_provenance_shape(
+    app, settings: Settings
+) -> None:
+    (settings.figure_export_root / "session").mkdir()
+    source = write_json(settings.rf_root / "rf.json")
+    payload = _figure_export_payload(
+        clusterIds=[11],
+        pages=_figure_pages("rf.cartesian"),
+    )
+    with authenticated_client(app) as client:
+        metadata = _open(client, source)
+        endpoint = f"/api/datasets/{metadata['id']}/figure-exports"
+        first = client.post(endpoint, json=payload)
+        assert first.status_code == 200, first.text
+
+        manifest_path = (
+            settings.figure_export_root
+            / "session"
+            / "selected_units"
+            / "manifest.json"
+        )
+        legacy = json.loads(manifest_path.read_text(encoding="utf-8"))
+        legacy["provenance"].pop("sharedRFScales")
+        legacy["provenance"].pop("sharedWaveformScale")
+        legacy["provenance"].pop("sharedWaveformScales")
+        legacy["provenance"]["renderingContract"].pop("svg")
+        manifest_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+        payload["destination"]["overwrite"] = True
+        replaced = client.post(endpoint, json=payload)
+
+    assert replaced.status_code == 200, replaced.text
+    assert replaced.json()["overwritten"] is True
+    assert "sharedRFScales" in replaced.json()["manifest"]["provenance"]
+
+
+def test_svg_export_embeds_renderer_identical_lossless_preview_png(
+    app, settings: Settings
+) -> None:
+    (settings.figure_export_root / "session").mkdir()
+    source = write_json(settings.rf_root / "rf.json")
+    pages = [
+        {
+            "title": "RF",
+            "plots": [
+                {
+                    "type": "rf.polar",
+                    "settings": {
+                        "rfStartMs": -100,
+                        "rfEndMs": 100,
+                        "valueMode": "Spike count",
+                    },
+                }
+            ],
+        }
+    ]
+    with authenticated_client(app) as client:
+        metadata = _open(client, source)
+        endpoint = f"/api/datasets/{metadata['id']}/figure-exports"
+        preview = client.post(
+            f"{endpoint}/preview",
+            json={
+                "specVersion": 1,
+                "clusterId": 11,
+                "scaleUnitIds": [11],
+                "pageIndex": 0,
+                "pages": pages,
+            },
+        )
+        exported = client.post(
+            endpoint,
+            json={
+                "specVersion": 1,
+                "clusterIds": [11],
+                "format": "svg",
+                "pages": pages,
+                "destination": {
+                    "directory": "session",
+                    "baseName": "svg-pages",
+                    "overwrite": False,
+                },
+            },
+        )
+
+    assert preview.status_code == 200, preview.text
+    assert exported.status_code == 200, exported.text
+    body = exported.json()
+    assert body["format"] == "svg"
+    assert body["manifest"]["format"] == "svg"
+    page = body["manifest"]["pages"][0]
+    assert page["file"].endswith(".svg")
+    contents = (
+        settings.figure_export_root / "session" / "svg-pages" / page["file"]
+    ).read_bytes()
+    assert hashlib.sha256(contents).hexdigest() == page["sha256"]
+    match = re.search(
+        rb'href="data:image/png;base64,([A-Za-z0-9+/=]+)"', contents
+    )
+    assert match is not None
+    assert base64.b64decode(match.group(1), validate=True) == preview.content
 
 
 def test_web_png_overwrite_refuses_raw_session_directory(
@@ -2682,6 +3467,13 @@ def test_multi_page_pdf_has_one_page_per_unit_template_and_unit_major_order(
     embedded = json.loads(embedded_text)
     assert embedded["manifestVersion"] == 2
     assert embedded["format"] == "pdf"
+    assert embedded["rendering"] == {
+        "widthPixels": 1600,
+        "heightPixels": 1200,
+        "resolutionDpi": 150.0,
+        "encoding": "FlateDecode DeviceRGB 8-bit",
+    }
+    assert body["manifest"]["rendering"] == embedded["rendering"]
     assert embedded["provenance"] == body["manifest"]["provenance"]
     assert embedded["spec"] == body["manifest"]["spec"]
     assert all(page["file"] == "report.pdf" for page in embedded["pages"])
@@ -2738,7 +3530,7 @@ def test_six_page_web_pdf_uses_shared_streaming_writer_without_append(
     assert body["pageCount"] == 6
     assert len(body["manifest"]["pages"]) == 6
     assert incremental_attempts == 0
-    assert jpeg_pages == 6
+    assert jpeg_pages == 0
     assert all(page["file"] == "six-pages.pdf" for page in body["manifest"]["pages"])
     assert any(page["placeholders"] for page in body["manifest"]["pages"])
     target = settings.figure_export_root / "session" / "six-pages.pdf"
@@ -2952,7 +3744,9 @@ def test_figure_export_loads_only_one_unit_at_a_time_in_expanded_order(
             f"/api/datasets/{metadata['id']}/figure-exports", json=payload
         )
     assert response.status_code == 200, response.text
-    assert load_order == [22, 11, 22, 11]
+    # One preflight pass freezes the shared RF scale, followed by expanded
+    # page-order rendering.  Every array is released before the next load.
+    assert load_order == [22, 11, 22, 11, 22, 11]
 
 
 def test_source_change_during_export_aborts_before_atomic_publish(

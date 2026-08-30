@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   FIGURE_TYPE_IDS,
+  anchoredScientificSnapshotToken,
   buildFigureExportRequest,
   buildFigurePreviewRequest,
   composerValidationError,
@@ -236,15 +237,50 @@ describe("figure export plan reducer", () => {
 
   it("serializes the same manual companion paths for preview and final export", () => {
     const draft = state();
+    const scientificSnapshotToken = `rf1.${"a".repeat(64)}`;
     const companions = {
       hdPath: "/mnt/senzailab/session/tuning_curves.json",
       probePositionsPath: "/mnt/senzailab/session/positions.csv",
       tuningSession: 3,
       waveformChannelMode: "same_shank" as const,
+      snapshotUnitIds: [41, 7, 88] as const,
+      scientificSnapshotToken,
     };
     expect(buildFigurePreviewRequest(draft, 1, companions)).toMatchObject(companions);
     expect(buildFigureExportRequest(draft, 1, companions)).toMatchObject(companions);
     expect(buildFigurePreviewRequest(draft, 1)).not.toHaveProperty("hdPath");
+  });
+
+  it("anchors the first server scientific identity and never refreshes it", () => {
+    const first = `rf1.${"1".repeat(64)}`;
+    const changed = `rf1.${"2".repeat(64)}`;
+
+    expect(anchoredScientificSnapshotToken(null, first)).toBe(first);
+    expect(anchoredScientificSnapshotToken(first, first)).toBe(first);
+    expect(() => anchoredScientificSnapshotToken(first, changed)).toThrow(
+      "Scientific inputs changed",
+    );
+    expect(() => anchoredScientificSnapshotToken(null, "invalid")).toThrow(
+      "invalid scientific snapshot identity",
+    );
+  });
+
+  it("freezes visible units into preview scaling and final filter provenance", () => {
+    let draft = state();
+    draft = figureComposerReducer(draft, { type: "set-units", unitIds: [41, 88] });
+    const unitFilter = {
+      enabled: true,
+      rfStartMs: 0,
+      rfEndMs: 200,
+      zeroSpikeSpatialBinThreshold: 1,
+      visibleUnitIds: [41, 7, 88],
+    };
+    const preview = buildFigurePreviewRequest(draft, 1, { unitFilter });
+    const exported = buildFigureExportRequest(draft, 1, { unitFilter });
+    expect(preview.scaleUnitIds).toEqual([41, 88]);
+    expect(preview.unitFilter).toEqual(unitFilter);
+    expect(exported.unitFilter).toEqual(unitFilter);
+    expect(figureComposerReducer(draft, { type: "set-format", format: "svg" }).format).toBe("svg");
   });
 
   it("validates selection, names, and writable destinations", () => {

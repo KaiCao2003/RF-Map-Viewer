@@ -20,7 +20,7 @@ export const FIGURE_TYPE_IDS = [
 ] as const;
 
 export type FigureTypeId = typeof FIGURE_TYPE_IDS[number];
-export type FigureOutputFormat = "pdf" | "png";
+export type FigureOutputFormat = "pdf" | "png" | "svg";
 export type FigurePageOrder = "unit-major" | "page-major";
 
 export interface FigureSettingDefinition {
@@ -66,12 +66,24 @@ export interface FigurePagePayload {
 export interface FigurePreviewRequest {
   specVersion: number;
   clusterId: number;
+  scaleUnitIds: number[];
   pageIndex: number;
   pages: FigurePagePayload[];
   hdPath?: string;
   probePositionsPath?: string;
   tuningSession: number;
   waveformChannelMode: WaveformChannelMode;
+  unitFilter?: FigureUnitFilterSnapshot;
+  snapshotUnitIds?: number[];
+  scientificSnapshotToken?: string;
+}
+
+export interface FigureUnitFilterSnapshot {
+  enabled: boolean;
+  rfStartMs: number;
+  rfEndMs: number;
+  zeroSpikeSpatialBinThreshold: number;
+  visibleUnitIds: number[];
 }
 
 export interface FigureDestinationPayload {
@@ -91,6 +103,9 @@ export interface FigureExportRequest {
   probePositionsPath?: string;
   tuningSession: number;
   waveformChannelMode: WaveformChannelMode;
+  unitFilter?: FigureUnitFilterSnapshot;
+  snapshotUnitIds?: number[];
+  scientificSnapshotToken?: string;
 }
 
 export interface FigureManifestPage {
@@ -191,6 +206,26 @@ export interface FigureCompanionPaths {
   probePositionsPath?: string | null;
   tuningSession?: number;
   waveformChannelMode?: WaveformChannelMode;
+  unitFilter?: FigureUnitFilterSnapshot;
+  snapshotUnitIds?: ReadonlyArray<number>;
+  scientificSnapshotToken?: string | null;
+}
+
+const SCIENTIFIC_SNAPSHOT_TOKEN = /^rf1\.[0-9a-f]{64}$/;
+
+export function anchoredScientificSnapshotToken(
+  current: string | null,
+  received: string,
+): string {
+  if (!SCIENTIFIC_SNAPSHOT_TOKEN.test(received)) {
+    throw new Error("The server returned an invalid scientific snapshot identity.");
+  }
+  if (current != null && current !== received) {
+    throw new Error(
+      "Scientific inputs changed since the first successful preview; close and reopen Figure Export Composer.",
+    );
+  }
+  return current ?? received;
 }
 
 export function isFigureTypeId(value: string): value is FigureTypeId {
@@ -383,10 +418,10 @@ export function createFigureComposerState(options: {
   const plotId = options.plotId ?? "plot-1";
   const previewClusterId = options.unitPool.includes(options.currentClusterId)
     ? options.currentClusterId
-    : options.unitPool[0];
+    : options.unitPool[0] ?? options.currentClusterId;
   return {
     unitPool: [...options.unitPool],
-    selectedUnitIds: [previewClusterId],
+    selectedUnitIds: options.unitPool.length ? [previewClusterId] : [],
     unitSearch: "",
     pages: [{
       id: pageId,
@@ -535,10 +570,16 @@ export function buildFigurePreviewRequest(
   return {
     specVersion,
     clusterId: state.previewClusterId,
+    scaleUnitIds: [...state.selectedUnitIds],
     pageIndex,
     pages: serializeFigurePages(state.pages),
     tuningSession: companions.tuningSession ?? 1,
     waveformChannelMode: companions.waveformChannelMode ?? "same_x_column",
+    ...(companions.unitFilter ? { unitFilter: companions.unitFilter } : {}),
+    ...(companions.snapshotUnitIds ? { snapshotUnitIds: [...companions.snapshotUnitIds] } : {}),
+    ...(companions.scientificSnapshotToken
+      ? { scientificSnapshotToken: companions.scientificSnapshotToken }
+      : {}),
     ...(companions.hdPath ? { hdPath: companions.hdPath } : {}),
     ...(companions.probePositionsPath ? { probePositionsPath: companions.probePositionsPath } : {}),
   };
@@ -557,6 +598,11 @@ export function buildFigureExportRequest(
     pages: serializeFigurePages(state.pages),
     tuningSession: companions.tuningSession ?? 1,
     waveformChannelMode: companions.waveformChannelMode ?? "same_x_column",
+    ...(companions.unitFilter ? { unitFilter: companions.unitFilter } : {}),
+    ...(companions.snapshotUnitIds ? { snapshotUnitIds: [...companions.snapshotUnitIds] } : {}),
+    ...(companions.scientificSnapshotToken
+      ? { scientificSnapshotToken: companions.scientificSnapshotToken }
+      : {}),
     destination: {
       directory: state.destinationDirectory,
       baseName: state.baseName.trim(),

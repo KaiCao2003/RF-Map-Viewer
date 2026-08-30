@@ -13,6 +13,7 @@ import {
   previewFigureExport,
 } from "../api";
 import {
+  anchoredScientificSnapshotToken,
   buildFigureExportRequest,
   buildFigurePreviewRequest,
   composerValidationError,
@@ -28,6 +29,7 @@ import {
   type FigureComposerState,
   type FigureExportSpec,
   type FigureExportResult,
+  type FigureUnitFilterSnapshot,
   type FigureTypeDefinition,
   type FigureTypeId,
 } from "../figureExport";
@@ -41,6 +43,8 @@ import type {
 
 interface FigureExportComposerProps {
   meta: DatasetMeta;
+  visibleUnitIds: ReadonlyArray<number>;
+  unitFilter: FigureUnitFilterSnapshot;
   viewState: ViewState;
   selectedCell: CellRef | null;
   hdSettings: HdViewSettings;
@@ -95,18 +99,23 @@ function figureTypeById(
 
 function UnitPicker({
   draft,
+  datasetUnitPool,
   currentClusterId,
   probeFilteredUnitIds,
   dispatch,
 }: {
   draft: FigureComposerState;
+  datasetUnitPool: ReadonlyArray<number>;
   currentClusterId: number;
   probeFilteredUnitIds: ReadonlyArray<number> | null;
   dispatch: React.Dispatch<Parameters<typeof figureComposerReducer>[1]>;
 }) {
   const visible = useMemo(
-    () => matchingUnitIds(draft.unitPool, draft.unitSearch),
-    [draft.unitPool, draft.unitSearch],
+    () => {
+      const matching = new Set(matchingUnitIds(datasetUnitPool, draft.unitSearch));
+      return draft.unitPool.filter((unitId) => matching.has(unitId));
+    },
+    [datasetUnitPool, draft.unitPool, draft.unitSearch],
   );
   const selected = new Set(draft.selectedUnitIds);
   const probeOrdered = probeFilteredUnitIds == null
@@ -142,7 +151,7 @@ function UnitPicker({
         <div><strong>Units</strong><span>{draft.selectedUnitIds.length} selected</span></div>
       </div>
       <div className="figure-unit-presets" role="group" aria-label="Unit selection presets">
-        <button type="button" onClick={() => setUnits([currentClusterId], currentClusterId)}>Current</button>
+        <button type="button" disabled={!draft.unitPool.includes(currentClusterId)} onClick={() => setUnits([currentClusterId], currentClusterId)}>Current</button>
         <button type="button" onClick={() => setUnits(draft.unitPool)}>All</button>
         <button
           type="button"
@@ -179,7 +188,7 @@ function UnitPicker({
       </div>
       <div className="figure-unit-list" role="listbox" aria-label="Export units" aria-multiselectable="true">
         {visible.map((clusterId) => {
-          const index = draft.unitPool.indexOf(clusterId);
+          const index = datasetUnitPool.indexOf(clusterId);
           return (
             <div
               key={clusterId}
@@ -441,6 +450,8 @@ function DestinationBrowser({
 
 export default function FigureExportComposer({
   meta,
+  visibleUnitIds,
+  unitFilter,
   viewState,
   selectedCell,
   hdSettings,
@@ -453,21 +464,37 @@ export default function FigureExportComposer({
   initialSpec,
   onClose,
 }: FigureExportComposerProps) {
+  const [sourceSnapshot] = useState(() => ({
+    visibleUnitIds: [...visibleUnitIds],
+    unitFilter: {
+      ...unitFilter,
+      visibleUnitIds: [...unitFilter.visibleUnitIds],
+    },
+    viewState: { ...viewState },
+    selectedCell: selectedCell == null ? null : [...selectedCell] as CellRef,
+    hdSettings: { ...hdSettings },
+    probeFilteredUnitIds: probeFilteredUnitIds == null ? null : [...probeFilteredUnitIds],
+    availableCapabilities: { ...availableCapabilities },
+    hdPath,
+    probePositionsPath,
+    tuningSession,
+    waveformChannelMode,
+  }));
   const [spec, setSpec] = useState<Awaited<ReturnType<typeof getFigureExportSpec>> | null>(initialSpec ?? null);
   const [specError, setSpecError] = useState("");
   const [specRefresh, setSpecRefresh] = useState(0);
-  const initialType = currentFigureType(viewState);
+  const initialType = currentFigureType(sourceSnapshot.viewState);
   const [draft, dispatch] = useReducer(
     figureComposerReducer,
     createFigureComposerState({
-      unitPool: meta.unitPool,
-      currentClusterId: viewState.clusterId,
+      unitPool: sourceSnapshot.visibleUnitIds,
+      currentClusterId: sourceSnapshot.viewState.clusterId,
       initialType,
       initialSettings: snapshotPlotSettings(initialType, {
-        view: viewState,
-        selectedCell,
-        hd: hdSettings,
-        waveformChannelMode,
+        view: sourceSnapshot.viewState,
+        selectedCell: sourceSnapshot.selectedCell,
+        hd: sourceSnapshot.hdSettings,
+        waveformChannelMode: sourceSnapshot.waveformChannelMode,
       }),
       baseName: safeExportBaseName(meta.name),
     }),
@@ -482,16 +509,18 @@ export default function FigureExportComposer({
   const previewUrlRef = useRef("");
   const [previewError, setPreviewError] = useState("");
   const [placeholderCount, setPlaceholderCount] = useState(0);
+  const [scientificSnapshotToken, setScientificSnapshotToken] = useState<string | null>(null);
+  const scientificSnapshotTokenRef = useRef<string | null>(null);
   const [exportStatus, setExportStatus] = useState<ExportStatus>("idle");
   const [exportError, setExportError] = useState("");
   const [exportResult, setExportResult] = useState<FigureExportResult | null>(null);
 
   const snapshotContext = useMemo(() => ({
-    view: viewState,
-    selectedCell,
-    hd: hdSettings,
-    waveformChannelMode,
-  }), [hdSettings, selectedCell, viewState, waveformChannelMode]);
+    view: sourceSnapshot.viewState,
+    selectedCell: sourceSnapshot.selectedCell,
+    hd: sourceSnapshot.hdSettings,
+    waveformChannelMode: sourceSnapshot.waveformChannelMode,
+  }), [sourceSnapshot]);
   const settingsFor = (type: FigureTypeId) => snapshotPlotSettings(type, snapshotContext);
 
   useEffect(() => {
@@ -534,12 +563,15 @@ export default function FigureExportComposer({
   const previewRequest = useMemo(() => {
     if (!spec || !draft.selectedUnitIds.length) return null;
     return buildFigurePreviewRequest(draft, spec.specVersion, {
-      hdPath,
-      probePositionsPath,
-      tuningSession,
-      waveformChannelMode,
+      hdPath: sourceSnapshot.hdPath,
+      probePositionsPath: sourceSnapshot.probePositionsPath,
+      tuningSession: sourceSnapshot.tuningSession,
+      waveformChannelMode: sourceSnapshot.waveformChannelMode,
+      unitFilter: sourceSnapshot.unitFilter,
+      snapshotUnitIds: sourceSnapshot.visibleUnitIds,
+      scientificSnapshotToken,
     });
-  }, [draft, hdPath, probePositionsPath, spec, tuningSession, waveformChannelMode]);
+  }, [draft, scientificSnapshotToken, sourceSnapshot, spec]);
   const previewKey = previewRequest == null ? "" : JSON.stringify(previewRequest);
 
   useEffect(() => {
@@ -559,6 +591,14 @@ export default function FigureExportComposer({
       previewFigureExport(meta.id, previewRequest, controller.signal)
         .then((result) => {
           if (controller.signal.aborted) return;
+          const anchoredToken = anchoredScientificSnapshotToken(
+            scientificSnapshotTokenRef.current,
+            result.scientificSnapshotToken,
+          );
+          if (scientificSnapshotTokenRef.current == null) {
+            scientificSnapshotTokenRef.current = anchoredToken;
+            setScientificSnapshotToken(anchoredToken);
+          }
           const nextUrl = URL.createObjectURL(result.image);
           if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
           previewUrlRef.current = nextUrl;
@@ -608,14 +648,17 @@ export default function FigureExportComposer({
   const previewPage = draft.pages.find((page) => page.id === draft.previewPageId) ?? draft.pages[0];
   const destinationWritable = directoryListing?.path === draft.destinationDirectory
     && directoryListing.writable;
-  const validationError = composerValidationError(draft, Boolean(destinationWritable));
+  const validationError = composerValidationError(draft, Boolean(destinationWritable))
+    ?? (scientificSnapshotToken == null
+      ? "Wait for the first successful server preview to freeze scientific inputs."
+      : null);
   const resultPlaceholderCount = exportResult?.manifest.pages.reduce(
     (sum, page) => sum + page.placeholders.length,
     0,
   ) ?? 0;
 
   const submitExport = async () => {
-    if (validationError) return;
+    if (validationError || scientificSnapshotToken == null) return;
     setExportStatus("exporting");
     setExportError("");
     setExportResult(null);
@@ -623,17 +666,22 @@ export default function FigureExportComposer({
       const result = await exportFigurePlan(
         meta.id,
         buildFigureExportRequest(draft, spec.specVersion, {
-          hdPath,
-          probePositionsPath,
-          tuningSession,
-          waveformChannelMode,
+          hdPath: sourceSnapshot.hdPath,
+          probePositionsPath: sourceSnapshot.probePositionsPath,
+          tuningSession: sourceSnapshot.tuningSession,
+          waveformChannelMode: sourceSnapshot.waveformChannelMode,
+          unitFilter: sourceSnapshot.unitFilter,
+          snapshotUnitIds: sourceSnapshot.visibleUnitIds,
+          scientificSnapshotToken,
         }),
       );
       setExportResult(result);
       setExportStatus("complete");
     } catch (caught) {
-      const conflict = caught instanceof ApiError && caught.status === 409;
-      setExportError(conflict
+      const destinationConflict = caught instanceof ApiError
+        && caught.status === 409
+        && caught.message.toLocaleLowerCase().includes("exist");
+      setExportError(destinationConflict
         ? "That export already exists. Enable ‘Replace existing output’ and export again if replacement is intended."
         : caught instanceof Error ? caught.message : "Figure export failed.");
       setExportStatus("error");
@@ -649,18 +697,26 @@ export default function FigureExportComposer({
           <button type="button" disabled={exportStatus === "exporting"} aria-label="Close Figure Export Composer" onClick={onClose}>×</button>
         </div>
       </header>
-      {(hdPath || probePositionsPath) && (
+      {(sourceSnapshot.hdPath || sourceSnapshot.probePositionsPath) && (
         <div className="figure-global-notice" role="status">
           Live preview and final export use the same manually attached companion files
-          {hdPath ? ` · HD: ${hdPath}` : ""}
-          {probePositionsPath ? ` · Probe: ${probePositionsPath}` : ""}
+          {sourceSnapshot.hdPath ? ` · HD: ${sourceSnapshot.hdPath}` : ""}
+          {sourceSnapshot.probePositionsPath ? ` · Probe: ${sourceSnapshot.probePositionsPath}` : ""}
         </div>
       )}
+      <div className="figure-global-notice" role="status">
+        Unit eligibility is frozen from the current RF window: {sourceSnapshot.visibleUnitIds.length} / {meta.unitPool.length} units.
+        {sourceSnapshot.unitFilter.enabled
+          ? ` Native zero-bin count < ${sourceSnapshot.unitFilter.zeroSpikeSpatialBinThreshold}.`
+          : " The native zero-bin filter was disabled when this composer opened."}
+{" "}RF Cartesian and Polar plots share one scalar scale across the selected export units.
+      </div>
       <div className="figure-composer-workspace">
         <UnitPicker
           draft={draft}
-          currentClusterId={viewState.clusterId}
-          probeFilteredUnitIds={probeFilteredUnitIds}
+          datasetUnitPool={meta.unitPool}
+          currentClusterId={sourceSnapshot.viewState.clusterId}
+          probeFilteredUnitIds={sourceSnapshot.probeFilteredUnitIds}
           dispatch={dispatch}
         />
         <PageComposer
@@ -668,7 +724,7 @@ export default function FigureExportComposer({
           definitions={spec.figureTypes}
           maxPlots={spec.page.maxPlots}
           settingsFor={settingsFor}
-          capabilities={availableCapabilities}
+          capabilities={sourceSnapshot.availableCapabilities}
           nextId={nextId}
           dispatch={dispatch}
         />
@@ -695,7 +751,7 @@ export default function FigureExportComposer({
             <div className="figure-output-grid">
               <label><span>Format</span><select value={draft.format} onChange={(event) => dispatch({ type: "set-format", format: event.target.value as FigureComposerState["format"] })}>{spec.formats.map((format) => <option key={format} value={format}>{format.toUpperCase()}</option>)}</select></label>
               <label><span>Page order</span><select value={draft.order} onChange={(event) => dispatch({ type: "set-order", order: event.target.value as FigureComposerState["order"] })}>{spec.pageOrders.map((order) => <option key={order} value={order}>{order === "unit-major" ? "Unit, then page" : "Page, then unit"}</option>)}</select></label>
-              <label className="figure-base-name"><span>{draft.format === "pdf" ? "PDF name" : "Folder name"}</span><input type="text" maxLength={128} value={draft.baseName} onChange={(event) => dispatch({ type: "set-base-name", value: event.target.value })} /><small>{draft.format === "pdf" ? ".pdf is added automatically" : "PNG pages plus manifest.json"}</small></label>
+              <label className="figure-base-name"><span>{draft.format === "pdf" ? "PDF name" : "Folder name"}</span><input type="text" maxLength={128} value={draft.baseName} onChange={(event) => dispatch({ type: "set-base-name", value: event.target.value })} /><small>{draft.format === "pdf" ? ".pdf is added automatically" : `${draft.format.toUpperCase()} pages plus manifest.json`}</small></label>
             </div>
             <DestinationBrowser draft={draft} listing={directoryListing} busy={directoryBusy} error={directoryError} dispatch={dispatch} />
             <label className="check-row figure-overwrite"><input type="checkbox" checked={draft.overwrite} onChange={(event) => dispatch({ type: "set-overwrite", value: event.target.checked })} /><span>Replace existing output with this exact name</span></label>

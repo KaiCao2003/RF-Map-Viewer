@@ -24,7 +24,7 @@ const specPayload = {
           : {}),
   })),
   pageOrders: ["unit-major", "page-major"],
-  formats: ["pdf", "png"],
+  formats: ["pdf", "png", "svg"],
   page: {
     minPlots: 1,
     maxPlots: 12,
@@ -65,6 +65,7 @@ describe("figure export API", () => {
     const directories = await listFigureExportDirectories("session");
 
     expect(spec.figureTypes.map((item) => item.id)).toEqual(FIGURE_TYPE_IDS);
+    expect(spec.formats).toEqual(["pdf", "png", "svg"]);
     expect(spec.page.maxPlots).toBe(12);
     expect(directories).toEqual({
       path: "session",
@@ -83,11 +84,13 @@ describe("figure export API", () => {
         "X-RF-Placeholder-Count": "2",
         "X-RF-Cluster-Id": "7",
         "X-RF-Page-Index": "0",
+        "X-RF-Scientific-Snapshot-Token": `rf1.${"a".repeat(64)}`,
       },
     }));
     const request: FigurePreviewRequest = {
       specVersion: 1,
       clusterId: 7,
+      scaleUnitIds: [7],
       pageIndex: 0,
       pages: [{ title: "Page", plots: [{ type: "hd.line", settings: {} }] }],
       hdPath: "/mnt/senzailab/session/tuning_curves.json",
@@ -99,6 +102,7 @@ describe("figure export API", () => {
 
     expect(result.placeholderCount).toBe(2);
     expect(result.sha256).toBe("abc123");
+    expect(result.scientificSnapshotToken).toBe(`rf1.${"a".repeat(64)}`);
     const [url, init] = fetchMock.mock.calls[0] as [URL, RequestInit];
     expect(String(url)).toContain("datasets/dataset%2Fid/figure-exports/preview");
     expect(JSON.parse(String(init.body))).toEqual(request);

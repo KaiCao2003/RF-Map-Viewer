@@ -21,6 +21,19 @@ Same shank modes. Automatic HD discovery uses one exact positive session
 (default `1`) without falling back to a different session. Press `P` to toggle
 rectangular/polar spatial views and `Shift-P` to cycle the palette.
 
+The native zero-spike unit filter is enabled by default at a threshold of one
+bin. It evaluates the current 2-D RF sum window on the source `y × x` grid
+before display rebinning or smoothing; the timeline keeps its independent full
+time axis. Unit navigation, Probe selection, Figure Composer, and export all
+use the same quality-visible unit set.
+
+Figure Composer freezes its source/filter/companion snapshot. RF
+Cartesian/Polar plots share scalar bounds across the selected units, waveform
+plots share symmetric bounds per channel mode, and preview/final rendering use
+the same recipe. PDF output embeds a lossless RGB raster and manifest metadata;
+PNG and SVG directories include per-page integrity plus `manifest.json`, with
+SVG explicitly recording its lossless embedded-PNG rendering contract.
+
 ## Input files
 
 The viewer opens current RF mapping JSON payloads saved as `.rfmap` or `.json`.

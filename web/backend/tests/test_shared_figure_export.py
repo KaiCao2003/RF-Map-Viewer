@@ -443,7 +443,11 @@ def test_polar_singleton_y_spans_the_legacy_seven_row_radius() -> None:
     spec = PlotSpec(
         PlotKind.RGB_POLAR,
         [[[255, 0, 0]] * 120],
-        options={"inner_blank_rows": 4},
+        options={
+            "inner_blank_rows": 4,
+            "show_axes": False,
+            "show_colorbar": False,
+        },
     )
 
     figure_export_module._draw_polar_map(  # type: ignore[attr-defined]
@@ -1137,11 +1141,37 @@ def test_explicit_overwrite_replaces_the_complete_destination(tmp_path: Path) ->
 
     assert result.files[0].is_file()
     manifest = json.loads((destination / "manifest.json").read_text(encoding="utf-8"))
-    assert manifest["producer"] == "rfmapping.python.figure-export"
+    assert manifest["producer"] == "rfmapping.web.shared-figure-export"
     assert set(path.name for path in destination.iterdir()) == {
         "manifest.json",
         result.files[0].name,
     }
+
+
+def test_web_shared_export_accepts_legacy_python_producer_only_for_overwrite(
+    tmp_path: Path,
+) -> None:
+    destination = tmp_path / "legacy-producer"
+    plan = _plan(destination)
+    export_figures(
+        plan,
+        data_provider=_data_for,
+        renderer=PillowFigureRenderer((500, 400)),
+    )
+    manifest_path = destination / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["producer"] = "rfmapping.python.figure-export"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    export_figures(
+        plan,
+        data_provider=_data_for,
+        renderer=PillowFigureRenderer((500, 400)),
+        overwrite=True,
+    )
+
+    replaced = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert replaced["producer"] == "rfmapping.web.shared-figure-export"
 
 
 def test_directory_manifest_accumulates_only_small_integrity_metadata(
