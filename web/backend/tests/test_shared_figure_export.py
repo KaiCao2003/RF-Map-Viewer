@@ -599,6 +599,29 @@ def test_pdf_export_contains_one_page_per_unit_template_pair(tmp_path: Path) -> 
     )
 
 
+def test_pdf_embeds_lossless_preview_pixels(tmp_path: Path) -> None:
+    destination = tmp_path / "lossless.pdf"
+    plan = _plan(destination, figure_format=FigureFormat.PDF, units=(7,))
+    renderer = PillowFigureRenderer((500, 400))
+    preview = render_live_preview(
+        plan,
+        7,
+        0,
+        data_provider=_data_for,
+        renderer=renderer,
+    )
+
+    export_figures(plan, data_provider=_data_for, renderer=renderer)
+
+    reader = PdfReader(destination)
+    image_object = (
+        reader.pages[0]["/Resources"]["/XObject"]["/image"].get_object()
+    )
+    assert image_object["/Filter"] == "/FlateDecode"
+    assert image_object.get_data() == preview.convert("RGB").tobytes()
+    preview.close()
+
+
 def test_pdf_export_avoids_pillow_incremental_trailer_loop(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

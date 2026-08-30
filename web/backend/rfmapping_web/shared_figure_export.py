@@ -29,6 +29,7 @@ import shutil
 import stat
 import sys
 import uuid
+import zlib
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
@@ -3079,10 +3080,10 @@ def _write_pdf_object(
     stream.write(b"endobj\n")
 
 
-def _jpeg_bytes(image: Image.Image) -> bytes:
-    output = io.BytesIO()
-    image.save(output, format="JPEG")
-    return output.getvalue()
+def _lossless_rgb_bytes(image: Image.Image) -> bytes:
+    """Return a Flate-compressed, byte-exact DeviceRGB raster."""
+
+    return zlib.compress(image.tobytes(), level=6)
 
 
 def write_streaming_pdf(
@@ -3097,7 +3098,7 @@ def write_streaming_pdf(
     """Write a raster PDF while retaining only the current page image.
 
     ``image_provider`` is called with each zero-based page index.  The writer
-    owns the returned image and closes it after its JPEG stream has been
+    owns the returned image and closes it after its lossless RGB stream has been
     written, including when encoding fails.  The page count must be known up
     front so the single authoritative PDF page tree can be emitted before any
     raster page is requested.
@@ -3105,8 +3106,8 @@ def write_streaming_pdf(
     Pillow 10.x's incremental ``append=True`` PDF path corrupts the trailer
     chain after four appends (``PdfFormatError: trailer loop found``).  The
     project's supported Pillow range includes that release, so construct the
-    small PDF object graph directly and continue using Pillow's JPEG encoder
-    for each rendered RGB page.
+    small PDF object graph directly. Every rendered RGB page is Flate
+    compressed, preserving exact preview pixels.
     """
 
     if not math.isfinite(resolution) or resolution <= 0:
@@ -3171,7 +3172,7 @@ def write_streaming_pdf(
         try:
             rgb_image = rendered.convert("RGB")
             width, height = rgb_image.size
-            jpeg = _jpeg_bytes(rgb_image)
+            compressed_rgb = _lossless_rgb_bytes(rgb_image)
         finally:
             if rgb_image is not None and rgb_image is not rendered:
                 rgb_image.close()
@@ -3217,13 +3218,13 @@ def write_streaming_pdf(
             + b" /Height "
             + str(height).encode("ascii")
             + b" /ColorSpace /DeviceRGB /BitsPerComponent 8 "
-            + b"/Filter /DCTDecode /Length "
-            + str(len(jpeg)).encode("ascii")
+            + b"/Filter /FlateDecode /Length "
+            + str(len(compressed_rgb)).encode("ascii")
             + b" >>\nstream\n"
-            + jpeg
+            + compressed_rgb
             + b"\nendstream",
         )
-        del jpeg
+        del compressed_rgb
 
     _write_pdf_object(
         stream,
