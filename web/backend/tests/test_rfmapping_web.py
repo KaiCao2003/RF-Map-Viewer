@@ -1858,6 +1858,69 @@ def test_figure_response_preparation_matches_live_pooled_observations() -> None:
     )
 
 
+def test_figure_hd_smoothing_matches_raw_observation_pipeline() -> None:
+    raw_counts = np.zeros(180, dtype=np.float64)
+    raw_counts[[0, 5, 37, 179]] = [180.0, 60.0, 90.0, 45.0]
+    occupancy = np.ones(180, dtype=np.float64)
+    occupancy[:6] = [0.05, 0.1, 0.2, 0.4, 0.8, 12.0]
+    occupancy[30:36] = [9.0, 7.0, 5.0, 3.0, 1.0, 0.1]
+    occupancy[174:] = [8.0, 4.0, 2.0, 1.0, 0.2, 0.05]
+    data = SimpleNamespace(
+        units_by_id={7: SimpleNamespace(spike_counts=tuple(raw_counts))},
+        occupancy_time_s=tuple(occupancy),
+    )
+
+    curve = figure_exports_module._hd_curve(
+        data,
+        7,
+        {"displayBins": 30, "smoothing": True, "sigmaDeg": 18.0},
+    )
+    assert curve is not None
+    centers, rates = curve
+
+    raw_sigma = 18.0 / 2.0
+    radius = math.floor(4.0 * raw_sigma + 0.5)
+    offsets = np.arange(-radius, radius + 1, dtype=int)
+    weights = np.exp(-0.5 * np.square(offsets.astype(np.float64) / raw_sigma))
+    weights /= weights.sum()
+
+    def smooth_raw(values: np.ndarray) -> np.ndarray:
+        return sum(
+            (
+                np.roll(values, -int(offset)) * weight
+                for offset, weight in zip(offsets, weights)
+            ),
+            np.zeros_like(values),
+        )
+
+    expected_counts = smooth_raw(raw_counts).reshape(30, 6).sum(axis=1)
+    expected_occupancy = smooth_raw(occupancy).reshape(30, 6).sum(axis=1)
+    expected_rates = expected_counts / expected_occupancy
+    np.testing.assert_allclose(centers, (np.arange(30) + 0.5) * 12.0)
+    np.testing.assert_allclose(rates, expected_rates, rtol=1e-13, atol=1e-13)
+
+    # The former aggregate-rate-then-smooth pipeline is materially different
+    # for these deliberately uneven occupancy observations.
+    grouped_rates = raw_counts.reshape(30, 6).sum(axis=1) / occupancy.reshape(
+        30, 6
+    ).sum(axis=1)
+    display_sigma = 18.0 / 12.0
+    old_radius = math.ceil(4.0 * display_sigma)
+    old_offsets = np.arange(-old_radius, old_radius + 1, dtype=int)
+    old_weights = np.exp(
+        -0.5 * np.square(old_offsets.astype(np.float64) / display_sigma)
+    )
+    old_weights /= old_weights.sum()
+    old_rates = sum(
+        (
+            np.roll(grouped_rates, int(offset)) * weight
+            for offset, weight in zip(old_offsets, old_weights)
+        ),
+        np.zeros_like(grouped_rates),
+    )
+    assert np.max(np.abs(rates - old_rates)) > 0.5
+
+
 def _temporal_parity_fixture() -> tuple[np.ndarray, dict[str, object]]:
     counts = np.full((4, 4, 3), 100.0, dtype=np.float64)
     occupancy = np.zeros((4, 4), dtype=np.float64)

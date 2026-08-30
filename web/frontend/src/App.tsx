@@ -39,6 +39,7 @@ import {
   valueModeUnit,
 } from "./math";
 import { DEFAULT_HD_DISPLAY_BINS, DEFAULT_HD_SMOOTH_SIGMA } from "./hdMath";
+import { exportShortcutAction, steppedTimeResolutionMs } from "./appShortcuts";
 import { nearestProbeUnitToRegionCenter } from "./probeSelection";
 import { resolutionChangePatch, timelineSelectionPatch } from "./viewStateMath";
 import { VIEWER_TABS } from "./viewTabs";
@@ -541,10 +542,10 @@ export default function App() {
     updateState((current) => resolutionChangePatch(meta, current, requested));
   }, [meta, updateState]);
 
-  const stepResolution = useCallback((delta: number) => {
-    if (!viewState) return;
-    changeResolution(viewState.timeResolutionMs + delta);
-  }, [changeResolution, viewState]);
+  const stepResolution = useCallback((direction: -1 | 1) => {
+    if (!meta || !viewState) return;
+    changeResolution(steppedTimeResolutionMs(meta, viewState.timeResolutionMs, direction));
+  }, [changeResolution, meta, viewState]);
 
   const showFullTimeline = useCallback(() => {
     if (!meta) return;
@@ -721,9 +722,11 @@ export default function App() {
         openChooser();
         return;
       }
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "e") {
+      const exportAction = exportShortcutAction(event);
+      if (exportAction) {
         event.preventDefault();
-        openFigureComposer();
+        if (exportAction === "displayed-csv") openExportDialog();
+        else openFigureComposer();
         return;
       }
       if (editing || !meta || !viewState) return;
@@ -754,7 +757,7 @@ export default function App() {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [figureComposerOpen, meta, openChooser, openFigureComposer, probeSelection, showFullTimeline, stepResolution, stepTimeline, stepUnit, updateState, viewState]);
+  }, [figureComposerOpen, meta, openChooser, openExportDialog, openFigureComposer, probeSelection, showFullTimeline, stepResolution, stepTimeline, stepUnit, updateState, viewState]);
 
   if (!meta || !viewState) {
     return (
@@ -1101,7 +1104,7 @@ export default function App() {
         <div className="modal-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) setHelpOpen(false); }}>
           <div className="info-dialog" role="dialog" aria-modal="true" aria-label="Keyboard Shortcuts">
             <header><strong>Keyboard Shortcuts</strong><button type="button" aria-label="Close" onClick={() => setHelpOpen(false)}>×</button></header>
-            <pre>← / → or [ / ]   Previous / next unit{"\n"}↑ / ↓   Previous / next timeline bin{"\n"}Shift+, / Shift+.   Time resolution −/+ 1 ms{"\n"}1–3   Switch RF / Delay-RGB / Timeline{"\n"}F   Invert Y{"\n"}P   Toggle rectangular / polar layout{"\n"}Shift+P   Cycle palette{"\n"}Double-click waveform   Enlarge local waveform{"\n"}Esc   Close waveform zoom; clear Probe region; otherwise show full Timeline{"\n"}Command-O   Open an RF mapping file in this viewer{"\n"}Command-E   Open Figure Export Composer</pre>
+            <pre>← / → or [ / ]   Previous / next unit{"\n"}↑ / ↓   Previous / next timeline bin{"\n"}Shift+, / Shift+.   Time resolution −/+ one source bin{"\n"}1–3   Switch RF / Delay-RGB / Timeline{"\n"}F   Invert Y{"\n"}P   Toggle rectangular / polar layout{"\n"}Shift+P   Cycle palette{"\n"}Double-click waveform   Enlarge local waveform{"\n"}Esc   Close waveform zoom; clear Probe region; otherwise show full Timeline{"\n"}Command/Ctrl-O   Open an RF mapping file in this viewer{"\n"}Command/Ctrl-E   Open Figure Export Composer{"\n"}Command/Ctrl-Shift-E   Export displayed data CSV</pre>
             <footer><button type="button" onClick={() => setHelpOpen(false)}>OK</button></footer>
           </div>
         </div>

@@ -873,23 +873,31 @@ def _hd_curve(
     divisors = [value for value in range(1, 181) if 180 % value == 0]
     display_bins = min(divisors, key=lambda value: (abs(value - requested), -value))
     group_size = 180 // display_bins
+    if settings["smoothing"]:
+        # Match the live Web view and Python viewer: smooth the 2-degree raw
+        # observations before display-bin aggregation, then derive the rate.
+        # Smoothing a pre-divided rate biases bins when occupancy is uneven.
+        sigma_bins = settings["sigmaDeg"] / (360.0 / 180.0)
+        radius = math.floor(sigma_bins * 4.0 + 0.5)
+        offsets = np.arange(-radius, radius + 1, dtype=int)
+        weights = np.exp(-0.5 * np.square(offsets.astype(np.float64) / sigma_bins))
+        weights /= weights.sum()
+        smoothed_counts = np.zeros_like(raw_counts)
+        smoothed_occupancy = np.zeros_like(occupancy)
+        for offset, weight in zip(offsets, weights):
+            smoothed_counts += np.roll(raw_counts, -int(offset)) * weight
+            smoothed_occupancy += np.roll(occupancy, -int(offset)) * weight
+        raw_counts = smoothed_counts
+        occupancy = smoothed_occupancy
     counts = raw_counts.reshape(display_bins, group_size).sum(axis=1)
     exposure = occupancy.reshape(display_bins, group_size).sum(axis=1)
-    rates = np.divide(counts, exposure, out=np.full(display_bins, np.nan), where=exposure > 0)
-    if settings["smoothing"]:
-        sigma_bins = settings["sigmaDeg"] / (360.0 / display_bins)
-        radius = max(1, int(math.ceil(sigma_bins * 4)))
-        offsets = np.arange(-radius, radius + 1, dtype=np.float64)
-        weights = np.exp(-0.5 * np.square(offsets / sigma_bins))
-        weights /= weights.sum()
-        valid = np.isfinite(rates).astype(np.float64)
-        filled = np.nan_to_num(rates)
-        smoothed = np.zeros_like(rates)
-        denominator = np.zeros_like(rates)
-        for offset, weight in zip(offsets.astype(int), weights):
-            smoothed += np.roll(filled, offset) * weight
-            denominator += np.roll(valid, offset) * weight
-        rates = np.divide(smoothed, denominator, out=np.full_like(rates, np.nan), where=denominator > 0)
+    minimum_exposure = 1e-12 if settings["smoothing"] else 0.0
+    rates = np.divide(
+        counts,
+        exposure,
+        out=np.full(display_bins, np.nan),
+        where=exposure > minimum_exposure,
+    )
     centers = (np.arange(display_bins, dtype=np.float64) + 0.5) * (360.0 / display_bins)
     return centers, rates
 
