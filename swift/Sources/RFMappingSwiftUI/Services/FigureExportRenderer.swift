@@ -1788,6 +1788,12 @@ struct FigureExportRenderer {
             let waveformPlot = manifest.pages.contains { page in
                 page.plots.contains(FigureExportPlotKind.waveformLocalAverage.rawValue)
             }
+            let amplitudeLimitMatches: Bool
+            if let amplitudeLimit = display.sharedWaveformAmplitudeLimitMicrovolts {
+                amplitudeLimitMatches = amplitudeLimit == scale.vmax
+            } else {
+                amplitudeLimitMatches = false
+            }
             guard scale.vmin.isFinite,
                   scale.vmax.isFinite,
                   scale.vmin <= 0,
@@ -1798,9 +1804,7 @@ struct FigureExportRenderer {
                   scale.baselineEndMs.isFinite,
                   WaveformChannelMode(rawValue: scale.channelMode) != nil,
                   scale.channelMode == display.waveformChannelMode,
-                  display.sharedWaveformAmplitudeLimitMicrovolts.map {
-                      $0 == scale.vmax
-                  } == true,
+                  amplitudeLimitMatches,
                   provenance.companionStatus.waveform == "available",
                   waveformPlot else {
                 throw invalidExportBundle(

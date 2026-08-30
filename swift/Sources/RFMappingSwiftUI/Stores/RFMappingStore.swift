@@ -635,7 +635,7 @@ final class RFMappingStore {
         _ state: ViewerSyncState,
         fields: ViewerSyncFields = .all
     ) {
-        guard let data else { return }
+        guard data != nil else { return }
         let state = viewerSyncState.merging(state, fields: fields)
 
         valueMode = ResponseValueMode.allCases.contains(state.valueMode)

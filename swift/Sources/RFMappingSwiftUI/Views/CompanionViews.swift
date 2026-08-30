@@ -131,7 +131,7 @@ struct ProbeSidebarSection: View {
         let rect = normalizedRect(from: start, to: end)
         guard rect.width >= 3 || rect.height >= 3 else { return }
         let qualityVisibleIDs = Set(store.qualityFilteredUnitIDs)
-        let selected = Set(geometry.units.compactMap { unit in
+        let selected: Set<Int> = Set(geometry.units.compactMap { unit -> Int? in
             guard qualityVisibleIDs.contains(unit.unitID) else { return nil }
             guard let position = unit.position else { return nil }
             return rect.contains(transform.point(x: position.x, y: position.y))
@@ -147,12 +147,15 @@ struct ProbeSidebarSection: View {
         transform: ProbeDisplayTransform
     ) {
         let qualityVisibleIDs = Set(store.qualityFilteredUnitIDs)
-        let candidates = geometry.positionedUnits.compactMap { unit in
-            guard qualityVisibleIDs.contains(unit.unitID) else { return nil }
-            return unit.position.map {
-                (unit: unit, point: transform.point(x: $0.x, y: $0.y))
+        let candidates: [(unit: ProbeUnitPosition, point: CGPoint)] = geometry.positionedUnits
+            .compactMap { unit -> (unit: ProbeUnitPosition, point: CGPoint)? in
+                guard qualityVisibleIDs.contains(unit.unitID),
+                      let position = unit.position else { return nil }
+                return (
+                    unit: unit,
+                    point: transform.point(x: position.x, y: position.y)
+                )
             }
-        }
         guard let nearest = candidates.min(by: {
             distance($0.point, location) < distance($1.point, location)
         }), distance(nearest.point, location) <= 14 else { return }
