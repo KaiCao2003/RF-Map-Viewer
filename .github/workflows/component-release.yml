@@ -175,7 +175,7 @@ jobs:
       - name: Test Swift viewer
         working-directory: swift
         run: |
-          swift build --build-tests -c release
+          swift test --list-tests -c release
           python3 -c 'import subprocess; subprocess.run(["swift", "test", "-c", "release", "--skip-build", "--filter", "FigureExportTests/testAvailableCompanionsResolveAllElevenKindsToRealRendererPayloads"], check=True, timeout=30)'
       - name: Build Swift macOS archive
         working-directory: swift
