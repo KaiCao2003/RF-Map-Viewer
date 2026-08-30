@@ -5,9 +5,12 @@ TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT_DIR="$(cd "$TEST_DIR/.." && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 BUILD_SCRIPT="$SCRIPT_DIR/build_python_stable_macos_app.sh"
+WINDOWS_BUILD_SCRIPT="$SCRIPT_DIR/build_python_stable_windows_app.ps1"
 INSTALLER="$SCRIPT_DIR/install_python_macos_app.sh"
 RELEASE_CONFIG="$SCRIPT_DIR/python_stable_macos_release.env"
 METADATA_AUDITOR="$SCRIPT_DIR/verify_python_stable_release_metadata.py"
+TK9_HOOK_PATCHER="$SCRIPT_DIR/patch_pyinstaller_tk9_runtime_hook.py"
+TK9_HOOK_BACKPORT="$ROOT_DIR/packaging/pyinstaller-hooks/rthooks/pyi_rth__tkinter.py"
 
 TEST_COUNT=0
 FIXTURE_ROOT=""
@@ -43,12 +46,19 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
-for required in "$BUILD_SCRIPT" "$INSTALLER" "$RELEASE_CONFIG" "$METADATA_AUDITOR"; do
+for required in \
+  "$BUILD_SCRIPT" \
+  "$WINDOWS_BUILD_SCRIPT" \
+  "$INSTALLER" \
+  "$RELEASE_CONFIG" \
+  "$METADATA_AUDITOR" \
+  "$TK9_HOOK_PATCHER" \
+  "$TK9_HOOK_BACKPORT"; do
   [[ -s "$required" ]] || fail_test "required stable release file is missing: $required"
 done
 /bin/bash -n "$BUILD_SCRIPT" || fail_test "stable build script failed Bash syntax validation"
 /bin/bash -n "$INSTALLER" || fail_test "macOS installer failed Bash syntax validation"
-python3 -m py_compile "$METADATA_AUDITOR" \
+python3 -m py_compile "$METADATA_AUDITOR" "$TK9_HOOK_PATCHER" "$TK9_HOOK_BACKPORT" \
   || fail_test "stable metadata auditor failed Python syntax validation"
 pass_test "stable release helpers pass syntax validation"
 
@@ -79,6 +89,25 @@ for marker in \
   assert_file_contains "$BUILD_SCRIPT" "$marker"
 done
 pass_test "stable builder targets the full viewer and retains its file contracts"
+
+for marker in \
+  '$PyInstallerVersion = "6.21.0"' \
+  '$TkinterRuntimeHookBackport = Join-Path $HooksDir "rthooks\pyi_rth__tkinter.py"' \
+  '$TkinterRuntimeHookPatcher = Join-Path $ScriptDir "patch_pyinstaller_tk9_runtime_hook.py"' \
+  '& $BuildPython $TkinterRuntimeHookPatcher $TkinterRuntimeHookBackport' \
+  'Assert-NativeSuccess "PyInstaller Tcl/Tk 9 runtime-hook backport"'; do
+  assert_file_contains "$WINDOWS_BUILD_SCRIPT" "$marker"
+done
+for marker in \
+  'EXPECTED_PYINSTALLER_VERSION = "6.21.0"' \
+  'EXPECTED_TCL_LIBRARY = "//zipfs:/lib/tcl/tcl_library"' \
+  'if not 9.0 <= numeric_tk_version < 10.0:' \
+  'installed_digest != EXPECTED_INSTALLED_HOOK_SHA256'; do
+  assert_file_contains "$TK9_HOOK_PATCHER" "$marker"
+done
+assert_file_contains "$TK9_HOOK_BACKPORT" \
+  '47745340110001c43d1165693f432521a65fc690'
+pass_test "Windows Tcl/Tk 9 backport is pinned and refuses unreviewed environments"
 
 for marker in \
   'RF_MAPPING_RELEASE_CONFIG' \

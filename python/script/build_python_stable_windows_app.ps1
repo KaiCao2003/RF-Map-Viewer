@@ -32,6 +32,8 @@ $SmokeJson = Join-Path $RootDir "tests\fixtures\release_smoke_rf.json"
 $IconPath = Join-Path $RootDir "assets\rf-mapping-viewer-icon-1024.png"
 $HooksDir = Join-Path $RootDir "packaging\pyinstaller-hooks"
 $TkinterDnDHook = Join-Path $HooksDir "hook-tkinterdnd2.py"
+$TkinterRuntimeHookBackport = Join-Path $HooksDir "rthooks\pyi_rth__tkinter.py"
+$TkinterRuntimeHookPatcher = Join-Path $ScriptDir "patch_pyinstaller_tk9_runtime_hook.py"
 $InstallerScript = Join-Path $RootDir "packaging\windows\RFMapViewer.iss"
 $MetadataAuditor = Join-Path $ScriptDir "verify_python_stable_release_metadata.py"
 $VersionVerifier = Join-Path $RepoRoot "release\verify_versions.py"
@@ -233,6 +235,8 @@ foreach ($Required in @(
     $SmokeJson,
     $IconPath,
     $TkinterDnDHook,
+    $TkinterRuntimeHookBackport,
+    $TkinterRuntimeHookPatcher,
     $InstallerScript,
     $MetadataAuditor,
     $VersionVerifier,
@@ -315,6 +319,13 @@ print("Tk runtime:", tkinter.TkVersion)
 '@
 & $BuildPython -c $DependencyProbe
 Assert-NativeSuccess "pinned Windows packaging dependency verification"
+
+# PyInstaller 6.21.0 predates upstream support for Python 3.14's Windows
+# Tcl/Tk 9 layout, which keeps its script libraries in DLL-embedded zipfs
+# archives. The patcher refuses to touch any other PyInstaller version, Tcl
+# library layout, Tk major version, or installed-hook revision.
+& $BuildPython $TkinterRuntimeHookPatcher $TkinterRuntimeHookBackport
+Assert-NativeSuccess "PyInstaller Tcl/Tk 9 runtime-hook backport"
 
 $VersionFile = Join-Path $BuildRoot "RFMapViewer-version-info.txt"
 $VersionResource = @"
