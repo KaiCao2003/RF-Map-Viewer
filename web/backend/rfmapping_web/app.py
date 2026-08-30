@@ -33,8 +33,10 @@ from .figure_exports import (
     FIGURE_SPEC_VERSION,
     FigureExportService,
     FigureExportValidationError,
+    FigureInputSnapshot,
     FigureOutputPathError,
     FigurePageRenderer,
+    FrozenScientificFile,
     SharedDestinationExistsError,
     SharedFigureExportError,
     expand_pages,
@@ -345,6 +347,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise _http_from_export_error(exc) from exc
 
     def _figure_companions(record, request: FigurePlanRequest):
+        cluster_ids = (
+            (request.clusterId,)
+            if isinstance(request, FigurePreviewRequest)
+            else tuple(request.clusterIds)
+        )
+        source_identity = FrozenScientificFile.capture(record.source)
+        companion_identities: list[tuple[str, FrozenScientificFile]] = []
+
         tuning = None
         tuning_error = None
         tuning_path = (
@@ -357,10 +367,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
         )
         if tuning_path is not None:
+            tuning_identity = FrozenScientificFile.capture(tuning_path)
+            companion_identities.append(("headDirection", tuning_identity))
             try:
                 tuning = load_tuning_curve(tuning_path)
             except (OSError, ValueError) as exc:
+                tuning_identity.verify()
                 tuning_error = f"HD tuning data could not be loaded: {exc}"
+            else:
+                tuning_identity.verify()
         probe = None
         probe_error = None
         probe_companions = record.companions
@@ -372,24 +387,106 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 record.companions, positions_path, record.scope_root
             )
         if probe_companions.has_probe:
+            probe_identities = tuple(
+                FrozenScientificFile.capture(path)
+                for path in (
+                    probe_companions.positions_path,
+                    probe_companions.channels_path,
+                )
+                if path is not None
+            )
+            companion_identities.extend(
+                ("probeGeometry", identity) for identity in probe_identities
+            )
             try:
                 probe = load_probe_geometry(
                     probe_companions,
                     record.cache.metadata["unitPool"],
                 )
             except (OSError, ValueError) as exc:
+                for identity in probe_identities:
+                    identity.verify()
                 probe_error = f"Probe geometry could not be loaded: {exc}"
+            else:
+                for identity in probe_identities:
+                    identity.verify()
         waveform = None
         waveform_error = None
         if record.companions.waveform_dir is not None:
+            waveform_directory = record.companions.waveform_dir
+            waveform_identities: dict[Path, FrozenScientificFile] = {}
+            for path in (
+                waveform_directory / "manifest.json",
+                waveform_directory / "channels.csv",
+                waveform_directory / "waveform_time.csv",
+            ):
+                if path.is_file():
+                    waveform_identities[path.resolve()] = (
+                        FrozenScientificFile.capture(path)
+                    )
             try:
-                waveform = WaveformArtifactStore(
-                    record.companions.waveform_dir,
+                discovered_waveform = WaveformArtifactStore(
+                    waveform_directory,
                     scope_root=record.scope_root,
                 )
+                for path in discovered_waveform.source_paths_for_units(cluster_ids):
+                    resolved = path.resolve()
+                    if resolved not in waveform_identities:
+                        waveform_identities[resolved] = FrozenScientificFile.capture(path)
+                waveform = WaveformArtifactStore(
+                    waveform_directory,
+                    scope_root=record.scope_root,
+                    template_cache_size=max(8, len(set(cluster_ids))),
+                )
+                waveform.preload_units(cluster_ids)
             except (OSError, ValueError) as exc:
+                for identity in waveform_identities.values():
+                    identity.verify()
                 waveform_error = f"Waveform artifact could not be loaded: {exc}"
-        return tuning, probe, waveform, tuning_error, probe_error, waveform_error
+            else:
+                for identity in waveform_identities.values():
+                    identity.verify()
+            companion_identities.extend(
+                ("waveform", identity)
+                for identity in waveform_identities.values()
+            )
+
+        input_snapshot = FigureInputSnapshot(
+            source=source_identity,
+            companions=tuple(companion_identities),
+            companion_status={
+                "headDirection": (
+                    "available"
+                    if tuning is not None
+                    else tuning_error or "unavailable"
+                ),
+                "probeGeometry": (
+                    "available" if probe is not None else probe_error or "unavailable"
+                ),
+                "waveform": (
+                    "available"
+                    if waveform is not None
+                    else waveform_error or "unavailable"
+                ),
+            },
+            snapshot={
+                "unitIds": list(cluster_ids),
+                "tuningCurveSession": request.tuningSession,
+                "headDirectionPath": request.hdPath,
+                "probePositionsPath": request.probePositionsPath,
+                "waveformChannelMode": request.waveformChannelMode,
+            },
+        )
+        input_snapshot.verify()
+        return (
+            tuning,
+            probe,
+            waveform,
+            tuning_error,
+            probe_error,
+            waveform_error,
+            input_snapshot,
+        )
 
     def _normalized_figure_pages(record, request: FigurePlanRequest):
         if request.specVersion != FIGURE_SPEC_VERSION:
@@ -419,6 +516,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 tuning_error,
                 probe_error,
                 waveform_error,
+                input_snapshot,
             ) = _figure_companions(
                 record, request
             )
@@ -442,6 +540,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 )
             finally:
                 del counts
+            input_snapshot.verify()
             services.datasets.get(dataset_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="Cluster not found") from exc
@@ -488,6 +587,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 tuning_error,
                 probe_error,
                 waveform_error,
+                input_snapshot,
             ) = _figure_companions(
                 record, request
             )
@@ -502,6 +602,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 waveform_channel_mode=request.waveformChannelMode,
                 waveform_unit_ids=request.clusterIds,
             )
+
+            def validate_figure_inputs() -> None:
+                services.datasets.get(dataset_id)
+                input_snapshot.verify()
+
             arguments = {
                 "record": record,
                 "jobs": jobs,
@@ -509,7 +614,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "unit_loader": lambda cluster_id: services.datasets.unit_array(
                     record, cluster_id
                 ),
-                "validate_source": lambda: services.datasets.get(dataset_id),
+                "validate_source": validate_figure_inputs,
+                "provenance": input_snapshot.provenance(
+                    application_version=WEB_VERSION
+                ),
                 "directory": request.destination.directory,
                 "base_name": request.destination.baseName,
                 "overwrite": request.destination.overwrite,

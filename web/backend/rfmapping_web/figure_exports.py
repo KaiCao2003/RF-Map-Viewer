@@ -44,7 +44,7 @@ from .shared_figure_export import (
 )
 
 from .companions import TuningCurveData
-from .datasets import DatasetRecord
+from .datasets import DatasetChangedError, DatasetRecord
 from .exports import (
     VALUE_MODE_COUNT,
     VALUE_MODE_RATE,
@@ -65,6 +65,8 @@ from .waveforms import (
 
 FIGURE_SPEC_VERSION = 1
 FIGURE_EXPORT_PRODUCER = "rfmapping.web.figure-export"
+FIGURE_MANIFEST_VERSION = 2
+FIGURE_PROVENANCE_VERSION = 1
 PAGE_ORDERS = {"unit-major", "page-major"}
 OUTPUT_FORMATS = {"pdf", "png"}
 
@@ -82,6 +84,187 @@ class FigureExportValidationError(ValueError):
 
 class FigureOutputPathError(ValueError):
     """A figure export destination is outside the configured destination root."""
+
+
+@dataclass(frozen=True)
+class FrozenScientificFile:
+    """Identity and digest for one scientific input used by an export.
+
+    The digest is read through a no-follow descriptor and the path plus open
+    handle identities are checked on both sides of the read.  The loaded
+    companion objects may then be reused for every page, while :meth:`verify`
+    rejects publication if the authoritative path changes afterwards.
+    """
+
+    path: Path
+    sha256: str
+    device: int
+    inode: int
+    size: int
+    mtime_ns: int
+    ctime_ns: int
+    mode: int
+    handle_device: int
+    handle_inode: int
+    handle_size: int
+    handle_mtime_ns: int
+    handle_mode: int
+
+    @staticmethod
+    def _signature(info: os.stat_result) -> tuple[int, ...]:
+        return (
+            int(info.st_dev),
+            int(info.st_ino),
+            int(info.st_size),
+            int(info.st_mtime_ns),
+            int(info.st_ctime_ns),
+            int(stat.S_IFMT(info.st_mode)),
+        )
+
+    @staticmethod
+    def _open_signature(info: os.stat_result) -> tuple[int, ...]:
+        return (
+            int(info.st_dev),
+            int(info.st_ino),
+            int(info.st_size),
+            int(info.st_mtime_ns),
+            int(stat.S_IFMT(info.st_mode)),
+        )
+
+    @classmethod
+    def capture(cls, path: Path) -> FrozenScientificFile:
+        try:
+            source = path.expanduser().resolve(strict=True)
+            before = os.stat(source, follow_symlinks=False)
+        except OSError as exc:
+            raise DatasetChangedError(
+                f"Scientific input is no longer available: {path}"
+            ) from exc
+        if not stat.S_ISREG(before.st_mode):
+            raise DatasetChangedError(f"Scientific input is not a regular file: {source}")
+        try:
+            descriptor = os.open(
+                source,
+                os.O_RDONLY
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+            )
+        except OSError as exc:
+            raise DatasetChangedError(
+                f"Scientific input could not be opened safely: {source}"
+            ) from exc
+        try:
+            handle_before = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(handle_before.st_mode)
+                or int(handle_before.st_size) != int(before.st_size)
+            ):
+                raise DatasetChangedError(
+                    f"Scientific input changed while it was opened: {source}"
+                )
+            digest = hashlib.sha256()
+            while chunk := os.read(descriptor, 1024 * 1024):
+                digest.update(chunk)
+            handle_after = os.fstat(descriptor)
+            if cls._open_signature(handle_after) != cls._open_signature(handle_before):
+                raise DatasetChangedError(
+                    f"Scientific input changed while provenance was computed: {source}"
+                )
+        finally:
+            os.close(descriptor)
+        try:
+            after = os.stat(source, follow_symlinks=False)
+        except OSError as exc:
+            raise DatasetChangedError(
+                f"Scientific input is no longer available: {source}"
+            ) from exc
+        if cls._signature(after) != cls._signature(before):
+            raise DatasetChangedError(
+                f"Scientific input changed while provenance was computed: {source}"
+            )
+        return cls(
+            path=source,
+            sha256=digest.hexdigest(),
+            device=int(after.st_dev),
+            inode=int(after.st_ino),
+            size=int(after.st_size),
+            mtime_ns=int(after.st_mtime_ns),
+            ctime_ns=int(after.st_ctime_ns),
+            mode=int(stat.S_IFMT(after.st_mode)),
+            handle_device=int(handle_after.st_dev),
+            handle_inode=int(handle_after.st_ino),
+            handle_size=int(handle_after.st_size),
+            handle_mtime_ns=int(handle_after.st_mtime_ns),
+            handle_mode=int(stat.S_IFMT(handle_after.st_mode)),
+        )
+
+    def verify(self) -> None:
+        try:
+            current = os.stat(self.path, follow_symlinks=False)
+        except OSError as exc:
+            raise DatasetChangedError(
+                f"Scientific input is no longer available: {self.path}"
+            ) from exc
+        expected = (
+            self.device,
+            self.inode,
+            self.size,
+            self.mtime_ns,
+            self.ctime_ns,
+            self.mode,
+        )
+        if self._signature(current) != expected:
+            raise DatasetChangedError(
+                "Scientific input changed after it was loaded; reopen it before "
+                f"exporting: {self.path}"
+            )
+
+    def metadata(self) -> dict[str, Any]:
+        return {
+            "path": str(self.path),
+            "sha256": self.sha256,
+            "sizeBytes": self.size,
+            "device": self.device,
+            "inode": self.inode,
+            "mtimeNs": self.mtime_ns,
+            "ctimeNs": self.ctime_ns,
+        }
+
+
+@dataclass(frozen=True)
+class FigureInputSnapshot:
+    """Frozen RF/companion inputs and their export provenance document."""
+
+    source: FrozenScientificFile
+    companions: tuple[tuple[str, FrozenScientificFile], ...]
+    companion_status: Mapping[str, str]
+    snapshot: Mapping[str, Any]
+
+    def verify(self) -> None:
+        self.source.verify()
+        for _kind, identity in self.companions:
+            identity.verify()
+
+    def provenance(self, *, application_version: str) -> dict[str, Any]:
+        return {
+            "provenanceVersion": FIGURE_PROVENANCE_VERSION,
+            "application": {
+                "name": "RF Map Viewer",
+                "version": application_version,
+                "edition": "Web",
+            },
+            "source": self.source.metadata(),
+            "snapshot": dict(self.snapshot),
+            "companions": [
+                {"kind": kind, **identity.metadata()}
+                for kind, identity in self.companions
+            ],
+            "companionStatus": dict(self.companion_status),
+            "renderingContract": {
+                "preview": "same-page-renderer",
+                "publication": "all scientific inputs reverified before atomic publish",
+            },
+        }
 
 
 def _setting(
@@ -1404,14 +1587,17 @@ def _web_manifest_header(
     record: DatasetRecord,
     jobs: Sequence[ExpandedPage],
     order: str,
+    provenance: Mapping[str, Any],
 ) -> dict[str, Any]:
     return {
+        "manifestVersion": FIGURE_MANIFEST_VERSION,
         "specVersion": FIGURE_SPEC_VERSION,
         "producer": FIGURE_EXPORT_PRODUCER,
         "format": "png",
         "order": order,
         "source": str(record.source),
         "sourceSignature": dict(record.source_signature),
+        "provenance": dict(provenance),
         "spec": _web_export_spec(jobs),
     }
 
@@ -1476,6 +1662,102 @@ def _validate_web_spec(spec: Any) -> tuple[list[dict[str, Any]], list[dict[str, 
     return pages, jobs
 
 
+def _is_finite_json(value: Any) -> bool:
+    if value is None or isinstance(value, (str, bool)):
+        return True
+    if isinstance(value, int):
+        return True
+    if isinstance(value, float):
+        return math.isfinite(value)
+    if isinstance(value, list):
+        return all(_is_finite_json(item) for item in value)
+    if isinstance(value, dict):
+        return all(
+            isinstance(key, str) and _is_finite_json(item)
+            for key, item in value.items()
+        )
+    return False
+
+
+def _validate_input_metadata(value: Any) -> None:
+    expected = {
+        "path",
+        "sha256",
+        "sizeBytes",
+        "device",
+        "inode",
+        "mtimeNs",
+        "ctimeNs",
+    }
+    if not isinstance(value, dict) or set(value) != expected:
+        raise FigureOutputPathError("Figure export input provenance is invalid")
+    if (
+        not isinstance(value["path"], str)
+        or not value["path"]
+        or not isinstance(value["sha256"], str)
+        or re.fullmatch(r"[0-9a-f]{64}", value["sha256"]) is None
+    ):
+        raise FigureOutputPathError("Figure export input provenance is invalid")
+    for key in expected - {"path", "sha256"}:
+        if isinstance(value[key], bool) or not isinstance(value[key], int):
+            raise FigureOutputPathError("Figure export input provenance is invalid")
+    if value["sizeBytes"] < 0:
+        raise FigureOutputPathError("Figure export input provenance is invalid")
+
+
+def _validate_web_provenance(value: Any) -> None:
+    required = {
+        "provenanceVersion",
+        "application",
+        "source",
+        "snapshot",
+        "companions",
+        "companionStatus",
+        "renderingContract",
+    }
+    if not isinstance(value, dict) or set(value) != required:
+        raise FigureOutputPathError("Figure export provenance is invalid")
+    if (
+        type(value["provenanceVersion"]) is not int
+        or value["provenanceVersion"] != FIGURE_PROVENANCE_VERSION
+    ):
+        raise FigureOutputPathError("Figure export provenance is invalid")
+    application = value["application"]
+    if (
+        not isinstance(application, dict)
+        or set(application) != {"name", "version", "edition"}
+        or any(not isinstance(item, str) or not item for item in application.values())
+    ):
+        raise FigureOutputPathError("Figure export application provenance is invalid")
+    _validate_input_metadata(value["source"])
+    companions = value["companions"]
+    if not isinstance(companions, list):
+        raise FigureOutputPathError("Figure export companion provenance is invalid")
+    for item in companions:
+        if not isinstance(item, dict) or "kind" not in item:
+            raise FigureOutputPathError("Figure export companion provenance is invalid")
+        kind = item["kind"]
+        if kind not in {"headDirection", "probeGeometry", "waveform"}:
+            raise FigureOutputPathError("Figure export companion provenance is invalid")
+        _validate_input_metadata({key: nested for key, nested in item.items() if key != "kind"})
+    status = value["companionStatus"]
+    if (
+        not isinstance(status, dict)
+        or set(status) != {"headDirection", "probeGeometry", "waveform"}
+        or any(not isinstance(item, str) or not item for item in status.values())
+    ):
+        raise FigureOutputPathError("Figure export companion status is invalid")
+    rendering = value["renderingContract"]
+    if (
+        not isinstance(rendering, dict)
+        or set(rendering) != {"preview", "publication"}
+        or any(not isinstance(item, str) or not item for item in rendering.values())
+    ):
+        raise FigureOutputPathError("Figure export rendering provenance is invalid")
+    if not isinstance(value["snapshot"], dict) or not _is_finite_json(value["snapshot"]):
+        raise FigureOutputPathError("Figure export snapshot provenance is invalid")
+
+
 def _validate_web_export_directory(
     parent: SharedParentDirectory,
     name: str,
@@ -1495,7 +1777,7 @@ def _validate_web_export_directory(
                 f"Refusing to overwrite unverified directory {parent.path / name}: "
                 "manifest.json is missing or invalid"
             ) from exc
-        required_keys = {
+        legacy_keys = {
             "specVersion",
             "producer",
             "format",
@@ -1505,10 +1787,14 @@ def _validate_web_export_directory(
             "spec",
             "pages",
         }
-        if not isinstance(manifest, dict) or set(manifest) != required_keys:
+        current_keys = legacy_keys | {"manifestVersion", "provenance"}
+        manifest_keys = frozenset(manifest) if isinstance(manifest, dict) else frozenset()
+        if manifest_keys not in {frozenset(legacy_keys), frozenset(current_keys)}:
             raise FigureOutputPathError("Figure export manifest structure is invalid")
+        current_manifest = manifest_keys == frozenset(current_keys)
         if (
-            manifest["specVersion"] != FIGURE_SPEC_VERSION
+            type(manifest["specVersion"]) is not int
+            or manifest["specVersion"] != FIGURE_SPEC_VERSION
             or manifest["producer"] != FIGURE_EXPORT_PRODUCER
             or manifest["format"] != "png"
             or manifest["order"] not in PAGE_ORDERS
@@ -1516,6 +1802,13 @@ def _validate_web_export_directory(
             or not isinstance(manifest["sourceSignature"], dict)
         ):
             raise FigureOutputPathError("Figure export manifest provenance is invalid")
+        if current_manifest:
+            if (
+                type(manifest["manifestVersion"]) is not int
+                or manifest["manifestVersion"] != FIGURE_MANIFEST_VERSION
+            ):
+                raise FigureOutputPathError("Figure export manifest version is invalid")
+            _validate_web_provenance(manifest["provenance"])
         spec_pages, spec_jobs = _validate_web_spec(manifest["spec"])
         if expected_header is not None:
             for key, value in expected_header.items():
@@ -1769,6 +2062,7 @@ class FigureExportService:
         renderer: FigurePageRenderer,
         unit_loader: Callable[[int], tuple[int, np.ndarray]],
         validate_source: Callable[[], None],
+        provenance: Mapping[str, Any],
         directory: str,
         base_name: str,
         overwrite: bool,
@@ -1777,7 +2071,7 @@ class FigureExportService:
         destination = self._destination(directory)
         safe_name = _safe_base_name(base_name)
         target = destination / safe_name
-        manifest_header = _web_manifest_header(record, jobs, order)
+        manifest_header = _web_manifest_header(record, jobs, order, provenance)
         expected_pages = tuple(_web_page_metadata(record, job) for job in jobs)
         with _shared_open_parent_directory(destination) as parent:
             _recover_web_directory_publish(parent, target)
@@ -1875,6 +2169,7 @@ class FigureExportService:
         renderer: FigurePageRenderer,
         unit_loader: Callable[[int], tuple[int, np.ndarray]],
         validate_source: Callable[[], None],
+        provenance: Mapping[str, Any],
         directory: str,
         base_name: str,
         overwrite: bool,
@@ -1885,6 +2180,17 @@ class FigureExportService:
         if safe_name.casefold().endswith(".pdf"):
             safe_name = safe_name[:-4]
         target = destination / f"{safe_name}.pdf"
+        manifest_header = {
+            **_web_manifest_header(record, jobs, order, provenance),
+            "format": "pdf",
+        }
+        embedded_manifest = {
+            **manifest_header,
+            "pages": [
+                {**_web_page_metadata(record, job), "file": target.name}
+                for job in jobs
+            ],
+        }
         with _shared_open_parent_directory(destination) as parent:
             expected_identity = _shared_inspect_pdf_destination(
                 parent,
@@ -1934,6 +2240,7 @@ class FigureExportService:
                         image_provider,
                         title=target.stem,
                         resolution=150.0,
+                        export_metadata=embedded_manifest,
                     )
                 os.fsync(staged_fd)
                 validate_source()
@@ -1952,16 +2259,7 @@ class FigureExportService:
                     "pageCount": len(manifest_entries),
                     "bytes": pdf_size,
                     "overwritten": existed,
-                    "manifest": {
-                        "specVersion": FIGURE_SPEC_VERSION,
-                        "producer": FIGURE_EXPORT_PRODUCER,
-                        "format": "pdf",
-                        "order": order,
-                        "source": str(record.source),
-                        "sourceSignature": dict(record.source_signature),
-                        "spec": _web_export_spec(jobs),
-                        "pages": manifest_entries,
-                    },
+                    "manifest": {**manifest_header, "pages": manifest_entries},
                 }
             finally:
                 os.close(staged_fd)

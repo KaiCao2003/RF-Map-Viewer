@@ -2363,6 +2363,81 @@ def test_multi_unit_png_export_order_preview_parity_and_missing_hd_placeholder(
     assert not list((settings.figure_export_root / "session").glob(".*.backup"))
 
 
+def test_figure_manifest_records_hashed_frozen_source_and_companions(
+    app, settings: Settings
+) -> None:
+    (settings.figure_export_root / "session").mkdir()
+    source = _create_remote_fixture(settings.rf_root)
+    payload = _figure_export_payload(
+        clusterIds=[11],
+        order="unit-major",
+        pages=_figure_pages("hd.line", "probe", "waveform.local_average"),
+        destination={
+            "directory": "session",
+            "baseName": "provenance",
+            "overwrite": False,
+        },
+    )
+
+    with authenticated_client(app) as client:
+        metadata = _open(client, source)
+        response = client.post(
+            f"/api/datasets/{metadata['id']}/figure-exports", json=payload
+        )
+
+    assert response.status_code == 200, response.text
+    manifest = response.json()["manifest"]
+    assert manifest["manifestVersion"] == 2
+    provenance = manifest["provenance"]
+    assert provenance["provenanceVersion"] == 1
+    assert provenance["application"] == {
+        "name": "RF Map Viewer",
+        "version": "1.9.6",
+        "edition": "Web",
+    }
+    assert provenance["snapshot"] == {
+        "unitIds": [11],
+        "tuningCurveSession": 1,
+        "headDirectionPath": None,
+        "probePositionsPath": None,
+        "waveformChannelMode": "same_x_column",
+    }
+    assert provenance["companionStatus"] == {
+        "headDirection": "available",
+        "probeGeometry": "available",
+        "waveform": "available",
+    }
+    assert provenance["source"]["path"] == str(source.resolve())
+    assert provenance["source"]["sha256"] == hashlib.sha256(
+        source.read_bytes()
+    ).hexdigest()
+    companions = provenance["companions"]
+    assert {item["kind"] for item in companions} == {
+        "headDirection",
+        "probeGeometry",
+        "waveform",
+    }
+    assert any(
+        item["kind"] == "waveform"
+        and Path(item["path"]).name == "template_uv.csv.gz"
+        and Path(item["path"]).parent.name == "Unit11"
+        for item in companions
+    )
+    for item in companions:
+        path = Path(item["path"])
+        assert item["sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
+        assert item["sizeBytes"] == path.stat().st_size
+    written = json.loads(
+        (
+            settings.figure_export_root
+            / "session"
+            / "provenance"
+            / "manifest.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert written == manifest
+
+
 def test_web_png_overwrite_refuses_raw_session_directory(
     app, settings: Settings
 ) -> None:
@@ -2603,6 +2678,16 @@ def test_multi_page_pdf_has_one_page_per_unit_template_and_unit_major_order(
         float(page.mediabox.width) > 0 and float(page.mediabox.height) > 0
         for page in reader.pages
     )
+    embedded_text = reader.metadata["/RFMExportManifest"]
+    embedded = json.loads(embedded_text)
+    assert embedded["manifestVersion"] == 2
+    assert embedded["format"] == "pdf"
+    assert embedded["provenance"] == body["manifest"]["provenance"]
+    assert embedded["spec"] == body["manifest"]["spec"]
+    assert all(page["file"] == "report.pdf" for page in embedded["pages"])
+    assert reader.metadata["/RFMExportManifestSHA256"] == hashlib.sha256(
+        embedded_text.encode("utf-8")
+    ).hexdigest()
     assert source.read_bytes() == source_before
 
 
@@ -2898,6 +2983,105 @@ def test_source_change_during_export_aborts_before_atomic_publish(
             f"/api/datasets/{metadata['id']}/figure-exports", json=payload
         )
     assert response.status_code == 409, response.text
+    assert not (settings.figure_export_root / "session" / "selected_units").exists()
+    assert not list((settings.figure_export_root / "session").glob(".*.tmp"))
+
+
+def test_hd_companion_change_during_export_aborts_before_atomic_publish(
+    app, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (settings.figure_export_root / "session").mkdir()
+    source = _create_remote_fixture(settings.rf_root)
+    tuning_path = next(settings.rf_root.rglob("tuning_curves.json"))
+    original_render = figure_exports_module.FigurePageRenderer.render_png
+    render_count = 0
+
+    def mutate_tuning_after_first_page(renderer, *args, **kwargs):
+        nonlocal render_count
+        rendered = original_render(renderer, *args, **kwargs)
+        render_count += 1
+        if render_count == 1:
+            tuning_path.write_text(
+                tuning_path.read_text(encoding="utf-8") + " ",
+                encoding="utf-8",
+            )
+        return rendered
+
+    monkeypatch.setattr(
+        figure_exports_module.FigurePageRenderer,
+        "render_png",
+        mutate_tuning_after_first_page,
+    )
+    payload = _figure_export_payload(
+        clusterIds=[11, 22],
+        order="unit-major",
+        pages=_figure_pages("hd.line"),
+    )
+    with authenticated_client(app) as client:
+        metadata = _open(client, source)
+        response = client.post(
+            f"/api/datasets/{metadata['id']}/figure-exports", json=payload
+        )
+
+    assert response.status_code == 409, response.text
+    assert "Scientific input changed" in response.json()["detail"]
+    assert render_count == 2
+    assert not (settings.figure_export_root / "session" / "selected_units").exists()
+    assert not list((settings.figure_export_root / "session").glob(".*.tmp"))
+
+
+def test_waveform_templates_are_preloaded_and_reverified_before_publish(
+    app, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (settings.figure_export_root / "session").mkdir()
+    source = _create_remote_fixture(settings.rf_root)
+    changed_template = next(
+        path
+        for path in settings.rf_root.rglob("template_uv.csv.gz")
+        if path.parent.name == "Unit22"
+    )
+    waveform_class = figure_exports_module.WaveformArtifactStore
+    original_load = waveform_class._load_template
+    loaded_units: list[int] = []
+
+    def tracked_load(store, summary):
+        loaded_units.append(summary.unit_id)
+        return original_load(store, summary)
+
+    original_render = figure_exports_module.FigurePageRenderer.render_png
+    render_count = 0
+
+    def mutate_template_after_first_page(renderer, *args, **kwargs):
+        nonlocal render_count
+        assert {11, 22}.issubset(loaded_units)
+        rendered = original_render(renderer, *args, **kwargs)
+        render_count += 1
+        if render_count == 1:
+            changed_template.write_bytes(b"changed-after-preload")
+        return rendered
+
+    monkeypatch.setattr(waveform_class, "_load_template", tracked_load)
+    monkeypatch.setattr(
+        figure_exports_module.FigurePageRenderer,
+        "render_png",
+        mutate_template_after_first_page,
+    )
+    payload = _figure_export_payload(
+        clusterIds=[11, 22],
+        order="unit-major",
+        pages=_figure_pages("waveform.local_average"),
+    )
+    with authenticated_client(app) as client:
+        metadata = _open(client, source)
+        response = client.post(
+            f"/api/datasets/{metadata['id']}/figure-exports", json=payload
+        )
+
+    assert response.status_code == 409, response.text
+    assert "Scientific input changed" in response.json()["detail"]
+    assert render_count == 2
+    assert loaded_units.count(11) == 1
+    assert loaded_units.count(22) == 1
     assert not (settings.figure_export_root / "session" / "selected_units").exists()
     assert not list((settings.figure_export_root / "session").glob(".*.tmp"))
 

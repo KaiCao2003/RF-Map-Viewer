@@ -3092,6 +3092,7 @@ def write_streaming_pdf(
     *,
     title: str,
     resolution: float = 150.0,
+    export_metadata: Mapping[str, Any] | None = None,
 ) -> None:
     """Write a raster PDF while retaining only the current page image.
 
@@ -3120,6 +3121,21 @@ def write_streaming_pdf(
         raise FigureExportValidationError("PDF image provider must be callable")
     if not isinstance(title, str):
         raise FigureExportValidationError("PDF title must be a string")
+    if export_metadata is not None and not isinstance(export_metadata, Mapping):
+        raise FigureExportValidationError("PDF export metadata must be a mapping")
+    metadata_document = (
+        {}
+        if export_metadata is None
+        else _manifest_json_value(export_metadata, label="PDF export metadata")
+    )
+    metadata_bytes = json.dumps(
+        metadata_document,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    metadata_digest = hashlib.sha256(metadata_bytes).hexdigest()
 
     # 1: catalog, 2: pages tree, then page/content/image triples and an Info obj.
     info_object = 3 + 3 * page_count
@@ -3213,7 +3229,13 @@ def write_streaming_pdf(
         stream,
         offsets,
         info_object,
-        b"<< /Title " + _pdf_utf16_literal(title) + b" >>",
+        b"<< /Title "
+        + _pdf_utf16_literal(title)
+        + b" /RFMExportManifest "
+        + _pdf_utf16_literal(metadata_bytes.decode("utf-8"))
+        + b" /RFMExportManifestSHA256 "
+        + _pdf_utf16_literal(metadata_digest)
+        + b" >>",
     )
     xref_offset = stream.tell()
     stream.write(f"xref\n0 {object_count + 1}\n".encode("ascii"))
