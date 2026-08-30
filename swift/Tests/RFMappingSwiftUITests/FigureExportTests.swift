@@ -235,43 +235,13 @@ final class FigureExportTests: XCTestCase {
 
     private func gzip(_ data: Data, to destination: URL) throws {
         let fileManager = FileManager.default
-        let captureDirectory = fileManager.temporaryDirectory
-            .appendingPathComponent("rfmapping-test-gzip-\(UUID().uuidString)", isDirectory: true)
-        try fileManager.createDirectory(at: captureDirectory, withIntermediateDirectories: false)
-        defer { try? fileManager.removeItem(at: captureDirectory) }
-        let inputURL = captureDirectory.appendingPathComponent("input")
-        let outputURL = captureDirectory.appendingPathComponent("stdout")
-        let errorURL = captureDirectory.appendingPathComponent("stderr")
+        let inputURL = fileManager.temporaryDirectory
+            .appendingPathComponent("rfmapping-test-gzip-input-\(UUID().uuidString)")
         try data.write(to: inputURL)
-        try Data().write(to: outputURL)
-        try Data().write(to: errorURL)
-        let output = try FileHandle(forWritingTo: outputURL)
-        let error = try FileHandle(forWritingTo: errorURL)
-        defer {
-            try? output.close()
-            try? error.close()
-        }
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/gzip")
-        process.arguments = ["-c", "--", inputURL.path]
-        process.standardInput = FileHandle.nullDevice
-        process.standardOutput = output
-        process.standardError = error
-        try process.run()
-        process.waitUntilExit()
-        try output.close()
-        try error.close()
-        let errorData = try Data(contentsOf: errorURL)
-        guard process.terminationStatus == 0 else {
-            let detail = String(data: errorData, encoding: .utf8)?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            throw NSError(
-                domain: "FigureExportTests.gzip",
-                code: Int(process.terminationStatus),
-                userInfo: [NSLocalizedDescriptionKey: detail ?? "gzip failed"]
-            )
-        }
-        let compressed = try Data(contentsOf: outputURL)
+        defer { try? fileManager.removeItem(at: inputURL) }
+        let compressed = try POSIXGzipRunner.run(
+            arguments: ["-c", "--", inputURL.path]
+        )
         try compressed.write(to: destination)
     }
 
