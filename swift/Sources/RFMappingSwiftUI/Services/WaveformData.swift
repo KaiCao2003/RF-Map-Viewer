@@ -1,6 +1,3 @@
-import Darwin
-import Darwin.crt_externs
-import Dispatch
 import Foundation
 
 enum WaveformChannelMode: String, CaseIterable, Codable, Identifiable, Hashable, Sendable {
@@ -71,247 +68,6 @@ enum WaveformArtifactError: LocalizedError, Equatable {
         case .missingUnit(let unitID, let scope):
             "Unit \(unitID) is not available in this \(scope) waveform artifact."
         }
-    }
-}
-
-enum POSIXGzipRunnerError: LocalizedError {
-    case invalidTimeout
-    case setup(String)
-    case spawn(String)
-    case wait(String)
-    case timedOut(TimeInterval)
-    case failed(String)
-    case output(String)
-
-    var errorDescription: String? {
-        switch self {
-        case .invalidTimeout:
-            "gzip timeout must be finite and positive."
-        case .setup(let detail):
-            "Could not prepare gzip: \(detail)"
-        case .spawn(let detail):
-            "Could not start gzip: \(detail)"
-        case .wait(let detail):
-            "Could not wait for gzip: \(detail)"
-        case .timedOut(let seconds):
-            "gzip exceeded its \(String(format: "%.1f", seconds))-second timeout."
-        case .failed(let detail):
-            detail
-        case .output(let detail):
-            "Could not read gzip output: \(detail)"
-        }
-    }
-}
-
-/// Runs the system gzip without Foundation `Process` or `Pipe`. Child stdout
-/// and stderr are regular files, so neither side can block on pipe capacity or
-/// EOF ownership. The child is always reaped, including the bounded timeout
-/// path used for corrupt or otherwise non-terminating inputs.
-enum POSIXGzipRunner {
-    private static let executable = "/usr/bin/gzip"
-    private static let pollIntervalMicroseconds: useconds_t = 10_000
-
-    static func run(
-        arguments: [String],
-        timeout: TimeInterval = 10
-    ) throws -> Data {
-        guard timeout.isFinite, timeout > 0 else {
-            throw POSIXGzipRunnerError.invalidTimeout
-        }
-
-        let fileManager = FileManager.default
-        let captureDirectory = fileManager.temporaryDirectory
-            .appendingPathComponent("rfmapping-gzip-\(UUID().uuidString)", isDirectory: true)
-        do {
-            try fileManager.createDirectory(
-                at: captureDirectory,
-                withIntermediateDirectories: false
-            )
-        } catch {
-            throw POSIXGzipRunnerError.setup(error.localizedDescription)
-        }
-        defer { try? fileManager.removeItem(at: captureDirectory) }
-
-        let standardOutputURL = captureDirectory.appendingPathComponent("stdout")
-        let standardErrorURL = captureDirectory.appendingPathComponent("stderr")
-        var standardInputDescriptor = Darwin.open("/dev/null", O_RDONLY)
-        var standardOutputDescriptor = standardOutputURL.path.withCString {
-            Darwin.open($0, O_WRONLY | O_CREAT | O_TRUNC, mode_t(S_IRUSR | S_IWUSR))
-        }
-        var standardErrorDescriptor = standardErrorURL.path.withCString {
-            Darwin.open($0, O_WRONLY | O_CREAT | O_TRUNC, mode_t(S_IRUSR | S_IWUSR))
-        }
-        defer {
-            closeDescriptor(&standardInputDescriptor)
-            closeDescriptor(&standardOutputDescriptor)
-            closeDescriptor(&standardErrorDescriptor)
-        }
-        guard standardInputDescriptor >= 0 else {
-            throw POSIXGzipRunnerError.setup(posixMessage(errno))
-        }
-        guard standardOutputDescriptor >= 0 else {
-            throw POSIXGzipRunnerError.setup(posixMessage(errno))
-        }
-        guard standardErrorDescriptor >= 0 else {
-            throw POSIXGzipRunnerError.setup(posixMessage(errno))
-        }
-
-        var fileActions: posix_spawn_file_actions_t?
-        let initializationResult = posix_spawn_file_actions_init(&fileActions)
-        guard initializationResult == 0 else {
-            throw POSIXGzipRunnerError.setup(posixMessage(initializationResult))
-        }
-        defer { _ = posix_spawn_file_actions_destroy(&fileActions) }
-        try addFileAction(
-            &fileActions,
-            source: standardInputDescriptor,
-            destination: STDIN_FILENO
-        )
-        try addFileAction(
-            &fileActions,
-            source: standardOutputDescriptor,
-            destination: STDOUT_FILENO
-        )
-        try addFileAction(
-            &fileActions,
-            source: standardErrorDescriptor,
-            destination: STDERR_FILENO
-        )
-
-        var allocatedArguments: [UnsafeMutablePointer<CChar>] = []
-        defer { allocatedArguments.forEach { free($0) } }
-        for value in [executable] + arguments {
-            guard let duplicate = strdup(value) else {
-                throw POSIXGzipRunnerError.setup("Could not allocate gzip arguments.")
-            }
-            allocatedArguments.append(duplicate)
-        }
-        var argv: [UnsafeMutablePointer<CChar>?] = allocatedArguments.map { Optional($0) }
-        argv.append(nil)
-
-        var processID: pid_t = 0
-        let spawnResult = argv.withUnsafeMutableBufferPointer { buffer in
-            executable.withCString { executablePath in
-                posix_spawn(
-                    &processID,
-                    executablePath,
-                    &fileActions,
-                    nil,
-                    buffer.baseAddress,
-                    _NSGetEnviron()!.pointee
-                )
-            }
-        }
-        closeDescriptor(&standardInputDescriptor)
-        closeDescriptor(&standardOutputDescriptor)
-        closeDescriptor(&standardErrorDescriptor)
-        guard spawnResult == 0 else {
-            throw POSIXGzipRunnerError.spawn(posixMessage(spawnResult))
-        }
-
-        let waitStatus = try waitForExit(processID, timeout: timeout)
-        let errorData: Data
-        do {
-            errorData = try Data(contentsOf: standardErrorURL)
-        } catch {
-            throw POSIXGzipRunnerError.output(
-                "stderr could not be read: \(error.localizedDescription)"
-            )
-        }
-        let errorText = String(data: errorData, encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        if let exitCode = normalExitCode(waitStatus) {
-            guard exitCode == 0 else {
-                throw POSIXGzipRunnerError.failed(
-                    "gzip exited with status \(exitCode)"
-                        + (errorText?.isEmpty == false ? ": \(errorText!)" : ".")
-                )
-            }
-        } else {
-            let signal = waitStatus & 0x7f
-            throw POSIXGzipRunnerError.failed(
-                "gzip terminated by signal \(signal)"
-                    + (errorText?.isEmpty == false ? ": \(errorText!)" : ".")
-            )
-        }
-
-        do {
-            return try Data(contentsOf: standardOutputURL)
-        } catch {
-            throw POSIXGzipRunnerError.output(error.localizedDescription)
-        }
-    }
-
-    private static func addFileAction(
-        _ fileActions: inout posix_spawn_file_actions_t?,
-        source: Int32,
-        destination: Int32
-    ) throws {
-        let duplicateResult = posix_spawn_file_actions_adddup2(
-            &fileActions,
-            source,
-            destination
-        )
-        guard duplicateResult == 0 else {
-            throw POSIXGzipRunnerError.setup(posixMessage(duplicateResult))
-        }
-        if source != destination {
-            let closeResult = posix_spawn_file_actions_addclose(&fileActions, source)
-            guard closeResult == 0 else {
-                throw POSIXGzipRunnerError.setup(posixMessage(closeResult))
-            }
-        }
-    }
-
-    private static func waitForExit(
-        _ processID: pid_t,
-        timeout: TimeInterval
-    ) throws -> Int32 {
-        let timeoutNanoseconds = UInt64(min(timeout * 1_000_000_000, Double(UInt64.max)))
-        let start = DispatchTime.now().uptimeNanoseconds
-        var status: Int32 = 0
-        while true {
-            let result = waitpid(processID, &status, WNOHANG)
-            if result == processID { return status }
-            if result == -1 {
-                let waitError = errno
-                if waitError == EINTR { continue }
-                terminateAndReap(processID)
-                throw POSIXGzipRunnerError.wait(posixMessage(waitError))
-            }
-            let elapsed = DispatchTime.now().uptimeNanoseconds - start
-            if elapsed >= timeoutNanoseconds {
-                terminateAndReap(processID)
-                throw POSIXGzipRunnerError.timedOut(timeout)
-            }
-            _ = usleep(pollIntervalMicroseconds)
-        }
-    }
-
-    private static func terminateAndReap(_ processID: pid_t) {
-        if Darwin.kill(processID, SIGKILL) == -1, errno != ESRCH { return }
-        var status: Int32 = 0
-        while true {
-            let result = waitpid(processID, &status, 0)
-            if result == processID || (result == -1 && errno == ECHILD) { return }
-            if result == -1 && errno == EINTR { continue }
-            return
-        }
-    }
-
-    private static func normalExitCode(_ status: Int32) -> Int32? {
-        guard status & 0x7f == 0 else { return nil }
-        return (status >> 8) & 0xff
-    }
-
-    private static func closeDescriptor(_ descriptor: inout Int32) {
-        guard descriptor >= 0 else { return }
-        _ = Darwin.close(descriptor)
-        descriptor = -1
-    }
-
-    private static func posixMessage(_ code: Int32) -> String {
-        String(cString: strerror(code))
     }
 }
 
@@ -789,14 +545,29 @@ final class WaveformArtifactStore: @unchecked Sendable {
         if let cached { return cached }
 
         let url = try templateURL(for: summary)
-        let data: Data
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/gzip")
+        process.arguments = ["-dc", "--", url.path]
+        let standardOutput = Pipe()
+        let standardError = Pipe()
+        process.standardOutput = standardOutput
+        process.standardError = standardError
         do {
-            data = try POSIXGzipRunner.run(
-                arguments: ["-dc", "--", url.path]
-            )
+            try process.run()
         } catch {
             throw WaveformArtifactError.decompression(
-                "Could not decompress \(url.lastPathComponent): \(error.localizedDescription)"
+                "Could not start gzip for \(url.lastPathComponent): \(error.localizedDescription)"
+            )
+        }
+        let data = standardOutput.fileHandleForReading.readDataToEndOfFile()
+        let errorData = standardError.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            let detail = String(data: errorData, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            throw WaveformArtifactError.decompression(
+                "Could not decompress \(url.lastPathComponent)"
+                    + (detail?.isEmpty == false ? ": \(detail!)" : ".")
             )
         }
         guard var text = String(data: data, encoding: .utf8) else {

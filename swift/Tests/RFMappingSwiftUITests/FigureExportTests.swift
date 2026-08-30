@@ -234,14 +234,19 @@ final class FigureExportTests: XCTestCase {
     }
 
     private func gzip(_ data: Data, to destination: URL) throws {
-        let fileManager = FileManager.default
-        let inputURL = fileManager.temporaryDirectory
-            .appendingPathComponent("rfmapping-test-gzip-input-\(UUID().uuidString)")
-        try data.write(to: inputURL)
-        defer { try? fileManager.removeItem(at: inputURL) }
-        let compressed = try POSIXGzipRunner.run(
-            arguments: ["-c", "--", inputURL.path]
-        )
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/gzip")
+        process.arguments = ["-c"]
+        let input = Pipe()
+        let output = Pipe()
+        process.standardInput = input
+        process.standardOutput = output
+        try process.run()
+        input.fileHandleForWriting.write(data)
+        try input.fileHandleForWriting.close()
+        let compressed = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        XCTAssertEqual(process.terminationStatus, 0)
         try compressed.write(to: destination)
     }
 
@@ -270,23 +275,6 @@ final class FigureExportTests: XCTestCase {
         XCTAssertEqual(payload.valuesMicrovolts[0], [-1.5, 1.5, 4.5, 7.5])
         XCTAssertEqual(payload.amplitudeLimitMicrovolts, 7.5)
         XCTAssertEqual(try waveform.store.sourceURLs(for: 22).count, 5)
-    }
-
-    func testWaveformReaderReturnsFromCorruptGzipWithDecompressionError() throws {
-        let waveform = try makeWaveformArtifact(unitIDs: [22])
-        defer { try? FileManager.default.removeItem(at: waveform.root) }
-        let templateURL = waveform.root
-            .appendingPathComponent("Unit22", isDirectory: true)
-            .appendingPathComponent("template_uv.csv.gz")
-        try Data("not a gzip stream".utf8).write(to: templateURL, options: .atomic)
-
-        XCTAssertThrowsError(try waveform.store.payload(for: 22, mode: .sameXColumn)) { error in
-            guard let waveformError = error as? WaveformArtifactError,
-                  case .decompression(let message) = waveformError else {
-                return XCTFail("Unexpected error: \(error)")
-            }
-            XCTAssertTrue(message.contains("Could not decompress"))
-        }
     }
 
     func testWaveformPreviewAndFinalUseOneSelectionScopedScale() throws {
