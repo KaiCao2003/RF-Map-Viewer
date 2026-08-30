@@ -1,7 +1,6 @@
 import AppKit
 import CoreGraphics
 import CryptoKit
-import Darwin
 import Foundation
 import SwiftUI
 
@@ -115,14 +114,6 @@ enum FigureExportRendererError: LocalizedError {
     }
 }
 
-func figureExportHangTrace(_ message: String) {
-    let bytes = Array("[swift-hang] \(message)\n".utf8)
-    bytes.withUnsafeBytes { buffer in
-        guard let baseAddress = buffer.baseAddress else { return }
-        _ = Darwin.write(STDERR_FILENO, baseAddress, buffer.count)
-    }
-}
-
 @MainActor
 struct FigureExportRenderer {
     func descriptors(
@@ -130,32 +121,26 @@ struct FigureExportRenderer {
         data: RFMappingData,
         companions: FigureExportCompanions
     ) -> [FigurePageRenderDescriptor] {
-        figureExportHangTrace("descriptors enter")
         var descriptors: [FigurePageRenderDescriptor] = []
         descriptors.reserveCapacity(configuration.selectedUnitIDs.count * configuration.pages.count)
         let needsWaveform = configuration.pages.contains { page in
             page.plots.contains { $0.kind.requiresWaveform }
         }
-        figureExportHangTrace("descriptors shared-waveform begin")
         let sharedWaveformLimit = needsWaveform
             ? sharedWaveformAmplitudeLimit(
                 companions: companions,
                 unitIDs: configuration.selectedUnitIDs
             )
             : nil
-        figureExportHangTrace("descriptors shared-waveform end")
-        figureExportHangTrace("descriptors shared-rf begin")
         let sharedRFRange = sharedRFRange(
             configuration: configuration,
             data: data
         )
-        figureExportHangTrace("descriptors shared-rf end")
         var ordinal = 0
         // The loop order is an explicit invariant: unit-major, then page-major.
         for unitID in configuration.selectedUnitIDs {
             let originalIndex = data.unitIndex(forUnitID: unitID) ?? -1
             for (pageIndex, page) in configuration.pages.enumerated() {
-                figureExportHangTrace("descriptors page begin unit=\(unitID) page=\(pageIndex)")
                 descriptors.append(makeDescriptor(
                     outputOrdinal: ordinal,
                     unitID: unitID,
@@ -168,11 +153,9 @@ struct FigureExportRenderer {
                     sharedWaveformLimit: sharedWaveformLimit,
                     sharedRFRange: sharedRFRange
                 ))
-                figureExportHangTrace("descriptors page end unit=\(unitID) page=\(pageIndex)")
                 ordinal += 1
             }
         }
-        figureExportHangTrace("descriptors exit")
         return descriptors
     }
 
@@ -309,8 +292,7 @@ struct FigureExportRenderer {
         sharedRFRange: FigureScalarRange?
     ) -> FigurePageRenderDescriptor {
         let plots = page.plots.map { placement in
-            figureExportHangTrace("plot begin \(placement.kind.rawValue)")
-            let descriptor = makePlotDescriptor(
+            makePlotDescriptor(
                 placement: placement,
                 unitID: unitID,
                 originalUnitIndex: originalUnitIndex,
@@ -318,8 +300,6 @@ struct FigureExportRenderer {
                 sharedWaveformLimit: sharedWaveformLimit,
                 sharedRFRange: sharedRFRange
             )
-            figureExportHangTrace("plot end \(placement.kind.rawValue)")
-            return descriptor
         }
         return FigurePageRenderDescriptor(
             id: stablePageID(unitID: unitID, pageID: page.id),
@@ -485,7 +465,6 @@ struct FigureExportRenderer {
         configuration: FigureExportConfiguration,
         data: RFMappingData
     ) -> FigureScalarRange? {
-        figureExportHangTrace("shared-rf helper enter")
         let needsRF = configuration.pages.contains { page in
             page.plots.contains { plot in
                 plot.kind == .rfCartesian || plot.kind == .rfPolar
@@ -495,7 +474,6 @@ struct FigureExportRenderer {
         var values: [Double] = []
         for unitID in configuration.selectedUnitIDs {
             guard data.unitIndex(forUnitID: unitID) != nil else { continue }
-            figureExportHangTrace("shared-rf store init begin unit=\(unitID)")
             let store = RFMappingStore(
                 initialData: data,
                 loadDefault: false,
@@ -503,25 +481,19 @@ struct FigureExportRenderer {
                 discoverCompanions: false,
                 unitQualityFilterEnabled: false
             )
-            figureExportHangTrace("shared-rf store init end unit=\(unitID)")
-            figureExportHangTrace("shared-rf sync begin unit=\(unitID)")
             store.applyViewerSyncState(configuration.viewerSnapshot)
-            figureExportHangTrace("shared-rf sync end unit=\(unitID)")
             store.selectUnitID(unitID, resetInteraction: false)
-            figureExportHangTrace("shared-rf plot begin unit=\(unitID)")
             values.append(contentsOf: store.currentHeatmapPlot().matrix
                 .flatMap { $0 }
                 .compactMap { value -> Double? in
                     guard let value, value.isFinite else { return nil }
                     return value
                 })
-            figureExportHangTrace("shared-rf plot end unit=\(unitID)")
         }
         guard let low = values.min(), let high = values.max() else {
             return FigureScalarRange(vmin: 0, vmax: 1)
         }
         let range = FigureScalarRange(vmin: low, vmax: high)
-        figureExportHangTrace("shared-rf helper exit")
         return range
     }
 

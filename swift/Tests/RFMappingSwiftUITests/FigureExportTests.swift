@@ -509,32 +509,23 @@ final class FigureExportTests: XCTestCase {
     }
 
     func testAvailableCompanionsResolveAllElevenKindsToRealRendererPayloads() throws {
-        figureExportHangTrace("test available enter")
         let data = try makeData()
-        figureExportHangTrace("test available data end")
         let waveform = try makeWaveformArtifact()
-        figureExportHangTrace("test available waveform fixture end")
         defer { try? FileManager.default.removeItem(at: waveform.root) }
         let page = FigurePageTemplate(
             name: "Every view",
             plots: FigureExportPlotKind.allCases.map { FigurePlotPlacement(kind: $0) }
         )
-        figureExportHangTrace("test available page end")
         var companions = FigureExportCompanions()
-        figureExportHangTrace("test available hd begin")
         companions.hdTuning = try makeHDTuningData(unitID: 22)
-        figureExportHangTrace("test available hd end")
         companions.probeGeometry = try makeProbeGeometry()
-        figureExportHangTrace("test available probe end")
         companions.waveformArtifact = waveform.store
 
-        figureExportHangTrace("test available descriptors begin")
         let descriptor = try XCTUnwrap(FigureExportRenderer().descriptors(
             configuration: configuration(unitIDs: [22], pages: [page]),
             data: data,
             companions: companions
         ).first)
-        figureExportHangTrace("test available descriptors end")
 
         XCTAssertEqual(descriptor.plots.map(\.kind), FigureExportPlotKind.allCases)
         XCTAssertTrue(descriptor.plots.allSatisfy { $0.placeholder == nil })
@@ -559,7 +550,6 @@ final class FigureExportTests: XCTestCase {
                 XCTAssertNil(plot.waveformPayload)
             }
         }
-        figureExportHangTrace("test available assertions end")
     }
 
     func testProbePayloadRequiresSelectedUnitPosition() throws {
