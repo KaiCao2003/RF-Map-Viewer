@@ -33,7 +33,10 @@ func strictHDTuningPayload(
         )
         var rates = zip(counts, occupancyTime).map { pair -> Any in
             let (count, occupied) = pair
-            occupied == 0 ? NSNull() : Double(count) / occupied
+            if occupied == 0 {
+                return NSNull() as Any
+            }
+            return (Double(count) / occupied) as Any
         }
         if let zeroOccupancyBin {
             counts[zeroOccupancyBin] = 0
