@@ -81,6 +81,7 @@ for marker in \
   'METADATA_AUDITOR="$SCRIPT_DIR/verify_python_stable_release_metadata.py"' \
   '"$ROOT_DIR/rfmapping_gui.py"' \
   '"$APP_BINARY" --self-test "$SMOKE_JSON"' \
+  '"$APP_BINARY" --self-test-isolated "$SMOKE_JSON"' \
   '"$APP_BINARY" --self-test-export "$EXPORT_SMOKE_DIR"' \
   'Archive must not bundle RF, tuning-curve, probe, or smoke sample data' \
   'Add :CFBundleDocumentTypes:1:CFBundleTypeExtensions:0 string json' \

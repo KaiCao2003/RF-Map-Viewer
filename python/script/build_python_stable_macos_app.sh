@@ -407,6 +407,7 @@ verify_arm64_macho_files
 
 # These smoke tests run the frozen executable, not the build interpreter.
 "$APP_BINARY" --self-test "$SMOKE_JSON"
+"$APP_BINARY" --self-test-isolated "$SMOKE_JSON"
 "$APP_BINARY" --self-test-dnd
 EXPORT_SMOKE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/rfmapping-stable-export-smoke.XXXXXX")"
 "$APP_BINARY" --self-test-export "$EXPORT_SMOKE_DIR"

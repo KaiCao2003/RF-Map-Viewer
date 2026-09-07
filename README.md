@@ -83,6 +83,15 @@ channels in the viewer and Figure Composer. All three use exact positive
 tuning-session selection (default `1`), `P` for rectangle/polar layout, and
 `Shift-P` for palette cycling.
 
+The stable viewers also share the Python responsiveness improvements: document
+loads discard superseded selections, repeated temporal calculations reuse
+cached results, and titles identify the current file. Swift reuses grouped
+count windows and pooled occupancy across its plots. Web stores count caches
+as compact integers and coalesces canvas draws. Windows uses the same Python
+source as macOS; both packaging smoke tests exercise the spawned loader.
+Plot range continues to affect only the 2-D RF display, while timelines retain
+the full time axis.
+
 ## Remote validation
 
 Project code is run on `RFMAPPING_REMOTE_HOST` from your untracked `.env.local` with `~/.virtualenvs/rfmapping`:

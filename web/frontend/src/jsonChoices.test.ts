@@ -38,6 +38,6 @@ describe("Current JSON choices", () => {
 
   it("sets and replaces the current JSON query without dropping other parameters", () => {
     expect(urlForJsonSource("http://viewer/rfmapping/?mode=test&json=old", "/data/rfmapping/a b.json"))
-      .toBe("http://viewer/rfmapping/?mode=test&json=%2Fmnt%2Fsenzailab%2Fa+b.json");
+      .toBe("http://viewer/rfmapping/?mode=test&json=%2Fdata%2Frfmapping%2Fa+b.json");
   });
 });

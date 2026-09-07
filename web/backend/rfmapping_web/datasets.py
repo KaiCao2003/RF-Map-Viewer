@@ -10,6 +10,7 @@ import time
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
@@ -64,7 +65,8 @@ REQUIRED_TOP_LEVEL = {
     "occupancyTimeSecSize",
     "occupancyTimeDefinition",
 }
-CACHE_SCHEMA_VERSION = 2
+CACHE_SCHEMA_VERSION = 3
+COUNT_DTYPES = ("|u1", "<u2", "<u4", "<u8")
 
 EXPECTED_RESPONSE_UNITS = "spike_count"
 EXPECTED_RESPONSE_NORMALIZATION = "none"
@@ -118,9 +120,12 @@ def _exclusive_lock(path: Path) -> Iterator[None]:
 def _read_metadata_stream(path: Path) -> dict[str, Any]:
     builders: dict[str, ObjectBuilder] = {}
     seen: set[str] = set()
+    maximum_count: int | Decimal = 0
     try:
         with path.open("rb") as handle:
-            for prefix, event, value in IJSON_BACKEND.parse(handle, use_float=True):
+            # Decimal mode also keeps unsigned 64-bit JSON integers intact;
+            # YAJL's float mode rejects integers above signed int64.
+            for prefix, event, value in IJSON_BACKEND.parse(handle, use_float=False):
                 if prefix == "" and event == "map_key":
                     if value in seen:
                         raise DatasetValidationError(
@@ -129,9 +134,15 @@ def _read_metadata_stream(path: Path) -> dict[str, Any]:
                     seen.add(value)
                     continue
                 root_name = prefix.split(".", 1)[0]
+                if root_name == "unitsSpikeCounts" and event == "number":
+                    # This pass already visits every count. Discover its storage
+                    # width without materializing the dataset or adding a pass.
+                    maximum_count = max(maximum_count, value)
                 if root_name in METADATA_FIELDS:
                     builder = builders.setdefault(root_name, ObjectBuilder())
-                    builder.event(event, value)
+                    builder.event(
+                        event, float(value) if isinstance(value, Decimal) else value
+                    )
     except DatasetValidationError:
         raise
     except (OSError, JSONError, TypeError, ValueError, OverflowError) as exc:
@@ -145,6 +156,12 @@ def _read_metadata_stream(path: Path) -> dict[str, Any]:
         builder = builders.get(name)
         if builder is not None:
             result[name] = builder.value
+    for dtype in COUNT_DTYPES:
+        if maximum_count <= np.iinfo(dtype).max:
+            result["countsDtype"] = dtype
+            break
+    else:
+        raise DatasetValidationError("Spike counts must be representable as uint64")
     return result
 
 
@@ -343,6 +360,7 @@ def _normalize_metadata(raw: dict[str, Any]) -> dict[str, Any]:
         )
     return {
         "shape": shape,
+        "countsDtype": raw["countsDtype"],
         "unitPool": unit_pool,
         "xPositions": x_positions,
         "yPositions": y_positions,
@@ -372,36 +390,16 @@ def _write_counts_stream(
             try:
                 with source.open("rb") as handle:
                     units = IJSON_BACKEND.items(
-                        handle, "unitsSpikeCounts.item", use_float=True
+                        handle, "unitsSpikeCounts.item", use_float=False
                     )
                     for unit_index, unit in enumerate(units):
                         if unit_index >= n_units:
                             raise DatasetValidationError(
                                 "unitsSpikeCounts first dimension exceeds unitsSpikeCountsSize"
                             )
-                        if not _counts_are_numeric(unit):
-                            raise DatasetValidationError(
-                                f"Unit {unit_index} contains non-numeric values"
-                            )
-                        try:
-                            array = np.asarray(unit, dtype="<f8")
-                        except (TypeError, ValueError, OverflowError) as exc:
-                            raise DatasetValidationError(
-                                f"Unit {unit_index} contains non-numeric values"
-                            ) from exc
-                        expected = (n_y, n_x, n_bins)
-                        if array.shape != expected:
-                            raise DatasetValidationError(
-                                f"Unit {unit_index} has shape {array.shape}, expected {expected}"
-                            )
-                        if not np.all(np.isfinite(array)) or np.any(array < 0):
-                            raise DatasetValidationError(
-                                f"Unit {unit_index} contains non-finite or negative counts"
-                            )
-                        if np.any(array != np.floor(array)):
-                            raise DatasetValidationError(
-                                f"Unit {unit_index} contains non-integer spike counts"
-                            )
+                        array = _compact_unit_counts(
+                            unit, (n_y, n_x, n_bins), metadata["countsDtype"], unit_index
+                        )
                         if np.any(array[zero_occupancy_mask, :] != 0):
                             raise DatasetValidationError(
                                 "occupancyTimeSec is zero where spike counts are nonzero"
@@ -421,10 +419,69 @@ def _write_counts_stream(
         temporary.unlink(missing_ok=True)
 
 
-def _counts_are_numeric(value: Any) -> bool:
-    if isinstance(value, list):
-        return all(_counts_are_numeric(child) for child in value)
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
+def _compact_unit_counts(
+    unit: Any, shape: tuple[int, int, int], dtype: str, unit_index: int
+) -> np.ndarray:
+    """Validate one streamed unit before copying directly to compact storage.
+
+    Integer JSON values must not pass through float64: that silently rounds
+    counts above 2**53 and can overflow the selected unsigned storage width.
+    """
+
+    n_y, n_x, n_bins = shape
+    if (
+        not isinstance(unit, list)
+        or len(unit) != n_y
+        or any(not isinstance(row, list) or len(row) != n_x for row in unit)
+        or any(
+            not isinstance(histogram, list) or len(histogram) != n_bins
+            for row in unit
+            for histogram in row
+        )
+    ):
+        raise DatasetValidationError(
+            f"Unit {unit_index} has an invalid shape, expected {shape}"
+        )
+    maximum = np.iinfo(dtype).max
+    for row in unit:
+        for histogram in row:
+            scalar_types = set(map(type, histogram))
+            if not scalar_types.issubset({int, float, Decimal}):
+                raise DatasetValidationError(
+                    f"Unit {unit_index} contains non-numeric values"
+                )
+            if float in scalar_types or Decimal in scalar_types:
+                for value in histogram:
+                    finite = (
+                        value.is_finite()
+                        if isinstance(value, Decimal)
+                        else math.isfinite(value)
+                    )
+                    if not finite or value < 0:
+                        raise DatasetValidationError(
+                            f"Unit {unit_index} contains non-finite or negative counts"
+                        )
+                    integral = (
+                        value == value.to_integral_value()
+                        if isinstance(value, Decimal)
+                        else type(value) is int or value.is_integer()
+                    )
+                    if not integral:
+                        raise DatasetValidationError(
+                            f"Unit {unit_index} contains non-integer spike counts"
+                        )
+            if min(histogram) < 0:
+                raise DatasetValidationError(
+                    f"Unit {unit_index} contains non-finite or negative counts"
+                )
+            if max(histogram) > maximum:
+                raise DatasetValidationError(
+                    f"Unit {unit_index} spike counts exceed their storage width"
+                )
+    try:
+        return np.asarray(unit, dtype=dtype)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise DatasetValidationError(f"Unable to parse unitsSpikeCounts: {exc}") from exc
 
 
 @dataclass(frozen=True)
@@ -450,7 +507,7 @@ class MemmapCache:
         self.on_evict = on_evict
 
     def _paths(self, key: str) -> tuple[Path, Path]:
-        return self.root / f"{key}.f64", self.root / f"{key}.meta.json"
+        return self.root / f"{key}.counts", self.root / f"{key}.meta.json"
 
     def _load_valid(
         self,
@@ -462,7 +519,11 @@ class MemmapCache:
         try:
             with metadata_path.open("r", encoding="utf-8") as handle:
                 metadata = json.load(handle)
-            expected_bytes = math.prod(metadata["shape"]) * 8
+            if metadata.get("countsDtype") not in COUNT_DTYPES:
+                return None
+            expected_bytes = math.prod(metadata["shape"]) * np.dtype(
+                metadata["countsDtype"]
+            ).itemsize
             if (
                 metadata.get("schemaVersion") != CACHE_SCHEMA_VERSION
                 or metadata.get("cacheKey") != key
@@ -487,7 +548,9 @@ class MemmapCache:
             if metadata is None:
                 raw = _read_metadata_stream(source)
                 normalized = _normalize_metadata(raw)
-                expected_bytes = math.prod(normalized["shape"]) * 8
+                expected_bytes = math.prod(normalized["shape"]) * np.dtype(
+                    normalized["countsDtype"]
+                ).itemsize
                 if expected_bytes > self.max_bytes:
                     raise DatasetValidationError(
                         f"Decoded RF dataset exceeds cache limit ({self.max_bytes} bytes)"
@@ -503,6 +566,9 @@ class MemmapCache:
                     "accessedAt": now,
                 }
                 _atomic_json(metadata_path, metadata)
+                # Older releases stored the same source entirely as float64.
+                # Remove that obsolete entry only after its replacement exists.
+                (self.root / f"{key}.f64").unlink(missing_ok=True)
             else:
                 metadata["accessedAt"] = time.time()
                 _atomic_json(metadata_path, metadata)
@@ -521,10 +587,15 @@ class MemmapCache:
             total = 0
             for metadata_path in self.root.glob("*.meta.json"):
                 key = metadata_path.name[: -len(".meta.json")]
-                data_path = self.root / f"{key}.f64"
                 try:
                     with metadata_path.open("r", encoding="utf-8") as handle:
                         metadata = json.load(handle)
+                    suffix = (
+                        ".counts"
+                        if metadata.get("schemaVersion") == CACHE_SCHEMA_VERSION
+                        else ".f64"
+                    )
+                    data_path = self.root / f"{key}{suffix}"
                     size = metadata_path.stat().st_size + data_path.stat().st_size
                     accessed = float(metadata.get("accessedAt", 0))
                 except (OSError, ValueError, TypeError, json.JSONDecodeError):
@@ -659,16 +730,18 @@ class DatasetStore:
                 raise KeyError(cluster_id) from exc
             _n_units, n_y, n_x, n_bins = metadata["shape"]
             values_per_unit = n_y * n_x * n_bins
+            dtype = np.dtype(metadata["countsDtype"])
             try:
                 mapped = np.memmap(
                     record.cache.data_path,
-                    dtype="<f8",
+                    dtype=dtype,
                     mode="r",
-                    offset=unit_index * values_per_unit * 8,
+                    offset=unit_index * values_per_unit * dtype.itemsize,
                     shape=(n_y, n_x, n_bins),
                     order="C",
                 )
-                payload = mapped.tobytes(order="C")
+                # Preserve the existing binary HTTP contract for all clients.
+                payload = np.asarray(mapped, dtype="<f8").tobytes(order="C")
                 del mapped
             except OSError as exc:
                 self._records.pop(record.dataset_id, None)
@@ -688,12 +761,13 @@ class DatasetStore:
                 raise KeyError(cluster_id) from exc
             _n_units, n_y, n_x, n_bins = metadata["shape"]
             values_per_unit = n_y * n_x * n_bins
+            dtype = np.dtype(metadata["countsDtype"])
             try:
                 mapped = np.memmap(
                     record.cache.data_path,
-                    dtype="<f8",
+                    dtype=dtype,
                     mode="r",
-                    offset=unit_index * values_per_unit * 8,
+                    offset=unit_index * values_per_unit * dtype.itemsize,
                     shape=(n_y, n_x, n_bins),
                     order="C",
                 )
@@ -730,18 +804,20 @@ class DatasetStore:
             try:
                 mapped = np.memmap(
                     record.cache.data_path,
-                    dtype="<f8",
+                    dtype=metadata["countsDtype"],
                     mode="r",
                     shape=(n_units, n_y, n_x, n_bins),
                     order="C",
                 )
-                totals = np.asarray(mapped[..., start : end + 1]).sum(axis=3)
-                zero_counts = np.count_nonzero(totals == 0, axis=(1, 2)).astype(
+                # Counts are non-negative, so any() is equivalent to summing
+                # for this filter and cannot overflow uint64 at large counts.
+                occupied = np.any(mapped[..., start : end + 1], axis=3)
+                zero_counts = np.count_nonzero(~occupied, axis=(1, 2)).astype(
                     np.int64,
                     copy=False,
                 )
                 result = [int(value) for value in zero_counts]
-                del totals
+                del occupied
                 del zero_counts
                 del mapped
             except OSError as exc:

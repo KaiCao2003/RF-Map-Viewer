@@ -7,6 +7,28 @@ private enum OccupancyTimePayload {
     case scalar(Double)
 }
 
+/// Decode a large volume in cancellable spatial chunks. Replacing a document
+/// must stop obsolete work before validating every remaining unit.
+private struct CancellableSpikeCounts: Decodable {
+    let values: [[[[Double]]]]
+
+    init(from decoder: Decoder) throws {
+        var units = try decoder.unkeyedContainer()
+        var result: [[[[Double]]]] = []
+        while !units.isAtEnd {
+            try Task.checkCancellation()
+            var rows = try units.nestedUnkeyedContainer()
+            var unit: [[[Double]]] = []
+            while !rows.isAtEnd {
+                try Task.checkCancellation()
+                unit.append(try rows.decode([[Double]].self))
+            }
+            result.append(unit)
+        }
+        values = result
+    }
+}
+
 private struct RFMappingArbitraryCodingKey: CodingKey {
     let stringValue: String
     let intValue: Int?
@@ -77,7 +99,10 @@ private struct RFMappingPayload: Decodable {
                     + missingKeys.joined(separator: ", ")
             )
         }
-        unitsSpikeCounts = try container.decode([[[[Double]]]].self, forKey: .unitsSpikeCounts)
+        unitsSpikeCounts = try container.decode(
+            CancellableSpikeCounts.self,
+            forKey: .unitsSpikeCounts
+        ).values
         unitsSpikeCountsSize = try container.decode([Int].self, forKey: .unitsSpikeCountsSize)
         unitPool = try Self.decodeUnitPool(
             from: container,
@@ -222,6 +247,23 @@ final class RFMappingData: @unchecked Sendable {
         let values: ExactPrefixValues
     }
 
+    private struct CountWindowCache {
+        let unitIndex: Int
+        let groups: [AxisGroup]
+        let matrices: [[[Double]]]
+    }
+
+    private struct SpatialExposure {
+        let pixelIndices: [Int]
+        let occupancyTimeSeconds: Double
+    }
+
+    private struct SpatialExposureCache {
+        let yGroups: [AxisGroup]
+        let xGroups: [AxisGroup]
+        let exposures: [[SpatialExposure]]
+    }
+
     let url: URL
     let counts: [[[[Double]]]]
     let size: (Int, Int, Int, Int)
@@ -250,6 +292,8 @@ final class RFMappingData: @unchecked Sendable {
 
     private var metricsCache: [Int: UnitMetrics] = [:]
     private var prefixCaches: [UnitPrefixCache] = []
+    private var countWindowCaches: [CountWindowCache] = []
+    private var spatialExposureCaches: [SpatialExposureCache] = []
 
     convenience init(url: URL) throws {
         try self.init(data: Data(contentsOf: url, options: .mappedIfSafe), url: url)
@@ -286,6 +330,8 @@ final class RFMappingData: @unchecked Sendable {
         let payload: RFMappingPayload
         do {
             payload = try JSONDecoder().decode(RFMappingPayload.self, from: jsonData)
+        } catch is CancellationError {
+            throw CancellationError()
         } catch let error as RFMappingError {
             throw error
         } catch {
@@ -511,6 +557,122 @@ final class RFMappingData: @unchecked Sendable {
                 )
             }
         }
+    }
+
+    /// Reuse native counts across temporal views, independent of display mode
+    /// or spatial rebinning. Only two layouts are retained, matching the small
+    /// per-unit prefix cache rather than accumulating a volume per UI edit.
+    func countWindows(unitIndex: Int, timeGroups: [AxisGroup]) -> [[[Double]]] {
+        let groups = timeGroups.map { group in
+            AxisGroup(
+                start: max(0, min(nBins - 1, min(group.start, group.end))),
+                end: max(0, min(nBins - 1, max(group.start, group.end)))
+            )
+        }
+        guard !groups.isEmpty else { return [] }
+        if let index = countWindowCaches.firstIndex(where: {
+            $0.unitIndex == unitIndex && $0.groups == groups
+        }) {
+            let cached = countWindowCaches.remove(at: index)
+            countWindowCaches.insert(cached, at: 0)
+            return cached.matrices
+        }
+
+        // A single RF window needs no full-volume prefix allocation. Temporal
+        // queries capture the prefix once instead of looking it up per pixel.
+        let prefix = groups.count > 1 ? prefixValues(for: unitIndex) : nil
+        let unit = rfMaps[unitIndex].spikeCounts
+        let stride = nBins + 1
+        let matrices = groups.map { group in
+            (0..<nY).map { yIndex in
+                (0..<nX).map { xIndex -> Double in
+                    let hist = unit[yIndex][xIndex]
+                    guard let prefix else {
+                        return compensatedSum(hist[group.start...group.end])
+                    }
+                    return prefixRangeCount(
+                        prefix,
+                        base: (yIndex * nX + xIndex) * stride,
+                        low: group.start,
+                        high: group.end,
+                        hist: hist
+                    )
+                }
+            }
+        }
+        countWindowCaches.insert(
+            CountWindowCache(unitIndex: unitIndex, groups: groups, matrices: matrices),
+            at: 0
+        )
+        if countWindowCaches.count > 2 { countWindowCaches.removeLast() }
+        return matrices
+    }
+
+    /// Pool all requested frames with one occupancy layout. Source order and
+    /// compensated summation match the scalar observation API exactly.
+    func spatialObservationFrames(
+        unitIndex: Int,
+        timeGroups: [AxisGroup],
+        yGroups: [AxisGroup],
+        xGroups: [AxisGroup]
+    ) -> [[[RFSpatialObservations]]] {
+        guard !timeGroups.isEmpty, !yGroups.isEmpty, !xGroups.isEmpty else { return [] }
+        let frames = countWindows(unitIndex: unitIndex, timeGroups: timeGroups)
+        let exposures = spatialExposures(yGroups: yGroups, xGroups: xGroups)
+        return frames.map { frame in
+            exposures.map { row in
+                row.map { exposure in
+                    RFSpatialObservations(
+                        count: compensatedSum(exposure.pixelIndices.lazy.map {
+                            frame[$0 / self.nX][$0 % self.nX]
+                        }),
+                        occupancyTimeSeconds: exposure.occupancyTimeSeconds,
+                        sourcePixelCount: exposure.pixelIndices.count
+                    )
+                }
+            }
+        }
+    }
+
+    private func spatialExposures(
+        yGroups: [AxisGroup],
+        xGroups: [AxisGroup]
+    ) -> [[SpatialExposure]] {
+        if let index = spatialExposureCaches.firstIndex(where: {
+            $0.yGroups == yGroups && $0.xGroups == xGroups
+        }) {
+            let cached = spatialExposureCaches.remove(at: index)
+            spatialExposureCaches.insert(cached, at: 0)
+            return cached.exposures
+        }
+        let exposures = yGroups.map { yGroup in
+            xGroups.map { xGroup in
+                let yStart = max(0, min(nY - 1, min(yGroup.start, yGroup.end)))
+                let yEnd = max(0, min(nY - 1, max(yGroup.start, yGroup.end)))
+                let xStart = max(0, min(nX - 1, min(xGroup.start, xGroup.end)))
+                let xEnd = max(0, min(nX - 1, max(xGroup.start, xGroup.end)))
+                var indices: [Int] = []
+                var occupancy: [Double] = []
+                for yIndex in yStart...yEnd {
+                    for xIndex in xStart...xEnd {
+                        let value = occupancyTimeSeconds[yIndex][xIndex]
+                        guard value > 0 else { continue }
+                        indices.append(yIndex * nX + xIndex)
+                        occupancy.append(value)
+                    }
+                }
+                return SpatialExposure(
+                    pixelIndices: indices,
+                    occupancyTimeSeconds: compensatedSum(occupancy)
+                )
+            }
+        }
+        spatialExposureCaches.insert(
+            SpatialExposureCache(yGroups: yGroups, xGroups: xGroups, exposures: exposures),
+            at: 0
+        )
+        if spatialExposureCaches.count > 8 { spatialExposureCaches.removeLast() }
+        return exposures
     }
 
     /// Counts native `(y, x)` RF bins that have no spikes in the inclusive

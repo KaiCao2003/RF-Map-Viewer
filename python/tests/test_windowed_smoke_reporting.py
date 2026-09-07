@@ -1,11 +1,38 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
 import rfmapping_gui as gui
+
+
+def test_spawned_loader_smoke_reports_success_without_opening_gui(tmp_path: Path) -> None:
+    report = tmp_path / "isolated-smoke.json"
+    fixture = Path(__file__).parent / "fixtures" / "release_smoke_rf.json"
+    arguments = ["--self-test-isolated", str(fixture)]
+    result = subprocess.run(
+        [sys.executable, str(Path(gui.__file__).resolve()), *arguments],
+        env={**os.environ, gui.WINDOWED_SMOKE_REPORT_ENV: str(report)},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert json.loads(report.read_text(encoding="utf-8")) == {
+        "argv": arguments,
+        "exitCode": 0,
+        "status": "success",
+    }
+
+
+def test_spawned_loader_smoke_requires_an_explicit_file(capsys) -> None:
+    assert gui.main(["--self-test-isolated"]) == 2
+    assert "--self-test-isolated requires an explicit RF mapping file" in capsys.readouterr().err
 
 
 def test_windowed_smoke_report_records_success(

@@ -14977,8 +14977,8 @@ class FigureExportWindow(tk.Toplevel):
         super().destroy()
 
 
-def run_self_test(path: Path) -> None:
-    data = RFMappingData(path)
+def run_self_test(path: Path, *, isolated: bool = False) -> None:
+    data = RFMappingData(path, isolated=isolated)
     assert data.size == (data.n_units, data.n_y, data.n_x, data.n_bins)
     assert len(data.unit_pool) == data.n_units
     assert len(data.time_bin_edges) == data.n_bins + 1
@@ -15210,6 +15210,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument("--self-test", action="store_true", help="Run data/model tests and exit.")
     parser.add_argument(
+        "--self-test-isolated",
+        action="store_true",
+        help="Run data/model tests through the spawned document loader and exit.",
+    )
+    parser.add_argument(
         "--self-test-dnd",
         action="store_true",
         help="Load the bundled TkDND runtime and exit.",
@@ -15254,15 +15259,13 @@ def main(argv: list[str] | None = None) -> int:
             return 2
     else:
         path = None
-    if args.self_test and path is None:
-        _cli_print("--self-test requires an explicit RF mapping file", error=True)
-        return 2
-    if args.self_test and not path.exists():
-        _cli_print(f"RF mapping file not found: {path}", error=True)
-        return 2
-    if args.self_test:
+    if args.self_test or args.self_test_isolated:
+        if path is None:
+            flag = "--self-test-isolated" if args.self_test_isolated else "--self-test"
+            _cli_print(f"{flag} requires an explicit RF mapping file", error=True)
+            return 2
         assert path is not None
-        run_self_test(path)
+        run_self_test(path, isolated=args.self_test_isolated)
         return 0
 
     if not TK_AVAILABLE:

@@ -1,5 +1,6 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { canvasFont } from "../canvasFont";
+import { useFrameEffect } from "../useFrameEffect";
 import {
   allPositionsTimelineValues,
   finiteMinMax,
@@ -336,7 +337,12 @@ function tooltipLines(
   ];
 }
 
-export function SpatialPlot({
+export function SpatialPlot(props: SpatialPlotProps) {
+  const deferred = useDeferredValue(props);
+  return <SpatialPlotContent {...deferred} />;
+}
+
+const SpatialPlotContent = memo(function SpatialPlotContent({
   meta,
   counts,
   state,
@@ -351,12 +357,10 @@ export function SpatialPlot({
   const { width, height } = useContainerSize(wrapper, 480, 280);
   const [tooltip, setTooltip] = useState<TooltipState | null>(null);
   const groups = useMemo(() => timeGroups(meta, state.timeResolutionMs), [meta, state.timeResolutionMs]);
-
-  useEffect(() => {
-    if (!canvas.current) return;
-    const context = contextFor(canvas.current, width, height);
+  const response = useMemo(() => {
+    if (kind !== "rf") return null;
     const range = snapTimeRange(meta, state.rfStartMs, state.rfEndMs);
-    const response = prepareResponseMatrix(
+    return prepareResponseMatrix(
       counts,
       meta,
       range,
@@ -366,7 +370,8 @@ export function SpatialPlot({
       state.flipY,
       state.smoothRadius,
     );
-    const temporal = prepareTemporalMetricMatrices(
+  }, [counts, kind, meta, state.rfStartMs, state.rfEndMs, state.valueMode, state.xBins, state.yBins, state.flipY, state.smoothRadius]);
+  const temporal = useMemo(() => kind === "delay" ? prepareTemporalMetricMatrices(
       counts,
       meta,
       groups,
@@ -374,15 +379,19 @@ export function SpatialPlot({
       state.yBins,
       state.flipY,
       state.smoothRadius,
-    );
+    ) : null, [counts, groups, kind, meta, state.xBins, state.yBins, state.flipY, state.smoothRadius]);
+  const responsePrepared = useMemo(() => kind === "delay" && state.rgbMode
+    ? prepareResponseMatrix(counts, meta, [0, meta.shape[3] - 1], state.valueMode, state.xBins, state.yBins, state.flipY, state.smoothRadius).matrix
+    : null, [counts, kind, meta, state.rgbMode, state.valueMode, state.xBins, state.yBins, state.flipY, state.smoothRadius]);
+
+  useFrameEffect(useCallback(() => {
+    if (!canvas.current) return;
+    const context = contextFor(canvas.current, width, height);
     const prepared = kind === "rf"
-      ? response
-      : { matrix: temporal.delay, xGroups: temporal.xGroups, yGroups: temporal.yGroups };
-    const responsePrepared = kind === "delay" && state.rgbMode
-      ? prepareResponseMatrix(counts, meta, [0, meta.shape[3] - 1], state.valueMode, state.xBins, state.yBins, state.flipY, state.smoothRadius).matrix
-      : null;
+      ? response!
+      : { matrix: temporal!.delay, xGroups: temporal!.xGroups, yGroups: temporal!.yGroups };
     const entropyPrepared = kind === "delay" && state.rgbMode
-      ? temporal.entropy
+      ? temporal!.entropy
       : null;
     const [finiteLow, finiteHigh] = finiteMinMax(prepared.matrix);
     const [autoLow, autoHigh] = responseRangeForPalette(finiteLow, finiteHigh, state.palette);
@@ -548,7 +557,7 @@ export function SpatialPlot({
         );
       }
     }
-  }, [counts, groups, height, kind, meta, selectedCell, state, unitIndex, width]);
+  }, [height, kind, meta, response, responsePrepared, selectedCell, state, temporal, unitIndex, width]));
 
   const pointerCell = (event: React.PointerEvent<HTMLCanvasElement> | React.MouseEvent<HTMLCanvasElement>): CellRef | null => {
     const bounds = event.currentTarget.getBoundingClientRect();
@@ -582,7 +591,7 @@ export function SpatialPlot({
       )}
     </div>
   );
-}
+});
 
 interface TimelinePlotProps extends CommonPlotProps {
   onSelectTime: (binIndex: number, extend: boolean) => void;
@@ -872,7 +881,12 @@ const TIMELINE_CHART_X = 72;
 const TIMELINE_CHART_Y = 88;
 const TIMELINE_CHART_PLOT_HEIGHT = 132;
 
-export function TimelinePlot({
+export function TimelinePlot(props: TimelinePlotProps) {
+  const deferred = useDeferredValue(props);
+  return <TimelinePlotContent {...deferred} />;
+}
+
+const TimelinePlotContent = memo(function TimelinePlotContent({
   meta,
   counts,
   state,
@@ -934,6 +948,12 @@ export function TimelinePlot({
   const contentHeight = TIMELINE_CHART_HEIGHT + rowCount * rowHeight;
   const selectionLower = Math.min(state.timelineStartMs, state.timelineEndMs);
   const selectionUpper = Math.max(state.timelineStartMs, state.timelineEndMs);
+  const timeTotals = useMemo(() => allPositionsTimelineValues(
+    counts, meta, groups, state.valueMode,
+  ), [counts, groups, meta, state.valueMode]);
+  const selectedValues = useMemo(() => groupResponseValues(
+    counts, meta, selectedCell, groups, state.valueMode,
+  ).map((value) => value ?? 0), [counts, groups, meta, selectedCell, state.valueMode]);
 
   const assignScroller = useCallback((node: HTMLDivElement | null) => {
     scroller.current = node;
@@ -959,11 +979,9 @@ export function TimelinePlot({
     lastPublishedScroll.current = state.timelineScrollFraction;
   }, [state.timelineScrollFraction]);
 
-  useEffect(() => {
+  useFrameEffect(useCallback(() => {
     if (!chartCanvas.current || !groups.length) return;
     const context = contextFor(chartCanvas.current, width, TIMELINE_CHART_HEIGHT);
-    const timeTotals = allPositionsTimelineValues(counts, meta, groups, state.valueMode);
-    const selectedValues = groupResponseValues(counts, meta, selectedCell, groups, state.valueMode).map((value) => value ?? 0);
     const chartX = TIMELINE_CHART_X;
     const chartY = TIMELINE_CHART_Y;
     const chartWidth = Math.max(320, width - TIMELINE_CHART_X * 2);
@@ -1110,8 +1128,10 @@ export function TimelinePlot({
     state.timelineEndMs,
     state.timelineStartMs,
     state.valueMode,
+    selectedValues,
+    timeTotals,
     width,
-  ]);
+  ]));
 
   useEffect(() => {
     const localEcho = locallyPublishedScroll.current;
@@ -1228,4 +1248,4 @@ export function TimelinePlot({
       </div>
     </div>
   );
-}
+});

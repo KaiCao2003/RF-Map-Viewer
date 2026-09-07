@@ -466,6 +466,7 @@ struct RFMap: Sendable {
             throw RFMapError.invalidData("timeBinEdges must be strictly increasing.")
         }
         for (yIndex, row) in spikeCounts.enumerated() {
+            try Task.checkCancellation()
             guard row.count == nX else {
                 throw RFMapError.invalidData("spikeCounts row \(yIndex) has the wrong x dimension.")
             }

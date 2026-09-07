@@ -76,7 +76,13 @@ script/build_python_stable_windows_app.ps1
 
 The versioned outputs are written under `dist/windows/`; the builder verifies
 the portable executable and a silent temporary installation with the RF
-fixture, TkDND, and packaged PDF/PNG/CSV export smoke tests.
+fixture, TkDND, and packaged PDF/PNG/CSV export smoke tests. Both macOS and
+Windows builders also run `--self-test-isolated` to exercise the spawned
+document loader inside the packaged executable.
+
+Windows and macOS use the same Python viewer source, including cancellable
+large-file loading, compact count storage, cached time-window calculations,
+and filename-based window titles.
 
 ## Free-Moving alpha 1.10.0-alpha.3
 
