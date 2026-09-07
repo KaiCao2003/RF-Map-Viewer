@@ -1451,19 +1451,14 @@ final class RFMappingStore {
         }
         let metrics = data.metrics(for: unitIndex)
         let grouping = timeGrouping()
+        let windows = data.countWindows(unitIndex: unitIndex, timeGroups: grouping.groups)
         let matrix: OptionalMatrix = (0..<data.nY).map { yIndex in
             (0..<data.nX).map { xIndex -> Double? in
                 guard metrics.total[yIndex][xIndex] > safeFloor else { return nil }
                 var peakIndex = 0
                 var peakCount = 0.0
-                for (index, group) in grouping.groups.enumerated() {
-                    let count = data.rangeCount(
-                        unitIndex: unitIndex,
-                        yIndex: yIndex,
-                        xIndex: xIndex,
-                        start: group.start,
-                        end: group.end
-                    )
+                for (index, window) in windows.enumerated() {
+                    let count = window[yIndex][xIndex]
                     if count > peakCount {
                         peakIndex = index
                         peakCount = count
@@ -1654,23 +1649,19 @@ final class RFMappingStore {
         let groups = timeGrouping().groups
         let xGroups = xGroups()
         let yGroups = displayYGroups()
-        var matrices: [OptionalMatrix] = []
-        matrices.reserveCapacity(groups.count)
+        let matrices = data.spatialObservationFrames(
+            unitIndex: unitIndex,
+            timeGroups: groups,
+            yGroups: yGroups,
+            xGroups: xGroups
+        ).map { responsePlotMatrix(observations: $0, smoothingRadius: smoothRadius) }
         var sharedHigh = 0.0
-        for group in groups {
-            let prepared = responsePlotMatrix(
-                sourceStart: group.start,
-                sourceEnd: group.end,
-                yGroups: yGroups,
-                xGroups: xGroups,
-                smoothingRadius: smoothRadius
-            )
+        for prepared in matrices {
             for row in prepared {
                 for value in row {
                     if let value, value.isFinite { sharedHigh = max(sharedHigh, value) }
                 }
             }
-            matrices.append(prepared)
         }
         let snapshot = TimelineMatrixSnapshot(
             timeGroups: groups,
@@ -1699,21 +1690,8 @@ final class RFMappingStore {
         guard occupancyTotal > 0 else {
             return Array(repeating: 0.0, count: groups.count)
         }
-        return groups.map { group in
-            var cellCounts: [Double] = []
-            cellCounts.reserveCapacity(data.nY * data.nX)
-            for yIndex in 0..<data.nY {
-                for xIndex in 0..<data.nX {
-                    cellCounts.append(data.rangeCount(
-                        unitIndex: unitIndex,
-                        yIndex: yIndex,
-                        xIndex: xIndex,
-                        start: group.start,
-                        end: group.end
-                    ))
-                }
-            }
-            let count = compensatedSum(cellCounts)
+        return data.countWindows(unitIndex: unitIndex, timeGroups: groups).map { frame in
+            let count = compensatedSum(frame.joined())
             return count / occupancyTotal
         }
     }
@@ -1780,6 +1758,13 @@ final class RFMappingStore {
                 )
             }
         }
+        return responsePlotMatrix(observations: observations, smoothingRadius: smoothingRadius)
+    }
+
+    private func responsePlotMatrix(
+        observations: [[RFSpatialObservations]],
+        smoothingRadius: Int
+    ) -> OptionalMatrix {
         let valid = observations.map { row in
             row.map { $0.sourcePixelCount > 0 && $0.occupancyTimeSeconds > 0 }
         }

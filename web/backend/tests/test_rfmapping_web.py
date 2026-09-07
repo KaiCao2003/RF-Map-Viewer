@@ -306,7 +306,8 @@ def test_network_filter_precedes_login_and_health_is_loopback_only(app) -> None:
         )
         assert response.status_code == 401
 
-    with TestClient(app, client=("192.0.2.10", 50000)) as blocked:
+    # Use a reserved test address outside every example allowed network.
+    with TestClient(app, client=("198.18.0.10", 50000)) as blocked:
         assert blocked.get("/login").status_code == 403
         assert blocked.get("/api/health").status_code == 403
 
@@ -458,7 +459,7 @@ def test_health_and_lazy_browse_are_root_confined(
             == 400
         )
 
-    with TestClient(app, client=("192.0.2.10", 50000)) as blocked:
+    with TestClient(app, client=("198.18.0.10", 50000)) as blocked:
         response = blocked.get("/api/health")
         assert response.status_code == 403
         assert response.json()["detail"] == "Client network is not allowed"
@@ -683,9 +684,9 @@ def test_open_metadata_binary_probe_and_hd(app, settings: Settings) -> None:
         assert image.headers["content-type"] == "image/png"
         assert "content-disposition" not in image.headers
 
-    cache_files = list(settings.cache_root.glob("*.f64"))
+    cache_files = list(settings.cache_root.glob("*.counts"))
     assert len(cache_files) == 1
-    assert cache_files[0].stat().st_size == 2 * 2 * 2 * 3 * 8
+    assert cache_files[0].stat().st_size == 2 * 2 * 2 * 3
 
 
 def test_current_extensions_open_and_win_companion_discovery(
@@ -1386,7 +1387,7 @@ def test_invalid_rf_json_is_rejected(
         response = client.post("/api/datasets/open", json={"path": str(source)})
     assert response.status_code == 422
     assert detail.casefold() in response.json()["detail"].casefold()
-    assert not list(settings.cache_root.glob("*.f64"))
+    assert not list(settings.cache_root.glob("*.counts"))
 
 
 def test_singleton_occupancy_scalar_is_normalized(app, settings: Settings) -> None:
@@ -3971,7 +3972,7 @@ def test_lru_eviction_invalidates_live_dataset_record(settings: Settings) -> Non
         opened_first = client.post("/api/datasets/open", json={"path": str(first)})
         assert opened_first.status_code == 200, opened_first.text
         first_id = opened_first.json()["id"]
-        first_cache = next(settings.cache_root.glob("*.f64"))
+        first_cache = next(settings.cache_root.glob("*.counts"))
 
         opened_second = client.post("/api/datasets/open", json={"path": str(second)})
         assert opened_second.status_code == 200, opened_second.text
@@ -4007,3 +4008,143 @@ def test_all_zero_rf_occupancy_is_rejected(app, settings: Settings) -> None:
         response = client.post("/api/datasets/open", json={"path": str(source)})
     assert response.status_code == 422
     assert "at least one positive" in response.json()["detail"]
+
+
+@pytest.mark.parametrize(
+    ("maximum", "dtype"),
+    [
+        (255, "|u1"),
+        (256, "<u2"),
+        (65535, "<u2"),
+        (65536, "<u4"),
+        (2**32 - 1, "<u4"),
+        (2**32, "<u8"),
+        (2**53 + 1, "<u8"),
+        (2**64 - 1, "<u8"),
+    ],
+)
+def test_compact_cache_keeps_exact_counts_and_float64_api(
+    app, settings: Settings, maximum: int, dtype: str
+) -> None:
+    payload = sample_payload()
+    payload["unitsSpikeCounts"][1][0][0][0] = maximum
+    source = write_json(settings.rf_root / "compact.rfmap", payload)
+    with authenticated_client(app) as client:
+        metadata = _open(client, source)
+        record = app.state.services.datasets.get(metadata["id"])
+        assert record.cache.metadata["countsDtype"] == dtype
+        assert record.cache.data_path.stat().st_size == 24 * np.dtype(dtype).itemsize
+        stored = np.fromfile(record.cache.data_path, dtype=dtype).reshape(2, 2, 2, 3)
+        assert int(stored[1, 0, 0, 0]) == maximum
+        response = client.get(f"/api/datasets/{metadata['id']}/units/22")
+        assert response.status_code == 200
+        assert response.headers["X-RF-Dtype"] == "<f8"
+        expected = np.asarray(payload["unitsSpikeCounts"][1], dtype="<f8")
+        np.testing.assert_array_equal(
+            np.frombuffer(response.content, dtype="<f8").reshape(2, 2, 3),
+            expected,
+        )
+        unit_index, values = app.state.services.datasets.unit_array(record, 22)
+        assert unit_index == 1
+        assert values.dtype == np.float64
+        np.testing.assert_array_equal(values, expected)
+
+
+def test_compact_cache_reuse_does_not_parse_json_again(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = write_json(settings.rf_root / "reuse.rfmap")
+    cache = datasets_module.MemmapCache(settings.cache_root, settings.cache_max_bytes)
+    first = cache.get_or_build(source)
+
+    def fail_if_parsed(*_args, **_kwargs):
+        pytest.fail("An unchanged compact cache should not parse the RF JSON again")
+
+    monkeypatch.setattr(datasets_module, "_read_metadata_stream", fail_if_parsed)
+    reopened = cache.get_or_build(source)
+    assert reopened.data_path == first.data_path
+    assert reopened.metadata["countsDtype"] == "|u1"
+
+
+def test_compact_cache_rebuilds_and_removes_legacy_float64_entry(
+    settings: Settings,
+) -> None:
+    source = write_json(settings.rf_root / "legacy.rfmap")
+    cache = datasets_module.MemmapCache(settings.cache_root, settings.cache_max_bytes)
+    first = cache.get_or_build(source)
+    legacy_path = settings.cache_root / f"{first.key}.f64"
+    np.arange(24, dtype="<f8").tofile(legacy_path)
+    legacy_metadata = dict(first.metadata, schemaVersion=2)
+    legacy_metadata.pop("countsDtype")
+    first.metadata_path.write_text(json.dumps(legacy_metadata), encoding="utf-8")
+    first.data_path.unlink()
+
+    rebuilt = cache.get_or_build(source)
+
+    assert rebuilt.metadata["schemaVersion"] == datasets_module.CACHE_SCHEMA_VERSION
+    assert rebuilt.metadata["countsDtype"] == "|u1"
+    assert rebuilt.data_path.stat().st_size == 24
+    assert not legacy_path.exists()
+
+
+def test_compact_cache_limit_uses_stored_byte_count(settings: Settings) -> None:
+    source = write_json(settings.rf_root / "fits.rfmap")
+    cache = datasets_module.MemmapCache(settings.cache_root, max_bytes=24)
+    assert cache.get_or_build(source).data_path.stat().st_size == 24
+    too_small = datasets_module.MemmapCache(settings.cache_root / "small", max_bytes=23)
+    with pytest.raises(DatasetValidationError, match="exceeds cache limit"):
+        too_small.get_or_build(source)
+    assert not list(too_small.root.glob("*.counts"))
+
+
+def test_compact_zero_spike_filter_does_not_overflow_uint64(
+    app, settings: Settings
+) -> None:
+    payload = sample_payload()
+    payload["unitsSpikeCounts"] = np.zeros((2, 2, 2, 3), dtype=int).tolist()
+    payload["unitsSpikeCounts"][0][0][0] = [2**63, 2**63, 0]
+    source = write_json(settings.rf_root / "large-counts.rfmap", payload)
+    store = app.state.services.datasets
+    record = store.open(source, public_source_path=str(source), scope_root=settings.rf_root)
+    visible, zero_counts = store.zero_spike_unit_filter(record, 0, 1, 4)
+    assert visible == [11]
+    assert zero_counts == [3, 4]
+    assert store.zero_spike_unit_filter(record, 2, 2, 4) == ([], [4, 4])
+
+
+@pytest.mark.parametrize("invalid_count", [2**64, float(2**64)])
+def test_compact_cache_rejects_counts_above_uint64(
+    app, settings: Settings, invalid_count: int | float
+) -> None:
+    payload = sample_payload()
+    payload["unitsSpikeCounts"][0][0][0][0] = invalid_count
+    source = write_json(settings.rf_root / "overflow.rfmap", payload)
+    with authenticated_client(app) as client:
+        response = client.post("/api/datasets/open", json={"path": str(source)})
+    assert response.status_code == 422
+    assert not list(settings.cache_root.glob("*.counts"))
+
+
+@pytest.mark.parametrize(
+    ("count_token", "accepted"),
+    [("255.0", True), ("18446744073709551615.0", True), ("1.000000000000000000001", False)],
+)
+def test_compact_cache_validates_decimal_counts_without_float_rounding(
+    app, settings: Settings, count_token: str, accepted: bool
+) -> None:
+    payload = sample_payload()
+    payload["unitsSpikeCounts"][0][0][0][0] = "COUNT_TOKEN"
+    source = settings.rf_root / "decimal.rfmap"
+    source.write_text(
+        json.dumps(payload).replace('"COUNT_TOKEN"', count_token), encoding="utf-8"
+    )
+    with authenticated_client(app) as client:
+        response = client.post("/api/datasets/open", json={"path": str(source)})
+    if not accepted:
+        assert response.status_code == 422
+        assert "non-integer" in response.json()["detail"]
+        return
+    assert response.status_code == 200, response.text
+    record = app.state.services.datasets.get(response.json()["id"])
+    stored = np.fromfile(record.cache.data_path, dtype=record.cache.metadata["countsDtype"])
+    assert int(stored[0]) == int(count_token.split(".")[0])

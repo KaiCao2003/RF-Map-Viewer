@@ -102,7 +102,13 @@ function Invoke-WindowedSmoke(
             -ArgumentList $Arguments `
             -PassThru
         if (-not $Process.WaitForExit(120000)) {
-            Stop-Process -Id $Process.Id -Force -ErrorAction SilentlyContinue
+            # The isolated decoder is a child executable in frozen builds.
+            # Reap the complete smoke process tree when its deadline expires.
+            $TaskKill = Join-Path $env:SystemRoot "System32\taskkill.exe"
+            & $TaskKill /PID $Process.Id /T /F | Out-Null
+            if (-not $Process.HasExited) {
+                Stop-Process -Id $Process.Id -Force -ErrorAction SilentlyContinue
+            }
             $Process.WaitForExit()
             $Detail = if (Test-Path -LiteralPath $ReportPath -PathType Leaf) {
                 Get-Content -LiteralPath $ReportPath -Raw
@@ -208,6 +214,11 @@ function Invoke-FrozenSmoke(
         @("--self-test", "`"$Fixture`"") `
         "$Label data self-test" `
         "$ExportRoot-data-smoke-report.json"
+    Invoke-WindowedSmoke `
+        $Executable `
+        @("--self-test-isolated", "`"$Fixture`"") `
+        "$Label spawned document loader self-test" `
+        "$ExportRoot-isolated-smoke-report.json"
     Invoke-WindowedSmoke `
         $Executable `
         @("--self-test-dnd") `

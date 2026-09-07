@@ -44,6 +44,7 @@ import { exportShortcutAction, steppedTimeResolutionMs } from "./appShortcuts";
 import { nearestProbeUnitToRegionCenter, probeUnitsInRegion } from "./probeSelection";
 import { resolutionChangePatch, timelineSelectionPatch } from "./viewStateMath";
 import { VIEWER_TABS } from "./viewTabs";
+import { LatestRequest, UnitCountsCache } from "./requestLifecycle";
 import {
   navigationUnitIds,
   orderedQualityVisibleUnitIds,
@@ -208,6 +209,7 @@ function SourceChooser({
   kind = "rf-json",
   title = "Open RF mapping file (.rfmap or .json)",
   busyLabel = "Opening RF mapping file…",
+  onCancel,
   onClose,
   onRemote,
 }: {
@@ -218,6 +220,7 @@ function SourceChooser({
   kind?: "rf-json" | "tuning-json" | "positions-csv";
   title?: string;
   busyLabel?: string;
+  onCancel?: () => void;
   onClose: () => void;
   onRemote: (path: string) => void;
 }) {
@@ -234,7 +237,7 @@ function SourceChooser({
       </header>
       {error && <div className="dialog-error" role="alert">{error}</div>}
       <RemoteBrowser key={`${kind}:${initialPath}`} busy={busy} initialPath={initialPath} kind={kind} title={title} onOpen={onRemote} />
-      {busy && <div className="dialog-status"><span className="spinner small" /> {busyLabel}</div>}
+      {busy && <div className="dialog-status"><span className="spinner small" /> {busyLabel}{onCancel && <button type="button" onClick={onCancel}>Cancel</button>}</div>}
     </div>
   );
   return overlay ? <div className="modal-backdrop">{content}</div> : <main className="landing">{content}</main>;
@@ -244,8 +247,9 @@ export default function App() {
   const [meta, setMeta] = useState<DatasetMeta | null>(null);
   const [viewState, setViewState] = useState<ViewState | null>(null);
   const [counts, setCounts] = useState<Float64Array | null>(null);
-  const countsCache = useRef(new Map<string, Map<number, Float64Array>>());
-  const initialQueryHandled = useRef(false);
+  const countsCache = useRef(new Map<string, UnitCountsCache>());
+  const sourceRequest = useRef(new LatestRequest());
+  const probeRequest = useRef(new LatestRequest());
   const lastLocalCluster = useRef<number | null>(null);
   const [unitStatus, setUnitStatus] = useState<"loading" | "ready" | "unavailable" | "error">("loading");
   const [unitFilterEnabled, setUnitFilterEnabled] = useState(
@@ -297,6 +301,8 @@ export default function App() {
   }, []);
 
   const commitDataset = useCallback((next: DatasetMeta) => {
+    probeRequest.current.cancel();
+    setProbeBusy(false);
     countsCache.current.clear();
     setCounts(null);
     setMeta(next);
@@ -346,18 +352,31 @@ export default function App() {
   }, []);
 
   const openRemote = useCallback(async (path: string) => {
+    const signal = sourceRequest.current.begin();
     setSourceBusy(true);
     setError("");
     try {
-      const next = await openRemoteDataset(path);
+      const next = await openRemoteDataset(path, signal);
+      if (!sourceRequest.current.isCurrent(signal)) return;
       commitDataset(next);
       window.history.replaceState(null, "", urlForJsonSource(window.location.href, next.sourcePath));
     } catch (caught) {
+      if (!sourceRequest.current.isCurrent(signal)) return;
       setError(caught instanceof Error ? caught.message : "Could not open RF mapping file.");
     } finally {
-      setSourceBusy(false);
+      if (sourceRequest.current.isCurrent(signal)) setSourceBusy(false);
     }
   }, [commitDataset]);
+
+  const cancelSourceLoad = useCallback(() => {
+    sourceRequest.current.cancel();
+    setSourceBusy(false);
+  }, []);
+
+  useEffect(() => () => {
+    sourceRequest.current.cancel();
+    probeRequest.current.cancel();
+  }, []);
 
   useEffect(() => {
     document.title = meta ? `${meta.name} — RF Map Viewer` : "RF Map Viewer";
@@ -411,8 +430,6 @@ export default function App() {
   }, [jsonChoiceRefresh, meta, recentPaths]);
 
   useEffect(() => {
-    if (initialQueryHandled.current) return;
-    initialQueryHandled.current = true;
     const initialPath = new URL(window.location.href).searchParams.get("json");
     if (initialPath) void openRemote(initialPath);
   }, [openRemote]);
@@ -488,7 +505,7 @@ export default function App() {
     const datasetId = meta.id;
     let datasetCache = countsCache.current.get(datasetId);
     if (!datasetCache) {
-      datasetCache = new Map<number, Float64Array>();
+      datasetCache = new UnitCountsCache();
       countsCache.current.set(datasetId, datasetCache);
     }
     const localIndex = meta.unitPool.indexOf(viewState.clusterId);
@@ -540,14 +557,16 @@ export default function App() {
 
   useEffect(() => {
     if (!meta?.capabilities.probe || probePositionsPath) return;
-    const controller = new AbortController();
+    const signal = probeRequest.current.begin();
     setProbeError("");
-    getProbeGeometry(meta.id, {}, controller.signal)
-      .then(setProbe)
+    getProbeGeometry(meta.id, {}, signal)
+      .then((geometry) => { if (probeRequest.current.isCurrent(signal)) setProbe(geometry); })
       .catch((caught) => {
-        if (!controller.signal.aborted) setProbeError(caught instanceof Error ? caught.message : "Could not load probe layout.");
+        if (probeRequest.current.isCurrent(signal)) setProbeError(caught instanceof Error ? caught.message : "Could not load probe layout.");
       });
-    return () => controller.abort();
+    return () => {
+      if (probeRequest.current.isCurrent(signal)) probeRequest.current.cancel();
+    };
   }, [meta, probePositionsPath]);
 
   useEffect(() => {
@@ -721,22 +740,40 @@ export default function App() {
     selectedCellXMidpoint: (cell[2] + cell[3]) / 2,
   }), [updateState]);
 
-  const selectedDetails = useMemo(() => {
+  const selectedSeries = useMemo(() => {
     if (!meta || !viewState || !counts || !selectedCell || !groups.length) return null;
-    const rfRange = snapTimeRange(meta, viewState.rfStartMs, viewState.rfEndMs);
-    const values = groupResponseValues(counts, meta, selectedCell, groups, viewState.valueMode);
-    const temporal = groupTemporalMetrics(counts, meta, selectedCell, groups);
+    return {
+      values: groupResponseValues(counts, meta, selectedCell, groups, viewState.valueMode),
+      temporal: groupTemporalMetrics(counts, meta, selectedCell, groups),
+      totalValue: groupResponseValue(counts, meta, selectedCell, [0, meta.shape[3] - 1], viewState.valueMode),
+    };
+  }, [counts, groups, meta, selectedCell, viewState?.valueMode]);
+
+  const selectedRfValue = useMemo(() => {
+    if (!meta || !viewState || !counts || !selectedCell) return null;
+    return groupResponseValue(
+      counts,
+      meta,
+      selectedCell,
+      snapTimeRange(meta, viewState.rfStartMs, viewState.rfEndMs),
+      viewState.valueMode,
+    );
+  }, [counts, meta, selectedCell, viewState?.rfStartMs, viewState?.rfEndMs, viewState?.valueMode]);
+
+  const selectedDetails = useMemo(() => {
+    if (!selectedSeries) return null;
+    const { values, temporal, totalValue } = selectedSeries;
     const peakIndex = temporal.peakGroupIndex ?? -1;
     return {
       activeValue: values[activeGroup] ?? null,
-      rfValue: groupResponseValue(counts, meta, selectedCell, rfRange, viewState.valueMode),
-      totalValue: groupResponseValue(counts, meta, selectedCell, [0, meta.shape[3] - 1], viewState.valueMode),
+      rfValue: selectedRfValue,
+      totalValue,
       peakValue: peakIndex < 0 ? null : values[peakIndex] ?? null,
       peakIndex,
       delay: temporal.delayMs,
       entropy: temporal.entropy,
     };
-  }, [activeGroup, counts, groups, meta, selectedCell, viewState]);
+  }, [activeGroup, selectedRfValue, selectedSeries]);
 
   const openExportDialog = useCallback(() => {
     if (!meta || !viewState || !counts) {
@@ -820,18 +857,21 @@ export default function App() {
 
   const handleProbePath = useCallback(async (path: string) => {
     if (!meta) return;
+    const signal = probeRequest.current.begin();
     setProbeBusy(true);
     setProbeError("");
     try {
-      const geometry = await getProbeGeometry(meta.id, { positionsPath: path });
+      const geometry = await getProbeGeometry(meta.id, { positionsPath: path }, signal);
+      if (!probeRequest.current.isCurrent(signal)) return;
       setProbe(geometry);
       setProbePositionsPath(path);
       setProbeSelection(null);
       setProbeChooserOpen(false);
     } catch (caught) {
+      if (!probeRequest.current.isCurrent(signal)) return;
       setProbeError(caught instanceof Error ? caught.message : "Could not load probe geometry.");
     } finally {
-      setProbeBusy(false);
+      if (probeRequest.current.isCurrent(signal)) setProbeBusy(false);
     }
   }, [meta]);
 
@@ -901,6 +941,7 @@ export default function App() {
         busy={sourceBusy}
         error={error}
         initialPath="/data/rfmapping"
+        onCancel={cancelSourceLoad}
         onClose={() => undefined}
         onRemote={handleRemoteChoice}
       />
@@ -960,6 +1001,12 @@ export default function App() {
               </select>
               <button type="button" onClick={openChooser}>Open…</button>
             </div>
+            {sourceBusy && !sourceOpen && (
+              <div className="dialog-status" role="status">
+                <span className="spinner small" /> Opening RF mapping file…
+                <button type="button" onClick={cancelSourceLoad}>Cancel</button>
+              </div>
+            )}
             <label className="display-row tuning-session-row">
               <span>Tuning session</span>
               <input
@@ -1180,7 +1227,7 @@ export default function App() {
                 {noNavigationUnits && <div className={`view-empty${unitFilterStatus === "error" ? " error-state" : ""}`}><strong>{emptyUnitTitle}</strong><span>{emptyUnitDetail}</span></div>}
                 {!noNavigationUnits && unitStatus === "loading" && <div className="view-empty"><span className="spinner" /> Loading cluster {viewState.clusterId}…</div>}
                 {!noNavigationUnits && unitStatus === "error" && <div className="view-empty error-state"><strong>Unit data could not be loaded</strong><span>{error}</span></div>}
-                {!noNavigationUnits && counts && selectedCell && <SpatialPlot kind="rf" meta={meta} counts={counts} state={viewState} unitIndex={localIndex} selectedCell={selectedCell} onSelectCell={selectCell} />}
+                {viewState.selectedTab === "rf" && !noNavigationUnits && counts && selectedCell && <SpatialPlot kind="rf" meta={meta} counts={counts} state={viewState} unitIndex={localIndex} selectedCell={selectedCell} onSelectCell={selectCell} />}
               </div>
               <HdPanel
                 artifact={hdArtifact}
@@ -1224,7 +1271,8 @@ export default function App() {
           busy={sourceBusy}
           error={error}
           initialPath={parentDirectory(meta.sourcePath)}
-          onClose={() => setSourceOpen(false)}
+          onCancel={cancelSourceLoad}
+          onClose={() => { cancelSourceLoad(); setSourceOpen(false); }}
           onRemote={handleRemoteChoice}
         />
       )}

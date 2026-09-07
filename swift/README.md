@@ -51,6 +51,13 @@ units that pass each window's filter. Probe rows containing the explicit
 `nan,nan` missing-position sentinel remain valid units but do not create a
 spatial marker.
 
+Document decoding runs on a cancellable worker, with cancellation checks during
+count decoding and validation. Window titles use only the source filename and
+`RF Map Viewer`. Bounded temporal count and spatial occupancy caches reuse the
+same grouped data for timeline and delay views; counts beyond the exact integer
+range of a `Double` prefix retain compensated slice summation. Changing the 2-D
+RF plot range does not trim the timeline's full time axis.
+
 Figure Composer freezes the eligible unit set and all read-only scientific
 inputs when it opens. RF Cartesian/Polar pages share one scalar range across
 the selected units, waveform pages share one symmetric microvolt range, and

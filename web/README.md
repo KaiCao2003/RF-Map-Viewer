@@ -21,6 +21,16 @@ Same shank modes. Automatic HD discovery uses one exact positive session
 (default `1`) without falling back to a different session. Press `P` to toggle
 rectangular/polar spatial views and `Shift-P` to cycle the palette.
 
+The Web viewer applies the Python responsiveness updates to its own backend
+and frontend. RF counts are cached as the smallest unsigned integer type that
+preserves the source values; existing float64 caches rebuild on the next open,
+and HTTP responses keep their float64 format. Replacing or cancelling a file
+selection discards its pending response, unit navigation keeps a bounded
+response cache, and canvas draws coalesce to the latest state once per frame.
+Hidden RF plots skip rendering, and repeated plot and timeline calculations
+reuse prepared values. Plot range affects the 2-D RF view only; timelines keep
+their full time axis.
+
 The native zero-spike unit filter is enabled by default at a threshold of one
 bin. It evaluates the current 2-D RF sum window on the source `y × x` grid
 before display rebinning or smoothing; the timeline keeps its independent full
