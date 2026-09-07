@@ -344,6 +344,7 @@ class TkViewerTests(unittest.TestCase):
             self.app = None
 
     def test_timeline_uses_and_reuses_one_raster_atlas(self) -> None:
+        self.app.value_mode_var.set(gui.VALUE_MODE_COUNT)
         self.app._timeline_preview_cache_key = None
         self.app._draw_timeline()
         first_atlas = self.app._timeline_preview_images[-1]
@@ -355,8 +356,10 @@ class TkViewerTests(unittest.TestCase):
         self.assertIs(self.app._timeline_preview_images[-1], first_atlas)
         self.assertEqual(self.app._timeline_preview_cache_key, first_cache_key)
 
-        self.app.range_start_ms_var.set("50")
-        self.app.range_end_ms_var.set("150")
+        # Keep the RF window inside this fixture's 0–30 ms axis so the
+        # default zero-bin filter still leaves a unit available for drawing.
+        self.app.range_start_ms_var.set("5")
+        self.app.range_end_ms_var.set("15")
         self.app.selected_cell = (1, 1, 2, 2)
         self.app._draw_timeline()
         self.assertIs(self.app._timeline_preview_images[-1], first_atlas)

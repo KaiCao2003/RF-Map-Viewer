@@ -58,6 +58,61 @@ def test_load_lookup_and_half_open_sum(tmp_path: Path) -> None:
     assert not maps[0].occupancy_time_s.flags.writeable
 
 
+@pytest.mark.parametrize(
+    ("maximum", "expected_dtype"),
+    [
+        (255, np.dtype(np.uint8)),
+        (256, np.dtype(np.uint16)),
+        (65_536, np.dtype(np.uint32)),
+        (2**32, np.dtype(np.uint64)),
+    ],
+)
+def test_load_compacts_counts_to_smallest_safe_unsigned_dtype(
+    tmp_path: Path,
+    maximum: int,
+    expected_dtype: np.dtype,
+) -> None:
+    maps = load_rf_maps(
+        _write_dataset(
+            tmp_path,
+            unitsSpikeCounts=[
+                [[[maximum, 2], [3, 4]]],
+                [[[5, 6], [7, 8]]],
+            ],
+        )
+    )
+
+    assert maps[0].spike_counts.dtype == expected_dtype
+    assert int(maps[0].spike_counts[0, 0, 0]) == maximum
+    assert not maps[0].spike_counts.flags.writeable
+
+
+def test_load_accepts_integral_json_floats_and_rejects_mixed_bool(
+    tmp_path: Path,
+) -> None:
+    maps = load_rf_maps(
+        _write_dataset(
+            tmp_path,
+            unitsSpikeCounts=[
+                [[[1.0, 2], [3, 4]]],
+                [[[5, 6], [7, 8]]],
+            ],
+        )
+    )
+    assert maps[0].spike_counts.dtype == np.dtype(np.uint8)
+
+    with pytest.raises(ValueError, match="JSON numbers, not bool"):
+        load_rf_maps(
+            _write_dataset(
+                tmp_path,
+                unitsSpikeCounts=[
+                    [[[True, 2], [3, 4]]],
+                    [[[5, 6], [7, 8]]],
+                ],
+            )
+        )
+
+
 def test_accepts_scalar_positions_for_singleton_spatial_axes(
     tmp_path: Path,
 ) -> None:

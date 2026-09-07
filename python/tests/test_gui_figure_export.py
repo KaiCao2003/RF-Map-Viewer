@@ -1048,6 +1048,28 @@ def test_gui_shared_rf_scale_is_selection_scoped_and_frozen_in_plot_options(
     assert all(plot.options["value_unit"] == "spikes" for plot in resolved[0].plots)
 
 
+def test_gui_shared_rf_scale_and_cartesian_polar_plots_reuse_derived_matrices(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    data = RFMappingData(_write_fixture(tmp_path))
+    provider = GUIFigureDataProvider(data, _snapshot())
+    real_frames = data.spatial_group_response_frames
+    calls = 0
+
+    def tracked_frames(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return real_frames(*args, **kwargs)
+
+    monkeypatch.setattr(data, "spatial_group_response_frames", tracked_frames)
+    provider.shared_rf_bounds((17, 42))
+    provider(17, PlotSpec(PlotKind.RF_CARTESIAN))
+    provider(17, PlotSpec(PlotKind.RF_POLAR))
+
+    assert calls == 2
+
+
 def test_gui_shared_waveform_scale_is_selection_scoped_and_resolved_in_options(
     tmp_path: Path,
 ) -> None:

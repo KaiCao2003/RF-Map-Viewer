@@ -15,6 +15,7 @@ import hashlib
 import ctypes
 import json
 import math
+import multiprocessing
 import os
 import queue
 import re
@@ -29,6 +30,8 @@ from dataclasses import asdict, dataclass, field, replace
 from functools import lru_cache
 from pathlib import Path
 from typing import Callable, Iterable, Mapping, Sequence
+
+import numpy as np
 
 from rfmapping_viewer.figure_export import (
     ExportPage,
@@ -48,6 +51,7 @@ from rfmapping_viewer.hd_tuning import (
     probe_name_for_rf,
 )
 from rfmapping_viewer.rf_dataset import RFMap, RFMapList, load_rf_maps
+from rfmapping_viewer.rf_loading import load_rf_maps_isolated
 from rfmapping_viewer.waveform import (
     WaveformArtifactStore,
     WaveformPayload,
@@ -109,6 +113,7 @@ SINGLETON_Y_REFERENCE_COLUMNS = 30
 SINGLETON_Y_REFERENCE_ROWS = 7
 STARTUP_EVENT_WAIT_MS = 350
 ASYNC_DOCUMENT_LOAD_BYTES = 8 * 1024 * 1024
+RF_COUNT_CACHE_UNIT_LIMIT = 4
 DEFAULT_RF_SUM_START_MS = 0.0
 DEFAULT_RF_SUM_END_MS = 200.0
 SETTINGS_SCHEMA_VERSION = 1
@@ -2575,10 +2580,20 @@ class ViewerSyncState:
 class RFMappingData:
     """GUI adapter around the implementation-local RF JSON model."""
 
-    def __init__(self, path: Path):
+    def __init__(
+        self,
+        path: Path,
+        *,
+        isolated: bool = False,
+        cancelled: Callable[[], bool] | None = None,
+    ):
         source_identity = FrozenFileIdentity.capture(path)
         self.path = source_identity.path
-        self.rf_maps: RFMapList = load_rf_maps(self.path)
+        self.rf_maps: RFMapList = (
+            load_rf_maps_isolated(self.path, cancelled=cancelled)
+            if isolated
+            else load_rf_maps(self.path)
+        )
         source_identity.verify_path()
         self.source_identity = source_identity
         first = self.rf_maps[0]
@@ -2593,6 +2608,16 @@ class RFMappingData:
         self.y_positions = first.y_positions.tolist()
         self.time_bin_edges = first.time_bin_edges_s.tolist()
         self.occupancy_time_s = first.occupancy_time_s.tolist()
+        self._occupancy_array = first.occupancy_time_s
+        self._count_prefix_cache: dict[int, np.ndarray] = {}
+        self._count_window_cache: dict[
+            tuple[int, tuple[AxisGroup, ...]], np.ndarray
+        ] = {}
+        self._spatial_exposure_cache: dict[
+            tuple[tuple[AxisGroup, ...], tuple[AxisGroup, ...]],
+            tuple[np.ndarray, np.ndarray],
+        ] = {}
+        self._count_cache_lock = threading.Lock()
         self._metrics_cache: dict[int, UnitMetrics] = {}
         self._best_cell_cache: dict[int, tuple[int, int]] = {}
         self._zero_spike_bin_count_cache: dict[tuple[int, int, int], int] = {}
@@ -3108,6 +3133,399 @@ class RFMappingData:
         end = max(0, min(self.n_bins - 1, requested_end))
         return self.time_bin_edges[end + 1] - self.time_bin_edges[start]
 
+    def _normalized_time_groups(
+        self,
+        time_groups: Sequence[AxisGroup],
+    ) -> tuple[AxisGroup, ...]:
+        return tuple(
+            (
+                max(0, min(self.n_bins - 1, min(start, end))),
+                max(0, min(self.n_bins - 1, max(start, end))),
+            )
+            for start, end in time_groups
+        )
+
+    def _unit_count_prefix(self, unit_idx: int) -> np.ndarray:
+        """Return a small per-unit ``uint64`` time prefix with LRU retention."""
+
+        unit_idx = int(self.rf_map(unit_idx).unit_index)
+        with self._count_cache_lock:
+            cached = self._count_prefix_cache.pop(unit_idx, None)
+            if cached is not None:
+                self._count_prefix_cache[unit_idx] = cached
+                return cached
+
+        source = np.asarray(self.counts[unit_idx])
+        prefix = np.zeros(
+            (self.n_y, self.n_x, self.n_bins + 1),
+            dtype=np.uint64,
+        )
+        np.cumsum(source, axis=-1, dtype=np.uint64, out=prefix[..., 1:])
+        prefix.setflags(write=False)
+        with self._count_cache_lock:
+            existing = self._count_prefix_cache.pop(unit_idx, None)
+            if existing is not None:
+                prefix = existing
+            self._count_prefix_cache[unit_idx] = prefix
+            while len(self._count_prefix_cache) > RF_COUNT_CACHE_UNIT_LIMIT:
+                oldest = next(iter(self._count_prefix_cache))
+                self._count_prefix_cache.pop(oldest)
+        return prefix
+
+    def _spatial_group_exposure_arrays(
+        self,
+        y_groups: Sequence[AxisGroup],
+        x_groups: Sequence[AxisGroup],
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Return pooled occupancy and valid-pixel counts for one layout.
+
+        There are few spatial groups compared with timeline frames, so this
+        one-time calculation retains the original row-major Python summation
+        order. That keeps exported firing-rate values reproducible down to the
+        last floating-point bit while the large count workload stays batched.
+        """
+
+        normalized_y = tuple(
+            (
+                max(0, min(self.n_y - 1, min(group))),
+                max(0, min(self.n_y - 1, max(group))),
+            )
+            for group in y_groups
+        )
+        normalized_x = tuple(
+            (
+                max(0, min(self.n_x - 1, min(group))),
+                max(0, min(self.n_x - 1, max(group))),
+            )
+            for group in x_groups
+        )
+        key = (normalized_y, normalized_x)
+        with self._count_cache_lock:
+            cached = self._spatial_exposure_cache.pop(key, None)
+            if cached is not None:
+                self._spatial_exposure_cache[key] = cached
+                return cached
+
+        occupancy = np.zeros(
+            (len(normalized_y), len(normalized_x)),
+            dtype=np.float64,
+        )
+        source_pixel_counts = np.zeros_like(occupancy)
+        for y_group_index, (y_start, y_end) in enumerate(normalized_y):
+            for x_group_index, (x_start, x_end) in enumerate(normalized_x):
+                positive = [
+                    float(self.occupancy_time_s[y_index][x_index])
+                    for y_index in range(y_start, y_end + 1)
+                    for x_index in range(x_start, x_end + 1)
+                    if self.occupancy_time_s[y_index][x_index] > 0.0
+                ]
+                occupancy[y_group_index, x_group_index] = sum(positive)
+                source_pixel_counts[y_group_index, x_group_index] = len(positive)
+        occupancy.setflags(write=False)
+        source_pixel_counts.setflags(write=False)
+        result = (occupancy, source_pixel_counts)
+        with self._count_cache_lock:
+            existing = self._spatial_exposure_cache.pop(key, None)
+            if existing is not None:
+                result = existing
+            self._spatial_exposure_cache[key] = result
+            while len(self._spatial_exposure_cache) > 8:
+                oldest = next(iter(self._spatial_exposure_cache))
+                self._spatial_exposure_cache.pop(oldest)
+        return result
+
+    def count_windows_array(
+        self,
+        unit_idx: int,
+        time_groups: Sequence[AxisGroup],
+    ) -> np.ndarray:
+        """Return inclusive time-window counts as ``(window, y, x)``."""
+
+        unit_idx = int(self.rf_map(unit_idx).unit_index)
+        groups = self._normalized_time_groups(time_groups)
+        if not groups:
+            empty = np.empty((0, self.n_y, self.n_x), dtype=np.uint64)
+            empty.setflags(write=False)
+            return empty
+        key = (unit_idx, groups)
+        with self._count_cache_lock:
+            cached = self._count_window_cache.pop(key, None)
+            if cached is not None:
+                self._count_window_cache[key] = cached
+                return cached
+
+        if len(groups) == 1:
+            start, end = groups[0]
+            windows = np.sum(
+                self.counts[unit_idx][..., start : end + 1],
+                axis=-1,
+                dtype=np.uint64,
+            )[None, ...]
+        else:
+            prefix = self._unit_count_prefix(unit_idx)
+            starts = np.fromiter(
+                (start for start, _end in groups),
+                dtype=np.intp,
+                count=len(groups),
+            )
+            stops = np.fromiter(
+                (end + 1 for _start, end in groups),
+                dtype=np.intp,
+                count=len(groups),
+            )
+            windows = np.moveaxis(
+                prefix[..., stops] - prefix[..., starts],
+                -1,
+                0,
+            )
+        windows.setflags(write=False)
+        with self._count_cache_lock:
+            existing = self._count_window_cache.pop(key, None)
+            if existing is not None:
+                windows = existing
+            self._count_window_cache[key] = windows
+            while len(self._count_window_cache) > RF_COUNT_CACHE_UNIT_LIMIT:
+                oldest = next(iter(self._count_window_cache))
+                self._count_window_cache.pop(oldest)
+        return windows
+
+    def spatial_group_response_frames(
+        self,
+        unit_idx: int,
+        time_groups: Sequence[AxisGroup],
+        value_mode: str,
+        y_groups: Sequence[AxisGroup],
+        x_groups: Sequence[AxisGroup],
+        *,
+        smooth_radius: int = 0,
+    ) -> np.ndarray:
+        """Pool and normalize all requested timeline frames in one array pass."""
+
+        if value_mode not in VALUE_MODES:
+            raise ValueError(f"Unknown value mode: {value_mode}")
+        window_counts = self.count_windows_array(unit_idx, time_groups)
+        grouped_counts = _rectangular_group_sums(
+            window_counts,
+            y_groups,
+            x_groups,
+        )
+        grouped_occupancy, source_pixel_counts = (
+            self._spatial_group_exposure_arrays(y_groups, x_groups)
+        )
+        valid = source_pixel_counts > 0.0
+
+        if value_mode == VALUE_MODE_COUNT:
+            response = np.divide(
+                grouped_counts,
+                source_pixel_counts,
+                out=np.full_like(grouped_counts, np.nan),
+                where=valid,
+            )
+            return _smooth_matrix_array(response, smooth_radius)
+
+        counts_for_smoothing = np.where(valid, grouped_counts, np.nan)
+        occupancy_for_smoothing = np.where(valid, grouped_occupancy, np.nan)
+        counts_for_smoothing = _smooth_matrix_array(
+            counts_for_smoothing,
+            smooth_radius,
+        )
+        occupancy_for_smoothing = _smooth_matrix_array(
+            occupancy_for_smoothing,
+            smooth_radius,
+        )
+        return np.divide(
+            counts_for_smoothing,
+            occupancy_for_smoothing,
+            out=np.full_like(counts_for_smoothing, np.nan),
+            where=valid & (occupancy_for_smoothing > 0.0),
+        )
+
+    def spatial_group_histograms_array(
+        self,
+        unit_idx: int,
+        y_groups: Sequence[AxisGroup],
+        x_groups: Sequence[AxisGroup],
+        *,
+        smooth_radius: int = 0,
+    ) -> np.ndarray:
+        """Return mean count histograms as ``(y_group, x_group, time)``."""
+
+        counts_by_time = np.moveaxis(
+            np.asarray(self.counts[int(self.rf_map(unit_idx).unit_index)]),
+            -1,
+            0,
+        )
+        grouped = np.moveaxis(
+            _rectangular_group_sums(counts_by_time, y_groups, x_groups),
+            0,
+            -1,
+        )
+        _grouped_occupancy, source_pixel_counts = (
+            self._spatial_group_exposure_arrays(y_groups, x_groups)
+        )
+        grouped = np.divide(
+            grouped,
+            np.maximum(source_pixel_counts, 1.0)[..., None],
+        )
+        if smooth_radius > 0:
+            grouped = np.moveaxis(
+                _smooth_matrix_array(
+                    np.moveaxis(grouped, -1, 0),
+                    smooth_radius,
+                ),
+                0,
+                -1,
+            )
+        return grouped
+
+    def spatial_group_temporal_arrays(
+        self,
+        unit_idx: int,
+        y_groups: Sequence[AxisGroup],
+        x_groups: Sequence[AxisGroup],
+        time_groups: Sequence[AxisGroup],
+        *,
+        smooth_radius: int = 0,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Derive delay and entropy for every grouped spatial cell in bulk."""
+
+        histograms = self.spatial_group_histograms_array(
+            unit_idx,
+            y_groups,
+            x_groups,
+            smooth_radius=smooth_radius,
+        )
+        totals = histograms.sum(axis=-1, dtype=np.float64)
+        groups = self._normalized_time_groups(time_groups)
+        delay = np.full(totals.shape, np.nan, dtype=np.float64)
+        if groups:
+            prefix = np.pad(
+                histograms.cumsum(axis=-1, dtype=np.float64),
+                [(0, 0)] * (histograms.ndim - 1) + [(1, 0)],
+                mode="constant",
+            )
+            starts = np.fromiter(
+                (start for start, _end in groups),
+                dtype=np.intp,
+                count=len(groups),
+            )
+            stops = np.fromiter(
+                (end + 1 for _start, end in groups),
+                dtype=np.intp,
+                count=len(groups),
+            )
+            grouped_counts = prefix[..., stops] - prefix[..., starts]
+            durations = np.asarray(
+                [
+                    self.time_bin_edges[end + 1]
+                    - self.time_bin_edges[start]
+                    for start, end in groups
+                ],
+                dtype=np.float64,
+            )
+            peaks = np.argmax(grouped_counts / durations, axis=-1)
+            centers_ms = np.asarray(
+                [
+                    (
+                        self.time_bin_edges[start]
+                        + self.time_bin_edges[end + 1]
+                    )
+                    * 500.0
+                    for start, end in groups
+                ],
+                dtype=np.float64,
+            )
+            delay = np.where(totals > 0.0, centers_ms[peaks], np.nan)
+
+        entropy = np.full(totals.shape, np.nan, dtype=np.float64)
+        entropy_scale = math.log(self.n_bins) if self.n_bins > 1 else 1.0
+        # Entropy is a small final reduction (one pass over each displayed
+        # histogram). Keep its historical Python addition order so existing
+        # exports remain byte-for-byte reproducible after the large pooling and
+        # smoothing stages move to NumPy.
+        for spatial_index in np.ndindex(totals.shape):
+            histogram = histograms[spatial_index].tolist()
+            total = sum(histogram)
+            if total <= 0.0:
+                continue
+            value = -sum(
+                (count / total) * math.log(count / total)
+                for count in histogram
+                if count > 0.0
+            )
+            entropy[spatial_index] = value / entropy_scale
+        return delay, entropy
+
+    def all_positions_timeline_values(
+        self,
+        unit_idx: int,
+        time_groups: Sequence[AxisGroup],
+        value_mode: str,
+    ) -> list[float]:
+        if value_mode not in VALUE_MODES:
+            raise ValueError(f"Unknown value mode: {value_mode}")
+        totals = self.count_windows_array(unit_idx, time_groups).sum(
+            axis=(1, 2),
+            dtype=np.uint64,
+        ).astype(np.float64)
+        if value_mode == VALUE_MODE_RATE:
+            occupancy_total = sum(
+                float(duration)
+                for row in self.occupancy_time_s
+                for duration in row
+                if duration > 0.0
+            )
+            if occupancy_total <= 0.0:
+                return [0.0 for _group in time_groups]
+            totals /= occupancy_total
+        return totals.tolist()
+
+    def spatial_group_response_values(
+        self,
+        unit_idx: int,
+        y_group: AxisGroup,
+        x_group: AxisGroup,
+        time_groups: Sequence[AxisGroup],
+        value_mode: str,
+    ) -> list[float | None]:
+        if value_mode not in VALUE_MODES:
+            raise ValueError(f"Unknown value mode: {value_mode}")
+        groups = self._normalized_time_groups(time_groups)
+        if not groups:
+            return []
+        occupancy, pixels = self._spatial_group_exposure_arrays([y_group], [x_group])
+        denominator = float(
+            pixels[0, 0] if value_mode == VALUE_MODE_COUNT else occupancy[0, 0]
+        )
+        if denominator <= 0:
+            return [None] * len(groups)
+        # Inspector and hover queries need only the selected source rectangle.
+        # Building an integral image for every spatial cell here scales poorly
+        # even when the unit's full-frame count cache is already warm.
+        source = self._spatial_group_slice(unit_idx, y_group, x_group)
+        starts = np.asarray([start for start, _end in groups], dtype=np.intp)
+        stops = np.asarray([end + 1 for _start, end in groups], dtype=np.intp)
+        if np.all(stops == starts + 1):
+            windows = source[..., starts]
+        else:
+            prefix = np.empty(source.shape[:-1] + (self.n_bins + 1,), dtype=np.uint64)
+            prefix[..., 0] = 0
+            np.cumsum(source, axis=-1, dtype=np.uint64, out=prefix[..., 1:])
+            windows = prefix[..., stops] - prefix[..., starts]
+        values = windows.sum(axis=(0, 1), dtype=np.float64) / denominator
+        return values.tolist()
+
+    def _spatial_group_slice(
+        self, unit_idx: int, y_group: AxisGroup, x_group: AxisGroup
+    ) -> np.ndarray:
+        y_start = max(0, min(self.n_y - 1, min(y_group)))
+        y_end = max(0, min(self.n_y - 1, max(y_group)))
+        x_start = max(0, min(self.n_x - 1, min(x_group)))
+        x_end = max(0, min(self.n_x - 1, max(x_group)))
+        return self.rf_map(unit_idx).spike_counts[
+            y_start : y_end + 1, x_start : x_end + 1
+        ]
+
     def response_value(
         self,
         unit_idx: int,
@@ -3120,7 +3538,11 @@ class RFMappingData:
         requested_start, requested_end = min(start, end), max(start, end)
         start = max(0, min(self.n_bins - 1, requested_start))
         end = max(0, min(self.n_bins - 1, requested_end))
-        count = float(sum(self.counts[unit_idx][y_idx][x_idx][start : end + 1]))
+        count = float(
+            self.rf_map(unit_idx).spike_counts[
+                y_idx, x_idx, start : end + 1
+            ].sum(dtype=np.uint64)
+        )
         occupancy_time_s = self.occupancy_time_s[y_idx][x_idx]
         if occupancy_time_s <= 0:
             return None
@@ -3142,28 +3564,23 @@ class RFMappingData:
         requested_start, requested_end = min(start, end), max(start, end)
         start = max(0, min(self.n_bins - 1, requested_start))
         end = max(0, min(self.n_bins - 1, requested_end))
-        count_matrix = self.aggregate_matrix(unit_idx, "Range sum", 0, start, end)
-        if value_mode == VALUE_MODE_COUNT:
-            return [
-                [
-                    None
-                    if self.occupancy_time_s[y_idx][x_idx] <= 0
-                    else count_matrix[y_idx][x_idx]
-                    for x_idx in range(self.n_x)
-                ]
-                for y_idx in range(self.n_y)
-            ]
         if value_mode not in VALUE_MODES:
             raise ValueError(f"Unknown value mode: {value_mode}")
-        return [
-            [
-                None
-                if self.occupancy_time_s[y_idx][x_idx] <= 0
-                else count_matrix[y_idx][x_idx] / self.occupancy_time_s[y_idx][x_idx]
-                for x_idx in range(self.n_x)
-            ]
-            for y_idx in range(self.n_y)
-        ]
+        counts = self.count_windows_array(unit_idx, [(start, end)])[0].astype(
+            np.float64,
+            copy=False,
+        )
+        valid = self._occupancy_array > 0.0
+        if value_mode == VALUE_MODE_COUNT:
+            values = np.where(valid, counts, np.nan)
+        else:
+            values = np.divide(
+                counts,
+                self._occupancy_array,
+                out=np.full_like(counts, np.nan),
+                where=valid,
+            )
+        return _nullable_array_list(values)
 
     def spatial_group_observations(
         self,
@@ -3181,31 +3598,18 @@ class RFMappingData:
         rates would give briefly occupied positions too much weight.
         """
 
-        y_start = max(0, min(self.n_y - 1, min(y_group)))
-        y_end = max(0, min(self.n_y - 1, max(y_group)))
-        x_start = max(0, min(self.n_x - 1, min(x_group)))
-        x_end = max(0, min(self.n_x - 1, max(x_group)))
-        requested_start, requested_end = min(start, end), max(start, end)
-        start = max(0, min(self.n_bins - 1, requested_start))
-        end = max(0, min(self.n_bins - 1, requested_end))
-        source_indices = [
-            (y_idx, x_idx)
-            for y_idx in range(y_start, y_end + 1)
-            for x_idx in range(x_start, x_end + 1)
-            if self.occupancy_time_s[y_idx][x_idx] > 0
-        ]
-        counts = [
-            float(sum(self.counts[unit_idx][y_idx][x_idx][start : end + 1]))
-            for y_idx, x_idx in source_indices
-        ]
-        occupancy_time_s = sum(
-            float(self.occupancy_time_s[y_idx][x_idx])
-            for y_idx, x_idx in source_indices
+        start, end = self._normalized_time_groups([(start, end)])[0]
+        source = self._spatial_group_slice(unit_idx, y_group, x_group)
+        grouped_count = source[..., start : end + 1].sum(
+            axis=-1, dtype=np.uint64
+        ).sum(dtype=np.float64)
+        grouped_occupancy, source_pixel_counts = (
+            self._spatial_group_exposure_arrays([y_group], [x_group])
         )
         return SpatialGroupObservations(
-            count=sum(counts),
-            occupancy_time_s=occupancy_time_s,
-            source_pixel_count=len(counts),
+            count=float(grouped_count),
+            occupancy_time_s=float(grouped_occupancy[0, 0]),
+            source_pixel_count=int(source_pixel_counts[0, 0]),
         )
 
     def spatial_group_response_value(
@@ -3243,20 +3647,14 @@ class RFMappingData:
         y_groups: list[AxisGroup],
         x_groups: list[AxisGroup],
     ) -> list[list[float | None]]:
-        return [
-            [
-                self.spatial_group_response_value(
-                    unit_idx,
-                    y_group,
-                    x_group,
-                    start,
-                    end,
-                    value_mode,
-                )
-                for x_group in x_groups
-            ]
-            for y_group in y_groups
-        ]
+        values = self.spatial_group_response_frames(
+            unit_idx,
+            [(start, end)],
+            value_mode,
+            y_groups,
+            x_groups,
+        )[0]
+        return _nullable_array_list(values)
 
     def spatial_group_count_histogram(
         self,
@@ -3268,15 +3666,12 @@ class RFMappingData:
         y_end = max(0, min(self.n_y - 1, max(y_group)))
         x_start = max(0, min(self.n_x - 1, min(x_group)))
         x_end = max(0, min(self.n_x - 1, max(x_group)))
-        return [
-            sum(
-                float(self.counts[unit_idx][y_idx][x_idx][bin_idx])
-                for y_idx in range(y_start, y_end + 1)
-                for x_idx in range(x_start, x_end + 1)
-                if self.occupancy_time_s[y_idx][x_idx] > 0
-            )
-            for bin_idx in range(self.n_bins)
-        ]
+        histogram = np.sum(
+            self.counts[unit_idx][y_start : y_end + 1, x_start : x_end + 1],
+            axis=(0, 1),
+            dtype=np.uint64,
+        )
+        return histogram.astype(np.float64).tolist()
 
     def spatial_group_source_pixel_count(
         self,
@@ -3289,11 +3684,14 @@ class RFMappingData:
         y_end = max(0, min(self.n_y - 1, max(y_group)))
         x_start = max(0, min(self.n_x - 1, min(x_group)))
         x_end = max(0, min(self.n_x - 1, max(x_group)))
-        return sum(
-            1
-            for y_idx in range(y_start, y_end + 1)
-            for x_idx in range(x_start, x_end + 1)
-            if self.occupancy_time_s[y_idx][x_idx] > 0
+        return int(
+            np.count_nonzero(
+                self._occupancy_array[
+                    y_start : y_end + 1,
+                    x_start : x_end + 1,
+                ]
+                > 0.0
+            )
         )
 
     def spatial_group_temporal_metrics(
@@ -3520,6 +3918,108 @@ def smooth_matrix(
             out.append(out_row)
         current = out
     return current
+
+
+def _smooth_matrix_array(values: np.ndarray, radius: int) -> np.ndarray:
+    """Apply ``smooth_matrix`` semantics to one matrix or a frame stack.
+
+    Only the final two dimensions are spatial. Missing centers remain missing,
+    while finite neighbors contribute with the same 4/2/1 center/edge/corner
+    weights as the scalar implementation.
+    """
+
+    current = np.asarray(values, dtype=np.float64)
+    if current.ndim < 2:
+        raise ValueError("matrix array must have at least two dimensions")
+    current = current.copy()
+    for _iteration in range(max(0, int(radius))):
+        finite_centers = np.isfinite(current)
+        padded_values = np.pad(
+            np.where(finite_centers, current, 0.0),
+            [(0, 0)] * (current.ndim - 2) + [(1, 1), (1, 1)],
+            mode="constant",
+        )
+        padded_finite = np.pad(
+            finite_centers,
+            [(0, 0)] * (current.ndim - 2) + [(1, 1), (1, 1)],
+            mode="constant",
+            constant_values=False,
+        )
+        rows, columns = current.shape[-2:]
+        total = np.zeros_like(current, dtype=np.float64)
+        weight_total = np.zeros_like(current, dtype=np.float64)
+        for dy in range(3):
+            for dx in range(3):
+                weight = 4.0 if dx == 1 and dy == 1 else (2.0 if dx == 1 or dy == 1 else 1.0)
+                source = padded_values[..., dy : dy + rows, dx : dx + columns]
+                source_finite = padded_finite[
+                    ..., dy : dy + rows, dx : dx + columns
+                ]
+                total += source * weight
+                weight_total += source_finite * weight
+        current = np.divide(
+            total,
+            weight_total,
+            out=np.full_like(total, np.nan),
+            where=finite_centers & (weight_total > 0.0),
+        )
+    return current
+
+
+def _rectangular_group_sums(
+    values: np.ndarray,
+    y_groups: Sequence[AxisGroup],
+    x_groups: Sequence[AxisGroup],
+) -> np.ndarray:
+    """Sum Cartesian products of inclusive rectangular groups in one batch."""
+
+    source = np.asarray(values, dtype=np.float64)
+    if source.ndim < 2:
+        raise ValueError("spatial values must have at least two dimensions")
+    n_y, n_x = source.shape[-2:]
+    if not y_groups or not x_groups:
+        return np.empty(
+            source.shape[:-2] + (len(y_groups), len(x_groups)),
+            dtype=np.float64,
+        )
+
+    y_starts = np.asarray(
+        [max(0, min(n_y - 1, min(group))) for group in y_groups],
+        dtype=np.intp,
+    )
+    y_stops = np.asarray(
+        [max(0, min(n_y - 1, max(group))) + 1 for group in y_groups],
+        dtype=np.intp,
+    )
+    x_starts = np.asarray(
+        [max(0, min(n_x - 1, min(group))) for group in x_groups],
+        dtype=np.intp,
+    )
+    x_stops = np.asarray(
+        [max(0, min(n_x - 1, max(group))) + 1 for group in x_groups],
+        dtype=np.intp,
+    )
+    integral = np.pad(
+        source,
+        [(0, 0)] * (source.ndim - 2) + [(1, 0), (1, 0)],
+        mode="constant",
+    )
+    integral = integral.cumsum(axis=-2).cumsum(axis=-1)
+    return (
+        integral[..., y_stops[:, None], x_stops[None, :]]
+        - integral[..., y_starts[:, None], x_stops[None, :]]
+        - integral[..., y_stops[:, None], x_starts[None, :]]
+        + integral[..., y_starts[:, None], x_starts[None, :]]
+    )
+
+
+def _nullable_array_list(values: np.ndarray) -> list:
+    """Convert finite array values to Python floats and NaN to ``None``."""
+
+    source = np.asarray(values, dtype=np.float64)
+    result = source.astype(object)
+    result[~np.isfinite(source)] = None
+    return result.tolist()
 
 
 def finite_min_max(matrix: list[list[float | None]]) -> tuple[float, float]:
@@ -4856,6 +5356,7 @@ class RFMViewer(tk.Toplevel):
         self._startup_after: str | None = None
         self._startup_poll_after: str | None = None
         self._startup_generation = 0
+        self._startup_cancel_event: threading.Event | None = None
         self._startup_result_queue: queue.SimpleQueue[
             tuple[int, Path, RFMappingData | None, Exception | None]
         ] = queue.SimpleQueue()
@@ -4879,7 +5380,7 @@ class RFMViewer(tk.Toplevel):
         self._optional_redraw_dirty: set[str] = set()
         self._pending_open_documents: list[Path] = []
         self._show_settings_when_ready = False
-        self.title(f"RF Map Viewer {APP_DISPLAY_VERSION}")
+        self.title("RF Map Viewer")
         self.withdraw()
         self._install_application_handlers()
 
@@ -4902,7 +5403,7 @@ class RFMViewer(tk.Toplevel):
         self._remove_startup_loading_shell()
         self.data = data
         self.settings = self._app_root._rfm_settings
-        self.title(f"{data.path.name} — RF Map Viewer {APP_DISPLAY_VERSION}")
+        self.title(f"{data.path.name} — RF Map Viewer")
         self.geometry("1440x900")
         self.minsize(1120, 720)
 
@@ -5027,17 +5528,28 @@ class RFMViewer(tk.Toplevel):
             return
         self._startup_generation += 1
         generation = self._startup_generation
+        if self._startup_cancel_event is not None:
+            self._startup_cancel_event.set()
+        cancel_event = threading.Event()
+        self._startup_cancel_event = cancel_event
         path = Path(path).expanduser()
         self._remove_startup_chooser_shell()
         self._show_startup_loading_shell(path)
 
         def decode_document() -> None:
             try:
-                data = RFMappingData(path)
+                if path.stat().st_size >= ASYNC_DOCUMENT_LOAD_BYTES:
+                    data = RFMappingData(
+                        path, isolated=True, cancelled=cancel_event.is_set
+                    )
+                else:
+                    data = RFMappingData(path)
             except Exception as exc:
-                self._startup_result_queue.put((generation, path, None, exc))
+                if not cancel_event.is_set():
+                    self._startup_result_queue.put((generation, path, None, exc))
             else:
-                self._startup_result_queue.put((generation, path, data, None))
+                if not cancel_event.is_set():
+                    self._startup_result_queue.put((generation, path, data, None))
 
         threading.Thread(
             target=decode_document,
@@ -5076,7 +5588,7 @@ class RFMViewer(tk.Toplevel):
             self._startup_loading_frame = frame
             self._startup_progress = progress
         self._startup_path_label.configure(text=path.name)
-        self.title(f"Opening {path.name} — RF Map Viewer {APP_DISPLAY_VERSION}")
+        self.title(f"Opening {path.name} — RF Map Viewer")
         self.deiconify()
         self.lift()
 
@@ -5111,7 +5623,7 @@ class RFMViewer(tk.Toplevel):
             command=self._open_json,
         ).grid(row=2, column=0, sticky="w")
         self._startup_chooser_frame = frame
-        self.title(f"RF Map Viewer {APP_DISPLAY_VERSION}")
+        self.title("RF Map Viewer")
         self.deiconify()
         self.lift()
 
@@ -5161,6 +5673,10 @@ class RFMViewer(tk.Toplevel):
 
     def _cancel_startup_callback(self) -> None:
         self._startup_generation = getattr(self, "_startup_generation", 0) + 1
+        cancel_event = self.__dict__.get("_startup_cancel_event")
+        if cancel_event is not None:
+            cancel_event.set()
+            self._startup_cancel_event = None
         if self._startup_after is None:
             pass
         else:
@@ -9967,14 +10483,20 @@ class RFMViewer(tk.Toplevel):
         return delay
 
     def _base_bin_ms(self) -> float:
-        if len(self.data.time_bin_edges) < 2:
+        edges = self.data.time_bin_edges
+        cached = self.__dict__.get("_base_bin_cache")
+        if cached is not None and cached[0] is edges:
+            return cached[1]
+        if len(edges) < 2:
             return 1.0
         diffs = [
-            (self.data.time_bin_edges[i + 1] - self.data.time_bin_edges[i]) * 1000.0
-            for i in range(len(self.data.time_bin_edges) - 1)
+            (edges[i + 1] - edges[i]) * 1000.0
+            for i in range(len(edges) - 1)
         ]
         positive = [diff for diff in diffs if diff > 1e-9]
-        return min(positive) if positive else 1.0
+        base = min(positive) if positive else 1.0
+        self._base_bin_cache = (edges, base)
+        return base
 
     def _time_axis_start_ms(self) -> float:
         if not self.data.time_bin_edges:
@@ -10009,13 +10531,27 @@ class RFMViewer(tk.Toplevel):
         self.time_res_ms_var.set(format_ms(group_size * base))
         return group_size
 
-    def _time_groups(self) -> list[AxisGroup]:
+    def _time_groups(self) -> tuple[AxisGroup, ...]:
+        # Loaded axes are immutable for a document's lifetime. Keep the axis
+        # object in the key so switching documents cannot reuse stale groups.
+        edges = self.data.time_bin_edges
+        try:
+            requested = self.time_res_ms_var.get()
+        except (tk.TclError, ValueError):
+            requested = None
+        cached = self.__dict__.get("_time_groups_cache")
+        if cached is not None and cached[0] is edges and cached[1] == requested:
+            return cached[2]
         group_size = self._time_group_size()
         target_duration_ms = group_size * self._base_bin_ms()
-        return physical_time_groups(
-            [edge * 1000.0 for edge in self.data.time_bin_edges],
-            target_duration_ms,
+        groups = tuple(
+            physical_time_groups(
+                [edge * 1000.0 for edge in edges],
+                target_duration_ms,
+            )
         )
+        self._time_groups_cache = (edges, self.time_res_ms_var.get(), groups)
+        return groups
 
     def _time_group_count(self) -> int:
         return max(1, len(self._time_groups()))
@@ -10181,73 +10717,15 @@ class RFMViewer(tk.Toplevel):
         unit_idx = self._selected_local_unit_index()
         if unit_idx is None:
             return [], x_groups, y_groups
-        observations = [
-            [
-                self.data.spatial_group_observations(
-                    unit_idx,
-                    y_group,
-                    x_group,
-                    source_start,
-                    source_end,
-                )
-                for x_group in x_groups
-            ]
-            for y_group in y_groups
-        ]
-        valid = [
-            [value.source_pixel_count > 0 for value in row]
-            for row in observations
-        ]
-        value_mode = self.value_mode_var.get()
-        if value_mode == VALUE_MODE_COUNT:
-            matrix: list[list[float | None]] = [
-                [
-                    None
-                    if value.source_pixel_count <= 0
-                    else value.count / value.source_pixel_count
-                    for value in row
-                ]
-                for row in observations
-            ]
-            if smooth:
-                matrix = smooth_matrix(matrix, self._smooth_radius())
-                matrix = [
-                    [value if valid[y_idx][x_idx] else None for x_idx, value in enumerate(row)]
-                    for y_idx, row in enumerate(matrix)
-                ]
-            return matrix, x_groups, y_groups
-
-        counts: list[list[float | None]] = [
-            [value.count if value.source_pixel_count > 0 else None for value in row]
-            for row in observations
-        ]
-        occupancies: list[list[float | None]] = [
-            [
-                value.occupancy_time_s
-                if value.source_pixel_count > 0
-                else None
-                for value in row
-            ]
-            for row in observations
-        ]
-        if smooth:
-            counts = smooth_matrix(counts, self._smooth_radius())
-            occupancies = smooth_matrix(occupancies, self._smooth_radius())
-        matrix = [
-            [
-                None
-                if (
-                    not valid[y_idx][x_idx]
-                    or count is None
-                    or exposure is None
-                    or exposure <= 0
-                )
-                else count / exposure
-                for x_idx, (count, exposure) in enumerate(zip(count_row, exposure_row))
-            ]
-            for y_idx, (count_row, exposure_row) in enumerate(zip(counts, occupancies))
-        ]
-        return matrix, x_groups, y_groups
+        frames = self.data.spatial_group_response_frames(
+            unit_idx,
+            [(source_start, source_end)],
+            self.value_mode_var.get(),
+            y_groups,
+            x_groups,
+            smooth_radius=self._smooth_radius() if smooth else 0,
+        )
+        return _nullable_array_list(frames[0]), x_groups, y_groups
 
     def _grouped_temporal_metric_matrices(
         self,
@@ -10375,10 +10853,16 @@ class RFMViewer(tk.Toplevel):
         x_start: int,
         x_end: int,
     ) -> list[float | None]:
-        return [
-            self._group_response_value(y_start, y_end, x_start, x_end, start, end)
-            for start, end in self._time_groups()
-        ]
+        unit_idx = self._selected_local_unit_index()
+        if unit_idx is None:
+            return [None for _group in self._time_groups()]
+        return self.data.spatial_group_response_values(
+            unit_idx,
+            (y_start, y_end),
+            (x_start, x_end),
+            self._time_groups(),
+            self.value_mode_var.get(),
+        )
 
     def _y_group_text(self, y_start: int, y_end: int) -> str:
         if y_start == y_end:
@@ -11376,29 +11860,11 @@ class RFMViewer(tk.Toplevel):
         unit_idx: int,
         time_groups: list[AxisGroup],
     ) -> list[float]:
-        value_mode = self.value_mode_var.get()
-        if value_mode == VALUE_MODE_COUNT:
-            metrics = self.data.metrics(unit_idx)
-            return [float(sum(metrics.bin_totals[start : end + 1])) for start, end in time_groups]
-
-        occupancy_total = sum(
-            duration
-            for row in self.data.occupancy_time_s
-            for duration in row
-            if duration > 0
+        return self.data.all_positions_timeline_values(
+            unit_idx,
+            time_groups,
+            self.value_mode_var.get(),
         )
-        if occupancy_total <= 0:
-            return [0.0 for _group in time_groups]
-        unit = self.data.counts[unit_idx]
-        values: list[float] = []
-        for start, end in time_groups:
-            count = sum(
-                float(sum(unit[y_idx][x_idx][start : end + 1]))
-                for y_idx in range(self.data.n_y)
-                for x_idx in range(self.data.n_x)
-            )
-            values.append(count / occupancy_total)
-        return values
 
     def _ensure_timeline_preview_images(
         self,
@@ -11436,30 +11902,21 @@ class RFMViewer(tk.Toplevel):
         if self._timeline_preview_cache_key == cache_key:
             return self._timeline_preview_high
 
-        prepared_by_bin: dict[int, list[list[float | None]]] = {}
-        high = 0.0
-        for bin_idx in visible_bins:
-            source_start, source_end = time_groups[bin_idx]
-            prepared, _prepared_x_groups, _prepared_y_groups = (
-                self._prepare_response_plot_matrix(
-                source_start,
-                source_end,
-                    smooth=True,
-                )
-            )
-            prepared_by_bin[bin_idx] = prepared
-            high = max(
-                high,
-                max(
-                    (
-                        float(value)
-                        for row in prepared
-                        for value in row
-                        if value is not None and math.isfinite(float(value))
-                    ),
-                    default=0.0,
-                ),
-            )
+        visible_groups = [time_groups[bin_idx] for bin_idx in visible_bins]
+        prepared_frames = self.data.spatial_group_response_frames(
+            unit_idx,
+            visible_groups,
+            self.value_mode_var.get(),
+            y_groups,
+            x_groups,
+            smooth_radius=smooth_radius,
+        )
+        prepared_by_bin = {
+            bin_idx: _nullable_array_list(prepared_frames[frame_index])
+            for frame_index, bin_idx in enumerate(visible_bins)
+        }
+        finite_values = prepared_frames[np.isfinite(prepared_frames)]
+        high = float(finite_values.max()) if finite_values.size else 0.0
 
         high = max(high, 1.0)
         palette = self.palette_var.get()
@@ -12501,7 +12958,7 @@ class RFMViewer(tk.Toplevel):
             messagebox.showerror("Could not load RF map", str(exc))
             return
         self.settings = self._app_root._rfm_settings
-        self.title(f"{self.data.path.name} — RF Map Viewer {APP_DISPLAY_VERSION}")
+        self.title(f"{self.data.path.name} — RF Map Viewer")
         self.unit_idx.set(0)
         self._selected_unit_id = self.data.unit_pool[0]
         self._last_supported_unit_id = self.data.unit_pool[0]
@@ -12809,11 +13266,27 @@ class GUIFigureDataProvider:
         *,
         shared_rf_scale: tuple[float, float] | None = None,
         shared_waveform_limit: float | None = None,
+        response_cache: dict[
+            tuple[object, ...], list[list[float | None]]
+        ]
+        | None = None,
+        response_cache_lock: threading.Lock | None = None,
     ):
         self.data = data
         self.snapshot = snapshot
         self.shared_rf_scale = shared_rf_scale
         self.shared_waveform_limit = shared_waveform_limit
+        self._response_cache = response_cache if response_cache is not None else {}
+        self._response_cache_lock = (
+            response_cache_lock
+            if response_cache_lock is not None
+            else threading.Lock()
+        )
+        self._temporal_cache: dict[
+            tuple[int, bool],
+            tuple[list[list[float | None]], list[list[float | None]]],
+        ] = {}
+        self._temporal_cache_lock = threading.Lock()
         # Capture companion geometry with the same source-session object used
         # for every other plot.  A non-modal composer must not start reading a
         # different CSV after the parent viewer switches JSON documents.
@@ -13002,77 +13475,48 @@ class GUIFigureDataProvider:
     ) -> list[list[float | None]]:
         """Pool count/exposure observations before spatial smoothing."""
 
-        observations = [
-            [
-                self.data.spatial_group_observations(
-                    unit_idx,
-                    y_group,
-                    x_group,
-                    source_start,
-                    source_end,
-                )
-                for x_group in self.snapshot.x_groups
-            ]
-            for y_group in self.snapshot.y_groups
-        ]
-        valid = [
-            [value.source_pixel_count > 0 for value in row]
-            for row in observations
-        ]
-        if self.snapshot.value_mode == VALUE_MODE_COUNT:
-            matrix: list[list[float | None]] = [
-                [
-                    None
-                    if value.source_pixel_count <= 0
-                    else value.count / value.source_pixel_count
-                    for value in row
-                ]
-                for row in observations
-            ]
-            matrix = smooth_matrix(matrix, self.snapshot.smooth_radius)
-            matrix = [
-                [
-                    value if valid[y_idx][x_idx] else None
-                    for x_idx, value in enumerate(row)
-                ]
-                for y_idx, row in enumerate(matrix)
-            ]
-            return self._polarize_grouped(matrix, polar=polar)
+        normalized = self.data._normalized_time_groups(
+            [(source_start, source_end)]
+        )[0]
+        key = (
+            int(unit_idx),
+            normalized[0],
+            normalized[1],
+            self.snapshot.value_mode,
+            tuple(self.snapshot.y_groups),
+            tuple(self.snapshot.x_groups),
+            int(self.snapshot.smooth_radius),
+            bool(polar),
+            self.snapshot.polar_radius if polar else None,
+        )
+        with self._response_cache_lock:
+            cached = self._response_cache.get(key)
+        if cached is not None:
+            return cached
 
-        counts: list[list[float | None]] = [
-            [value.count if value.source_pixel_count > 0 else None for value in row]
-            for row in observations
-        ]
-        occupancies: list[list[float | None]] = [
-            [
-                value.occupancy_time_s
-                if value.source_pixel_count > 0
-                else None
-                for value in row
-            ]
-            for row in observations
-        ]
-        counts = smooth_matrix(counts, self.snapshot.smooth_radius)
-        occupancies = smooth_matrix(occupancies, self.snapshot.smooth_radius)
-        matrix = [
-            [
-                None
-                if (
-                    not valid[y_idx][x_idx]
-                    or count is None
-                    or exposure is None
-                    or exposure <= 0
-                )
-                else count / exposure
-                for x_idx, (count, exposure) in enumerate(
-                    zip(count_row, exposure_row)
-                )
-            ]
-            for y_idx, (count_row, exposure_row) in enumerate(
-                zip(counts, occupancies)
+        if polar:
+            matrix = self._polarize_grouped(
+                self._grouped_response_matrix(
+                    unit_idx,
+                    normalized[0],
+                    normalized[1],
+                    polar=False,
+                ),
+                polar=True,
             )
-        ]
-        return self._polarize_grouped(matrix, polar=polar)
+        else:
+            frames = self.data.spatial_group_response_frames(
+                unit_idx,
+                [normalized],
+                self.snapshot.value_mode,
+                self.snapshot.y_groups,
+                self.snapshot.x_groups,
+                smooth_radius=self.snapshot.smooth_radius,
+            )
+            matrix = _nullable_array_list(frames[0])
+        with self._response_cache_lock:
+            existing = self._response_cache.setdefault(key, matrix)
+        return existing
 
     def _delay_raw(self, unit_idx: int) -> list[list[float | None]]:
         unit = self.data.rf_map(unit_idx).spike_counts
@@ -13114,71 +13558,34 @@ class GUIFigureDataProvider:
         *,
         polar: bool,
     ) -> tuple[list[list[float | None]], list[list[float | None]]]:
-        histograms = [
-            [
-                [
-                    value
-                    / max(
-                        1,
-                        self.data.spatial_group_source_pixel_count(
-                            y_group, x_group
-                        ),
-                    )
-                    for value in self.data.spatial_group_count_histogram(
-                        unit_idx, y_group, x_group
-                    )
-                ]
-                for x_group in self.snapshot.x_groups
-            ]
-            for y_group in self.snapshot.y_groups
-        ]
-        if (
-            self.snapshot.smooth_radius > 0
-            and histograms
-            and histograms[0]
-        ):
-            output = [
-                [
-                    [0.0 for _bin in range(self.data.n_bins)]
-                    for _x_group in self.snapshot.x_groups
-                ]
-                for _y_group in self.snapshot.y_groups
-            ]
-            for bin_idx in range(self.data.n_bins):
-                temporal_slice = [
-                    [histogram[bin_idx] for histogram in row]
-                    for row in histograms
-                ]
-                smoothed = smooth_matrix(
-                    temporal_slice, self.snapshot.smooth_radius
-                )
-                for y_idx, row in enumerate(smoothed):
-                    for x_idx, value in enumerate(row):
-                        output[y_idx][x_idx][bin_idx] = float(value or 0.0)
-            histograms = output
-
-        delay: list[list[float | None]] = []
-        entropy: list[list[float | None]] = []
-        for row in histograms:
-            delay_row: list[float | None] = []
-            entropy_row: list[float | None] = []
-            for histogram in row:
-                metrics = self.data.temporal_metrics_from_histogram(
-                    histogram,
-                    list(self.snapshot.time_groups),
-                )
-                delay_row.append(
-                    metrics.delay_ms if metrics.mean_total_count > 0.0 else None
-                )
-                entropy_row.append(
-                    metrics.entropy if metrics.mean_total_count > 0.0 else None
-                )
-            delay.append(delay_row)
-            entropy.append(entropy_row)
-        return (
-            self._polarize_grouped(delay, polar=polar),
-            self._polarize_grouped(entropy, polar=polar),
-        )
+        key = (int(unit_idx), bool(polar))
+        with self._temporal_cache_lock:
+            cached = self._temporal_cache.get(key)
+        if cached is not None:
+            return cached
+        if polar:
+            delay, entropy = self._grouped_temporal_matrices(
+                unit_idx,
+                polar=False,
+            )
+            result = (
+                self._polarize_grouped(delay, polar=True),
+                self._polarize_grouped(entropy, polar=True),
+            )
+        else:
+            delay_values, entropy_values = self.data.spatial_group_temporal_arrays(
+                unit_idx,
+                self.snapshot.y_groups,
+                self.snapshot.x_groups,
+                self.snapshot.time_groups,
+                smooth_radius=self.snapshot.smooth_radius,
+            )
+            result = (
+                _nullable_array_list(delay_values),
+                _nullable_array_list(entropy_values),
+            )
+        with self._temporal_cache_lock:
+            return self._temporal_cache.setdefault(key, result)
 
     def _rgb_matrix(self, unit_idx: int, *, polar: bool) -> list[list[tuple[int, int, int]]]:
         response = self._grouped_response_matrix(
@@ -13231,53 +13638,44 @@ class GUIFigureDataProvider:
         return rgb
 
     def _all_positions_timeline(self, unit_idx: int) -> list[float]:
-        if self.snapshot.value_mode == VALUE_MODE_COUNT:
-            totals = self.data.metrics(unit_idx).bin_totals
-            return [
-                float(sum(totals[start : end + 1]))
-                for start, end in self.snapshot.time_groups
-            ]
-        occupancy_total = sum(
-            float(duration)
-            for row in self.data.occupancy_time_s
-            for duration in row
-            if duration > 0
+        return self.data.all_positions_timeline_values(
+            unit_idx,
+            self.snapshot.time_groups,
+            self.snapshot.value_mode,
         )
-        if occupancy_total <= 0:
-            return [0.0 for _group in self.snapshot.time_groups]
-        unit = self.data.rf_map(unit_idx).spike_counts
-        values: list[float] = []
-        for start, end in self.snapshot.time_groups:
-            values.append(float(unit[..., start : end + 1].sum()) / occupancy_total)
-        return values
 
     def _selected_timeline(self, unit_idx: int) -> list[float] | None:
         if self.snapshot.selected_cell is None:
             return None
         y_start, y_end, x_start, x_end = self.snapshot.selected_cell
-        result: list[float] = []
-        for start, end in self.snapshot.time_groups:
-            value = self.data.spatial_group_response_value(
-                unit_idx,
-                (y_start, y_end),
-                (x_start, x_end),
-                start,
-                end,
-                self.snapshot.value_mode,
-            )
-            result.append(float(value) if value is not None else 0.0)
-        return result
+        values = self.data.spatial_group_response_values(
+            unit_idx,
+            (y_start, y_end),
+            (x_start, x_end),
+            self.snapshot.time_groups,
+            self.snapshot.value_mode,
+        )
+        return [float(value) if value is not None else 0.0 for value in values]
 
     def _timeline_payload(self, unit_idx: int) -> dict[str, object]:
-        frames = [
-            self._grouped_response_matrix(
-                unit_idx,
-                start,
-                end,
-                polar=self.snapshot.timeline_polar,
-            )
-            for start, end in self.snapshot.time_groups
-        ]
+        frame_values = self.data.spatial_group_response_frames(
+            unit_idx,
+            self.snapshot.time_groups,
+            self.snapshot.value_mode,
+            self.snapshot.y_groups,
+            self.snapshot.x_groups,
+            smooth_radius=self.snapshot.smooth_radius,
+        )
+        if self.snapshot.timeline_polar:
+            if self.snapshot.polar_radius == POLAR_RADIUS_MODES[0]:
+                ring_rows = sorted(
+                    range(len(self.snapshot.y_groups)),
+                    key=lambda index: self.snapshot.y_groups[index][0],
+                )
+            else:
+                ring_rows = list(range(len(self.snapshot.y_groups) - 1, -1, -1))
+            frame_values = frame_values[:, ring_rows, :]
+        frames = _nullable_array_list(frame_values)
         times = [
             (
                 self.data.time_bin_edges[start]
@@ -13559,7 +13957,7 @@ class FigureExportWindow(tk.Toplevel):
         self._export_busy = False
         self._export_future: Future | None = None
         self._export_poll_after: str | None = None
-        self.title(f"Export Figures — RF Map Viewer {APP_DISPLAY_VERSION}")
+        self.title("Export Figures — RF Map Viewer")
         self.geometry("1380x840")
         self.minsize(1050, 680)
         self.transient(viewer)
@@ -14217,6 +14615,8 @@ class FigureExportWindow(tk.Toplevel):
                 self.snapshot,
                 shared_rf_scale=scale,
                 shared_waveform_limit=waveform_limit,
+                response_cache=self._base_data_provider._response_cache,
+                response_cache_lock=self._base_data_provider._response_cache_lock,
             )
             metadata = dict(self._provenance_metadata)
             if scale is not None:
@@ -14812,4 +15212,5 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
     raise SystemExit(main())

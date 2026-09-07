@@ -1,4 +1,5 @@
 import json
+import math
 import tempfile
 import unittest
 from dataclasses import replace
@@ -153,6 +154,207 @@ class RFMappingRateTests(unittest.TestCase):
         payload["unitsSpikeCounts"][0][0][0][1] = "20"
         with self.assertRaisesRegex(ValueError, "must be JSON numbers"):
             self.load(payload)
+
+    def test_batched_timeline_windows_match_direct_sums_and_pooling(self) -> None:
+        payload = base_payload()
+        payload.update(
+            unitsSpikeCounts=[
+                [
+                    [[1, 2, 3, 4], [5, 6, 7, 8], [0, 0, 0, 0]],
+                    [[9, 10, 11, 12], [13, 14, 15, 16], [17, 18, 19, 20]],
+                ]
+            ],
+            unitsSpikeCountsSize=[1, 2, 3, 4],
+            xPositions=[-1, 0, 1],
+            yPositions=[-1, 1],
+            timeBinEdges=[-0.1, 0.0, 0.1, 0.2, 0.3],
+            occupancyTimeSec=[[1.0, 2.0, 0.0], [0.5, 1.5, 2.5]],
+            occupancyTimeSecSize=[2, 3],
+        )
+        data = self.load(payload)
+        time_groups = [(0, 0), (1, 2), (3, 3)]
+        counts = np.asarray(payload["unitsSpikeCounts"], dtype=np.uint64)[0]
+
+        expected_windows = np.stack(
+            [counts[..., start : end + 1].sum(axis=-1) for start, end in time_groups]
+        )
+        np.testing.assert_array_equal(
+            data.count_windows_array(0, time_groups),
+            expected_windows,
+        )
+        self.assertFalse(data.count_windows_array(0, time_groups).flags.writeable)
+        self.assertEqual(
+            data.all_positions_timeline_values(
+                0,
+                time_groups,
+                gui.VALUE_MODE_COUNT,
+            ),
+            expected_windows.sum(axis=(1, 2)).astype(float).tolist(),
+        )
+
+        y_groups = [(1, 1), (0, 0)]
+        x_groups = [(0, 1), (2, 2)]
+        frames = data.spatial_group_response_frames(
+            0,
+            time_groups,
+            gui.VALUE_MODE_RATE,
+            y_groups,
+            x_groups,
+            smooth_radius=1,
+        )
+        reference = []
+        for start, end in time_groups:
+            observations = [
+                [
+                    data.spatial_group_observations(0, y_group, x_group, start, end)
+                    for x_group in x_groups
+                ]
+                for y_group in y_groups
+            ]
+            count_matrix = [
+                [
+                    value.count if value.source_pixel_count > 0 else None
+                    for value in row
+                ]
+                for row in observations
+            ]
+            occupancy_matrix = [
+                [
+                    value.occupancy_time_s
+                    if value.source_pixel_count > 0
+                    else None
+                    for value in row
+                ]
+                for row in observations
+            ]
+            count_matrix = gui.smooth_matrix(count_matrix, 1)
+            occupancy_matrix = gui.smooth_matrix(occupancy_matrix, 1)
+            reference.append(
+                [
+                    [
+                        None if count is None or occupancy is None else count / occupancy
+                        for count, occupancy in zip(count_row, occupancy_row)
+                    ]
+                    for count_row, occupancy_row in zip(
+                        count_matrix,
+                        occupancy_matrix,
+                    )
+                ]
+            )
+        expected = np.asarray(
+            [
+                [
+                    [np.nan if value is None else value for value in row]
+                    for row in frame
+                ]
+                for frame in reference
+            ]
+        )
+        np.testing.assert_allclose(frames, expected, equal_nan=True)
+
+    def test_batched_temporal_metrics_match_scalar_reference(self) -> None:
+        data = self.load(base_payload())
+        y_groups = [(0, 0)]
+        x_groups = [(0, 0), (1, 1)]
+        time_groups = [(0, 0), (1, 2)]
+        delay, entropy = data.spatial_group_temporal_arrays(
+            0,
+            y_groups,
+            x_groups,
+            time_groups,
+            smooth_radius=1,
+        )
+        histograms = [
+            [
+                [
+                    value
+                    / max(
+                        1,
+                        data.spatial_group_source_pixel_count(y_group, x_group),
+                    )
+                    for value in data.spatial_group_count_histogram(
+                        0,
+                        y_group,
+                        x_group,
+                    )
+                ]
+                for x_group in x_groups
+            ]
+            for y_group in y_groups
+        ]
+        for bin_idx in range(data.n_bins):
+            smoothed = gui.smooth_matrix(
+                [
+                    [histogram[bin_idx] for histogram in row]
+                    for row in histograms
+                ],
+                1,
+            )
+            for y_idx, row in enumerate(smoothed):
+                for x_idx, value in enumerate(row):
+                    histograms[y_idx][x_idx][bin_idx] = float(value or 0.0)
+
+        for y_idx, row in enumerate(histograms):
+            for x_idx, histogram in enumerate(row):
+                metrics = data.temporal_metrics_from_histogram(
+                    histogram,
+                    time_groups,
+                )
+                self.assertAlmostEqual(delay[y_idx, x_idx], metrics.delay_ms)
+                self.assertAlmostEqual(entropy[y_idx, x_idx], metrics.entropy)
+
+
+class VectorizedSpatialHelpersTests(unittest.TestCase):
+    def test_array_smoothing_matches_scalar_smoothing_for_frame_stack(self) -> None:
+        frames = np.asarray(
+            [
+                [[1.0, np.nan, 3.0], [4.0, 5.0, 6.0]],
+                [[9.0, 8.0, 7.0], [np.nan, 2.0, 1.0]],
+            ]
+        )
+        expected = np.asarray(
+            [
+                [
+                    [np.nan if value is None else value for value in row]
+                    for row in gui.smooth_matrix(
+                        [
+                            [None if not math.isfinite(value) else value for value in row]
+                            for row in frame
+                        ],
+                        2,
+                    )
+                ]
+                for frame in frames
+            ]
+        )
+
+        np.testing.assert_allclose(
+            gui._smooth_matrix_array(frames, 2),
+            expected,
+            equal_nan=True,
+        )
+
+    def test_rectangular_group_sums_support_reordered_groups_and_frames(self) -> None:
+        values = np.arange(2 * 3 * 4, dtype=float).reshape(2, 3, 4)
+        y_groups = [(2, 2), (0, 1)]
+        x_groups = [(1, 3), (0, 0)]
+        expected = np.asarray(
+            [
+                [
+                    [
+                        frame[min(y_group) : max(y_group) + 1, min(x_group) : max(x_group) + 1].sum()
+                        for x_group in x_groups
+                    ]
+                    for y_group in y_groups
+                ]
+                for frame in values
+            ]
+        )
+
+        np.testing.assert_array_equal(
+            gui._rectangular_group_sums(values, y_groups, x_groups),
+            expected,
+        )
 
 
 class UnitFilterSettingsTests(unittest.TestCase):

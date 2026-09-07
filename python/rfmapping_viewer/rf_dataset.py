@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from numbers import Real
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, overload
+from typing import Any, TextIO, overload
 
 import numpy as np
 from numpy.typing import NDArray
@@ -91,10 +91,224 @@ def _axis_values(
     return _flat_list(value, label)
 
 
-def _counts_are_numeric(value: Any) -> bool:
-    if isinstance(value, list):
-        return all(_counts_are_numeric(child) for child in value)
-    return isinstance(value, Real) and not isinstance(value, bool)
+def _spike_count_histograms(
+    value: Any,
+    shape: tuple[int, int, int, int],
+) -> Iterator[tuple[int, int, int, list[Any]]]:
+    """Yield validated 1-D histograms without walking every scalar recursively.
+
+    RF count documents commonly contain tens of millions of scalar values.
+    Validating each one through a recursive Python call is needlessly costly;
+    the declared four-dimensional shape lets us validate only the comparatively
+    small number of container rows here, then inspect each leaf row in bulk.
+    """
+
+    n_units, n_y, n_x, n_time_bins = shape
+    if not isinstance(value, list) or len(value) != n_units:
+        raise ValueError(
+            f"unitsSpikeCounts has an invalid shape; expected {shape}"
+        )
+    for unit_index, unit in enumerate(value):
+        if not isinstance(unit, list) or len(unit) != n_y:
+            raise ValueError(
+                f"unitsSpikeCounts has an invalid shape in y; expected {shape}"
+            )
+        for y_index, row in enumerate(unit):
+            if not isinstance(row, list) or len(row) != n_x:
+                raise ValueError(
+                    f"unitsSpikeCounts has an invalid shape in x; expected {shape}"
+                )
+            for x_index, histogram in enumerate(row):
+                if not isinstance(histogram, list) or len(histogram) != n_time_bins:
+                    raise ValueError(
+                        "unitsSpikeCounts has an invalid shape in time; "
+                        f"expected {shape}"
+                    )
+                yield unit_index, y_index, x_index, histogram
+
+
+def _compact_spike_counts(
+    value: Any,
+    shape: tuple[int, int, int, int],
+) -> NDArray[np.unsignedinteger[Any]]:
+    """Validate counts and copy them directly into the smallest safe dtype.
+
+    Only one unit's nested Python lists are materialized by the streaming
+    reader. This also avoids constructing an ``int64`` array before
+    down-casting it. MATLAB integer JSON normally takes the fast ``int`` row
+    path; uncommon floating-point JSON numbers retain the previous strict
+    finite, non-negative, integral validation.
+    """
+
+    maximum = 0
+    for _unit_index, _y_index, _x_index, histogram in _spike_count_histograms(
+        value, shape
+    ):
+        scalar_types = set(map(type, histogram))
+        if not scalar_types.issubset({int, float}):
+            raise ValueError(
+                "unitsSpikeCounts value is not numeric; values must be JSON "
+                "numbers, not bool"
+            )
+        if float in scalar_types:
+            for item in histogram:
+                parsed = float(item)
+                if (
+                    not math.isfinite(parsed)
+                    or parsed < 0.0
+                    or not parsed.is_integer()
+                    or parsed >= 2**64
+                ):
+                    raise ValueError(
+                        "unitsSpikeCounts values must be finite non-negative "
+                        "integer spike counts"
+                    )
+            row_maximum = max(float(item) for item in histogram)
+            maximum = max(maximum, int(row_maximum))
+            continue
+
+        row_minimum = min(histogram)
+        row_maximum = max(histogram)
+        if row_minimum < 0 or row_maximum > np.iinfo(np.uint64).max:
+            raise ValueError(
+                "unitsSpikeCounts values must be finite non-negative integer "
+                "spike counts representable as uint64"
+            )
+        maximum = max(maximum, int(row_maximum))
+
+    if maximum <= np.iinfo(np.uint8).max:
+        dtype: Any = np.uint8
+    elif maximum <= np.iinfo(np.uint16).max:
+        dtype = np.uint16
+    elif maximum <= np.iinfo(np.uint32).max:
+        dtype = np.uint32
+    else:
+        dtype = np.uint64
+
+    result = np.empty(shape, dtype=dtype)
+    try:
+        for unit_index, y_index, x_index, histogram in _spike_count_histograms(
+            value, shape
+        ):
+            result[unit_index, y_index, x_index, :] = histogram
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"Unable to parse unitsSpikeCounts: {exc}") from exc
+    result.setflags(write=False)
+    return result
+
+
+class _RFJSONReader:
+    """Decode JSON values incrementally, retaining at most one raw unit.
+
+    The standard decoder still handles strings, escapes and number syntax.
+    Only the top-level object and the outer counts array are streamed here;
+    metadata may precede or follow the counts, as in MATLAB jsonencode output.
+    """
+
+    def __init__(self, handle: TextIO):
+        self.handle = handle
+        self.buffer = ""
+        self.position = 0
+        self.eof = False
+        self.decoder = json.JSONDecoder()
+        self.value_chars = 0
+
+    def _fill(self) -> None:
+        remaining = self.buffer[self.position :]
+        chunk = self.handle.read(max(64 * 1024, len(remaining)))
+        self.buffer = remaining + chunk
+        self.position = 0
+        self.eof = not chunk
+
+    def peek(self) -> str:
+        while True:
+            while (
+                self.position < len(self.buffer)
+                and self.buffer[self.position] in " \t\r\n"
+            ):
+                self.position += 1
+            if self.position < len(self.buffer):
+                return self.buffer[self.position]
+            if self.eof:
+                return ""
+            self._fill()
+
+    def take(self, token: str) -> None:
+        if self.peek() != token:
+            raise ValueError(f"Unable to parse RF mapping JSON: expected {token!r}")
+        self.position += 1
+
+    def value(self, *, minimum_chars: int = 0) -> Any:
+        self.peek()
+        # Successive units normally have comparable encoded sizes. Reading
+        # that much first avoids repeatedly decoding partial nested arrays.
+        while not self.eof and len(self.buffer) - self.position < minimum_chars:
+            self._fill()
+        while True:
+            try:
+                value, end = self.decoder.raw_decode(self.buffer, self.position)
+            except json.JSONDecodeError as exc:
+                if self.eof:
+                    raise ValueError(f"Unable to parse RF mapping JSON: {exc}") from exc
+            else:
+                # A number at the end of a chunk may still continue (12, 1e3).
+                if self.eof or (
+                    end < len(self.buffer) and self.buffer[end] in " \t\r\n,]}:"
+                ):
+                    self.value_chars = end - self.position
+                    self.position = end
+                    return value
+            self._fill()
+
+
+def _read_count_units(reader: _RFJSONReader) -> tuple[np.ndarray, ...]:
+    reader.take("[")
+    units: list[np.ndarray] = []
+    unit_chars = 0
+    if reader.peek() != "]":
+        while True:
+            unit = reader.value(minimum_chars=unit_chars)
+            unit_chars = max(unit_chars, reader.value_chars)
+            if not (
+                isinstance(unit, list) and unit
+                and isinstance(unit[0], list) and unit[0]
+                and isinstance(unit[0][0], list) and unit[0][0]
+            ):
+                raise ValueError("unitsSpikeCounts has an invalid shape")
+            shape = (1, len(unit), len(unit[0]), len(unit[0][0]))
+            units.append(_compact_spike_counts([unit], shape)[0])
+            del unit
+            if reader.peek() == "]":
+                break
+            reader.take(",")
+    reader.take("]")
+    return tuple(units)
+
+
+def _read_rf_json(handle: TextIO) -> dict[str, Any]:
+    reader = _RFJSONReader(handle)
+    if reader.peek() != "{":
+        raise ValueError("RF mapping JSON must contain an object at the top level")
+    reader.take("{")
+    raw: dict[str, Any] = {}
+    if reader.peek() != "}":
+        while True:
+            key = reader.value()
+            if not isinstance(key, str):
+                raise ValueError("Unable to parse RF mapping JSON: expected an object key")
+            reader.take(":")
+            raw[key] = (
+                _read_count_units(reader)
+                if key == "unitsSpikeCounts"
+                else reader.value()
+            )
+            if reader.peek() == "}":
+                break
+            reader.take(",")
+    reader.take("}")
+    if reader.peek():
+        raise ValueError("Unable to parse RF mapping JSON: trailing data")
+    return raw
 
 
 def _occupancy_matrix(value: Any, n_y: int, n_x: int) -> NDArray[np.float64]:
@@ -339,13 +553,8 @@ def load_rf_maps(path: str | Path) -> RFMapList:
     """Load and validate one RF mapping JSON document."""
 
     source_path = Path(path)
-    try:
-        with source_path.open("r", encoding="utf-8") as handle:
-            raw = json.load(handle)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"Unable to parse RF mapping JSON: {exc}") from exc
-    if not isinstance(raw, dict):
-        raise ValueError("RF mapping JSON must contain an object at the top level")
+    with source_path.open("r", encoding="utf-8") as handle:
+        raw = _read_rf_json(handle)
 
     required = {
         "occupancyTimeDefinition",
@@ -391,27 +600,14 @@ def load_rf_maps(path: str | Path) -> RFMapList:
         raise ValueError("unitsSpikeCountsSize values must be positive")
     n_units, n_y, n_x, n_time_bins = shape
 
-    if not _counts_are_numeric(raw["unitsSpikeCounts"]):
-        raise ValueError(
-            "unitsSpikeCounts value is not numeric; values must be JSON numbers, not bool"
-        )
-    try:
-        spike_counts = np.asarray(raw["unitsSpikeCounts"])
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise ValueError(f"Unable to parse unitsSpikeCounts: {exc}") from exc
-    if spike_counts.shape != shape:
-        raise ValueError(
-            f"unitsSpikeCounts has shape {spike_counts.shape}, expected {shape}"
-        )
-    if (
-        not np.all(np.isfinite(spike_counts))
-        or np.any(spike_counts < 0)
-        or np.any(spike_counts != np.floor(spike_counts))
+    count_units = raw.pop("unitsSpikeCounts")
+    if len(count_units) != n_units or any(
+        unit.shape != shape[1:] for unit in count_units
     ):
-        raise ValueError(
-            "unitsSpikeCounts values must be finite non-negative integer spike counts"
-        )
+        raise ValueError(f"unitsSpikeCounts has an invalid shape; expected {shape}")
+    spike_counts = np.stack(count_units)
     spike_counts.setflags(write=False)
+    del count_units
 
     unit_pool = tuple(
         _integer(value, "unitPool value")

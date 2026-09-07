@@ -7,7 +7,7 @@ import argparse
 import json
 import math
 import queue
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -314,7 +314,7 @@ class FreeMovingRFViewer(_RootBase):
         initial_stimulus_kind: str | None = None,
     ) -> None:
         super().__init__()
-        self.title(f"Free-Moving RF Viewer {APP_DISPLAY_VERSION}")
+        self.title("Free-Moving RF Viewer")
         self.geometry("1320x860")
         self.minsize(1040, 700)
 
@@ -324,6 +324,7 @@ class FreeMovingRFViewer(_RootBase):
         self.start_bin = 0
         self.stop_bin = 1
         self._load_generation = 0
+        self._unit_future: Future | None = None
         self._render_after: str | None = None
         self._heat_photo: ImageTk.PhotoImage | None = None
         self._legend_photo: ImageTk.PhotoImage | None = None
@@ -770,6 +771,10 @@ class FreeMovingRFViewer(_RootBase):
             messagebox.showerror("Open failed", str(exc), parent=self)
             return
 
+        if self._unit_future is not None:
+            self._unit_future.cancel()
+        self._unit_future = None
+        self._load_generation += 1
         self.dataset = dataset
         self.unit_map = None
         self.unit_index = 0
@@ -837,8 +842,17 @@ class FreeMovingRFViewer(_RootBase):
             self._request_unit(min(self.dataset.unit_count - 1, self.unit_index + 1))
 
     def _request_unit(self, unit_index: int) -> None:
-        if self.dataset is None or unit_index == self.unit_index and self.unit_map is not None:
+        if self.dataset is None or self._closed:
             return
+        if unit_index == self.unit_index and (
+            self.unit_map is not None
+            or self._unit_future is not None and not self._unit_future.done()
+        ):
+            return
+        if self._unit_future is not None:
+            self._unit_future.cancel()
+        self.unit_map = None
+        self._display_matrix = None
         self.unit_index = unit_index
         self.unit_combo.current(unit_index)
         self.previous_unit_button.configure(state="normal" if unit_index > 0 else "disabled")
@@ -860,8 +874,11 @@ class FreeMovingRFViewer(_RootBase):
         )
 
         future = self._executor.submit(dataset.load_unit, unit_index)
+        self._unit_future = future
 
         def completed(job: Any) -> None:
+            if job.cancelled() or self._closed or generation != self._load_generation:
+                return
             try:
                 result = job.result()
             except BaseException as exc:
@@ -881,6 +898,7 @@ class FreeMovingRFViewer(_RootBase):
                 break
             if generation != self._load_generation:
                 continue
+            self._unit_future = None
             if error is not None:
                 self.status_var.set("Unit load failed")
                 messagebox.showerror("Unit load failed", str(error), parent=self)
@@ -950,8 +968,10 @@ class FreeMovingRFViewer(_RootBase):
         self._sync_time_scales()
 
     def schedule_render(self) -> None:
-        if self._render_after is not None:
-            self.after_cancel(self._render_after)
+        # Keep the existing deadline during a drag; render the newest state
+        # at that deadline even if motion events arrive faster than 20 ms.
+        if self._closed or self._render_after is not None:
+            return
         self._render_after = self.after(20, self._render)
 
     def _current_matrix(self) -> tuple[np.ndarray, str]:
@@ -1347,6 +1367,7 @@ class FreeMovingRFViewer(_RootBase):
 
     def _close(self) -> None:
         self._closed = True
+        self._load_generation += 1
         if self._render_after is not None:
             self.after_cancel(self._render_after)
         self._executor.shutdown(wait=False, cancel_futures=True)
