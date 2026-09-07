@@ -62,3 +62,36 @@ script/build_macos_app.sh
 A `data/` directory is optional. Without bundled RF data, the application
 starts empty and opens current-schema `.rfmap` or `.json` files through the
 normal document picker/Finder flow.
+
+## Standalone TC Comparison app
+
+`TCComparisonApp` is a separate macOS app for comparing two head-direction
+tuning-curve files without opening an RF map. It shares the extracted
+`TuningCurveCore` parser and processing code with RF Map Viewer, so schema
+validation, count/occupancy pooling, circular Gaussian smoothing, and display
+bin behavior remain identical.
+
+The app supports:
+
+- opening one or two `.tc`/`.json` files through the File menu;
+- dropping two files anywhere, or dropping one file into a specific TC I/TC II
+  source card;
+- selecting only unit IDs shared by both files, with TC I fixed on the left and
+  TC II fixed on the right using the same Hz scale;
+- pressing `P` to switch both panels together between line and polar views;
+- choosing any display-bin count that divides the 180 raw direction bins;
+- toggling circular smoothing and adjusting Gaussian sigma; and
+- independently calibrating TC I and TC II from −180° to +180°. Positive
+  offsets rotate clockwise/right with 0° at the top (for example, TC II +80°).
+
+```sh
+cd ~/Developer/rfmapping_gui/swift
+swift run TCComparisonApp
+```
+
+On a macOS 15 Apple-silicon build host, create the standalone app bundle and
+zip archive with:
+
+```sh
+script/build_tc_comparison_app.sh
+```
