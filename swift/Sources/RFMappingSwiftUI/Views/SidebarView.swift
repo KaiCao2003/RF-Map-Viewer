@@ -1,0 +1,280 @@
+import SwiftUI
+
+struct SidebarView: View {
+    @Bindable var store: RFMappingStore
+    @Bindable var pairingCoordinator: WindowPairingCoordinator
+    let pairingWindowID: UUID
+    let openFigureExporter: () -> Void
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                titleSection
+                Divider()
+                rfMapSection
+                Divider()
+                pairingSection
+                Divider()
+                ProbeSidebarSection(store: store)
+                Divider()
+                unitSection
+                Divider()
+                WaveformSidebarSection(store: store)
+                Divider()
+                displaySection
+                Divider()
+                selectedCellSection
+                actionSection
+                shortcutHint
+                Spacer(minLength: 12)
+            }
+            .padding(14)
+        }
+        .background(.bar)
+    }
+
+    private var pairingSection: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text("Window pairing").font(.headline)
+            Toggle("Sync viewer windows", isOn: Binding(
+                get: { pairingCoordinator.isPairingEnabled },
+                set: { pairingCoordinator.setPairingEnabled($0, sourceID: pairingWindowID) }
+            ))
+            .disabled(!pairingCoordinator.isPairingEnabled && !pairingCoordinator.eligibility.canEnable)
+            .help("Pair loaded windows by a shared sorted union of unit IDs")
+
+            Text(pairingCoordinator.statusText())
+                .font(.caption)
+                .foregroundStyle(pairingStatusColor)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var pairingStatusColor: Color {
+        switch pairingCoordinator.eligibility {
+        case .matching:
+            pairingCoordinator.isPairingEnabled ? .green : .secondary
+        case .noSecondWindow:
+            .secondary
+        case .mismatch:
+            .orange
+        }
+    }
+
+    private var titleSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label("RF Map Viewer", systemImage: "waveform.path.ecg.rectangle")
+                .font(.system(size: 17, weight: .semibold))
+            Text(store.dataSummary)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .lineLimit(6)
+                .textSelection(.enabled)
+        }
+    }
+
+    private var rfMapSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Current RF map").font(.headline)
+            Picker("RF map", selection: Binding(
+                get: { store.selectedJSONPath },
+                set: { path in
+                    Task { @MainActor in
+                        _ = await store.loadJSONAsync(path: path)
+                    }
+                }
+            )) {
+                ForEach(store.availableJSONURLs, id: \.path) { url in
+                    Text(JSONDiscovery.choiceLabel(for: url)).tag(url.path)
+                }
+            }
+            .labelsHidden()
+            .disabled(store.isAwaitingStartupDocument || store.isLoadingData)
+            Button("Open…") { store.isImporting = true }
+                .disabled(store.isLoadingData)
+            integerControl(
+                title: "Tuning session",
+                value: Binding(
+                    get: { store.tuningSessionIndex },
+                    set: store.setTuningSessionIndex
+                ),
+                range: 1...999
+            )
+            Text("Exact positive session; missing sessions do not fall back")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var unitSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Unit").font(.headline)
+            HStack(spacing: 6) {
+                Button { store.stepUnit(-1) } label: { Image(systemName: "chevron.left") }
+                    .help("Previous unit (← or [)")
+                    .disabled(store.navigationUnitIDs.isEmpty)
+
+                Picker("Unit", selection: Binding(
+                    get: { store.selectedUnitID ?? store.navigationUnitIDs.first ?? 0 },
+                    set: { store.selectUnitID($0) }
+                )) {
+                    if let data = store.data {
+                        ForEach(store.navigationUnitIDs, id: \.self) { unitID in
+                            if let index = data.unitIndex(forUnitID: unitID) {
+                                Text("\(String(format: "%03d", index))  cluster \(unitID)")
+                                    .tag(unitID)
+                            } else {
+                                Text("N/A  cluster \(unitID)")
+                                    .tag(unitID)
+                            }
+                        }
+                    }
+                }
+                .labelsHidden()
+                .disabled(store.navigationUnitIDs.isEmpty)
+
+                Button { store.stepUnit(1) } label: { Image(systemName: "chevron.right") }
+                    .help("Next unit (→ or ])")
+                    .disabled(store.navigationUnitIDs.isEmpty)
+            }
+
+            Toggle(
+                "Hide units with zero-spike RF bins",
+                isOn: Binding(
+                    get: { store.rfFilterUnitsWithZeroBins },
+                    set: store.setRFUnitQualityFilterEnabled
+                )
+            )
+            .help("Uses native spatial bins summed over the current RF sum range before display rebinning or smoothing")
+
+            integerControl(
+                title: "Zero-bin threshold",
+                value: Binding(
+                    get: { store.rfZeroBinThreshold },
+                    set: store.setRFZeroBinThreshold
+                ),
+                range: 1...store.rfZeroBinThresholdEditMaximum
+            )
+            .disabled(!store.rfFilterUnitsWithZeroBins)
+
+            Text(store.unitQualityFilterStatusText)
+                .font(.caption)
+                .foregroundStyle(
+                    store.qualityFilteredUnitIDs.isEmpty ? Color.orange : Color.secondary
+                )
+                .fixedSize(horizontal: false, vertical: true)
+
+            Text(store.unitStatsText)
+                .font(.callout.weight(.semibold))
+                .lineLimit(4)
+        }
+    }
+
+    private var displaySection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Display").font(.headline)
+            Toggle("Invert Y (MATLAB flip)", isOn: $store.flipY)
+
+            integerControl(
+                title: "X bins",
+                value: Binding(
+                    get: { store.xBins },
+                    set: { store.xBins = $0; store.normalizeControls() }
+                ),
+                range: 1...(store.data?.nX ?? 1)
+            )
+
+            integerControl(
+                title: "Y bins",
+                value: Binding(
+                    get: { store.yBins },
+                    set: { store.yBins = $0; store.normalizeControls() }
+                ),
+                range: 1...(store.data?.nY ?? 1)
+            )
+
+            integerControl(
+                title: "Smooth",
+                value: Binding(
+                    get: { store.smoothRadius },
+                    set: { store.smoothRadius = $0; store.normalizeControls() }
+                ),
+                range: 0...3
+            )
+
+            Picker("Palette", selection: $store.palette) {
+                ForEach(RFPalette.allCases) { palette in
+                    Text(palette.rawValue).tag(palette)
+                }
+            }
+
+            if store.spatialPlotFormat == .polar {
+                Picker("Polar radius", selection: $store.polarRadiusMode) {
+                    ForEach(PolarRadiusMode.allCases) { mode in
+                        Text(mode.rawValue).tag(mode)
+                    }
+                }
+            }
+
+            DisclosureGroup("Advanced") {
+                Stepper(
+                    "Delay response floor \(String(format: "%.0f", store.responseFloor))",
+                    value: Binding(
+                        get: { store.responseFloor },
+                        set: { store.responseFloor = $0; store.normalizeControls() }
+                    ),
+                    in: 0...9999,
+                    step: 1
+                )
+                .padding(.top, 6)
+            }
+            .foregroundStyle(.secondary)
+        }
+    }
+
+    private func integerControl(
+        title: String,
+        value: Binding<Int>,
+        range: ClosedRange<Int>
+    ) -> some View {
+        HStack {
+            Text(title)
+            Spacer()
+            TextField(title, value: value, format: .number)
+                .multilineTextAlignment(.trailing)
+                .frame(width: 44)
+            Stepper(title, value: value, in: range)
+                .labelsHidden()
+        }
+    }
+
+    private var selectedCellSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Selected cell").font(.headline)
+            Text(store.displayedCellText)
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var actionSection: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Button("Export Figures…", action: openFigureExporter)
+                .disabled(!store.hasData || store.qualityFilteredUnitIDs.isEmpty)
+            HStack {
+                Button("Export displayed CSV") { store.prepareExport() }
+                    .disabled(!store.hasSelectedUnit)
+                Button("Full range") { store.clearTimelineSelection() }
+                    .disabled(!store.hasTimeSelection)
+            }
+        }
+    }
+
+    private var shortcutHint: some View {
+        Text("←/→ unit   ↑/↓ timeline   1–3 views\nP rectangle/polar   ⇧P palette   Esc close/full range")
+            .font(.caption)
+            .foregroundStyle(.tertiary)
+    }
+}

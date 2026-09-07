@@ -1,0 +1,2 @@
+# This reviewed runtime-hook backport is verified byte-for-byte before packaging.
+python/packaging/pyinstaller-hooks/rthooks/pyi_rth__tkinter.py text eol=lf

@@ -1,0 +1,2945 @@
+import AppKit
+import CoreGraphics
+import CryptoKit
+import Foundation
+import SwiftUI
+
+struct FigureExportCompanions: Sendable {
+    var hdTuning: HDTuningData?
+    var hdError: String?
+    var probeGeometry: ProbeGeometry?
+    var probeError: String?
+    var waveformArtifact: WaveformArtifactStore?
+    var waveformError: String?
+    var waveformChannelMode: WaveformChannelMode = .sameXColumn
+    /// Scientific inputs and waveform payloads captured as one immutable
+    /// composer snapshot. A non-nil (possibly empty) fingerprint list means
+    /// preview and final export must use only these decoded values.
+    var frozenInputs: [FigureManifestInput]?
+    var frozenWaveformPayloads: [Int: WaveformPayload] = [:]
+    var frozenUnitIDs: [Int] = []
+
+    var isFrozen: Bool { frozenInputs != nil }
+
+    var probeUnavailableReason: String {
+        if let probeError {
+            return "Probe geometry could not be loaded: \(probeError)"
+        }
+        return "No companion positions.csv was found for this RF dataset."
+    }
+
+    var waveformUnavailableReason: String {
+        if let waveformError {
+            return "Waveform artifact could not be loaded: \(waveformError)"
+        }
+        return "No companion data/waveform/Probe*/manifest.json was found for this RF dataset."
+    }
+}
+
+struct FigurePlotRenderDescriptor: Identifiable, Equatable, Sendable {
+    let id: UUID
+    let kind: FigureExportPlotKind
+    let placeholder: String?
+    let hdCurve: ProcessedHDCurve?
+    let probePayload: ProbePlotPayload?
+    let waveformPayload: WaveformPayload?
+    let waveformAmplitudeLimitMicrovolts: Double?
+    let rfValueRange: FigureScalarRange?
+
+    init(
+        id: UUID,
+        kind: FigureExportPlotKind,
+        placeholder: String? = nil,
+        hdCurve: ProcessedHDCurve? = nil,
+        probePayload: ProbePlotPayload? = nil,
+        waveformPayload: WaveformPayload? = nil,
+        waveformAmplitudeLimitMicrovolts: Double? = nil,
+        rfValueRange: FigureScalarRange? = nil
+    ) {
+        self.id = id
+        self.kind = kind
+        self.placeholder = placeholder
+        self.hdCurve = hdCurve
+        self.probePayload = probePayload
+        self.waveformPayload = waveformPayload
+        self.waveformAmplitudeLimitMicrovolts = waveformAmplitudeLimitMicrovolts
+        self.rfValueRange = rfValueRange
+    }
+}
+
+struct FigurePageRenderDescriptor: Identifiable, Equatable, Sendable {
+    let id: UUID
+    let outputOrdinal: Int
+    let unitID: Int
+    let originalUnitIndex: Int
+    let pageIndex: Int
+    let pageID: UUID
+    let pageName: String
+    let plots: [FigurePlotRenderDescriptor]
+    let viewerSnapshot: ViewerSyncState
+
+    var unitLabel: String {
+        originalUnitIndex >= 0
+            ? "Original index \(String(format: "%03d", originalUnitIndex)) / unit ID \(unitID)"
+            : "Original index N/A / unit ID \(unitID)"
+    }
+}
+
+struct FigureExportResult: Sendable {
+    let outputURL: URL
+    let pageCount: Int
+    let generatedFiles: [URL]
+}
+
+struct FigureExportProgress: Equatable, Sendable {
+    let completedPages: Int
+    let totalPages: Int
+}
+
+enum FigureExportRendererError: LocalizedError {
+    case invalidConfiguration([FigureExportValidationIssue])
+    case couldNotCreateRenderer(String)
+    case couldNotWrite(String)
+    case outputAlreadyExists(URL)
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidConfiguration(let issues):
+            return issues.map(\.message).joined(separator: "\n")
+        case .couldNotCreateRenderer(let message), .couldNotWrite(let message):
+            return message
+        case .outputAlreadyExists(let url):
+            return "Output already exists: \(url.path)."
+        }
+    }
+}
+
+@MainActor
+struct FigureExportRenderer {
+    func descriptors(
+        configuration: FigureExportConfiguration,
+        data: RFMappingData,
+        companions: FigureExportCompanions
+    ) -> [FigurePageRenderDescriptor] {
+        var descriptors: [FigurePageRenderDescriptor] = []
+        descriptors.reserveCapacity(configuration.selectedUnitIDs.count * configuration.pages.count)
+        let needsWaveform = configuration.pages.contains { page in
+            page.plots.contains { $0.kind.requiresWaveform }
+        }
+        let sharedWaveformLimit = needsWaveform
+            ? sharedWaveformAmplitudeLimit(
+                companions: companions,
+                unitIDs: configuration.selectedUnitIDs
+            )
+            : nil
+        let sharedRFRange = sharedRFRange(
+            configuration: configuration,
+            data: data
+        )
+        var ordinal = 0
+        // The loop order is an explicit invariant: unit-major, then page-major.
+        for unitID in configuration.selectedUnitIDs {
+            let originalIndex = data.unitIndex(forUnitID: unitID) ?? -1
+            for (pageIndex, page) in configuration.pages.enumerated() {
+                descriptors.append(makeDescriptor(
+                    outputOrdinal: ordinal,
+                    unitID: unitID,
+                    originalUnitIndex: originalIndex,
+                    pageIndex: pageIndex,
+                    page: page,
+                    viewerSnapshot: configuration.viewerSnapshot,
+                    data: data,
+                    companions: companions,
+                    sharedWaveformLimit: sharedWaveformLimit,
+                    sharedRFRange: sharedRFRange
+                ))
+                ordinal += 1
+            }
+        }
+        return descriptors
+    }
+
+    /// Live preview calls this exact function; final export calls `descriptors`,
+    /// which delegates to it for every page.
+    func previewDescriptor(
+        unitID: Int,
+        pageIndex: Int,
+        configuration: FigureExportConfiguration,
+        data: RFMappingData,
+        companions: FigureExportCompanions
+    ) -> FigurePageRenderDescriptor? {
+        guard let unitOffset = configuration.selectedUnitIDs.firstIndex(of: unitID),
+              configuration.pages.indices.contains(pageIndex) else { return nil }
+        let outputOrdinal = unitOffset * configuration.pages.count + pageIndex
+        let needsWaveform = configuration.pages[pageIndex].plots.contains {
+            $0.kind.requiresWaveform
+        }
+        let sharedWaveformLimit = needsWaveform
+            ? sharedWaveformAmplitudeLimit(
+                companions: companions,
+                unitIDs: configuration.selectedUnitIDs
+            )
+            : nil
+        let sharedRFRange = sharedRFRange(
+            configuration: configuration,
+            data: data
+        )
+        return makeDescriptor(
+            outputOrdinal: outputOrdinal,
+            unitID: unitID,
+            originalUnitIndex: data.unitIndex(forUnitID: unitID) ?? -1,
+            pageIndex: pageIndex,
+            page: configuration.pages[pageIndex],
+            viewerSnapshot: configuration.viewerSnapshot,
+            data: data,
+            companions: companions,
+            sharedWaveformLimit: sharedWaveformLimit,
+            sharedRFRange: sharedRFRange
+        )
+    }
+
+    func export(
+        configuration: FigureExportConfiguration,
+        data: RFMappingData,
+        companions: FigureExportCompanions,
+        fileManager: FileManager = .default,
+        progress: ((FigureExportProgress) -> Void)? = nil
+    ) async throws -> FigureExportResult {
+        try Task.checkCancellation()
+        let issues = FigureExportValidation.issues(
+            for: configuration,
+            fileManager: fileManager,
+            checkOutputCollision: true
+        )
+        guard issues.isEmpty else {
+            throw FigureExportRendererError.invalidConfiguration(issues)
+        }
+        guard let destination = configuration.destinationDirectory,
+              let outputURL = configuration.outputURL else {
+            throw FigureExportRendererError.invalidConfiguration([
+                .init(code: .missingDestination, message: "Choose an export destination.", pageID: nil)
+            ])
+        }
+        let sourceInput = try captureRFSource(data, fileManager: fileManager)
+        let frozenCompanions = companions.isFrozen
+            ? companions
+            : try freezeCompanions(
+                companions,
+                data: data,
+                unitIDs: configuration.selectedUnitIDs,
+                fileManager: fileManager
+            )
+        guard Set(configuration.selectedUnitIDs).isSubset(
+            of: Set(frozenCompanions.frozenUnitIDs)
+        ) else {
+            throw FigureExportRendererError.couldNotWrite(
+                "The figure selection changed after its scientific companion snapshot was frozen; reopen the composer before exporting."
+            )
+        }
+        let companionInputs = frozenCompanions.frozenInputs ?? []
+        try verifyInputs(companionInputs, fileManager: fileManager)
+        let pages = descriptors(
+            configuration: configuration,
+            data: data,
+            companions: frozenCompanions
+        )
+        guard !pages.isEmpty else {
+            throw FigureExportRendererError.invalidConfiguration([
+                .init(code: .noPages, message: "The export contains no rendered pages.", pageID: nil)
+            ])
+        }
+
+        let accessing = destination.startAccessingSecurityScopedResource()
+        defer { if accessing { destination.stopAccessingSecurityScopedResource() } }
+        switch configuration.format {
+        case .pdf:
+            return try await exportPDF(
+                pages: pages,
+                configuration: configuration,
+                data: data,
+                outputURL: outputURL,
+                companions: frozenCompanions,
+                sourceInput: sourceInput,
+                companionInputs: companionInputs,
+                fileManager: fileManager,
+                progress: progress
+            )
+        case .png, .svg:
+            return try await exportPageDirectory(
+                pages: pages,
+                configuration: configuration,
+                data: data,
+                outputURL: outputURL,
+                companions: frozenCompanions,
+                sourceInput: sourceInput,
+                companionInputs: companionInputs,
+                fileManager: fileManager,
+                progress: progress
+            )
+        }
+    }
+
+    private func makeDescriptor(
+        outputOrdinal: Int,
+        unitID: Int,
+        originalUnitIndex: Int,
+        pageIndex: Int,
+        page: FigurePageTemplate,
+        viewerSnapshot: ViewerSyncState,
+        data: RFMappingData,
+        companions: FigureExportCompanions,
+        sharedWaveformLimit: Double?,
+        sharedRFRange: FigureScalarRange?
+    ) -> FigurePageRenderDescriptor {
+        let plots = page.plots.map { placement in
+            makePlotDescriptor(
+                placement: placement,
+                unitID: unitID,
+                originalUnitIndex: originalUnitIndex,
+                companions: companions,
+                sharedWaveformLimit: sharedWaveformLimit,
+                sharedRFRange: sharedRFRange
+            )
+        }
+        return FigurePageRenderDescriptor(
+            id: stablePageID(unitID: unitID, pageID: page.id),
+            outputOrdinal: outputOrdinal,
+            unitID: unitID,
+            originalUnitIndex: originalUnitIndex,
+            pageIndex: pageIndex,
+            pageID: page.id,
+            pageName: page.name,
+            plots: plots,
+            viewerSnapshot: viewerSnapshot
+        )
+    }
+
+    private func makePlotDescriptor(
+        placement: FigurePlotPlacement,
+        unitID: Int,
+        originalUnitIndex: Int,
+        companions: FigureExportCompanions,
+        sharedWaveformLimit: Double?,
+        sharedRFRange: FigureScalarRange?
+    ) -> FigurePlotRenderDescriptor {
+        if originalUnitIndex < 0 {
+            return .init(
+                id: placement.id,
+                kind: placement.kind,
+                placeholder: "RF mapping unit \(unitID) is unavailable in this dataset.",
+                hdCurve: nil,
+                probePayload: nil
+            )
+        }
+        if placement.kind.requiresHDTuning {
+            guard let hdTuning = companions.hdTuning else {
+                let reason = companions.hdError
+                    ?? "No companion HD tuning_curves.json was found for this RF dataset."
+                return .init(
+                    id: placement.id,
+                    kind: placement.kind,
+                    placeholder: "HD tuning unavailable: \(reason)",
+                    hdCurve: nil,
+                    probePayload: nil
+                )
+            }
+            do {
+                return .init(
+                    id: placement.id,
+                    kind: placement.kind,
+                    placeholder: nil,
+                    hdCurve: try hdTuning.processedCurve(unitID: unitID),
+                    probePayload: nil
+                )
+            } catch {
+                return .init(
+                    id: placement.id,
+                    kind: placement.kind,
+                    placeholder: "HD tuning unavailable for unit ID \(unitID): \(error.localizedDescription)",
+                    hdCurve: nil,
+                    probePayload: nil
+                )
+            }
+        }
+        if placement.kind.requiresProbe {
+            guard let geometry = companions.probeGeometry else {
+                return .init(
+                    id: placement.id,
+                    kind: placement.kind,
+                    placeholder: companions.probeUnavailableReason
+                )
+            }
+            guard let unit = geometry.units.first(where: { $0.unitID == unitID }) else {
+                return .init(
+                    id: placement.id,
+                    kind: placement.kind,
+                    placeholder: "Probe position is unavailable for RF unit \(unitID); "
+                        + "the selected unit is absent from positions.csv."
+                )
+            }
+            return .init(
+                id: placement.id,
+                kind: placement.kind,
+                probePayload: ProbePlotPayload(
+                    probeName: geometry.probeName,
+                    positionsURL: geometry.positionsURL,
+                    channelsURL: geometry.channelsURL,
+                    channels: geometry.channels,
+                    unit: unit
+                )
+            )
+        }
+        if placement.kind.requiresWaveform {
+            guard let artifact = companions.waveformArtifact else {
+                return .init(
+                    id: placement.id,
+                    kind: placement.kind,
+                    placeholder: companions.waveformUnavailableReason
+                )
+            }
+            if companions.isFrozen {
+                guard let payload = companions.frozenWaveformPayloads[unitID] else {
+                    let reason = artifact.unitSummaries[unitID] == nil
+                        ? "Unit \(unitID) is not available in this \(artifact.unitScope) waveform artifact."
+                        : "The composer did not freeze a waveform payload for unit ID \(unitID)."
+                    return .init(
+                        id: placement.id,
+                        kind: placement.kind,
+                        placeholder: "Waveform unavailable for unit ID \(unitID): \(reason)"
+                    )
+                }
+                return .init(
+                    id: placement.id,
+                    kind: placement.kind,
+                    waveformPayload: payload,
+                    waveformAmplitudeLimitMicrovolts: sharedWaveformLimit
+                        ?? payload.amplitudeLimitMicrovolts
+                )
+            }
+            do {
+                let payload = try artifact.payload(
+                    for: unitID,
+                    mode: companions.waveformChannelMode
+                )
+                return .init(
+                    id: placement.id,
+                    kind: placement.kind,
+                    waveformPayload: payload,
+                    waveformAmplitudeLimitMicrovolts: sharedWaveformLimit
+                        ?? payload.amplitudeLimitMicrovolts
+                )
+            } catch {
+                return .init(
+                    id: placement.id,
+                    kind: placement.kind,
+                    placeholder: "Waveform unavailable for unit ID \(unitID): "
+                        + error.localizedDescription
+                )
+            }
+        }
+        return .init(
+            id: placement.id,
+            kind: placement.kind,
+            rfValueRange: placement.kind == .rfCartesian || placement.kind == .rfPolar
+                ? sharedRFRange
+                : nil
+        )
+    }
+
+    private func sharedWaveformAmplitudeLimit(
+        companions: FigureExportCompanions,
+        unitIDs: [Int]
+    ) -> Double? {
+        if companions.isFrozen {
+            return unitIDs.compactMap {
+                companions.frozenWaveformPayloads[$0]?.amplitudeLimitMicrovolts
+            }.max()
+        }
+        return companions.waveformArtifact?.sharedAmplitudeLimit(
+            unitIDs: unitIDs,
+            mode: companions.waveformChannelMode
+        )
+    }
+
+    private func sharedRFRange(
+        configuration: FigureExportConfiguration,
+        data: RFMappingData
+    ) -> FigureScalarRange? {
+        let needsRF = configuration.pages.contains { page in
+            page.plots.contains { plot in
+                plot.kind == .rfCartesian || plot.kind == .rfPolar
+            }
+        }
+        guard needsRF else { return nil }
+        var values: [Double] = []
+        for unitID in configuration.selectedUnitIDs {
+            guard data.unitIndex(forUnitID: unitID) != nil else { continue }
+            let store = RFMappingStore(
+                initialData: data,
+                loadDefault: false,
+                discoverJSONChoices: false,
+                discoverCompanions: false,
+                unitQualityFilterEnabled: false
+            )
+            store.applyViewerSyncState(configuration.viewerSnapshot)
+            store.selectUnitID(unitID, resetInteraction: false)
+            values.append(contentsOf: store.currentHeatmapPlot().matrix
+                .flatMap { $0 }
+                .compactMap { value -> Double? in
+                    guard let value, value.isFinite else { return nil }
+                    return value
+                })
+        }
+        guard let low = values.min(), let high = values.max() else {
+            return FigureScalarRange(vmin: 0, vmax: 1)
+        }
+        let range = FigureScalarRange(vmin: low, vmax: high)
+        return range
+    }
+
+    private func stablePageID(unitID: Int, pageID: UUID) -> UUID {
+        // Identity only needs to remain stable while the composer is open.
+        var bytes = pageID.uuid
+        withUnsafeMutableBytes(of: &bytes) { buffer in
+            var value = UInt64(bitPattern: Int64(unitID)).littleEndian
+            withUnsafeBytes(of: &value) { unitBytes in
+                for index in 0..<min(8, buffer.count) {
+                    buffer[index] ^= unitBytes[index]
+                }
+            }
+        }
+        return UUID(uuid: bytes)
+    }
+
+    private func exportPDF(
+        pages: [FigurePageRenderDescriptor],
+        configuration: FigureExportConfiguration,
+        data: RFMappingData,
+        outputURL: URL,
+        companions: FigureExportCompanions,
+        sourceInput: FigureManifestInput,
+        companionInputs: [FigureManifestInput],
+        fileManager: FileManager,
+        progress: ((FigureExportProgress) -> Void)?
+    ) async throws -> FigureExportResult {
+        let temporaryURL = outputURL.deletingLastPathComponent()
+            .appendingPathComponent(".\(configuration.baseName)-\(UUID().uuidString).tmp")
+            .appendingPathExtension("pdf")
+        var mediaBox = CGRect(origin: .zero, size: configuration.pageSize.size)
+        let manifest = makeManifest(
+            pages: pages,
+            configuration: configuration,
+            data: data,
+            companions: companions,
+            sourceInput: sourceInput,
+            companionInputs: companionInputs,
+            outputPages: pages.map { manifestPage(for: $0) }
+        )
+        let manifestData = try encodedManifest(manifest, prettyPrinted: false)
+        let metadata = pdfMetadata(
+            configuration: configuration,
+            data: data,
+            manifestData: manifestData
+        )
+        guard let context = CGContext(
+            temporaryURL as CFURL,
+            mediaBox: &mediaBox,
+            metadata as CFDictionary
+        ) else {
+            throw FigureExportRendererError.couldNotCreateRenderer(
+                "Could not create the PDF context."
+            )
+        }
+        do {
+            for (pageOffset, page) in pages.enumerated() {
+                try Task.checkCancellation()
+                context.beginPDFPage(nil)
+                let imageRenderer = makeImageRenderer(
+                    descriptor: page,
+                    data: data,
+                    configuration: configuration,
+                    scale: 1
+                )
+                imageRenderer.render { _, draw in draw(context) }
+                context.endPDFPage()
+                progress?(FigureExportProgress(
+                    completedPages: pageOffset + 1,
+                    totalPages: pages.count
+                ))
+                try Task.checkCancellation()
+                await Task.yield()
+            }
+            try Task.checkCancellation()
+        } catch {
+            context.closePDF()
+            try? fileManager.removeItem(at: temporaryURL)
+            throw error
+        }
+        // Close exactly once before publication. Commit failures must never
+        // call closePDF again on the same Core Graphics context.
+        context.closePDF()
+        do {
+            try verifyInputs([sourceInput] + companionInputs, fileManager: fileManager)
+            try commitTemporaryItem(
+                temporaryURL,
+                to: outputURL,
+                overwrite: configuration.overwriteExisting,
+                expectedDirectory: false,
+                expectedFormat: nil,
+                fileManager: fileManager
+            )
+        } catch {
+            try? fileManager.removeItem(at: temporaryURL)
+            throw error
+        }
+        return FigureExportResult(
+            outputURL: outputURL,
+            pageCount: pages.count,
+            generatedFiles: [outputURL]
+        )
+    }
+
+    private func exportPageDirectory(
+        pages: [FigurePageRenderDescriptor],
+        configuration: FigureExportConfiguration,
+        data: RFMappingData,
+        outputURL: URL,
+        companions: FigureExportCompanions,
+        sourceInput: FigureManifestInput,
+        companionInputs: [FigureManifestInput],
+        fileManager: FileManager,
+        progress: ((FigureExportProgress) -> Void)?
+    ) async throws -> FigureExportResult {
+        let temporaryURL = outputURL.deletingLastPathComponent()
+            .appendingPathComponent(".\(configuration.baseName)-\(UUID().uuidString).tmp", isDirectory: true)
+        try fileManager.createDirectory(at: temporaryURL, withIntermediateDirectories: false)
+        var generated: [URL] = []
+        var entries: [FigureManifestPage] = []
+        do {
+            for (pageOffset, page) in pages.enumerated() {
+                try Task.checkCancellation()
+                let filename = pageFilename(page, format: configuration.format)
+                let fileURL = temporaryURL.appendingPathComponent(filename)
+                let png = try pngData(
+                    descriptor: page,
+                    data: data,
+                    configuration: configuration
+                )
+                let outputData: Data
+                switch configuration.format {
+                case .png:
+                    outputData = png
+                case .svg:
+                    let svg = embeddedSVG(
+                        pngData: png,
+                        size: configuration.pageSize.size,
+                        scale: configuration.outputScale,
+                        title: "\(page.unitLabel) — \(page.pageName)"
+                    )
+                    outputData = Data(svg.utf8)
+                case .pdf:
+                    preconditionFailure("PDF is handled by exportPDF")
+                }
+                try outputData.write(to: fileURL, options: .atomic)
+                generated.append(outputURL.appendingPathComponent(filename))
+                entries.append(FigureManifestPage(
+                    ordinal: page.outputOrdinal,
+                    unitID: page.unitID,
+                    originalUnitIndex: page.originalUnitIndex,
+                    pageIndex: page.pageIndex,
+                    pageName: page.pageName,
+                    filename: filename,
+                    byteCount: outputData.count,
+                    sha256: sha256Hex(outputData),
+                    plots: page.plots.map(\.kind.rawValue),
+                    placeholders: page.plots.compactMap(\.placeholder),
+                    annotations: manifestAnnotations(for: page)
+                ))
+                progress?(FigureExportProgress(
+                    completedPages: pageOffset + 1,
+                    totalPages: pages.count
+                ))
+                try Task.checkCancellation()
+                await Task.yield()
+            }
+            try Task.checkCancellation()
+            let manifest = makeManifest(
+                pages: pages,
+                configuration: configuration,
+                data: data,
+                companions: companions,
+                sourceInput: sourceInput,
+                companionInputs: companionInputs,
+                outputPages: entries
+            )
+            let manifestURL = temporaryURL.appendingPathComponent("manifest.json")
+            try encodedManifest(manifest, prettyPrinted: true)
+                .write(to: manifestURL, options: .atomic)
+            generated.append(outputURL.appendingPathComponent("manifest.json"))
+            try Task.checkCancellation()
+            try verifyInputs([sourceInput] + companionInputs, fileManager: fileManager)
+            try commitTemporaryItem(
+                temporaryURL,
+                to: outputURL,
+                overwrite: configuration.overwriteExisting,
+                expectedDirectory: true,
+                expectedFormat: configuration.format,
+                fileManager: fileManager
+            )
+        } catch {
+            try? fileManager.removeItem(at: temporaryURL)
+            throw error
+        }
+        return FigureExportResult(
+            outputURL: outputURL,
+            pageCount: pages.count,
+            generatedFiles: generated
+        )
+    }
+
+    private func pngData(
+        descriptor: FigurePageRenderDescriptor,
+        data: RFMappingData,
+        configuration: FigureExportConfiguration
+    ) throws -> Data {
+        let renderer = makeImageRenderer(
+            descriptor: descriptor,
+            data: data,
+            configuration: configuration,
+            scale: configuration.outputScale
+        )
+        guard let image = renderer.nsImage,
+              let tiff = image.tiffRepresentation,
+              let bitmap = NSBitmapImageRep(data: tiff),
+              let png = bitmap.representation(using: .png, properties: [:]) else {
+            throw FigureExportRendererError.couldNotCreateRenderer(
+                "Could not rasterize \(descriptor.unitLabel), page \(descriptor.pageName)."
+            )
+        }
+        return png
+    }
+
+    private func makeImageRenderer(
+        descriptor: FigurePageRenderDescriptor,
+        data: RFMappingData,
+        configuration: FigureExportConfiguration,
+        scale: CGFloat
+    ) -> ImageRenderer<FigureRenderedPageView> {
+        let view = FigureRenderedPageView(
+            descriptor: descriptor,
+            data: data
+        )
+        let renderer = ImageRenderer(content: view)
+        renderer.proposedSize = ProposedViewSize(configuration.pageSize.size)
+        renderer.scale = scale
+        return renderer
+    }
+
+    /// Captures one coherent companion snapshot for the lifetime of a figure
+    /// composer. Decoded HD/probe values and every selectable waveform payload
+    /// are loaded between two checks of the exact source-file fingerprints, so
+    /// neither preview nor final rendering performs a later scientific reload.
+    func freezeCompanions(
+        _ companions: FigureExportCompanions,
+        data: RFMappingData,
+        unitIDs: [Int],
+        fileManager: FileManager = .default
+    ) throws -> FigureExportCompanions {
+        var source = companions
+        source.frozenInputs = nil
+        source.frozenWaveformPayloads = [:]
+        source.frozenUnitIDs = []
+
+        let beforeRequests: [FigureManifestSourceRequest]
+        do {
+            beforeRequests = try companionSourceRequests(
+                unitIDs: unitIDs,
+                companions: source
+            )
+        } catch {
+            throw FigureExportRendererError.couldNotWrite(
+                "Could not enumerate scientific companion inputs: \(error.localizedDescription)"
+            )
+        }
+        let capturedInputs = try beforeRequests.map {
+            try captureInput($0, fileManager: fileManager)
+        }
+
+        var frozen = try reloadCompanions(source, data: data)
+        var waveformPayloads: [Int: WaveformPayload] = [:]
+        if let waveform = frozen.waveformArtifact {
+            for unitID in unitIDs where waveform.unitSummaries[unitID] != nil {
+                do {
+                    waveformPayloads[unitID] = try waveform.payload(
+                        for: unitID,
+                        mode: frozen.waveformChannelMode
+                    )
+                } catch {
+                    throw FigureExportRendererError.couldNotWrite(
+                        "Could not freeze waveform companion for unit ID \(unitID): "
+                            + error.localizedDescription
+                    )
+                }
+            }
+        }
+
+        let afterRequests: [FigureManifestSourceRequest]
+        do {
+            afterRequests = try companionSourceRequests(
+                unitIDs: unitIDs,
+                companions: frozen
+            )
+        } catch {
+            throw FigureExportRendererError.couldNotWrite(
+                "Could not re-enumerate frozen scientific companion inputs: "
+                    + error.localizedDescription
+            )
+        }
+        guard sourceRequestIdentities(beforeRequests)
+            == sourceRequestIdentities(afterRequests) else {
+            throw FigureExportRendererError.couldNotWrite(
+                "Scientific companion file membership changed while the composer snapshot was frozen."
+            )
+        }
+        try verifyInputs(capturedInputs, fileManager: fileManager)
+
+        frozen.frozenInputs = capturedInputs
+        frozen.frozenWaveformPayloads = waveformPayloads
+        frozen.frozenUnitIDs = unitIDs
+        return frozen
+    }
+
+    private func companionSourceRequests(
+        unitIDs: [Int],
+        companions: FigureExportCompanions
+    ) throws -> [FigureManifestSourceRequest] {
+        var requests: [FigureManifestSourceRequest] = []
+        if let tuning = companions.hdTuning {
+            requests.append(.init(
+                kind: "headDirection",
+                role: "tuningCurves",
+                url: tuning.sourceURL
+            ))
+        }
+        if let geometry = companions.probeGeometry {
+            requests.append(.init(
+                kind: "probeGeometry",
+                role: "positions",
+                url: geometry.positionsURL
+            ))
+            if let channelsURL = geometry.channelsURL {
+                requests.append(.init(
+                    kind: "probeGeometry",
+                    role: "channels",
+                    url: channelsURL
+                ))
+            }
+        }
+        if let waveform = companions.waveformArtifact {
+            for unitID in unitIDs where waveform.unitSummaries[unitID] != nil {
+                let sourceURLs = try waveform.sourceURLs(for: unitID)
+                for (sourceIndex, url) in sourceURLs.enumerated() {
+                    requests.append(.init(
+                        kind: "waveform",
+                        role: waveformSourceRole(
+                            sourceIndex: sourceIndex,
+                            unitID: unitID
+                        ),
+                        url: url
+                    ))
+                }
+            }
+            if !requests.contains(where: {
+                $0.kind == "waveform" && $0.role == "manifest"
+            }) {
+                requests.append(.init(
+                    kind: "waveform",
+                    role: "manifest",
+                    url: waveform.sourceDirectory.appendingPathComponent("manifest.json")
+                ))
+            }
+        }
+
+        var seen: Set<String> = []
+        return requests.filter { request in
+            let key = "\(request.kind)\u{0}\(request.url.standardizedFileURL.path)"
+            return seen.insert(key).inserted
+        }
+    }
+
+    private func sourceRequestIdentities(
+        _ requests: [FigureManifestSourceRequest]
+    ) -> [String] {
+        requests.map {
+            "\($0.kind)\u{0}\($0.role)\u{0}\($0.url.standardizedFileURL.path)"
+        }
+    }
+
+    private func waveformSourceRole(sourceIndex: Int, unitID: Int) -> String {
+        switch sourceIndex {
+        case 0: "manifest"
+        case 1: "channels"
+        case 2: "timeAxis"
+        case 3: "units"
+        default: "unit-\(unitID)-template"
+        }
+    }
+
+    private func captureRFSource(
+        _ data: RFMappingData,
+        fileManager: FileManager
+    ) throws -> FigureManifestInput {
+        let input = try captureInput(
+            FigureManifestSourceRequest(
+                kind: "rfMapping",
+                role: "sourceJSON",
+                url: data.url
+            ),
+            fileManager: fileManager
+        )
+        guard input.byteCount == data.sourceByteCount,
+              input.sha256 == data.sourceSHA256 else {
+            throw FigureExportRendererError.couldNotWrite(
+                "RF source changed after it was loaded; reopen it before exporting: \(data.url.path)."
+            )
+        }
+        return input
+    }
+
+    private func reloadCompanions(
+        _ companions: FigureExportCompanions,
+        data: RFMappingData
+    ) throws -> FigureExportCompanions {
+        var frozen = companions
+        if let tuning = companions.hdTuning {
+            let url = tuning.sourceURL
+            let accessing = url.startAccessingSecurityScopedResource()
+            defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+            do {
+                frozen.hdTuning = try HDTuningData(url: url)
+            } catch {
+                throw FigureExportRendererError.couldNotWrite(
+                    "Could not freeze HD tuning companion \(url.path): \(error.localizedDescription)"
+                )
+            }
+        }
+        if let geometry = companions.probeGeometry {
+            let positionsURL = geometry.positionsURL
+            let accessing = positionsURL.startAccessingSecurityScopedResource()
+            defer { if accessing { positionsURL.stopAccessingSecurityScopedResource() } }
+            do {
+                frozen.probeGeometry = try ProbeGeometryDiscovery.load(
+                    ProbeGeometryPaths(
+                        probeName: geometry.probeName,
+                        positionsURL: positionsURL,
+                        channelsURL: geometry.channelsURL
+                    ),
+                    rfUnitIDs: data.unitPool
+                )
+            } catch {
+                throw FigureExportRendererError.couldNotWrite(
+                    "Could not freeze probe geometry companion \(positionsURL.path): "
+                        + error.localizedDescription
+                )
+            }
+        }
+        if let waveform = companions.waveformArtifact {
+            let directory = waveform.sourceDirectory
+            let accessing = directory.startAccessingSecurityScopedResource()
+            defer { if accessing { directory.stopAccessingSecurityScopedResource() } }
+            do {
+                frozen.waveformArtifact = try WaveformArtifactStore(directory: directory)
+            } catch {
+                throw FigureExportRendererError.couldNotWrite(
+                    "Could not freeze waveform companion \(directory.path): "
+                        + error.localizedDescription
+                )
+            }
+        }
+        return frozen
+    }
+
+    private func captureInput(
+        _ request: FigureManifestSourceRequest,
+        fileManager: FileManager
+    ) throws -> FigureManifestInput {
+        let url = request.url.standardizedFileURL
+        let accessing = url.startAccessingSecurityScopedResource()
+        defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+        do {
+            let before = try inputFileSignature(url, fileManager: fileManager)
+            let data = try Data(contentsOf: url, options: .mappedIfSafe)
+            let after = try inputFileSignature(url, fileManager: fileManager)
+            guard before == after, before.byteCount == data.count else {
+                throw FigureExportRendererError.couldNotWrite(
+                    "Scientific companion changed while provenance was computed: \(url.path)."
+                )
+            }
+            return FigureManifestInput(
+                kind: request.kind,
+                role: request.role,
+                path: url.path,
+                byteCount: data.count,
+                sha256: sha256Hex(data)
+            )
+        } catch let error as FigureExportRendererError {
+            throw error
+        } catch {
+            throw FigureExportRendererError.couldNotWrite(
+                "Could not verify scientific companion \(url.path): \(error.localizedDescription)"
+            )
+        }
+    }
+
+    private func inputFileSignature(
+        _ url: URL,
+        fileManager: FileManager
+    ) throws -> FigureManifestFileSignature {
+        let attributes = try fileManager.attributesOfItem(atPath: url.path)
+        guard attributes[.type] as? FileAttributeType == .typeRegular,
+              let size = attributes[.size] as? NSNumber,
+              let modified = attributes[.modificationDate] as? Date else {
+            throw FigureExportRendererError.couldNotWrite(
+                "Scientific companion must be a regular file: \(url.path)."
+            )
+        }
+        return FigureManifestFileSignature(
+            device: (attributes[.systemNumber] as? NSNumber)?.uint64Value ?? 0,
+            inode: (attributes[.systemFileNumber] as? NSNumber)?.uint64Value ?? 0,
+            byteCount: size.intValue,
+            modificationDate: modified
+        )
+    }
+
+    private func verifyInputs(
+        _ expected: [FigureManifestInput],
+        fileManager: FileManager
+    ) throws {
+        for input in expected {
+            let actual = try captureInput(
+                FigureManifestSourceRequest(
+                    kind: input.kind,
+                    role: input.role,
+                    url: URL(fileURLWithPath: input.path)
+                ),
+                fileManager: fileManager
+            )
+            guard actual == input else {
+                throw FigureExportRendererError.couldNotWrite(
+                    "Scientific input changed during figure export: \(input.path)."
+                )
+            }
+        }
+    }
+
+    private func manifestPage(
+        for page: FigurePageRenderDescriptor
+    ) -> FigureManifestPage {
+        FigureManifestPage(
+            ordinal: page.outputOrdinal,
+            unitID: page.unitID,
+            originalUnitIndex: page.originalUnitIndex,
+            pageIndex: page.pageIndex,
+            pageName: page.pageName,
+            filename: nil,
+            byteCount: nil,
+            sha256: nil,
+            plots: page.plots.map(\.kind.rawValue),
+            placeholders: page.plots.compactMap(\.placeholder),
+            annotations: manifestAnnotations(for: page)
+        )
+    }
+
+    private func manifestAnnotations(
+        for page: FigurePageRenderDescriptor
+    ) -> [String] {
+        page.plots.compactMap { plot in
+            guard plot.kind == .probe,
+                  let unit = plot.probePayload?.unit,
+                  unit.xMicrometers == nil || unit.yMicrometers == nil else { return nil }
+            return "Probe unit ID \(unit.unitID) missingPosition: positions.csv contains nan,nan."
+        }
+    }
+
+    private func makeManifest(
+        pages: [FigurePageRenderDescriptor],
+        configuration: FigureExportConfiguration,
+        data: RFMappingData,
+        companions: FigureExportCompanions,
+        sourceInput: FigureManifestInput,
+        companionInputs: [FigureManifestInput],
+        outputPages: [FigureManifestPage]
+    ) -> FigureExportManifest {
+        let snapshot = configuration.viewerSnapshot
+        let selectedCell = snapshot.selectedCell.map {
+            FigureManifestCell(
+                yStart: $0.yStart,
+                yEnd: $0.yEnd,
+                xStart: $0.xStart,
+                xEnd: $0.xEnd
+            )
+        }
+        let waveformLimit = pages.flatMap(\.plots)
+            .compactMap(\.waveformAmplitudeLimitMicrovolts)
+            .max()
+        let waveformPayload = pages.flatMap(\.plots)
+            .compactMap(\.waveformPayload)
+            .first
+        let sharedWaveformScale = waveformLimit.flatMap { rawLimit in
+            waveformPayload.map { payload in
+                let amplitude = abs(rawLimit)
+                return FigureManifestSharedWaveformScale(
+                    vmin: -amplitude,
+                    vmax: amplitude,
+                    unit: "µV",
+                    unitIds: configuration.selectedUnitIDs,
+                    baselineEndMs: payload.baselineEndMilliseconds,
+                    channelMode: payload.mode.rawValue
+                )
+            }
+        }
+        let sharedRFRange = pages.flatMap(\.plots).compactMap(\.rfValueRange).first
+        let qualityFilter = resolvedUnitQualityFilter(
+            configuration: configuration,
+            data: data
+        )
+        let provenance = FigureManifestProvenance(
+            provenanceVersion: 1,
+            application: FigureManifestApplication(
+                name: "RF Map Viewer",
+                version: applicationVersion,
+                edition: "SwiftUI"
+            ),
+            source: sourceInput,
+            sourceContract: FigureManifestSourceContract(
+                dimensions: [data.nUnits, data.nY, data.nX, data.nBins],
+                unitIDs: data.unitPool,
+                responseUnits: data.responseUnits,
+                responseNormalization: data.responseNormalization,
+                spikeCountDefinition: data.spikeCountDefinition,
+                occupancyTimeDefinition: data.occupancyTimeDefinition,
+                xPositions: data.xPositions,
+                yPositions: data.yPositions,
+                timeBinEdgesMS: data.timeBinEdges.map { $0 * 1_000 },
+                occupancyTimeSecondsSize: [data.nY, data.nX]
+            ),
+            companions: companionInputs,
+            companionStatus: FigureManifestCompanionStatus(
+                headDirection: companionStatus(
+                    available: companions.hdTuning != nil,
+                    error: companions.hdError
+                ),
+                probeGeometry: companionStatus(
+                    available: companions.probeGeometry != nil,
+                    error: companions.probeError
+                ),
+                waveform: companionStatus(
+                    available: companions.waveformArtifact != nil,
+                    error: companions.waveformError
+                )
+            ),
+            selection: FigureManifestSelection(
+                selectedUnitIDs: configuration.selectedUnitIDs,
+                pageTemplates: configuration.pages.enumerated().map { index, page in
+                    FigureManifestPageTemplate(
+                        pageIndex: index,
+                        pageName: page.name,
+                        plots: page.plots.map(\.kind.rawValue)
+                    )
+                },
+                outputOrder: "unit-major/page-major"
+            ),
+            display: FigureManifestDisplaySettings(
+                viewerUnitID: snapshot.unitID,
+                valueMode: snapshot.valueMode.rawValue,
+                valueUnit: snapshot.valueMode.unit,
+                activeTimeMS: snapshot.activeTimeMS,
+                selectedRangeMS: [snapshot.rangeStartMS, snapshot.rangeEndMS],
+                plotRangeMS: [snapshot.plotRangeStartMS, snapshot.plotRangeEndMS],
+                timeResolutionMS: snapshot.timeResolutionMS,
+                xBins: snapshot.xBins,
+                yBins: snapshot.yBins,
+                smoothRadius: snapshot.smoothRadius,
+                flipY: snapshot.flipY,
+                palette: snapshot.palette.rawValue,
+                polarRadiusMode: snapshot.polarRadiusMode.rawValue,
+                spatialPlotFormat: snapshot.spatialPlotFormat.rawValue,
+                delayRGBMode: snapshot.delayRGBMode.rawValue,
+                responseFloor: snapshot.responseFloor,
+                selectedTab: snapshot.selectedTab.rawValue,
+                selectedCell: selectedCell,
+                timelineRangeAnchorMS: snapshot.timelineRangeAnchorMS,
+                timelineScrollFraction: snapshot.timelineScrollFraction,
+                hdDisplayBins: HDTuningData.defaultDisplayBins,
+                hdSmoothing: true,
+                hdSmoothSigma: HDTuningData.defaultSmoothSigma,
+                waveformChannelMode: companions.waveformChannelMode.rawValue,
+                sharedWaveformAmplitudeLimitMicrovolts: waveformLimit,
+                unitQualityFilter: FigureManifestUnitQualityFilter(
+                    enabled: qualityFilter.enabled,
+                    zeroSpikeSpatialBinThreshold: qualityFilter.zeroSpikeSpatialBinThreshold,
+                    sourceStartBin: qualityFilter.sourceStartBin,
+                    sourceEndBin: qualityFilter.sourceEndBin,
+                    spatialBinCount: qualityFilter.spatialBinCount,
+                    comparison: "hide when zero-bin count is greater than or equal to threshold",
+                    visibleUnitIDs: qualityFilter.visibleUnitIDs,
+                    excludedUnitIDs: qualityFilter.excludedUnitIDs
+                )
+            ),
+            sharedRFScale: sharedRFRange.map {
+                FigureManifestSharedRFScale(
+                    vmin: $0.vmin,
+                    vmax: $0.vmax,
+                    unit: snapshot.valueMode.unit,
+                    unitIds: configuration.selectedUnitIDs
+                )
+            },
+            sharedWaveformScale: sharedWaveformScale,
+            export: FigureManifestExportSettings(
+                format: configuration.format.rawValue,
+                pageSize: configuration.pageSize.rawValue,
+                pageWidthPoints: Double(configuration.pageSize.size.width),
+                pageHeightPoints: Double(configuration.pageSize.size.height),
+                outputScale: Double(configuration.outputScale),
+                actualRasterScale: configuration.format == .pdf
+                    ? 1
+                    : Double(configuration.outputScale),
+                baseName: configuration.baseName,
+                outputPath: configuration.outputURL?.path ?? "",
+                overwriteExisting: configuration.overwriteExisting,
+                rasterEmbeddedInSVG: configuration.format == .svg
+            ),
+            renderingContract: FigureManifestRenderingContract(
+                preview: "same-page-renderer",
+                svg: "lossless PNG embedded in SVG; plot primitives are not vector paths",
+                pdf: "manifest JSON and its SHA-256 are embedded in PDF document metadata",
+                outputIntegrity: configuration.format == .pdf
+                    ? "embedded manifest SHA-256"
+                    : "per-file byteCount and SHA-256"
+            )
+        )
+        return FigureExportManifest(
+            schemaVersion: 2,
+            generator: generatorName,
+            generatedAtUTC: ISO8601DateFormatter().string(from: Date()),
+            order: "unit-major/page-major",
+            format: configuration.format.rawValue,
+            sourceJSON: data.url.path,
+            sourceSHA256: data.sourceSHA256,
+            sourceByteCount: data.sourceByteCount,
+            pageSize: configuration.pageSize.rawValue,
+            rasterEmbeddedInSVG: configuration.format == .svg,
+            provenance: provenance,
+            pages: outputPages
+        )
+    }
+
+    private func companionStatus(available: Bool, error: String?) -> String {
+        if available { return "available" }
+        guard let error, !error.isEmpty else { return "unavailable" }
+        return error
+    }
+
+    private func resolvedUnitQualityFilter(
+        configuration: FigureExportConfiguration,
+        data: RFMappingData
+    ) -> RFUnitQualityFilterSnapshot {
+        if let snapshot = configuration.unitQualityFilter { return snapshot }
+        let store = RFMappingStore(
+            initialData: data,
+            loadDefault: false,
+            discoverJSONChoices: false,
+            discoverCompanions: false,
+            unitQualityFilterEnabled: false
+        )
+        store.applyViewerSyncState(configuration.viewerSnapshot)
+        let source = store.sourceBinsForPlotRange()
+        return RFUnitQualityFilterSnapshot(
+            enabled: false,
+            zeroSpikeSpatialBinThreshold: 1,
+            sourceStartBin: source.start,
+            sourceEndBin: source.end,
+            spatialBinCount: data.nY * data.nX,
+            visibleUnitIDs: data.unitPool,
+            excludedUnitIDs: []
+        )
+    }
+
+    private func encodedManifest(
+        _ manifest: FigureExportManifest,
+        prettyPrinted: Bool
+    ) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = prettyPrinted
+            ? [.prettyPrinted, .sortedKeys]
+            : [.sortedKeys]
+        return try encoder.encode(manifest)
+    }
+
+    private var applicationVersion: String {
+        let bundle = Bundle.main
+        guard bundle.bundleIdentifier == "org.local.rfmapping.viewer.swift",
+              let version = bundle.object(
+                forInfoDictionaryKey: "CFBundleShortVersionString"
+              ) as? String,
+              !version.isEmpty else {
+            // `Bundle.main` belongs to xctest when the renderer is exercised
+            // through SwiftPM, not to RF Map Viewer.
+            return "1.9.6"
+        }
+        return version
+    }
+
+    private var generatorName: String {
+        "RFMappingSwiftUI/\(applicationVersion)"
+    }
+
+    func pdfMetadata(
+        configuration: FigureExportConfiguration,
+        data: RFMappingData,
+        manifestData: Data? = nil
+    ) -> [CFString: Any] {
+        var subject = [
+            "Source JSON: \(data.url.path)",
+            "Source SHA-256: \(data.sourceSHA256)",
+            "Source bytes: \(data.sourceByteCount)",
+            "Order: unit-major/page-major",
+        ]
+        var metadata: [CFString: Any] = [
+            kCGPDFContextTitle: configuration.baseName,
+            kCGPDFContextCreator: generatorName,
+        ]
+        if let manifestData, let manifestJSON = String(data: manifestData, encoding: .utf8) {
+            let digest = sha256Hex(manifestData)
+            subject.append("RFMExportManifestSHA256: \(digest)")
+            subject.append("RFMExportManifest: \(manifestJSON)")
+            metadata[kCGPDFContextKeywords] = "RFMExportManifestSHA256=\(digest)"
+        }
+        metadata[kCGPDFContextSubject] = subject.joined(separator: "\n")
+        return metadata
+    }
+
+    private func sha256Hex(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Publishes a complete sibling staging item using one Darwin rename.
+    /// New outputs use an exclusive rename; explicit overwrite atomically swaps
+    /// old and new entries, after which the old complete output is cleaned from
+    /// the private staging name. Directory overwrite additionally requires the
+    /// old entry to be a fully validated RFMappingSwiftUI export bundle. There
+    /// is never a state where overwrite has deleted the old output but not yet
+    /// published the new one.
+    func commitTemporaryItem(
+        _ temporaryURL: URL,
+        to outputURL: URL,
+        overwrite: Bool,
+        expectedDirectory: Bool,
+        expectedFormat: FigureExportFormat?,
+        fileManager: FileManager
+    ) throws {
+        let renameExclusive: UInt32 = 0x00000004
+        let renameSwap: UInt32 = 0x00000002
+
+        for _ in 0..<4 {
+            do {
+                try atomicRename(
+                    temporaryURL,
+                    outputURL,
+                    flags: renameExclusive
+                )
+                return
+            } catch let error as AtomicRenameError
+                where error.code == EEXIST || error.code == ENOTEMPTY {
+                guard overwrite else {
+                    throw FigureExportRendererError.outputAlreadyExists(outputURL)
+                }
+            } catch let error as AtomicRenameError {
+                throw renameFailure(error)
+            }
+
+            do {
+                try validateExistingOutput(
+                    outputURL,
+                    expectedDirectory: expectedDirectory,
+                    expectedFormat: expectedFormat,
+                    fileManager: fileManager
+                )
+                try atomicRename(temporaryURL, outputURL, flags: renameSwap)
+                // `temporaryURL` now contains the previous complete output.
+                do {
+                    try validateExistingOutput(
+                        temporaryURL,
+                        expectedDirectory: expectedDirectory,
+                        expectedFormat: expectedFormat,
+                        fileManager: fileManager
+                    )
+                } catch {
+                    // The destination changed type between validation and the
+                    // atomic exchange. Exchange again to restore the original
+                    // destination before reporting the race.
+                    do {
+                        try atomicRename(temporaryURL, outputURL, flags: renameSwap)
+                    } catch let rollbackError as AtomicRenameError {
+                        throw FigureExportRendererError.couldNotWrite(
+                            "Export replacement validation failed and rollback also failed: "
+                                + "\(renameFailure(rollbackError).localizedDescription)"
+                        )
+                    }
+                    throw error
+                }
+                // Failure to clean it cannot invalidate the newly published
+                // destination, so cleanup is deliberately best-effort.
+                try? fileManager.removeItem(at: temporaryURL)
+                return
+            } catch let error as AtomicRenameError where error.code == ENOENT {
+                // Destination disappeared after the exclusive attempt. Retry
+                // the complete decision without using a clobbering rename.
+                continue
+            } catch let error as AtomicRenameError {
+                throw renameFailure(error)
+            }
+        }
+        throw FigureExportRendererError.couldNotWrite(
+            "Output changed repeatedly while publishing \(outputURL.path)."
+        )
+    }
+
+    private struct AtomicRenameError: Error {
+        let code: Int32
+        let source: URL
+        let destination: URL
+    }
+
+    private func atomicRename(_ source: URL, _ destination: URL, flags: UInt32) throws {
+        let result = source.path.withCString { sourcePath in
+            destination.path.withCString { destinationPath in
+                renamex_np(sourcePath, destinationPath, flags)
+            }
+        }
+        guard result == 0 else {
+            throw AtomicRenameError(
+                code: errno,
+                source: source,
+                destination: destination
+            )
+        }
+    }
+
+    private func renameFailure(_ error: AtomicRenameError) -> FigureExportRendererError {
+        let detail = String(cString: strerror(error.code))
+        return .couldNotWrite(
+            "Could not atomically publish \(error.source.path) to "
+                + "\(error.destination.path): \(detail)."
+        )
+    }
+
+    private func validateExistingOutput(
+        _ outputURL: URL,
+        expectedDirectory: Bool,
+        expectedFormat: FigureExportFormat?,
+        fileManager: FileManager
+    ) throws {
+        let attributes: [FileAttributeKey: Any]
+        do {
+            attributes = try fileManager.attributesOfItem(atPath: outputURL.path)
+        } catch let error as NSError where error.domain == NSCocoaErrorDomain
+            && error.code == NSFileNoSuchFileError {
+            throw AtomicRenameError(code: ENOENT, source: outputURL, destination: outputURL)
+        }
+        let type = attributes[.type] as? FileAttributeType
+        guard type != .typeSymbolicLink else {
+            throw FigureExportRendererError.couldNotWrite(
+                "Export output must not replace a symbolic link: \(outputURL.path)."
+            )
+        }
+        let isDirectory = type == .typeDirectory
+        guard isDirectory == expectedDirectory else {
+            let expected = expectedDirectory ? "a directory" : "a regular file"
+            throw FigureExportRendererError.couldNotWrite(
+                "Existing export output must be \(expected): \(outputURL.path)."
+            )
+        }
+        if expectedDirectory {
+            guard let expectedFormat, expectedFormat != .pdf else {
+                throw FigureExportRendererError.couldNotWrite(
+                    "Directory export replacement requires an explicit PNG or SVG format."
+                )
+            }
+            try validateExportDirectoryBundle(
+                outputURL,
+                expectedFormat: expectedFormat,
+                fileManager: fileManager
+            )
+        }
+    }
+
+    private func validateExportDirectoryBundle(
+        _ directory: URL,
+        expectedFormat: FigureExportFormat,
+        fileManager: FileManager
+    ) throws {
+        let manifestURL = directory.appendingPathComponent("manifest.json")
+        let manifestAttributes: [FileAttributeKey: Any]
+        do {
+            manifestAttributes = try regularFileAttributes(
+                manifestURL,
+                label: "Figure export manifest",
+                fileManager: fileManager
+            )
+        } catch {
+            throw invalidExportBundle(directory, error.localizedDescription)
+        }
+        let manifestSize = (manifestAttributes[.size] as? NSNumber)?.uint64Value ?? 0
+        guard manifestSize > 0, manifestSize <= 16 * 1_024 * 1_024 else {
+            throw invalidExportBundle(directory, "manifest.json has an invalid size")
+        }
+
+        let manifest: FigureExportManifest
+        do {
+            manifest = try JSONDecoder().decode(
+                FigureExportManifest.self,
+                from: Data(contentsOf: manifestURL, options: .mappedIfSafe)
+            )
+        } catch {
+            throw invalidExportBundle(
+                directory,
+                "manifest.json could not be decoded: \(error.localizedDescription)"
+            )
+        }
+        let generatorParts = manifest.generator.split(
+            separator: "/",
+            omittingEmptySubsequences: false
+        )
+        guard [1, 2].contains(manifest.schemaVersion),
+              generatorParts.count == 2,
+              generatorParts[0] == "RFMappingSwiftUI",
+              !generatorParts[1].isEmpty,
+              manifest.format == expectedFormat.rawValue,
+              manifest.order == "unit-major/page-major",
+              manifest.rasterEmbeddedInSVG == (expectedFormat == .svg),
+              ISO8601DateFormatter().date(from: manifest.generatedAtUTC) != nil,
+              manifest.sourceJSON.hasPrefix("/"),
+              manifest.pages.allSatisfy({ !$0.plots.isEmpty }),
+              manifest.pages.count <= 100_000,
+              !manifest.pages.isEmpty else {
+            throw invalidExportBundle(
+                directory,
+                "manifest identity, format, order, or page list is invalid"
+            )
+        }
+        guard manifest.sourceSHA256.count == 64,
+              manifest.sourceSHA256.allSatisfy(\.isHexDigit),
+              manifest.sourceByteCount > 0 else {
+            throw invalidExportBundle(directory, "source provenance is invalid")
+        }
+        if manifest.schemaVersion == 2 {
+            try validateManifestV2Provenance(manifest, directory: directory)
+        }
+
+        let filenames = manifest.pages.compactMap(\.filename)
+        guard filenames.count == manifest.pages.count,
+              Set(filenames).count == filenames.count,
+              manifest.pages.map(\.ordinal) == Array(manifest.pages.indices) else {
+            throw invalidExportBundle(directory, "page filenames or ordinals are duplicated")
+        }
+        let requiredExtension = expectedFormat.rawValue
+        for page in manifest.pages {
+            guard let filename = page.filename,
+                  let digest = page.sha256,
+                  page.pageIndex >= 0, page.pageIndex < Int.max else {
+                throw invalidExportBundle(directory, "manifest page index is invalid")
+            }
+            let canonicalFilename = String(
+                format: "unit_%03d_id_%d_page_%02d_%@.%@",
+                page.originalUnitIndex,
+                page.unitID,
+                page.pageIndex + 1,
+                slug(page.pageName),
+                requiredExtension
+            )
+            guard safeManifestFilename(filename),
+                  filename == canonicalFilename,
+                  URL(fileURLWithPath: filename).pathExtension.lowercased()
+                    == requiredExtension,
+                  digest.count == 64,
+                  digest.allSatisfy(\.isHexDigit),
+                  manifest.schemaVersion == 1 || (page.byteCount ?? 0) > 0 else {
+                throw invalidExportBundle(
+                    directory,
+                    "manifest contains an unsafe filename, extension, or digest"
+                )
+            }
+        }
+
+        let expectedEntries = Set(filenames).union(["manifest.json"])
+        let actualEntries: Set<String>
+        do {
+            actualEntries = Set(try fileManager.contentsOfDirectory(atPath: directory.path))
+        } catch {
+            throw invalidExportBundle(
+                directory,
+                "directory contents could not be enumerated: \(error.localizedDescription)"
+            )
+        }
+        guard actualEntries == expectedEntries else {
+            let unexpected = actualEntries.subtracting(expectedEntries).sorted()
+            let missing = expectedEntries.subtracting(actualEntries).sorted()
+            throw invalidExportBundle(
+                directory,
+                "file set differs from manifest; unexpected=\(unexpected), missing=\(missing)"
+            )
+        }
+
+        for page in manifest.pages {
+            guard let filename = page.filename, let digest = page.sha256 else {
+                throw invalidExportBundle(directory, "manifest output identity is missing")
+            }
+            let pageURL = directory.appendingPathComponent(filename)
+            let pageAttributes: [FileAttributeKey: Any]
+            do {
+                pageAttributes = try regularFileAttributes(
+                    pageURL,
+                    label: "Manifest page \(filename)",
+                    fileManager: fileManager
+                )
+            } catch {
+                throw invalidExportBundle(directory, error.localizedDescription)
+            }
+            let actualDigest: String
+            do {
+                actualDigest = sha256Hex(try Data(
+                    contentsOf: pageURL,
+                    options: .mappedIfSafe
+                ))
+            } catch {
+                throw invalidExportBundle(
+                    directory,
+                    "page \(filename) could not be read: \(error.localizedDescription)"
+                )
+            }
+            if manifest.schemaVersion == 2 {
+                let actualByteCount = (pageAttributes[.size] as? NSNumber)?.intValue
+                guard actualByteCount == page.byteCount else {
+                    throw invalidExportBundle(
+                        directory,
+                        "page \(filename) does not match its byte count"
+                    )
+                }
+            }
+            guard actualDigest == digest.lowercased() else {
+                throw invalidExportBundle(
+                    directory,
+                    "page \(filename) does not match its SHA-256"
+                )
+            }
+        }
+    }
+
+    private func validateManifestV2Provenance(
+        _ manifest: FigureExportManifest,
+        directory: URL
+    ) throws {
+        guard let provenance = manifest.provenance else {
+            throw invalidExportBundle(directory, "manifest v2 provenance is missing")
+        }
+        guard let generatorVersion = manifest.generator.split(separator: "/").last.map(String.init),
+              provenance.provenanceVersion == 1,
+              provenance.application.name == "RF Map Viewer",
+              provenance.application.edition == "SwiftUI",
+              provenance.application.version == generatorVersion,
+              provenance.source.kind == "rfMapping",
+              provenance.source.role == "sourceJSON",
+              provenance.source.path == manifest.sourceJSON,
+              provenance.source.byteCount == manifest.sourceByteCount,
+              provenance.source.sha256 == manifest.sourceSHA256,
+              provenance.selection.outputOrder == manifest.order,
+              provenance.export.format == manifest.format,
+              provenance.export.pageSize == manifest.pageSize,
+              provenance.export.rasterEmbeddedInSVG == manifest.rasterEmbeddedInSVG,
+              provenance.export.outputPath.hasPrefix("/"),
+              provenance.export.outputScale.isFinite,
+              provenance.export.outputScale > 0,
+              provenance.export.actualRasterScale == provenance.export.outputScale,
+              provenance.export.pageWidthPoints.isFinite,
+              provenance.export.pageWidthPoints > 0,
+              provenance.export.pageHeightPoints.isFinite,
+              provenance.export.pageHeightPoints > 0 else {
+            throw invalidExportBundle(directory, "manifest v2 identity or export settings are invalid")
+        }
+
+        let unitIDs = provenance.selection.selectedUnitIDs
+        let templates = provenance.selection.pageTemplates
+        guard !unitIDs.isEmpty,
+              Set(unitIDs).count == unitIDs.count,
+              !templates.isEmpty,
+              templates.map(\.pageIndex) == Array(templates.indices),
+              templates.allSatisfy({ !$0.pageName.isEmpty && !$0.plots.isEmpty }),
+              manifest.pages.count == unitIDs.count * templates.count else {
+            throw invalidExportBundle(directory, "manifest v2 selection is invalid")
+        }
+        for (ordinal, page) in manifest.pages.enumerated() {
+            let unitOffset = ordinal / templates.count
+            let pageOffset = ordinal % templates.count
+            let template = templates[pageOffset]
+            guard page.unitID == unitIDs[unitOffset],
+                  page.pageIndex == pageOffset,
+                  page.pageName == template.pageName,
+                  page.plots == template.plots else {
+                throw invalidExportBundle(
+                    directory,
+                    "manifest v2 outputs do not match the frozen selection"
+                )
+            }
+        }
+
+        let sourceContract = provenance.sourceContract
+        guard sourceContract.dimensions.count == 4,
+              sourceContract.dimensions.allSatisfy({ $0 > 0 }),
+              sourceContract.unitIDs.count == sourceContract.dimensions[0],
+              Set(sourceContract.unitIDs).count == sourceContract.unitIDs.count,
+              !sourceContract.responseUnits.isEmpty,
+              !sourceContract.responseNormalization.isEmpty,
+              !sourceContract.spikeCountDefinition.isEmpty,
+              !sourceContract.occupancyTimeDefinition.isEmpty,
+              sourceContract.xPositions.allSatisfy(\.isFinite),
+              sourceContract.yPositions.allSatisfy(\.isFinite),
+              sourceContract.timeBinEdgesMS.allSatisfy(\.isFinite),
+              sourceContract.occupancyTimeSecondsSize.count == 2,
+              sourceContract.occupancyTimeSecondsSize.allSatisfy({ $0 > 0 }) else {
+            throw invalidExportBundle(directory, "manifest v2 source contract is invalid")
+        }
+        let (sourceSpatialBinCount, spatialBinCountOverflow) = sourceContract.dimensions[1]
+            .multipliedReportingOverflow(by: sourceContract.dimensions[2])
+        guard !spatialBinCountOverflow else {
+            throw invalidExportBundle(directory, "manifest v2 source contract is invalid")
+        }
+
+        let display = provenance.display
+        let displayNumbers = [
+            display.activeTimeMS,
+            display.timeResolutionMS,
+            display.responseFloor,
+            display.timelineScrollFraction,
+            display.hdSmoothSigma,
+        ] + display.selectedRangeMS + display.plotRangeMS
+        guard displayNumbers.allSatisfy(\.isFinite),
+              display.selectedRangeMS.count == 2,
+              display.plotRangeMS.count == 2,
+              display.timeResolutionMS > 0,
+              display.xBins > 0,
+              display.yBins > 0,
+              display.smoothRadius >= 0,
+              display.hdDisplayBins > 0,
+              display.hdSmoothSigma > 0,
+              display.sharedWaveformAmplitudeLimitMicrovolts?.isFinite != false else {
+            throw invalidExportBundle(directory, "manifest v2 display settings are invalid")
+        }
+        guard let filter = display.unitQualityFilter else {
+            throw invalidExportBundle(directory, "manifest v2 unit-quality filter is missing")
+        }
+        let visible = filter.visibleUnitIDs
+        let excluded = filter.excludedUnitIDs
+        let visibleSet = Set(visible)
+        let excludedSet = Set(excluded)
+        guard filter.zeroSpikeSpatialBinThreshold >= 1,
+              filter.zeroSpikeSpatialBinThreshold <= 100_000,
+              filter.sourceStartBin >= 0,
+              filter.sourceEndBin >= filter.sourceStartBin,
+              filter.sourceEndBin < sourceContract.dimensions[3],
+              filter.spatialBinCount == sourceSpatialBinCount,
+              filter.comparison
+                == "hide when zero-bin count is greater than or equal to threshold",
+              visibleSet.count == visible.count,
+              excludedSet.count == excluded.count,
+              visibleSet.isDisjoint(with: excludedSet),
+              visibleSet.union(excludedSet) == Set(sourceContract.unitIDs),
+              visible == sourceContract.unitIDs.filter(visibleSet.contains),
+              excluded == sourceContract.unitIDs.filter(excludedSet.contains),
+              unitIDs.allSatisfy(visibleSet.contains) else {
+            throw invalidExportBundle(directory, "manifest v2 unit-quality filter is invalid")
+        }
+
+        let companions = provenance.companions
+        let companionKeys = companions.map { "\($0.kind)\u{0}\($0.path)" }
+        guard Set(companionKeys).count == companionKeys.count,
+              companions.allSatisfy({ input in
+                  !input.kind.isEmpty
+                      && !input.role.isEmpty
+                      && input.path.hasPrefix("/")
+                      && input.byteCount > 0
+                      && input.sha256.count == 64
+                      && input.sha256.allSatisfy(\.isHexDigit)
+              }),
+              provenance.companionStatus.headDirection != "available"
+                || companions.contains(where: { $0.kind == "headDirection" }),
+              provenance.companionStatus.probeGeometry != "available"
+                || companions.contains(where: { $0.kind == "probeGeometry" }),
+              provenance.companionStatus.waveform != "available"
+                || companions.contains(where: { $0.kind == "waveform" }) else {
+            throw invalidExportBundle(directory, "manifest v2 companion provenance is invalid")
+        }
+        if let scale = provenance.sharedRFScale {
+            guard scale.vmin.isFinite,
+                  scale.vmax.isFinite,
+                  scale.vmax >= scale.vmin,
+                  !scale.unit.isEmpty,
+                  scale.unitIds == unitIDs else {
+                throw invalidExportBundle(directory, "manifest v2 shared RF scale is invalid")
+            }
+        }
+        if let scale = provenance.sharedWaveformScale {
+            let absoluteMinimum = abs(scale.vmin)
+            let absoluteMaximum = abs(scale.vmax)
+            let symmetryTolerance = max(
+                1e-12,
+                1e-12 * max(absoluteMinimum, absoluteMaximum)
+            )
+            let waveformPlot = manifest.pages.contains { page in
+                page.plots.contains(FigureExportPlotKind.waveformLocalAverage.rawValue)
+            }
+            let amplitudeLimitMatches: Bool
+            if let amplitudeLimit = display.sharedWaveformAmplitudeLimitMicrovolts {
+                amplitudeLimitMatches = amplitudeLimit == scale.vmax
+            } else {
+                amplitudeLimitMatches = false
+            }
+            guard scale.vmin.isFinite,
+                  scale.vmax.isFinite,
+                  scale.vmin <= 0,
+                  scale.vmax >= 0,
+                  abs(absoluteMinimum - absoluteMaximum) <= symmetryTolerance,
+                  scale.unit == "µV",
+                  scale.unitIds == unitIDs,
+                  scale.baselineEndMs.isFinite,
+                  WaveformChannelMode(rawValue: scale.channelMode) != nil,
+                  scale.channelMode == display.waveformChannelMode,
+                  amplitudeLimitMatches,
+                  provenance.companionStatus.waveform == "available",
+                  waveformPlot else {
+                throw invalidExportBundle(
+                    directory,
+                    "manifest v2 shared waveform scale is invalid"
+                )
+            }
+        }
+    }
+
+    private func regularFileAttributes(
+        _ url: URL,
+        label: String,
+        fileManager: FileManager
+    ) throws -> [FileAttributeKey: Any] {
+        let attributes: [FileAttributeKey: Any]
+        do {
+            attributes = try fileManager.attributesOfItem(atPath: url.path)
+        } catch {
+            throw FigureExportRendererError.couldNotWrite(
+                "\(label) is unavailable: \(error.localizedDescription)"
+            )
+        }
+        guard attributes[.type] as? FileAttributeType == .typeRegular else {
+            throw FigureExportRendererError.couldNotWrite(
+                "\(label) must be a regular file and not a directory or symbolic link."
+            )
+        }
+        return attributes
+    }
+
+    private func safeManifestFilename(_ filename: String) -> Bool {
+        !filename.isEmpty
+            && filename != "."
+            && filename != ".."
+            && URL(fileURLWithPath: filename).lastPathComponent == filename
+            && !filename.contains("/")
+            && !filename.contains(":")
+            && filename.rangeOfCharacter(from: .controlCharacters) == nil
+    }
+
+    private func invalidExportBundle(
+        _ directory: URL,
+        _ reason: String
+    ) -> FigureExportRendererError {
+        .couldNotWrite(
+            "Refusing to overwrite a directory that is not a validated "
+                + "RFMappingSwiftUI export bundle: \(directory.path) (\(reason))."
+        )
+    }
+
+    private func pageFilename(
+        _ page: FigurePageRenderDescriptor,
+        format: FigureExportFormat
+    ) -> String {
+        let safePageName = slug(page.pageName)
+        return String(
+            format: "unit_%03d_id_%d_page_%02d_%@.%@",
+            page.originalUnitIndex,
+            page.unitID,
+            page.pageIndex + 1,
+            safePageName,
+            format.rawValue
+        )
+    }
+
+    private func slug(_ text: String) -> String {
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_"))
+        let sanitized = text.lowercased().unicodeScalars.map {
+            allowed.contains($0) ? String($0) : "-"
+        }.joined()
+        let collapsed = sanitized.replacingOccurrences(
+            of: "-+",
+            with: "-",
+            options: .regularExpression
+        ).trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+        return collapsed.isEmpty ? "page" : collapsed
+    }
+
+    private func embeddedSVG(
+        pngData: Data,
+        size: CGSize,
+        scale: CGFloat,
+        title: String
+    ) -> String {
+        let escapedTitle = title
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+        let pixelWidth = size.width * scale
+        let pixelHeight = size.height * scale
+        return """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="\(pixelWidth)" height="\(pixelHeight)" viewBox="0 0 \(size.width) \(size.height)">
+          <title>\(escapedTitle)</title>
+          <image width="\(size.width)" height="\(size.height)" href="data:image/png;base64,\(pngData.base64EncodedString())" />
+        </svg>
+        """
+    }
+}
+
+private struct FigureManifestSourceRequest {
+    let kind: String
+    let role: String
+    let url: URL
+}
+
+private struct FigureManifestFileSignature: Equatable {
+    let device: UInt64
+    let inode: UInt64
+    let byteCount: Int
+    let modificationDate: Date
+}
+
+struct FigureManifestInput: Codable, Equatable, Sendable {
+    let kind: String
+    let role: String
+    let path: String
+    let byteCount: Int
+    let sha256: String
+}
+
+private struct FigureManifestApplication: Codable {
+    let name: String
+    let version: String
+    let edition: String
+}
+
+private struct FigureManifestSourceContract: Codable {
+    let dimensions: [Int]
+    let unitIDs: [Int]
+    let responseUnits: String
+    let responseNormalization: String
+    let spikeCountDefinition: String
+    let occupancyTimeDefinition: String
+    let xPositions: [Double]
+    let yPositions: [Double]
+    let timeBinEdgesMS: [Double]
+    let occupancyTimeSecondsSize: [Int]
+}
+
+private struct FigureManifestUnitQualityFilter: Codable {
+    let enabled: Bool
+    let zeroSpikeSpatialBinThreshold: Int
+    let sourceStartBin: Int
+    let sourceEndBin: Int
+    let spatialBinCount: Int
+    let comparison: String
+    let visibleUnitIDs: [Int]
+    let excludedUnitIDs: [Int]
+}
+
+private struct FigureManifestCompanionStatus: Codable {
+    let headDirection: String
+    let probeGeometry: String
+    let waveform: String
+}
+
+private struct FigureManifestPageTemplate: Codable {
+    let pageIndex: Int
+    let pageName: String
+    let plots: [String]
+}
+
+private struct FigureManifestSelection: Codable {
+    let selectedUnitIDs: [Int]
+    let pageTemplates: [FigureManifestPageTemplate]
+    let outputOrder: String
+}
+
+private struct FigureManifestCell: Codable {
+    let yStart: Int
+    let yEnd: Int
+    let xStart: Int
+    let xEnd: Int
+}
+
+private struct FigureManifestDisplaySettings: Codable {
+    let viewerUnitID: Int
+    let valueMode: String
+    let valueUnit: String
+    let activeTimeMS: Double
+    let selectedRangeMS: [Double]
+    let plotRangeMS: [Double]
+    let timeResolutionMS: Double
+    let xBins: Int
+    let yBins: Int
+    let smoothRadius: Int
+    let flipY: Bool
+    let palette: String
+    let polarRadiusMode: String
+    let spatialPlotFormat: String
+    let delayRGBMode: String
+    let responseFloor: Double
+    let selectedTab: String
+    let selectedCell: FigureManifestCell?
+    let timelineRangeAnchorMS: Double?
+    let timelineScrollFraction: Double
+    let hdDisplayBins: Int
+    let hdSmoothing: Bool
+    let hdSmoothSigma: Double
+    let waveformChannelMode: String
+    let sharedWaveformAmplitudeLimitMicrovolts: Double?
+    let unitQualityFilter: FigureManifestUnitQualityFilter?
+}
+
+private struct FigureManifestSharedRFScale: Codable {
+    let vmin: Double
+    let vmax: Double
+    let unit: String
+    let unitIds: [Int]
+}
+
+private struct FigureManifestSharedWaveformScale: Codable {
+    let vmin: Double
+    let vmax: Double
+    let unit: String
+    let unitIds: [Int]
+    let baselineEndMs: Double
+    let channelMode: String
+}
+
+private struct FigureManifestExportSettings: Codable {
+    let format: String
+    let pageSize: String
+    let pageWidthPoints: Double
+    let pageHeightPoints: Double
+    let outputScale: Double
+    let actualRasterScale: Double
+    let baseName: String
+    let outputPath: String
+    let overwriteExisting: Bool
+    let rasterEmbeddedInSVG: Bool
+}
+
+private struct FigureManifestRenderingContract: Codable {
+    let preview: String
+    let svg: String
+    let pdf: String
+    let outputIntegrity: String
+}
+
+private struct FigureManifestProvenance: Codable {
+    let provenanceVersion: Int
+    let application: FigureManifestApplication
+    let source: FigureManifestInput
+    let sourceContract: FigureManifestSourceContract
+    let companions: [FigureManifestInput]
+    let companionStatus: FigureManifestCompanionStatus
+    let selection: FigureManifestSelection
+    let display: FigureManifestDisplaySettings
+    let sharedRFScale: FigureManifestSharedRFScale?
+    let sharedWaveformScale: FigureManifestSharedWaveformScale?
+    let export: FigureManifestExportSettings
+    let renderingContract: FigureManifestRenderingContract
+}
+
+private struct FigureManifestPage: Codable {
+    let ordinal: Int
+    let unitID: Int
+    let originalUnitIndex: Int
+    let pageIndex: Int
+    let pageName: String
+    let filename: String?
+    let byteCount: Int?
+    let sha256: String?
+    let plots: [String]
+    let placeholders: [String]
+    let annotations: [String]?
+}
+
+private struct FigureExportManifest: Codable {
+    let schemaVersion: Int
+    let generator: String
+    let generatedAtUTC: String
+    let order: String
+    let format: String
+    let sourceJSON: String
+    let sourceSHA256: String
+    let sourceByteCount: Int
+    let pageSize: String
+    let rasterEmbeddedInSVG: Bool
+    let provenance: FigureManifestProvenance?
+    let pages: [FigureManifestPage]
+}
+
+struct FigureRenderedPageView: View {
+    let descriptor: FigurePageRenderDescriptor
+    let data: RFMappingData
+
+    var body: some View {
+        VStack(spacing: 10) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(descriptor.pageName)
+                        .font(.system(size: 18, weight: .bold))
+                    Text(descriptor.unitLabel)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Text("Page \(descriptor.pageIndex + 1)")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 14)
+            .padding(.top, 10)
+
+            GeometryReader { proxy in
+                let columns = gridColumnCount(descriptor.plots.count)
+                let rows = max(1, Int(ceil(Double(max(1, descriptor.plots.count)) / Double(columns))))
+                let gap: CGFloat = 8
+                let slotWidth = max(1, (proxy.size.width - CGFloat(columns - 1) * gap) / CGFloat(columns))
+                let slotHeight = max(1, (proxy.size.height - CGFloat(rows - 1) * gap) / CGFloat(rows))
+                ZStack(alignment: .topLeading) {
+                    if descriptor.plots.isEmpty {
+                        FigureExportPlaceholderView(
+                            title: "Empty page",
+                            message: "Add at least one plot before exporting."
+                        )
+                    } else {
+                        ForEach(Array(descriptor.plots.enumerated()), id: \.element.id) { index, plot in
+                            FigureExportPlotView(
+                                plot: plot,
+                                descriptor: descriptor,
+                                data: data
+                            )
+                            .frame(width: slotWidth, height: slotHeight)
+                            .position(
+                                x: CGFloat(index % columns) * (slotWidth + gap) + slotWidth / 2,
+                                y: CGFloat(index / columns) * (slotHeight + gap) + slotHeight / 2
+                            )
+                        }
+                    }
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.bottom, 10)
+        }
+        .background(Color(nsColor: .textBackgroundColor))
+        .environment(\.colorScheme, .light)
+    }
+
+    private func gridColumnCount(_ plotCount: Int) -> Int {
+        Int(ceil(sqrt(Double(max(1, plotCount)))))
+    }
+}
+
+private struct FigureExportPlotView: View {
+    let plot: FigurePlotRenderDescriptor
+    let descriptor: FigurePageRenderDescriptor
+    let data: RFMappingData
+
+    @ViewBuilder
+    var body: some View {
+        Group {
+            if let placeholder = plot.placeholder {
+                FigureExportPlaceholderView(title: plot.kind.label, message: placeholder)
+            } else if let curve = plot.hdCurve {
+                HDCurveExportView(
+                    title: plot.kind.label,
+                    curve: curve,
+                    polar: plot.kind == .hdPolar,
+                    unitID: descriptor.unitID
+                )
+            } else if let probePayload = plot.probePayload {
+                ProbeGeometryExportView(payload: probePayload)
+            } else if let waveformPayload = plot.waveformPayload {
+                WaveformExportView(
+                    payload: waveformPayload,
+                    amplitudeLimitMicrovolts: plot.waveformAmplitudeLimitMicrovolts
+                        ?? waveformPayload.amplitudeLimitMicrovolts
+                )
+            } else {
+                ExistingRFExportPlotView(
+                    data: data,
+                    snapshot: descriptor.viewerSnapshot,
+                    unitID: descriptor.unitID,
+                    kind: plot.kind,
+                    rfValueRange: plot.rfValueRange
+                )
+                // `@State` owns an isolated store. Force a fresh identity when
+                // previewing another unit so SwiftUI cannot retain the prior
+                // unit's store under the same reusable plot placement ID.
+                .id("\(descriptor.unitID):\(plot.kind.rawValue):\(plot.id.uuidString)")
+            }
+        }
+        // Preview and final rendering stay deterministic; interacting with a
+        // preview plot must not create state that is absent from the export.
+        .allowsHitTesting(false)
+    }
+}
+
+private struct ExistingRFExportPlotView: View {
+    @State private var store: RFMappingStore
+    let kind: FigureExportPlotKind
+    let rfValueRange: FigureScalarRange?
+
+    init(
+        data: RFMappingData,
+        snapshot: ViewerSyncState,
+        unitID: Int,
+        kind: FigureExportPlotKind,
+        rfValueRange: FigureScalarRange?
+    ) {
+        let isolated = RFMappingStore(
+            initialData: data,
+            loadDefault: false,
+            discoverJSONChoices: false,
+            discoverCompanions: false,
+            unitQualityFilterEnabled: false
+        )
+        isolated.applyViewerSyncState(snapshot)
+        isolated.selectUnitID(unitID, resetInteraction: false)
+        isolated.clearHover()
+        if kind == .rgbCartesian { isolated.spatialPlotFormat = .rectangular }
+        if kind == .rgbPolar { isolated.spatialPlotFormat = .polar }
+        _store = State(initialValue: isolated)
+        self.kind = kind
+        self.rfValueRange = rfValueRange
+    }
+
+    @ViewBuilder
+    var body: some View {
+        switch kind {
+        case .rfCartesian:
+            if let rfValueRange {
+                SharedRFExportPlotView(
+                    store: store,
+                    valueRange: rfValueRange,
+                    polar: false
+                )
+            } else {
+                HeatmapView(store: store, kind: .rf)
+            }
+        case .rfPolar:
+            if let rfValueRange {
+                SharedRFExportPlotView(
+                    store: store,
+                    valueRange: rfValueRange,
+                    polar: true
+                )
+            } else {
+                PolarMapView(store: store, kind: .rf)
+            }
+        case .delayCartesian:
+            HeatmapView(store: store, kind: .delay)
+        case .delayPolar:
+            PolarMapView(store: store, kind: .delay)
+        case .rgbCartesian, .rgbPolar:
+            RGBMapView(store: store)
+        case .timelineCurrent:
+            TimelineExportView(store: store)
+        case .hdLine, .hdPolar:
+            FigureExportPlaceholderView(
+                title: kind.label,
+                message: "HD renderer payload was not resolved."
+            )
+        case .probe:
+            FigureExportPlaceholderView(
+                title: kind.label,
+                message: "Probe renderer payload was not resolved."
+            )
+        case .waveformLocalAverage:
+            FigureExportPlaceholderView(
+                title: kind.label,
+                message: "Waveform renderer payload was not resolved."
+            )
+        }
+    }
+}
+
+private struct SharedRFExportPlotView: View {
+    @Bindable var store: RFMappingStore
+    let valueRange: FigureScalarRange
+    let polar: Bool
+
+    var body: some View {
+        GeometryReader { proxy in
+            let source = store.currentHeatmapPlot()
+            let plot = HeatmapPlot(
+                matrix: source.matrix,
+                xGroups: source.xGroups,
+                yGroups: source.yGroups,
+                low: valueRange.vmin,
+                high: valueRange.vmax
+            )
+            Canvas { context, size in
+                var context = context
+                if polar {
+                    drawPolarRF(
+                        context: &context,
+                        size: size,
+                        plot: plot
+                    )
+                } else {
+                    let layout = makeHeatmapLayout(size: size, plot: plot)
+                    drawHeatmap(
+                        context: &context,
+                        store: store,
+                        plot: plot,
+                        layout: layout,
+                        title: "2D RF map - \(store.currentMatrixLabel())",
+                        subtitle: unitSubtitle,
+                        palette: store.palette,
+                        valueSuffix: store.valueMode.suffix,
+                        drawInteraction: false
+                    )
+                }
+            }
+        }
+        .background(Color(nsColor: .textBackgroundColor))
+    }
+
+    private var unitSubtitle: String {
+        guard store.hasSelectedUnit, let selectedUnitID = store.selectedUnitID else {
+            return "Unit N/A"
+        }
+        return "Unit \(String(format: "%03d", store.unitIndex)) / cluster \(selectedUnitID)"
+    }
+
+    private func drawPolarRF(
+        context: inout GraphicsContext,
+        size: CGSize,
+        plot: HeatmapPlot
+    ) {
+        let layout = makePolarLayout(size: size, store: store, plot: plot)
+        drawTitle(
+            context: &context,
+            title: "Polar RF map - \(store.currentMatrixLabel())",
+            subtitle: "total_deg inferred: \(String(format: "%.0f", layout.totalDegrees)); "
+                + "radius: \(store.polarRadiusMode.rawValue)"
+        )
+
+        let innerRadius = CGFloat(innerBlankRows) * layout.scale
+        let innerCircle = Path(ellipseIn: CGRect(
+            x: layout.center.x - innerRadius,
+            y: layout.center.y - innerRadius,
+            width: innerRadius * 2,
+            height: innerRadius * 2
+        ))
+        context.fill(innerCircle, with: .color(Color(nsColor: .controlBackgroundColor)))
+        context.stroke(innerCircle, with: .color(.secondary), lineWidth: 0.5)
+
+        let thetaEdges = (0...layout.xGroups.count).map {
+            Double.pi / 180 * (
+                90 + layout.totalDegrees / 2
+                    - layout.totalDegrees * Double($0) / Double(layout.xGroups.count)
+            )
+        }
+        for (ringIndex, displayRow) in layout.ringRows.enumerated() {
+            let rInner = CGFloat(innerBlankRows) + CGFloat(ringIndex) * layout.ringSpan
+            let rOuter = rInner + layout.ringSpan
+            for column in layout.xGroups.indices {
+                let path = polarCellPath(
+                    center: layout.center,
+                    scale: layout.scale,
+                    rInner: Double(rInner),
+                    rOuter: Double(rOuter),
+                    thetaStart: thetaEdges[column],
+                    thetaEnd: thetaEdges[column + 1]
+                )
+                context.fill(
+                    path,
+                    with: .color(paletteColor(
+                        plot.matrix[displayRow][column],
+                        low: plot.low,
+                        high: plot.high,
+                        palette: store.palette
+                    ))
+                )
+            }
+        }
+
+        let outer = (
+            CGFloat(innerBlankRows) + CGFloat(layout.yGroups.count) * layout.ringSpan
+        ) * layout.scale
+        context.stroke(
+            Path(ellipseIn: CGRect(
+                x: layout.center.x - outer,
+                y: layout.center.y - outer,
+                width: outer * 2,
+                height: outer * 2
+            )),
+            with: .color(.secondary),
+            lineWidth: 1
+        )
+        context.draw(
+            Text("x columns span visual angle")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary),
+            at: CGPoint(x: layout.center.x, y: layout.center.y - outer - 18),
+            anchor: .center
+        )
+        context.draw(
+            Text("RF values: \(store.valueMode.rawValue)")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary),
+            at: CGPoint(x: layout.center.x, y: layout.center.y + outer + 22),
+            anchor: .center
+        )
+        drawColorbar(
+            context: &context,
+            x: layout.center.x + outer + 34,
+            y: layout.center.y - min(220, outer * 2) / 2,
+            height: min(220, outer * 2),
+            low: plot.low,
+            high: plot.high,
+            palette: store.palette,
+            suffix: store.valueMode.suffix
+        )
+    }
+}
+
+private struct FigureExportPlaceholderView: View {
+    let title: String
+    let message: String
+
+    var body: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.system(size: 26))
+                .foregroundStyle(.orange)
+            Text(title).font(.headline)
+            Text(message)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .textSelection(.enabled)
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .overlay(RoundedRectangle(cornerRadius: 6).stroke(.secondary.opacity(0.45)))
+    }
+}
+
+private struct HDCurveExportView: View {
+    let title: String
+    let curve: ProcessedHDCurve
+    let polar: Bool
+    let unitID: Int
+
+    var body: some View {
+        Canvas { context, size in
+            var context = context
+            drawTitle(
+                context: &context,
+                title: title,
+                subtitle: "Unit ID \(unitID); 30 display bins; circular Gaussian smoothing"
+            )
+            if polar {
+                drawPolarCurve(context: &context, size: size)
+            } else {
+                drawLineCurve(context: &context, size: size)
+            }
+        }
+        .background(Color(nsColor: .textBackgroundColor))
+    }
+
+    private func drawLineCurve(context: inout GraphicsContext, size: CGSize) {
+        let rect = CGRect(x: 52, y: 66, width: max(10, size.width - 76), height: max(10, size.height - 102))
+        context.stroke(Path(rect), with: .color(.secondary.opacity(0.6)), lineWidth: 1)
+        let high = max(curve.ratesHz.max() ?? 0, 1e-12)
+        var path = Path()
+        for index in curve.ratesHz.indices {
+            let point = CGPoint(
+                x: rect.minX + rect.width * CGFloat(index) / CGFloat(max(1, curve.ratesHz.count - 1)),
+                y: rect.maxY - rect.height * CGFloat(curve.ratesHz[index] / high)
+            )
+            if index == 0 {
+                path.move(to: point)
+            } else {
+                path.addLine(to: point)
+            }
+        }
+        context.stroke(path, with: .color(.blue), lineWidth: 2)
+        for angle in stride(from: 0, through: 360, by: 90) {
+            let x = rect.minX + rect.width * CGFloat(angle) / 360
+            context.draw(
+                Text("\(angle)°").font(.system(size: 9)).foregroundStyle(.secondary),
+                at: CGPoint(x: x, y: rect.maxY + 16),
+                anchor: .center
+            )
+        }
+        context.draw(
+            Text(String(format: "%.2f Hz", high)).font(.system(size: 9)).foregroundStyle(.secondary),
+            at: CGPoint(x: rect.minX - 6, y: rect.minY),
+            anchor: .trailing
+        )
+    }
+
+    private func drawPolarCurve(context: inout GraphicsContext, size: CGSize) {
+        let center = CGPoint(x: size.width / 2, y: size.height / 2 + 18)
+        let radius = max(10, min(size.width, size.height) * 0.34)
+        let high = max(curve.ratesHz.max() ?? 0, 1e-12)
+        for fraction in [0.25, 0.5, 0.75, 1.0] {
+            let r = radius * CGFloat(fraction)
+            context.stroke(
+                Path(ellipseIn: CGRect(x: center.x - r, y: center.y - r, width: r * 2, height: r * 2)),
+                with: .color(.secondary.opacity(0.25)),
+                lineWidth: 1
+            )
+        }
+        var path = Path()
+        for index in 0...curve.ratesHz.count {
+            let sourceIndex = index % curve.ratesHz.count
+            let angle = curve.anglesDegrees[sourceIndex] * Double.pi / 180 - Double.pi / 2
+            let r = radius * CGFloat(curve.ratesHz[sourceIndex] / high)
+            let point = CGPoint(
+                x: center.x + r * CGFloat(cos(angle)),
+                y: center.y + r * CGFloat(sin(angle))
+            )
+            if index == 0 {
+                path.move(to: point)
+            } else {
+                path.addLine(to: point)
+            }
+        }
+        context.stroke(path, with: .color(.blue), lineWidth: 2)
+        for (label, angle) in [("0°", -Double.pi / 2), ("90°", 0.0), ("180°", Double.pi / 2), ("270°", Double.pi)] {
+            context.draw(
+                Text(label).font(.system(size: 9)).foregroundStyle(.secondary),
+                at: CGPoint(
+                    x: center.x + (radius + 15) * CGFloat(cos(angle)),
+                    y: center.y + (radius + 15) * CGFloat(sin(angle))
+                ),
+                anchor: .center
+            )
+        }
+    }
+}
+
+private struct WaveformExportView: View {
+    let payload: WaveformPayload
+    let amplitudeLimitMicrovolts: Double
+
+    var body: some View {
+        Canvas { context, size in
+            var context = context
+            drawTitle(
+                context: &context,
+                title: "Local average waveform",
+                subtitle: "Unit ID \(payload.summary.unitID); best + nearest "
+                    + "\(max(0, payload.channels.count - 1)); \(payload.mode.label); "
+                    + "baseline ≤ \(String(format: "%.3g", payload.baselineEndMilliseconds)) ms; "
+                    + "shared ±\(String(format: "%.1f", amplitudeLimitMicrovolts)) µV"
+            )
+            drawHeatmap(context: &context, size: size)
+        }
+        .background(Color(nsColor: .textBackgroundColor))
+    }
+
+    private func drawHeatmap(context: inout GraphicsContext, size: CGSize) {
+        let plotRect = CGRect(
+            x: 62,
+            y: 68,
+            width: max(10, size.width - 146),
+            height: max(10, size.height - 112)
+        )
+        guard !payload.valuesMicrovolts.isEmpty,
+              !payload.timesMilliseconds.isEmpty else { return }
+        let rowHeight = plotRect.height / CGFloat(payload.valuesMicrovolts.count)
+        let columnWidth = plotRect.width / CGFloat(payload.timesMilliseconds.count)
+        let limit = max(amplitudeLimitMicrovolts, Double.leastNonzeroMagnitude)
+        for row in payload.valuesMicrovolts.indices {
+            for column in payload.valuesMicrovolts[row].indices {
+                let value = payload.valuesMicrovolts[row][column]
+                let rect = CGRect(
+                    x: plotRect.minX + CGFloat(column) * columnWidth,
+                    y: plotRect.minY + CGFloat(row) * rowHeight,
+                    width: columnWidth + 0.5,
+                    height: rowHeight + 0.5
+                )
+                context.fill(
+                    Path(rect),
+                    with: .color(waveformDivergingColor(value / limit))
+                )
+            }
+        }
+        context.stroke(Path(plotRect), with: .color(.secondary.opacity(0.65)), lineWidth: 1)
+        let bestRect = CGRect(
+            x: plotRect.minX,
+            y: plotRect.minY + CGFloat(payload.bestChannelRow) * rowHeight,
+            width: plotRect.width,
+            height: rowHeight
+        )
+        context.stroke(Path(bestRect), with: .color(.red), lineWidth: 2)
+        for row in payload.channels.indices {
+            context.draw(
+                Text((row == payload.bestChannelRow ? "★ " : "")
+                    + "ch \(payload.channels[row].channelID)")
+                    .font(.system(size: 8, weight: row == payload.bestChannelRow ? .bold : .regular))
+                    .foregroundStyle(row == payload.bestChannelRow ? .red : .secondary),
+                at: CGPoint(
+                    x: plotRect.minX - 6,
+                    y: plotRect.minY + (CGFloat(row) + 0.5) * rowHeight
+                ),
+                anchor: .trailing
+            )
+        }
+        let timeLow = payload.timeEdgesMilliseconds.first
+            ?? payload.timesMilliseconds.first ?? 0
+        let timeHigh = payload.timeEdgesMilliseconds.last
+            ?? payload.timesMilliseconds.last ?? 0
+        let tickValues = [
+            payload.timesMilliseconds.first ?? timeLow,
+            0.0,
+            payload.timesMilliseconds.last ?? timeHigh,
+        ].filter { timeLow <= $0 && $0 <= timeHigh }
+        for value in tickValues {
+            let fraction = (value - timeLow) / max(timeHigh - timeLow, 1e-12)
+            context.draw(
+                Text(String(format: "%.2f", value))
+                    .font(.system(size: 8))
+                    .foregroundStyle(.secondary),
+                at: CGPoint(
+                    x: plotRect.minX + plotRect.width * CGFloat(fraction),
+                    y: plotRect.maxY + 13
+                ),
+                anchor: .center
+            )
+        }
+        context.draw(
+            Text("time (ms)").font(.system(size: 9)).foregroundStyle(.secondary),
+            at: CGPoint(x: plotRect.midX, y: plotRect.maxY + 29),
+            anchor: .center
+        )
+        let zeroFraction = (0 - timeLow) / max(timeHigh - timeLow, 1e-12)
+        if (0.0...1.0).contains(zeroFraction) {
+            let x = plotRect.minX + plotRect.width * CGFloat(zeroFraction)
+            var zeroPath = Path()
+            zeroPath.move(to: CGPoint(x: x, y: plotRect.minY))
+            zeroPath.addLine(to: CGPoint(x: x, y: plotRect.maxY))
+            context.stroke(zeroPath, with: .color(.black.opacity(0.5)), lineWidth: 0.8)
+        }
+        let barX = plotRect.maxX + 20
+        let barWidth: CGFloat = 13
+        let steps = 96
+        for step in 0..<steps {
+            let fraction = Double(step) / Double(steps - 1)
+            let rect = CGRect(
+                x: barX,
+                y: plotRect.minY + CGFloat(step) * plotRect.height / CGFloat(steps),
+                width: barWidth,
+                height: plotRect.height / CGFloat(steps) + 0.5
+            )
+            context.fill(
+                Path(rect),
+                with: .color(waveformDivergingColor(1 - 2 * fraction))
+            )
+        }
+        context.stroke(
+            Path(CGRect(x: barX, y: plotRect.minY, width: barWidth, height: plotRect.height)),
+            with: .color(.secondary),
+            lineWidth: 1
+        )
+        context.draw(
+            Text("µV").font(.system(size: 8)).foregroundStyle(.secondary),
+            at: CGPoint(x: barX, y: plotRect.minY - 7),
+            anchor: .bottomLeading
+        )
+        for (value, y) in [
+            (limit, plotRect.minY),
+            (0.0, plotRect.midY),
+            (-limit, plotRect.maxY),
+        ] {
+            context.draw(
+                Text(String(format: "%.3g", value))
+                    .font(.system(size: 8))
+                    .foregroundStyle(.secondary),
+                at: CGPoint(x: barX + barWidth + 4, y: y),
+                anchor: .leading
+            )
+        }
+    }
+}
+
+func waveformDivergingColor(_ normalized: Double) -> Color {
+    let value = max(-1, min(1, normalized.isFinite ? normalized : 0))
+    let fraction = (value + 1) / 2
+    let stops: [(position: Double, red: Double, green: Double, blue: Double)] = [
+        (0, 5, 48, 97),
+        (0.25, 67, 147, 195),
+        (0.5, 247, 247, 247),
+        (0.75, 214, 96, 77),
+        (1, 103, 0, 31),
+    ]
+    for index in 0..<(stops.count - 1) where fraction <= stops[index + 1].position {
+        let left = stops[index]
+        let right = stops[index + 1]
+        let segment = (fraction - left.position) / (right.position - left.position)
+        return Color(
+            red: (left.red + (right.red - left.red) * segment) / 255,
+            green: (left.green + (right.green - left.green) * segment) / 255,
+            blue: (left.blue + (right.blue - left.blue) * segment) / 255
+        )
+    }
+    return Color(red: 103.0 / 255.0, green: 0, blue: 31.0 / 255.0)
+}
+
+private struct ProbeGeometryExportView: View {
+    let payload: ProbePlotPayload
+
+    var body: some View {
+        Canvas { context, size in
+            var context = context
+            drawTitle(
+                context: &context,
+                title: "\(payload.probeName) layout",
+                subtitle: "Unit ID \(payload.unit.unitID); "
+                    + "\(payload.channels.count) channels; "
+                    + (payload.unit.position == nil
+                        ? "missingPosition (nan,nan); channels only"
+                        : "current unit only")
+            )
+            drawGeometry(context: &context, size: size)
+        }
+        .background(Color(nsColor: .textBackgroundColor))
+    }
+
+    private func drawGeometry(context: inout GraphicsContext, size: CGSize) {
+        let plotRect = CGRect(
+            x: 54,
+            y: 68,
+            width: max(10, size.width - 86),
+            height: max(10, size.height - 112)
+        )
+        let unitPosition = payload.unit.position
+        let allX = payload.channels.map(\.xMicrometers)
+            + (unitPosition.map { [$0.x] } ?? [])
+        let allY = payload.channels.map(\.yMicrometers)
+            + (unitPosition.map { [$0.y] } ?? [])
+        let xRange = allX.min().flatMap { low in
+            allX.max().map { paddedRange(low: low, high: $0) }
+        } ?? (-1.0...1.0)
+        let yRange = allY.min().flatMap { low in
+            allY.max().map { paddedRange(low: low, high: $0) }
+        } ?? (-1.0...1.0)
+
+        context.stroke(
+            Path(plotRect),
+            with: .color(.secondary.opacity(0.55)),
+            lineWidth: 1
+        )
+        drawAxisLabels(
+            context: &context,
+            plotRect: plotRect,
+            xRange: xRange,
+            yRange: yRange
+        )
+
+        for channel in payload.channels {
+            let point = displayPoint(
+                x: channel.xMicrometers,
+                y: channel.yMicrometers,
+                plotRect: plotRect,
+                xRange: xRange,
+                yRange: yRange
+            )
+            context.fill(
+                Path(ellipseIn: CGRect(
+                    x: point.x - 2.25,
+                    y: point.y - 2.25,
+                    width: 4.5,
+                    height: 4.5
+                )),
+                with: .color(Color(red: 0.58, green: 0.64, blue: 0.72))
+            )
+        }
+
+        // Channels remain as spatial context; only this page's unit is drawn.
+        if let unitPosition {
+            let point = displayPoint(
+                x: unitPosition.x,
+                y: unitPosition.y,
+                plotRect: plotRect,
+                xRange: xRange,
+                yRange: yRange
+            )
+            let radius: CGFloat = 6
+            let circle = Path(ellipseIn: CGRect(
+                x: point.x - radius,
+                y: point.y - radius,
+                width: radius * 2,
+                height: radius * 2
+            ))
+            context.fill(
+                circle,
+                with: .color(Color(red: 0.86, green: 0.15, blue: 0.15))
+            )
+            context.stroke(circle, with: .color(.white), lineWidth: 1)
+            context.draw(
+                Text("\(payload.unit.unitID)")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(.primary),
+                at: CGPoint(x: point.x + radius + 3, y: point.y),
+                anchor: .leading
+            )
+        } else {
+            drawMissingPosition(context: &context, plotRect: plotRect)
+        }
+
+        drawLegend(
+            context: &context,
+            plotRect: plotRect,
+            hasUnitPosition: unitPosition != nil
+        )
+    }
+
+    private func paddedRange(low: Double, high: Double) -> ClosedRange<Double> {
+        let span = high - low
+        let padding = span > 1e-12 ? span * 0.06 : max(abs(low) * 0.06, 1)
+        return (low - padding)...(high + padding)
+    }
+
+    private func displayPoint(
+        x: Double,
+        y: Double,
+        plotRect: CGRect,
+        xRange: ClosedRange<Double>,
+        yRange: ClosedRange<Double>
+    ) -> CGPoint {
+        let xFraction = (x - xRange.lowerBound)
+            / max(xRange.upperBound - xRange.lowerBound, 1e-12)
+        let yFraction = (y - yRange.lowerBound)
+            / max(yRange.upperBound - yRange.lowerBound, 1e-12)
+        return CGPoint(
+            x: plotRect.minX + plotRect.width * CGFloat(xFraction),
+            y: plotRect.maxY - plotRect.height * CGFloat(yFraction)
+        )
+    }
+
+    private func drawAxisLabels(
+        context: inout GraphicsContext,
+        plotRect: CGRect,
+        xRange: ClosedRange<Double>,
+        yRange: ClosedRange<Double>
+    ) {
+        for fraction in [0.0, 0.5, 1.0] {
+            let x = plotRect.minX + plotRect.width * CGFloat(fraction)
+            let value = xRange.lowerBound
+                + (xRange.upperBound - xRange.lowerBound) * fraction
+            context.draw(
+                Text(String(format: "%.1f", value))
+                    .font(.system(size: 8))
+                    .foregroundStyle(.secondary),
+                at: CGPoint(x: x, y: plotRect.maxY + 13),
+                anchor: .center
+            )
+            let y = plotRect.maxY - plotRect.height * CGFloat(fraction)
+            let yValue = yRange.lowerBound
+                + (yRange.upperBound - yRange.lowerBound) * fraction
+            context.draw(
+                Text(String(format: "%.1f", yValue))
+                    .font(.system(size: 8))
+                    .foregroundStyle(.secondary),
+                at: CGPoint(x: plotRect.minX - 6, y: y),
+                anchor: .trailing
+            )
+        }
+        context.draw(
+            Text("x (µm)").font(.system(size: 9)).foregroundStyle(.secondary),
+            at: CGPoint(x: plotRect.midX, y: plotRect.maxY + 29),
+            anchor: .center
+        )
+        context.drawLayer { layer in
+            layer.translateBy(x: plotRect.minX - 37, y: plotRect.midY)
+            layer.rotate(by: .degrees(-90))
+            layer.draw(
+                Text("y (µm)").font(.system(size: 9)).foregroundStyle(.secondary),
+                at: .zero,
+                anchor: .center
+            )
+        }
+    }
+
+    private func drawMissingPosition(
+        context: inout GraphicsContext,
+        plotRect: CGRect
+    ) {
+        let text = payload.channels.isEmpty
+            ? "missingPosition: unit coordinates are nan,nan; no channel geometry available"
+            : "missingPosition: unit coordinates are nan,nan; marker omitted"
+        context.draw(
+            Text(text)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(.orange),
+            at: CGPoint(x: plotRect.midX, y: plotRect.maxY - 14),
+            anchor: .center
+        )
+    }
+
+    private func drawLegend(
+        context: inout GraphicsContext,
+        plotRect: CGRect,
+        hasUnitPosition: Bool
+    ) {
+        let origin = CGPoint(x: plotRect.maxX - 124, y: plotRect.minY + 10)
+        var entries: [(String, Color, CGFloat)] = [
+            ("channel", Color(red: 0.58, green: 0.64, blue: 0.72), 2.5)
+        ]
+        if hasUnitPosition {
+            entries.append(("current unit", Color(red: 0.86, green: 0.15, blue: 0.15), 5))
+        }
+        let boxHeight = CGFloat(entries.count * 16 + 7)
+        let box = CGRect(x: origin.x - 8, y: origin.y - 8, width: 128, height: boxHeight)
+        context.fill(Path(box), with: .color(.white.opacity(0.84)))
+        context.stroke(Path(box), with: .color(.secondary.opacity(0.35)), lineWidth: 1)
+        for (index, entry) in entries.enumerated() {
+            let y = origin.y + CGFloat(index) * 16
+            context.fill(
+                Path(ellipseIn: CGRect(
+                    x: origin.x - entry.2,
+                    y: y - entry.2,
+                    width: entry.2 * 2,
+                    height: entry.2 * 2
+                )),
+                with: .color(entry.1)
+            )
+            context.draw(
+                Text(entry.0).font(.system(size: 8)).foregroundStyle(.primary),
+                at: CGPoint(x: origin.x + 10, y: y),
+                anchor: .leading
+            )
+        }
+    }
+}
