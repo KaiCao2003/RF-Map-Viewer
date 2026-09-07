@@ -70,6 +70,15 @@ class RepositoryPrivacyTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("noreply", result.stderr)
 
+    def test_private_tagger_email_is_blocked(self):
+        self.write("README.md", "Source only\n")
+        self.git("commit", "-qm", "source")
+        self.git("config", "user.email", "person@example.com")
+        self.git("tag", "-a", "candidate", "-m", "candidate")
+        result = self.check("--history", "candidate")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("tag identity", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

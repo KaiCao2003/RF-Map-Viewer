@@ -57,6 +57,14 @@ def main() -> int:
             blobs.append((git("rev-parse", f":{path}").decode().strip(), path))
     else:
         # Resolve first: arbitrary ref text must never become a Git option.
+        object_id = git("rev-parse", "--verify", "--end-of-options", args.history).decode().strip()
+        while git("cat-file", "-t", object_id).strip() == b"tag":
+            tag = git("cat-file", "tag", object_id).decode()
+            tagger = next((line for line in tag.splitlines() if line.startswith("tagger ")), "")
+            for email in EMAIL.findall(tagger):
+                if not (email.endswith("@users.noreply.github.com") or email == "noreply@github.com"):
+                    failures.append("tag identity: use a GitHub noreply email address")
+            object_id = tag.splitlines()[0].removeprefix("object ")
         ref = git("rev-parse", "--verify", "--end-of-options", f"{args.history}^{{commit}}").decode().strip()
         for line in git("rev-list", "--objects", ref).decode("utf-8", "surrogateescape").splitlines():
             oid, _, path = line.partition(" ")
