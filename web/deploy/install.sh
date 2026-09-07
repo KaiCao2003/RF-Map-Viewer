@@ -56,8 +56,8 @@ if [[ -d "${legacy_upload_dir}" ]]; then
     deploy_note "Removed the empty legacy upload directory."
 fi
 
-if [[ ! -d "/home/rfmapping/.config/systemd/user" ]]; then
-    install -d -m 0700 "/home/rfmapping/.config/systemd/user"
+if [[ ! -d "${HOME}/.config/systemd/user" ]]; then
+    install -d -m 0700 "${HOME}/.config/systemd/user"
 fi
 
 acquire_deploy_lock
@@ -102,7 +102,7 @@ else
     deploy_note "Skipped Python dependency installation (use --install-deps on first install)."
 fi
 
-install -m 0644 "${SCRIPT_DIR}/rfmapping-web.service" "/home/rfmapping/.config/systemd/user/${RFMAPPING_SERVICE_NAME}"
+install -m 0644 "${SCRIPT_DIR}/rfmapping-web.service" "${HOME}/.config/systemd/user/${RFMAPPING_SERVICE_NAME}"
 systemctl --user daemon-reload
 deploy_note "Installed the user service without enabling or starting it."
 

@@ -2,12 +2,14 @@
 
 # Shared deployment helpers. This file is sourced by the executable scripts.
 
-readonly RFMAPPING_DEPLOY_ROOT="/srv/rfmapping"
+readonly RFMAPPING_DEPLOY_ROOT="${RFMAPPING_DEPLOY_ROOT:?set the existing deployment root in private configuration}"
+readonly RFMAPPING_DEPLOY_USER="${RFMAPPING_DEPLOY_USER:?set the deployment account in private configuration}"
+readonly RFMAPPING_DEPLOY_HOSTS="${RFMAPPING_DEPLOY_HOSTS:?set the allowed host names in private configuration}"
 readonly RFMAPPING_RELEASES_ROOT="${RFMAPPING_DEPLOY_ROOT}/releases"
 readonly RFMAPPING_SERVICE_NAME="rfmapping-web.service"
-readonly RFMAPPING_GATE_ENV="/home/rfmapping/.config/lab-access-gate/pi-first-name.env"
-readonly RFMAPPING_PYTHON="/home/rfmapping/.virtualenvs/rfmapping/bin/python"
-readonly RFMAPPING_PIP="/home/rfmapping/.virtualenvs/rfmapping/bin/pip"
+readonly RFMAPPING_GATE_ENV="${RFMAPPING_GATE_ENV:-${HOME}/.config/lab-access-gate/pi-first-name.env}"
+readonly RFMAPPING_PYTHON="${RFMAPPING_PYTHON:-${HOME}/.virtualenvs/rfmapping/bin/python}"
+readonly RFMAPPING_PIP="${RFMAPPING_PIP:-${HOME}/.virtualenvs/rfmapping/bin/pip}"
 readonly RFMAPPING_HEALTH_URL="http://127.0.0.1:3005/rfmapping/api/health"
 readonly RFMAPPING_EXPECTED_VERSION="1.9.6"
 readonly RFMAPPING_PROTECTED_URL="http://127.0.0.1:3005/rfmapping/api/fs/list"
@@ -26,16 +28,17 @@ deploy_note() {
 require_deployment_host() {
     local short_host
     short_host="$(hostname -s | tr '[:upper:]' '[:lower:]')"
-    case "${short_host}" in
-        rfmapping_remote|rfmapping_remote) ;;
-        *) deploy_die "deployment scripts must run on rfmapping_remote (found ${short_host})" ;;
-    esac
+    local allowed_host
+    for allowed_host in ${RFMAPPING_DEPLOY_HOSTS}; do
+        [[ "${short_host}" == "${allowed_host}" ]] && return 0
+    done
+    deploy_die "host is not listed in the private deployment configuration"
 }
 
 require_deployment_user() {
     local current_user
     current_user="$(id -un)"
-    [[ "${current_user}" == "rfmapping" ]] || deploy_die "run as rfmapping, not ${current_user}"
+    [[ "${current_user}" == "${RFMAPPING_DEPLOY_USER}" ]] || deploy_die "run as the configured deployment account"
 }
 
 load_and_validate_gate_environment() {
@@ -45,8 +48,8 @@ load_and_validate_gate_environment() {
         || deploy_die "private access-gate environment is missing"
     mode="$(stat -c '%a' -- "${RFMAPPING_GATE_ENV}")"
     owner="$(stat -c '%U' -- "${RFMAPPING_GATE_ENV}")"
-    [[ "${mode}" == "600" && "${owner}" == "rfmapping" ]] \
-        || deploy_die "private access-gate environment must be owned by rfmapping with mode 600"
+    [[ "${mode}" == "600" && "${owner}" == "${RFMAPPING_DEPLOY_USER}" ]] \
+        || deploy_die "private access-gate environment must be owned by the configured deployment account with mode 600"
     if grep -Ev \
         '^(#.*|[[:space:]]*|MOUSELINE_LOGIN_ANSWER=.*|MOUSELINE_AUTH_GENERATION=.*)$' \
         "${RFMAPPING_GATE_ENV}" | grep -q .; then

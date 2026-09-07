@@ -113,10 +113,10 @@ dimension order. Only the selected unit is read from the large rate dataset.
 
 ### Install and run from source
 
-Project validation is performed on `rfmapping_remote`:
+Project validation is performed on `RFMAPPING_REMOTE_HOST` from your untracked `.env.local`:
 
 ```sh
-ssh rfmapping_remote
+ssh "$RFMAPPING_REMOTE_HOST"
 cd ~/Developer/rfmapping_gui/python
 ~/.virtualenvs/rfmapping/bin/pip install -e '.[test]'
 ~/.virtualenvs/rfmapping/bin/python rfmapping_fm_gui.py /path/to/result.rfmap

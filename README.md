@@ -92,17 +92,17 @@ tuning-session selection (default `1`), `P` for rectangle/polar layout, and
 
 ## Remote validation
 
-Project code is run on `rfmapping_remote` with `~/.virtualenvs/rfmapping`:
+Project code is run on `RFMAPPING_REMOTE_HOST` from your untracked `.env.local` with `~/.virtualenvs/rfmapping`:
 
 ```sh
-ssh rfmapping_remote 'cd ~/Developer/rfmapping_gui/python && \
+ssh "$RFMAPPING_REMOTE_HOST" 'cd ~/Developer/rfmapping_gui/python && \
   PYTHONDONTWRITEBYTECODE=1 ~/.virtualenvs/rfmapping/bin/python -m pytest -q \
     --ignore=tests/test_rfmapping_gui_tk.py'
 
-ssh rfmapping_remote 'cd ~/Developer/rfmapping_gui/web && \
+ssh "$RFMAPPING_REMOTE_HOST" 'cd ~/Developer/rfmapping_gui/web && \
   PYTHONDONTWRITEBYTECODE=1 ~/.virtualenvs/rfmapping/bin/python -m pytest -q'
 
-ssh rfmapping_remote 'cd ~/Developer/rfmapping_gui/web/frontend && \
+ssh "$RFMAPPING_REMOTE_HOST" 'cd ~/Developer/rfmapping_gui/web/frontend && \
   npm ci --no-audit --no-fund && npm test && npm run build'
 ```
 
