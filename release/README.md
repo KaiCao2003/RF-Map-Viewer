@@ -18,7 +18,7 @@ component tag and artifact name:
 
 | Component | Release | Tag | Channel |
 | --- | --- | --- | --- |
-| Python stable | `1.9.6` | `python-v1.9.6` | stable |
+| Python stable | `1.9.9` | `python-v1.9.9` | stable |
 | Python Free-Moving | `1.10.0-alpha.3` | `python-v1.10.0-alpha.3` | alpha |
 | Swift | `1.9.6` | `swift-v1.9.6` | stable |
 | Web | `1.9.6` | `web-v1.9.6` | stable |
@@ -27,7 +27,20 @@ Published downloads and checksums are available from the repository
 [Releases page](https://github.com/KaiCao2003/RF-Map-Viewer/releases). The root
 [`README.md`](../README.md#downloads) links directly to each component archive.
 
-Stable 1.9.6 is a coordinated companion-parity release for the current regular
+Python 1.9.9 separates viewer responsibilities into focused modules, removes
+internal fallback branches, consolidates historical tests, and adds a macOS
+Apple Silicon PR regression check for the stable viewer.
+
+Python 1.9.8 aligns exported Delay/RGB maps with the live GUI, shares and caches
+temporal display calculations, and limits waveform loading to one active
+read plus the latest pending selection. The stable macOS package explicitly
+excludes the separate Free-Moving/HDF5 modules.
+
+Python 1.9.7 added RF window subtraction with saved defaults, gray NaN display
+for negative differences, and shortcuts for display options and the zero-bin
+unit filter. Its macOS package retains the existing input contract.
+
+Stable 1.9.6 introduced the coordinated companion-parity release for the current regular
 `RFmapping_core.m` output. Python, Swift, and Web require raw spike counts plus
 the spatial `occupancyTimeSec` matrix, normalize firing rate as
 count/occupancy, and start in firing-rate mode. Earlier occupancy-free or

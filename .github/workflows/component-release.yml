@@ -76,8 +76,8 @@ jobs:
         working-directory: python
         run: |
           python -m pip install --disable-pip-version-check -r requirements.txt
-          PYTHONDONTWRITEBYTECODE=1 python -m pytest -q \
-            --ignore=tests/test_full_legacy_tk.py
+          RF_MAPPING_TEST_PYTHON="$(command -v python)" \
+            script/test_python_stable.sh
           RF_MAPPING_TEST_PYTHON="$(command -v python)" \
             script/tests/test_python_stable_release_candidate.sh
       - name: Build stable Python macOS archive

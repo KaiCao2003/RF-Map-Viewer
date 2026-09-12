@@ -5,6 +5,10 @@ import sys
 from types import SimpleNamespace
 
 import rfmapping_gui as gui
+import rfmapping_viewer.companions as companions_module
+import rfmapping_viewer.constants as constants_module
+import rfmapping_viewer.paths as paths_module
+import rfmapping_viewer.rf_model as rf_model_module
 from rfmapping_viewer.hd_tuning import discover_hd_tuning_path, load_hd_tuning
 from rfmapping_viewer.rf_dataset import load_rf_maps
 
@@ -68,15 +72,15 @@ def test_alias_loaders_use_the_existing_json_and_csv_contracts(tmp_path: Path) -
     rf_path = _write_json(tmp_path / "map.rfmap", _rf_payload())
     tuning_path = _write_json(
         tmp_path / "curve.tc",
-        {"42": [float(index) for index in range(gui.HD_RAW_BIN_COUNT)]},
+        {"42": [float(index) for index in range(constants_module.HD_RAW_BIN_COUNT)]},
     )
     probe_path = _write_probe(tmp_path / "positions.probe")
 
     assert load_rf_maps(rf_path).unit_ids == [42]
-    assert gui.RFMappingData(rf_path).unit_pool == [42]
+    assert rf_model_module.RFMappingData(rf_path).unit_pool == [42]
     assert load_hd_tuning(tuning_path).unit_ids == (42,)
-    assert gui.TuningCurveData.load(tuning_path).rates_for(42) is not None
-    geometry = gui.load_probe_geometry(probe_path)
+    assert companions_module.TuningCurveData.load(tuning_path).rates_for(42) is not None
+    geometry = companions_module.load_probe_geometry(probe_path)
     assert geometry.units[0].unit_id == 42
 
 
@@ -84,14 +88,14 @@ def test_rf_discovery_includes_rfmap_and_legacy_json_only(tmp_path: Path) -> Non
     rfmap = _write_json(tmp_path / "map.rfmap", _rf_payload())
     legacy = _write_json(tmp_path / "legacy.json", _rf_payload())
     reserved = _write_json(tmp_path / "TUNING_CURVES.JSON", _rf_payload())
-    _write_json(tmp_path / "curve.tc", {"42": [0.0] * gui.HD_RAW_BIN_COUNT})
+    _write_json(tmp_path / "curve.tc", {"42": [0.0] * constants_module.HD_RAW_BIN_COUNT})
     _write_probe(tmp_path / "positions.probe")
 
-    assert set(gui.discover_json_files(tmp_path)) == {
+    assert set(paths_module.discover_json_files(tmp_path)) == {
         rfmap.resolve(),
         legacy.resolve(),
     }
-    assert gui.RFMappingData(reserved).unit_pool == [42]
+    assert rf_model_module.RFMappingData(reserved).unit_pool == [42]
 
 
 def test_tuning_discovery_prefers_tc_within_the_same_session(tmp_path: Path) -> None:
@@ -108,11 +112,11 @@ def test_tuning_discovery_prefers_tc_within_the_same_session(tmp_path: Path) -> 
     alias = _write_json(directory / "tuning_curves.tc", {})
     legacy = _write_json(directory / "tuning_curves.json", {})
 
-    assert gui.discover_tuning_curve_path(rf_path) == alias.resolve()
+    assert companions_module.discover_tuning_curve_path(rf_path) == alias.resolve()
     assert discover_hd_tuning_path(rf_path) == alias
 
     alias.unlink()
-    assert gui.discover_tuning_curve_path(rf_path) == legacy.resolve()
+    assert companions_module.discover_tuning_curve_path(rf_path) == legacy.resolve()
     assert discover_hd_tuning_path(rf_path) == legacy
 
 
@@ -126,25 +130,25 @@ def test_probe_discovery_prefers_probe_and_falls_back_to_csv(tmp_path: Path) -> 
     alias = _write_probe(directory / "positions.probe")
     legacy = _write_probe(directory / "positions.csv")
 
-    discovered = gui.discover_probe_geometry_paths(rf_path)
+    discovered = companions_module.discover_probe_geometry_paths(rf_path)
     assert discovered is not None
     assert discovered[1] == alias.resolve()
 
     alias.unlink()
-    discovered = gui.discover_probe_geometry_paths(rf_path)
+    discovered = companions_module.discover_probe_geometry_paths(rf_path)
     assert discovered is not None
     assert discovered[1] == legacy.resolve()
 
 
 def test_document_routing_and_dialog_filters_cover_new_and_legacy_names() -> None:
-    assert gui.document_kind("MAP.RFMAP") == "rf"
-    assert gui.document_kind("curve.TC") == "tuning"
-    assert gui.document_kind("positions.PROBE") == "probe"
-    assert gui.document_kind("legacy.json") == "rf"
-    assert gui.document_kind("notes.txt") == "unsupported"
-    assert gui.RF_DOCUMENT_FILETYPES[0][1] == "*.rfmap *.json"
-    assert gui.TUNING_CURVE_FILETYPES[0][1] == "*.tc *.json"
-    assert gui.PROBE_POSITION_FILETYPES[0][1] == "*.probe *.csv"
+    assert paths_module.document_kind("MAP.RFMAP") == "rf"
+    assert paths_module.document_kind("curve.TC") == "tuning"
+    assert paths_module.document_kind("positions.PROBE") == "probe"
+    assert paths_module.document_kind("legacy.json") == "rf"
+    assert paths_module.document_kind("notes.txt") == "unsupported"
+    assert constants_module.RF_DOCUMENT_FILETYPES[0][1] == "*.rfmap *.json"
+    assert constants_module.TUNING_CURVE_FILETYPES[0][1] == "*.tc *.json"
+    assert constants_module.PROBE_POSITION_FILETYPES[0][1] == "*.probe *.csv"
 
     viewer = SimpleNamespace(
         _viewer_ready=True,

@@ -1287,6 +1287,33 @@ def test_scalar_maps_render_none_and_nan_as_missing_cells(kind: PlotKind) -> Non
     assert (237, 240, 243) in {color for _count, color in image.getcolors(maxcolors=500_000) or []}
 
 
+@pytest.mark.parametrize("kind", [PlotKind.RGB_CARTESIAN, PlotKind.RGB_POLAR])
+def test_rgb_zero_is_black_and_missing_cells_are_gray_with_hatching(kind: PlotKind) -> None:
+    options = {"missing_color": "#e6e8eb", "hatch_missing": True}
+    spec = PlotSpec(kind, [[(0, 0, 0), None]], options=options)
+    with Image.new("RGB", (400, 300), "white") as image:
+        draw_map = (
+            figure_export_module._draw_cartesian_map
+            if kind is PlotKind.RGB_CARTESIAN else figure_export_module._draw_polar_map
+        )
+        draw_map(ImageDraw.Draw(image), (0, 0, 399, 299), spec, rgb=True)
+        colors = {color for _, color in image.getcolors(maxcolors=120_000)}
+        assert {(0, 0, 0), (230, 232, 235), (184, 187, 192)} <= colors
+
+
+@pytest.mark.parametrize("kind", [PlotKind.RGB_CARTESIAN, PlotKind.RGB_POLAR])
+@pytest.mark.parametrize("byte_channels,expected", [(True, (1, 0, 0)), (False, (255, 0, 0))])
+def test_rgb_byte_colors_do_not_rescale_dim_cells(kind, byte_channels, expected) -> None:
+    spec = PlotSpec(kind, [[(1, 0, 0)]], options={"rgb_bytes": byte_channels})
+    with Image.new("RGB", (400, 300), "white") as image:
+        draw_map = (
+            figure_export_module._draw_cartesian_map
+            if kind is PlotKind.RGB_CARTESIAN else figure_export_module._draw_polar_map
+        )
+        draw_map(ImageDraw.Draw(image), (0, 0, 399, 299), spec, rgb=True)
+        assert image.getpixel((200, 150)) == expected
+
+
 def test_missing_cell_color_is_validated() -> None:
     page = ExportPage(
         "Bad color",

@@ -293,12 +293,12 @@ def verify_sources(root: Path, manifest: dict[str, Any]) -> None:
     web = component(manifest, "web")
 
     expect(
-        literal_assignment(root / "python/rfmapping_gui.py", "APP_VERSION"),
+        literal_assignment(root / "python/rfmapping_viewer/constants.py", "APP_VERSION"),
         python_stable["release_version"],
         "Python stable APP_VERSION",
     )
     expect(
-        literal_assignment(root / "python/rfmapping_gui.py", "APP_EDITION"),
+        literal_assignment(root / "python/rfmapping_viewer/constants.py", "APP_EDITION"),
         python_stable["edition"],
         "Python stable APP_EDITION",
     )

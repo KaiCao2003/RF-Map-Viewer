@@ -319,6 +319,9 @@ run_pyinstaller() {
     --workpath "$WORK_DIR/build" \
     --specpath "$WORK_DIR" \
     --additional-hooks-dir "$PYINSTALLER_HOOKS" \
+    --exclude-module rfmapping_fm_gui \
+    --exclude-module rfmapping_viewer.fm_dataset \
+    --exclude-module h5py \
     --add-data "$SUPPORT_DOCUMENTATION:." \
     "$@" \
     "$ROOT_DIR/rfmapping_gui.py"

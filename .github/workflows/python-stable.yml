@@ -1,0 +1,31 @@
+name: Python stable regression
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: python-stable-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Python stable / macOS arm64
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+          architecture: arm64
+          cache: pip
+          cache-dependency-path: python/requirements.txt
+      - name: Install stable viewer test dependencies
+        working-directory: python
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - name: Run model, export, performance, and Tk regressions
+        working-directory: python
+        run: RF_MAPPING_TEST_PYTHON="$(command -v python)" script/test_python_stable.sh

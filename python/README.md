@@ -2,16 +2,28 @@
 
 This directory contains two separately versioned applications:
 
-- `rfmapping_gui.py`: the stable RF Map Viewer `1.9.6`;
+- `rfmapping_gui.py`: the stable RF Map Viewer `1.9.9`;
 - `rfmapping_fm_gui.py`: the Free-Moving RF Viewer `1.10.0-alpha.3`.
 
 They have distinct app names, bundle identifiers, release artifacts, and tags,
 so the alpha can be installed and released without replacing the stable app.
 
-## Stable viewer 1.9.6
+## Stable viewer 1.9.9
+
+Version 1.9.9 separates data, display calculations, settings, and figure
+composition into focused modules. Stable regression tests share synthetic
+fixtures and run once through the same command in remote validation and
+macOS PR checks.
+
+Version 1.9.8 shares Delay/RGB calculations between the viewer and Figure
+Composer, preserving the first equal peak after smoothing and distinguishing
+black zero-response cells from gray, marked cells with no occupancy. Temporal
+results use a bounded cache, spatial display controls avoid redrawing companion
+panels, and waveform navigation keeps one active read plus the latest pending
+unit. The stable macOS package excludes the separate Free-Moving/HDF5 modules.
 
 The stable viewer opens the current JSON-text RF `.rfmap` contract and its
-tuning-curve, probe, and waveform companions. Version 1.9.6 requires raw non-negative
+tuning-curve, probe, and waveform companions. Since version 1.9.6 it requires raw non-negative
 integer `unitsSpikeCounts` together with the matching spatial
 `occupancyTimeSec` map and the current response-definition fields written by
 `RFmapping_core.m`. Older RF documents without occupancy metadata are rejected
@@ -50,6 +62,34 @@ different session. The default is session `1`.
 Press **P** to switch the RF display between Rectangle and Polar layouts.
 Press **Shift+P** to cycle the color palette.
 
+Press **-** (or **View → Subtract RF Windows (A − B)**) to toggle between
+the usual RF window sum and the difference of two independently adjustable
+windows. In difference mode the RF controls read
+**(start ms – end ms) − (start ms – end ms)**. For example, set A to
+**80–160 ms** and B to **0–80 ms** (the initial difference defaults).
+**Settings → RF Map → Timing** saves the default mode, the Sum window, and
+both A − B windows. Switching modes restores that mode's last used range;
+new windows start with the saved defaults, and **Reset** restores the active
+mode's defaults. All windows snap to source-bin edges and exclude their end
+edge. Each window uses the selected
+metric and spatial pooling/smoothing before subtraction; negative differences
+display as **NaN** in gray, while zero remains zero. The same result and both
+windows are included in displayed-data CSV and Figure Composer exports.
+Pair Windows also synchronizes the subtraction mode and both windows. The
+zero-spike unit filter continues to use window A. RF windows do not restrict
+the timeline or alter Delay / RGB.
+
+Press **D** to show or hide **Display Options**; the expanded button reads
+**Hide (D)**. These shortcuts leave text entry, including negative time
+values, available while an input has focus.
+
+Press **Command+Shift+.** (or use **View → Show Filtered Units / Hide Units
+with Zero RF Bins**) to toggle the Settings zero-bin unit filter. It restores
+or hides the affected units while preserving the current time windows,
+palette, and other display controls. The filter preference is saved and
+updated in open viewer and Settings windows. **Shift+.** alone still adjusts
+the target time width.
+
 Run it from source with:
 
 ```sh
@@ -60,7 +100,7 @@ Opening the app without a path shows the native file chooser. Release packages
 do not contain or auto-load sample RF data.
 
 Its macOS identity is `RF Map Viewer.app`, bundle ID
-`org.local.rfmapping.viewer`, and version/build `1.9.6` / `10908`. Build it with:
+`org.local.rfmapping.viewer`, and version/build `1.9.9` / `10911`. Build it with:
 
 ```sh
 script/build_python_stable_macos_app.sh
@@ -83,6 +123,37 @@ document loader inside the packaged executable.
 Windows and macOS use the same Python viewer source, including cancellable
 large-file loading, compact count storage, cached time-window calculations,
 and filename-based window titles.
+
+### Stable development and validation
+
+The Tk window and CLI entry point remain in `rfmapping_gui.py`. Supporting
+code lives in `rfmapping_viewer/`:
+
+| Module | Responsibility |
+| --- | --- |
+| `rf_model.py`, `companions.py` | Read-only data adapters and cached display values |
+| `display.py` | Spatial grouping, colors, timelines, and raster calculations |
+| `settings.py`, `settings_window.py` | Validated preferences and their Tk editor |
+| `viewer_state.py` | Paired-window state and waveform worker results |
+| `figure_composer.py`, `export_inputs.py` | Figure composition, input identity, and CSV publication |
+| `constants.py`, `paths.py`, `tk_support.py` | Stable identity, discovery, and native integration |
+
+Data and display modules can be imported without Tk or the alpha HDF5 stack.
+Tests import each function from its owning module and share synthetic fixtures
+in `tests/gui_test_support.py`.
+
+Run the complete stable regression suite on the configured remote host:
+
+```sh
+ssh "$RFMAPPING_REMOTE_HOST" 'cd ~/Developer/rfmapping_gui/python && \
+  RF_MAPPING_TEST_PYTHON="$HOME/.virtualenvs/rfmapping/bin/python" \
+    xvfb-run -a script/test_python_stable.sh'
+```
+
+The remote virtual environment must include Tk; Xvfb supplies a display, not
+the Tk runtime. A missing Tk runtime fails the suite. `pytest-stable.ini`
+selects stable tests, including all window interactions. The macOS PR check
+and stable release job use the same test script without Xvfb.
 
 ## Free-Moving alpha 1.10.0-alpha.3
 

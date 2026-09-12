@@ -37,7 +37,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, BinaryIO, TypeAlias
 
-from PIL import Image, ImageColor, ImageDraw, ImageFont
+from PIL import Image, ImageChops, ImageColor, ImageDraw, ImageFont
 
 try:  # POSIX advisory locks used by the descriptor-pinned publication backend.
     import fcntl
@@ -429,12 +429,12 @@ def _matrix_payload(data: Any) -> list[list[Any]]:
     return matrix
 
 
-def _rgb(value: Any) -> tuple[int, int, int]:
+def _rgb(value: Any, *, byte_channels: bool = False) -> tuple[int, int, int]:
     channels = _sequence(value, label="RGB cell")
     if len(channels) not in (3, 4):
         raise FigureExportValidationError("RGB cells must have three or four channels")
     converted = [_finite_float(channel, label="RGB channel") for channel in channels[:3]]
-    if max(converted, default=0.0) <= 1.0 and min(converted, default=0.0) >= 0.0:
+    if not byte_channels and max(converted, default=0.0) <= 1.0 and min(converted, default=0.0) >= 0.0:
         converted = [channel * 255.0 for channel in converted]
     if any(channel < 0.0 or channel > 255.0 for channel in converted):
         raise FigureExportValidationError("RGB channels must be in 0..1 or 0..255")
@@ -739,6 +739,29 @@ def _draw_text_inside(
     )
 
 
+def _draw_missing_hatch(
+    draw: ImageDraw.ImageDraw,
+    box: tuple[int, int, int, int],
+    *,
+    arc: tuple[float, float] | None = None,
+) -> None:
+    left, top, right, bottom = box
+    width, height = right - left + 1, bottom - top + 1
+    with Image.new("L", (width, height)) as stripes:
+        pattern = ImageDraw.Draw(stripes)
+        for offset in range(-height, width, 8):
+            pattern.line((offset, height, offset + height, 0), fill=255)
+        if arc is None:
+            draw.bitmap((left, top), stripes, fill="#b8bbc0")
+        else:
+            with Image.new("L", stripes.size) as sector:
+                ImageDraw.Draw(sector).pieslice(
+                    (0, 0, width - 1, height - 1), *arc, fill=255,
+                )
+                with ImageChops.multiply(stripes, sector) as clipped:
+                    draw.bitmap((left, top), clipped, fill="#b8bbc0")
+
+
 def _draw_cartesian_map(
     draw: ImageDraw.ImageDraw,
     box: tuple[int, int, int, int],
@@ -757,14 +780,16 @@ def _draw_cartesian_map(
         raise FigureExportValidationError(
             "RGB maps do not have one scalar colorbar"
         )
+    hatch_missing = rgb and _boolean_option(spec.options, "hatch_missing", default=False)
     missing_color = _color(
         spec.options.get("missing_color", "#edf0f3"), label="missing_color"
     )
     low = high = 0.0
     palette = "viridis"
     if rgb:
+        byte_channels = _boolean_option(spec.options, "rgb_bytes", default=False)
         colors = [
-            [missing_color if value is None else _rgb(value) for value in row]
+            [missing_color if value is None else _rgb(value, byte_channels=byte_channels) for value in row]
             for row in matrix
         ]
     else:
@@ -825,6 +850,8 @@ def _draw_cartesian_map(
             x0 = round(grid_left + cell_width * x_index)
             x1 = round(grid_left + cell_width * (x_index + 1))
             draw.rectangle((x0, y0, x1, y1), fill=color)
+            if hatch_missing and matrix[y_index][x_index] is None:
+                _draw_missing_hatch(draw, (x0, y0, x1, y1))
     draw.rectangle(
         (
             round(grid_left),
@@ -1205,14 +1232,16 @@ def _draw_polar_map(
         raise FigureExportValidationError(
             "RGB maps do not have one scalar colorbar"
         )
+    hatch_missing = rgb and _boolean_option(spec.options, "hatch_missing", default=False)
     missing_color = _color(
         spec.options.get("missing_color", "#edf0f3"), label="missing_color"
     )
     low = high = 0.0
     palette = "viridis"
     if rgb:
+        byte_channels = _boolean_option(spec.options, "rgb_bytes", default=False)
         colors = [
-            [missing_color if value is None else _rgb(value) for value in row]
+            [missing_color if value is None else _rgb(value, byte_channels=byte_channels) for value in row]
             for row in matrix
         ]
     else:
@@ -1293,6 +1322,8 @@ def _draw_polar_map(
                 start = arc_end - fraction_end * total_degrees
                 end = arc_end - fraction_start * total_degrees
             draw.pieslice(ring_box, start=start, end=end, fill=color)
+            if hatch_missing and matrix[ring_index][angle_index] is None:
+                _draw_missing_hatch(draw, ring_box, arc=(start, end))
     if inner_blank_rows > 0.0:
         inner_radius = outer_radius * inner_blank_rows / radial_units
         inner_color = _color(

@@ -1,5316 +1,139 @@
 #!/usr/bin/env python3
-"""Native Python/Tk viewer for RF maps and live head-direction data.
-
-The implementation-local validated model, full native viewer, and figure
-exporter do not depend on notebook state or a web server.
-"""
+"""Native Python/Tk RF viewer and command-line entry point."""
 
 from __future__ import annotations
 
 import argparse
-from bisect import bisect_left
 import csv
-import errno
-import hashlib
-import ctypes
 import json
 import math
 import multiprocessing
 import os
 import queue
-import re
-import stat
 import sys
-import tempfile
 import threading
 import traceback
-import uuid
 import webbrowser
-from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import asdict, dataclass, field, replace
-from functools import lru_cache
+from dataclasses import replace
 from pathlib import Path
-from typing import Callable, Iterable, Mapping, Sequence
-
+from typing import Callable, Mapping, Sequence
 import numpy as np
-
 from rfmapping_viewer.figure_export import (
     ExportPage,
     ExportPlan,
     FigureFormat,
-    PLOT_KIND_REGISTRY,
     PlotKind,
     PlotSpec,
     export_figures,
-    shared_scalar_scale,
-    render_live_preview,
-)
-from rfmapping_viewer.hd_tuning import (
-    HDTuningData,
-    discover_hd_tuning_path,
-    load_hd_tuning,
-    probe_name_for_rf,
-)
-from rfmapping_viewer.rf_dataset import RFMap, RFMapList, load_rf_maps
-from rfmapping_viewer.rf_loading import load_rf_maps_isolated
-from rfmapping_viewer.waveform import (
-    WaveformArtifactStore,
-    WaveformPayload,
-    discover_waveform_artifact,
 )
 
-try:
-    from tkinter import filedialog, messagebox, ttk
-    import tkinter as tk
-    TK_AVAILABLE = True
-except ModuleNotFoundError:
-    filedialog = messagebox = ttk = None
-    TK_AVAILABLE = False
-
-    class _MissingTk:
-        Tk = object
-        Toplevel = object
-        Misc = object
-        TclError = ValueError
-
-    tk = _MissingTk()
-
-
-DEFAULT_JSON_DIR = Path("data")
-DEFAULT_JSON = DEFAULT_JSON_DIR / "unitsSpikeCounts_260701_1.json"
-RF_DOCUMENT_EXTENSIONS = (".rfmap", ".json")
-TUNING_CURVE_EXTENSIONS = (".tc", ".json")
-PROBE_POSITION_EXTENSIONS = (".probe", ".csv")
-TUNING_CURVE_FILENAMES = tuple(
-    f"tuning_curves{extension}" for extension in TUNING_CURVE_EXTENSIONS
+from rfmapping_viewer.companions import (
+    ProbeChannel,
+    ProbeGeometry,
+    SpatialRegion,
+    TuningCurveData,
+    center_tuning_curve_on_zero,
+    discover_probe_geometry,
+    discover_tuning_curve_path,
+    head_direction_unit_vector,
+    probe_name_for_json,
+    processed_tuning_curve,
+    tuning_rate_peak,
 )
-PROBE_POSITION_FILENAMES = tuple(
-    f"positions{extension}" for extension in PROBE_POSITION_EXTENSIONS
+from rfmapping_viewer.constants import (
+    APP_DISPLAY_VERSION,
+    APP_EDITION,
+    APP_VERSION,
+    ASYNC_DOCUMENT_LOAD_BYTES,
+    AxisGroup,
+    CellRef,
+    DEFAULT_HD_DISPLAY_BINS,
+    DEFAULT_HD_SMOOTH_SIGMA,
+    DEFAULT_TUNING_CURVE_SESSION,
+    HD_RAW_BIN_COUNT,
+    INNER_BLANK_ROWS,
+    PAIR_SYNC_ALL_FIELDS,
+    PALETTES,
+    POLAR_PAD_ROWS,
+    POLAR_RADIUS_MODES,
+    PROBE_POSITION_FILETYPES,
+    RF_DOCUMENT_FILETYPES,
+    SINGLETON_Y_REFERENCE_COLUMNS,
+    SINGLETON_Y_REFERENCE_ROWS,
+    STARTUP_EVENT_WAIT_MS,
+    TUNING_CURVE_FILETYPES,
+    TUNING_PLOT_MODES,
+    VALUE_MODES,
+    VALUE_MODE_COUNT,
+    VALUE_MODE_RATE,
+    WAVEFORM_CHANNEL_MODE_LABELS,
 )
-RF_DOCUMENT_FILETYPES = (
-    ("RF mapping files", "*.rfmap *.json"),
-    ("RF Map document", "*.rfmap"),
-    ("JSON document", "*.json"),
-    ("All files", "*.*"),
+from rfmapping_viewer.display import (
+    PreparedSpatialMatrix,
+    _nullable_array_list,
+    axis_groups_for_target,
+    delay_color,
+    display_group_index_for_source_bin,
+    format_ms,
+    format_pos,
+    format_response_value,
+    hex_color,
+    matrix_atlas_ppm_data,
+    nonnegative_response_range,
+    palette_color,
+    palette_response_range,
+    physical_time_groups,
+    polar_matrix_atlas_ppm_data,
+    polar_ring_span,
+    reduce_matrix_xy,
+    rgb_response_color,
+    smooth_matrix,
+    spatial_grid_dimensions,
+    subtract_response_matrices,
+    timeline_bin_index,
+    timeline_chart_points,
+    timeline_position_fraction,
+    timeline_response_high,
+    timeline_scroll_offset,
+    timeline_scroll_progress,
+    value_mode_slug,
+    value_mode_suffix,
+    value_mode_unit,
+    waveform_color,
 )
-TUNING_CURVE_FILETYPES = (
-    ("Tuning curve files", "*.tc *.json"),
-    ("Tuning curve document", "*.tc"),
-    ("JSON document", "*.json"),
-    ("All files", "*.*"),
+from rfmapping_viewer.export_inputs import (
+    FrozenFileIdentity,
+    _active_export_jobs,
+    _atomic_write_csv,
+    _shutdown_export_executor,
 )
-PROBE_POSITION_FILETYPES = (
-    ("Probe position files", "*.probe *.csv"),
-    ("Probe position document", "*.probe"),
-    ("CSV document", "*.csv"),
-    ("All files", "*.*"),
+from rfmapping_viewer.figure_composer import FigureExportWindow
+from rfmapping_viewer.paths import (
+    _resolve_existing_file,
+    discover_json_files,
+    document_kind,
+    safe_mtime,
+    startup_file_dialog_directory,
+    support_documentation_path,
 )
-APP_VERSION = "1.9.6"
-APP_EDITION = "Full"
-APP_DISPLAY_VERSION = APP_VERSION
-INNER_BLANK_ROWS = 4
-POLAR_PAD_ROWS = 1
-SINGLETON_Y_REFERENCE_COLUMNS = 30
-SINGLETON_Y_REFERENCE_ROWS = 7
-STARTUP_EVENT_WAIT_MS = 350
-ASYNC_DOCUMENT_LOAD_BYTES = 8 * 1024 * 1024
-RF_COUNT_CACHE_UNIT_LIMIT = 4
-DEFAULT_RF_SUM_START_MS = 0.0
-DEFAULT_RF_SUM_END_MS = 200.0
-SETTINGS_SCHEMA_VERSION = 1
-HD_RAW_BIN_COUNT = 180
-DEFAULT_HD_DISPLAY_BINS = 30
-DEFAULT_HD_SMOOTH_SIGMA = 1.5
-DEFAULT_TUNING_CURVE_SESSION = 1
-GAUSSIAN_TRUNCATE = 4.0
-MACOS_FULLSCREEN_MAX_SIZE = float.fromhex("0x1.fffffep+127")
-HD_BIN_DIVISORS = tuple(
-    count for count in range(1, HD_RAW_BIN_COUNT + 1) if HD_RAW_BIN_COUNT % count == 0
+from rfmapping_viewer.rf_model import RFMappingData
+from rfmapping_viewer.settings import (
+    ViewerSettings,
+    load_viewer_settings,
+    normalize_hd_bin_count,
+    save_viewer_settings,
+    viewer_settings_path,
 )
-TUNING_PLOT_MODES = ("Auto", "Polar", "Line")
-TUNING_LAYOUTS = ("Side by side", "Stacked")
-VALUE_MODE_COUNT = "Spike count"
-VALUE_MODE_RATE = "Mean firing rate (Hz)"
-VALUE_MODES = (VALUE_MODE_COUNT, VALUE_MODE_RATE)
-PALETTES = ("Gray", "Viridis", "Inferno")
-POLAR_RADIUS_MODES = ("MATLAB row 1 inner", "Display bottom inner")
-WAVEFORM_CHANNEL_MODE_LABELS = {
-    "same_x_column": "Same x column",
-    "same_shank": "Same shank",
-}
-_USE_PATH_CSV_PUBLICATION = os.name == "nt"
-WAVEFORM_CHANNEL_MODES = tuple(WAVEFORM_CHANNEL_MODE_LABELS)
-WAVEFORM_CHANNEL_MODE_BY_LABEL = {
-    label: mode for mode, label in WAVEFORM_CHANNEL_MODE_LABELS.items()
-}
-AxisGroup = tuple[int, int]
-CellRef = tuple[int, int, int, int]
-PROBE_CLICK_WIDTH_UM = 160.0
-PROBE_CLICK_HEIGHT_UM = 75.0
-PAIR_SYNC_ALL_FIELDS = frozenset(
-    {
-        "unit",
-        "value_mode",
-        "active_time",
-        "timeline_selection",
-        "rf_range",
-        "time_resolution",
-        "x_bins",
-        "y_bins",
-        "smoothing",
-        "flip_y",
-        "palette",
-        "polar_radius",
-        "spatial_format",
-        "delay_rgb",
-        "selected_cell",
-        "timeline_scroll",
-        "selected_tab",
-        "tuning_display",
-        "optional_views",
-    }
+from rfmapping_viewer.settings_window import SettingsWindow
+from rfmapping_viewer.tk_support import (
+    TK_AVAILABLE,
+    allow_macos_fullscreen_resize,
+    filedialog,
+    messagebox,
+    tk,
+    ttk,
 )
-_RECORDING_SESSION_RE = re.compile(r"^\d{6}_\d+$")
-
-
-@dataclass(frozen=True)
-class FrozenFileIdentity:
-    """Stable identity of a regular input captured while its data is loaded."""
-
-    path: Path
-    device: int
-    inode: int
-    size: int
-    mtime_ns: int
-    ctime_ns: int
-    mode: int
-    handle_device: int
-    handle_inode: int
-    handle_size: int
-    handle_mtime_ns: int
-    handle_mode: int
-
-    @classmethod
-    def capture(cls, path: str | Path) -> FrozenFileIdentity:
-        source = Path(path).expanduser().resolve(strict=True)
-        path_before = os.stat(source, follow_symlinks=False)
-        if not stat.S_ISREG(path_before.st_mode):
-            raise ValueError(f"Scientific input is not a regular file: {source}")
-        descriptor = os.open(
-            source,
-            os.O_RDONLY
-            | getattr(os, "O_CLOEXEC", 0)
-            | getattr(os, "O_NOFOLLOW", 0),
-        )
-        try:
-            handle_info = os.fstat(descriptor)
-        finally:
-            os.close(descriptor)
-        path_after = os.stat(source, follow_symlinks=False)
-        if not stat.S_ISREG(handle_info.st_mode):
-            raise ValueError(f"Scientific input is not a regular file: {source}")
-        if (
-            handle_info.st_size != path_after.st_size
-            or cls.path_signature(path_after) != cls.path_signature(path_before)
-        ):
-            raise ValueError(f"Scientific input changed while it was opened: {source}")
-        return cls(
-            source,
-            int(path_after.st_dev),
-            int(path_after.st_ino),
-            int(path_after.st_size),
-            int(path_after.st_mtime_ns),
-            int(path_after.st_ctime_ns),
-            int(stat.S_IFMT(path_after.st_mode)),
-            int(handle_info.st_dev),
-            int(handle_info.st_ino),
-            int(handle_info.st_size),
-            int(handle_info.st_mtime_ns),
-            int(stat.S_IFMT(handle_info.st_mode)),
-        )
-
-    @staticmethod
-    def path_signature(info: os.stat_result) -> tuple[int, ...]:
-        return (
-            int(info.st_dev),
-            int(info.st_ino),
-            int(info.st_size),
-            int(info.st_mtime_ns),
-            int(info.st_ctime_ns) if os.name != "nt" else 0,
-            int(stat.S_IFMT(info.st_mode)),
-        )
-
-    def matches(self, info: os.stat_result) -> bool:
-        stable_fields_match = (
-            int(info.st_dev),
-            int(info.st_ino),
-            int(info.st_size),
-            int(info.st_mtime_ns),
-            int(stat.S_IFMT(info.st_mode)),
-        ) == (
-            self.device,
-            self.inode,
-            self.size,
-            self.mtime_ns,
-            self.mode,
-        )
-        # Windows reports creation/change timestamps inconsistently between
-        # path stat and an open file handle.  Size, mtime, file identity, and
-        # the provenance digest still detect scientific-input mutations.
-        return stable_fields_match and (
-            os.name == "nt" or int(info.st_ctime_ns) == self.ctime_ns
-        )
-
-    def matches_open_file(self, info: os.stat_result) -> bool:
-        return (
-            int(info.st_dev),
-            int(info.st_ino),
-            int(info.st_size),
-            int(info.st_mtime_ns),
-            int(stat.S_IFMT(info.st_mode)),
-        ) == (
-            self.handle_device,
-            self.handle_inode,
-            self.handle_size,
-            self.handle_mtime_ns,
-            self.handle_mode,
-        )
-
-    @staticmethod
-    def open_file_signature(info: os.stat_result) -> tuple[int, ...]:
-        return (
-            int(info.st_dev),
-            int(info.st_ino),
-            int(info.st_size),
-            int(info.st_mtime_ns),
-            int(stat.S_IFMT(info.st_mode)),
-        )
-
-    def verify_path(self) -> None:
-        try:
-            info = os.stat(self.path, follow_symlinks=False)
-        except OSError as exc:
-            raise RuntimeError(f"Scientific input is no longer available: {self.path}") from exc
-        if not self.matches(info):
-            raise RuntimeError(
-                f"Scientific input changed after it was loaded; reopen it before exporting: {self.path}"
-            )
-
-    def metadata(self, sha256: str) -> dict[str, object]:
-        return {
-            "path": str(self.path),
-            "sha256": sha256,
-            "sizeBytes": self.size,
-            "device": self.device,
-            "inode": self.inode,
-            "mtimeNs": self.mtime_ns,
-            "ctimeNs": self.ctime_ns,
-        }
-
-
-def _hash_frozen_file(
-    identity: FrozenFileIdentity,
-    cancelled: Callable[[], bool] | None = None,
-) -> str:
-    """Hash exactly the frozen input, cooperatively aborting stale previews."""
-
-    def check_cancelled() -> None:
-        if cancelled is not None and cancelled():
-            raise RuntimeError("Preview superseded by a newer recipe")
-
-    check_cancelled()
-    identity.verify_path()
-    descriptor = os.open(
-        identity.path,
-        os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
-    )
-    try:
-        before = os.fstat(descriptor)
-        if not identity.matches_open_file(before):
-            raise RuntimeError(
-                f"Scientific input changed after it was loaded; reopen it before exporting: {identity.path}"
-            )
-        digest = hashlib.sha256()
-        while chunk := os.read(descriptor, 1024 * 1024):
-            check_cancelled()
-            digest.update(chunk)
-        check_cancelled()
-        after = os.fstat(descriptor)
-        if (
-            not identity.matches_open_file(after)
-            or identity.open_file_signature(after)
-            != identity.open_file_signature(before)
-        ):
-            raise RuntimeError(
-                f"Scientific input changed while provenance was computed: {identity.path}"
-            )
-    finally:
-        os.close(descriptor)
-    identity.verify_path()
-    return digest.hexdigest()
-
-
-def _export_executor(root: tk.Misc) -> ThreadPoolExecutor:
-    executor = getattr(root, "_rfm_export_executor", None)
-    if executor is None:
-        executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="rfmap-export")
-        root._rfm_export_executor = executor
-        root._rfm_export_jobs = {}
-        root._rfm_export_jobs_lock = threading.Lock()
-    return executor
-
-
-def _submit_daemon_future(action: Callable[[], object], *, name: str) -> Future:
-    """Run cancellable preview work without keeping the interpreter alive."""
-
-    future: Future = Future()
-
-    def run() -> None:
-        if not future.set_running_or_notify_cancel():
-            return
-        try:
-            result = action()
-        except BaseException as exc:
-            future.set_exception(exc)
-        else:
-            future.set_result(result)
-
-    threading.Thread(target=run, name=name, daemon=True).start()
-    return future
-
-
-def _register_export_job(root: tk.Misc, viewer: object, future: Future) -> None:
-    _export_executor(root)
-    with root._rfm_export_jobs_lock:
-        root._rfm_export_jobs[future] = viewer
-
-
-def _unregister_export_job(root: tk.Misc, future: Future | None) -> None:
-    if future is None:
-        return
-    lock = getattr(root, "_rfm_export_jobs_lock", None)
-    if lock is None:
-        return
-    with lock:
-        root._rfm_export_jobs.pop(future, None)
-
-
-def _active_export_jobs(root: tk.Misc, viewer: object | None = None) -> tuple[Future, ...]:
-    jobs = getattr(root, "_rfm_export_jobs", {})
-    lock = getattr(root, "_rfm_export_jobs_lock", None)
-    if lock is None:
-        return ()
-    with lock:
-        return tuple(
-            future
-            for future, owner in jobs.items()
-            if viewer is None or owner is viewer
-        )
-
-
-def _shutdown_export_executor(root: tk.Misc) -> None:
-    executor = getattr(root, "_rfm_export_executor", None)
-    if executor is not None:
-        executor.shutdown(wait=False, cancel_futures=True)
-        root._rfm_export_executor = None
-
-
-def _path_is_link_like(path: Path) -> bool:
-    if path.is_symlink():
-        return True
-    is_junction = getattr(path, "is_junction", None)
-    return bool(is_junction is not None and is_junction())
-
-
-def _path_stat_signature(result: os.stat_result | None) -> tuple | None:
-    if result is None:
-        return None
-    return (
-        result.st_dev,
-        result.st_ino,
-        stat.S_IFMT(result.st_mode),
-        result.st_size,
-        result.st_mtime_ns,
-        result.st_ctime_ns,
-    )
-
-
-def _path_lstat(path: Path) -> os.stat_result | None:
-    try:
-        return path.lstat()
-    except FileNotFoundError:
-        return None
-
-
-def _file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        while chunk := stream.read(1024 * 1024):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _atomic_write_csv_path_backend(
-    target: Path,
-    write_rows: Callable[[csv.writer], None],
-    *,
-    before_publish: Callable[[], None] | None,
-) -> Path:
-    """Windows-safe sibling staging and atomic file replacement."""
-
-    parent = target.parent if str(target.parent) else Path(".")
-    parent_before = _path_lstat(parent)
-    if (
-        parent_before is None
-        or _path_is_link_like(parent)
-        or not stat.S_ISDIR(parent_before.st_mode)
-    ):
-        raise ValueError("CSV parent must be a real directory")
-    existing = _path_lstat(target)
-    if existing is not None and (
-        _path_is_link_like(target) or not stat.S_ISREG(existing.st_mode)
-    ):
-        raise ValueError("CSV destination must be a regular file")
-    existing_signature = _path_stat_signature(existing)
-    temporary_path = parent / f".{target.name}.tmp-{uuid.uuid4().hex}"
-    descriptor: int | None = os.open(
-        temporary_path,
-        os.O_WRONLY
-        | os.O_CREAT
-        | os.O_EXCL
-        | getattr(os, "O_BINARY", 0)
-        | getattr(os, "O_CLOEXEC", 0),
-        0o600,
-    )
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as stream:
-            descriptor = None
-            write_rows(csv.writer(stream))
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.chmod(temporary_path, 0o660)
-        staged = temporary_path.lstat()
-        staged_digest = _file_sha256(temporary_path)
-        if before_publish is not None:
-            before_publish()
-        current = _path_lstat(target)
-        if _path_stat_signature(current) != existing_signature:
-            raise RuntimeError("CSV destination changed while the export was being written")
-        parent_now = _path_lstat(parent)
-        if (
-            parent_now is None
-            or _path_is_link_like(parent)
-            or (
-                parent_now.st_dev,
-                parent_now.st_ino,
-                stat.S_IFMT(parent_now.st_mode),
-            )
-            != (
-                parent_before.st_dev,
-                parent_before.st_ino,
-                stat.S_IFMT(parent_before.st_mode),
-            )
-        ):
-            raise RuntimeError("CSV parent directory changed while the export was being written")
-        try:
-            os.replace(temporary_path, target)
-        except OSError:
-            published = _path_lstat(target)
-            if (
-                temporary_path.exists()
-                or published is None
-                or published.st_size != staged.st_size
-                or _file_sha256(target) != staged_digest
-            ):
-                raise
-    finally:
-        if descriptor is not None:
-            os.close(descriptor)
-        temporary_path.unlink(missing_ok=True)
-    return target
-
-
-def _atomic_write_csv(
-    destination: str | Path,
-    write_rows: Callable[[csv.writer], None],
-    *,
-    before_publish: Callable[[], None] | None = None,
-) -> Path:
-    """Publish one complete CSV atomically.
-
-    Failures before ``os.replace`` preserve the previous destination. A lost
-    replace reply is recognized from the staged inode. A later durability
-    failure is reported explicitly even though the complete new file is visible.
-    """
-
-    target = Path(destination).expanduser()
-    if not target.name or target.name in {".", ".."}:
-        raise ValueError("CSV destination must name a file")
-    if _USE_PATH_CSV_PUBLICATION:
-        return _atomic_write_csv_path_backend(
-            target,
-            write_rows,
-            before_publish=before_publish,
-        )
-    parent = target.parent if str(target.parent) else Path(".")
-    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-    directory_flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-    directory_fd = os.open(parent, directory_flags)
-    temporary = f".{target.name}.tmp-{uuid.uuid4().hex}"
-    descriptor: int | None = None
-    try:
-        try:
-            existing = os.stat(target.name, dir_fd=directory_fd, follow_symlinks=False)
-        except FileNotFoundError:
-            existing = None
-        if existing is not None and not stat.S_ISREG(existing.st_mode):
-            raise ValueError("CSV destination must be a regular file")
-        descriptor = os.open(
-            temporary,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL
-            | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
-            0o600,
-            dir_fd=directory_fd,
-        )
-        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as stream:
-            descriptor = None
-            write_rows(csv.writer(stream))
-            stream.flush()
-            os.fsync(stream.fileno())
-            os.fchmod(stream.fileno(), 0o660)
-            os.fsync(stream.fileno())
-        if before_publish is not None:
-            before_publish()
-        try:
-            current = os.stat(target.name, dir_fd=directory_fd, follow_symlinks=False)
-        except FileNotFoundError:
-            current = None
-        if (existing is None) != (current is None) or (
-            existing is not None
-            and current is not None
-            and (
-                existing.st_dev,
-                existing.st_ino,
-                stat.S_IFMT(existing.st_mode),
-                existing.st_size,
-                existing.st_mtime_ns,
-                existing.st_ctime_ns,
-            )
-            != (
-                current.st_dev,
-                current.st_ino,
-                stat.S_IFMT(current.st_mode),
-                current.st_size,
-                current.st_mtime_ns,
-                current.st_ctime_ns,
-            )
-        ):
-            raise RuntimeError("CSV destination changed while the export was being written")
-        parent_now = os.stat(parent, follow_symlinks=False)
-        parent_open = os.fstat(directory_fd)
-        if (parent_now.st_dev, parent_now.st_ino) != (parent_open.st_dev, parent_open.st_ino):
-            raise RuntimeError("CSV parent directory changed while the export was being written")
-        staged = os.stat(temporary, dir_fd=directory_fd, follow_symlinks=False)
-        try:
-            os.replace(
-                temporary,
-                target.name,
-                src_dir_fd=directory_fd,
-                dst_dir_fd=directory_fd,
-            )
-        except OSError:
-            # CIFS/NFS can commit the rename and lose only its success reply.
-            # Treat that as success iff the complete staged inode is now the
-            # destination and the temporary name disappeared.
-            try:
-                published = os.stat(
-                    target.name,
-                    dir_fd=directory_fd,
-                    follow_symlinks=False,
-                )
-            except FileNotFoundError:
-                published = None
-            try:
-                os.stat(temporary, dir_fd=directory_fd, follow_symlinks=False)
-                temporary_still_exists = True
-            except FileNotFoundError:
-                temporary_still_exists = False
-            if (
-                published is None
-                or temporary_still_exists
-                or (published.st_dev, published.st_ino, published.st_size)
-                != (staged.st_dev, staged.st_ino, staged.st_size)
-            ):
-                raise
-        try:
-            os.fsync(directory_fd)
-        except OSError as exc:
-            unsupported = {errno.EINVAL, errno.EOPNOTSUPP}
-            if hasattr(errno, "ENOTSUP"):
-                unsupported.add(errno.ENOTSUP)
-            if exc.errno not in unsupported:
-                raise RuntimeError(
-                    "CSV was atomically published, but directory durability "
-                    "could not be confirmed"
-                ) from exc
-    finally:
-        if descriptor is not None:
-            os.close(descriptor)
-        try:
-            os.unlink(temporary, dir_fd=directory_fd)
-        except FileNotFoundError:
-            pass
-        finally:
-            os.close(directory_fd)
-    return target
-
-
-def composer_unit_selection_after_click(
-    selected_indices: Iterable[int],
-    clicked_index: int,
-    anchor_index: int | None,
-    unit_count: int,
-    *,
-    command: bool = False,
-    shift: bool = False,
-) -> tuple[tuple[int, ...], int]:
-    """Apply Finder-style row selection and return sorted source indices.
-
-    A plain click replaces the selection, Command-click toggles one row while
-    retaining the others, and Shift-click replaces the selection with the
-    inclusive range from the stable anchor. Command-Shift-click adds that range.
-    Sorting by source index is intentional: downstream exports must always
-    follow the JSON ``unitPool`` order, never the order in which rows were
-    clicked.
-    """
-
-    if unit_count < 0:
-        raise ValueError("unit_count must be non-negative")
-    if not 0 <= clicked_index < unit_count:
-        raise IndexError(f"unit index {clicked_index} is outside 0..{unit_count - 1}")
-
-    selected = {
-        int(index)
-        for index in selected_indices
-        if 0 <= int(index) < unit_count
-    }
-    valid_anchor = (
-        int(anchor_index)
-        if anchor_index is not None and 0 <= int(anchor_index) < unit_count
-        else None
-    )
-
-    if shift:
-        anchor = clicked_index if valid_anchor is None else valid_anchor
-        first, last = sorted((anchor, clicked_index))
-        clicked_range = set(range(first, last + 1))
-        selected = selected | clicked_range if command else clicked_range
-        return tuple(sorted(selected)), anchor
-
-    if command:
-        if clicked_index in selected:
-            selected.remove(clicked_index)
-        else:
-            selected.add(clicked_index)
-        return tuple(sorted(selected)), clicked_index
-
-    return (clicked_index,), clicked_index
-
-
-def composer_unit_checkbox_hit(
-    event_x: int,
-    row_text_x: int,
-    checkbox_hit_width: int,
-) -> bool:
-    """Return whether a row click landed in its leading checkbox column."""
-
-    if checkbox_hit_width <= 0:
-        raise ValueError("checkbox_hit_width must be positive")
-    return row_text_x <= event_x < row_text_x + checkbox_hit_width
-
-
-class PreparedSpatialMatrix(list):
-    """A display-grouped matrix that must not be reduced or smoothed again."""
-
-    def __init__(
-        self,
-        values: list[list[float | None]],
-        x_groups: list[AxisGroup],
-        y_groups: list[AxisGroup],
-    ) -> None:
-        super().__init__(values)
-        self.x_groups = x_groups
-        self.y_groups = y_groups
-
-
-def timeline_scroll_progress(first: float, last: float) -> float | None:
-    """Convert a Tk canvas yview into viewport-independent scroll progress.
-
-    Tk reports fractions of the full scroll region.  The first fraction at the
-    bottom therefore depends on how much of that region the current viewport
-    can show.  Pairing stores progress through the *scrollable travel* instead.
-    ``None`` means the canvas is currently not scrollable, so callers should
-    preserve the last meaningful progress for a later draw.
-    """
-
-    first = float(first)
-    last = float(last)
-    visible_span = max(0.0, min(1.0, last - first))
-    max_first = max(0.0, 1.0 - visible_span)
-    if max_first <= 1e-9:
-        return None
-    progress = max(0.0, min(1.0, first / max_first))
-    if progress <= 1e-9:
-        return 0.0
-    if progress >= 1.0 - 1e-9:
-        return 1.0
-    return progress
-
-
-def timeline_scroll_offset(progress: float, first: float, last: float) -> float | None:
-    """Map normalized scroll progress to a target canvas yview offset."""
-
-    visible_span = max(0.0, min(1.0, float(last) - float(first)))
-    max_first = max(0.0, 1.0 - visible_span)
-    if max_first <= 1e-9:
-        return None
-    return max(0.0, min(1.0, float(progress))) * max_first
-
-
-def timeline_position_fraction(
-    time_ms: float,
-    axis_start_ms: float,
-    axis_end_ms: float,
-) -> float:
-    """Map physical time onto the timeline axis, clamped to its visible span."""
-
-    values = (float(time_ms), float(axis_start_ms), float(axis_end_ms))
-    if not all(math.isfinite(value) for value in values):
-        return 0.0
-    span = values[2] - values[1]
-    if span <= 0.0:
-        return 0.0
-    return max(0.0, min(1.0, (values[0] - values[1]) / span))
-
-
-def timeline_chart_points(
-    values: Sequence[float],
-    center_times_ms: Sequence[float],
-    axis_range_ms: tuple[float, float],
-    high: float,
-    chart_rect: tuple[float, float, float, float],
-) -> list[float]:
-    """Return a Tk polyline whose x coordinates use real bin-center times."""
-
-    chart_x, chart_y, chart_width, chart_height = map(float, chart_rect)
-    safe_high = float(high)
-    if not math.isfinite(safe_high) or safe_high <= 0.0:
-        safe_high = 1.0
-    points: list[float] = []
-    for value, center_ms in zip(values, center_times_ms):
-        numeric = float(value)
-        if not math.isfinite(numeric):
-            numeric = 0.0
-        response_fraction = max(0.0, min(1.0, numeric / safe_high))
-        points.extend(
-            (
-                chart_x
-                + chart_width
-                * timeline_position_fraction(center_ms, axis_range_ms[0], axis_range_ms[1]),
-                chart_y + chart_height - chart_height * response_fraction,
-            )
-        )
-    return points
-
-
-def timeline_response_high(values: Sequence[float]) -> float:
-    """Return one trace's non-negative y-axis maximum."""
-
-    high = 0.0
-    for value in values:
-        numeric = float(value)
-        if math.isfinite(numeric):
-            high = max(high, numeric)
-    return max(high, 1.0)
-
-
-def timeline_bin_index(time_ms: float, end_bounds_ms: Sequence[float]) -> int | None:
-    """Return the half-open physical-time bin containing ``time_ms``."""
-
-    if not end_bounds_ms:
-        return None
-    for index, end_ms in enumerate(end_bounds_ms):
-        if float(time_ms) < float(end_ms):
-            return index
-    return len(end_bounds_ms) - 1
-
-
-def safe_mtime(path: Path) -> float:
-    try:
-        return path.stat().st_mtime
-    except OSError:
-        return -1.0
-
-
-def _resolve_existing_file(path: Path) -> Path | None:
-    try:
-        resolved = path.expanduser().resolve()
-    except OSError:
-        resolved = path.expanduser().absolute()
-    return resolved if resolved.is_file() else None
-
-
-def document_kind(path: str | Path) -> str:
-    """Classify a file association without inspecting or modifying its data."""
-
-    suffix = Path(path).suffix.lower()
-    if suffix == ".tc":
-        return "tuning"
-    if suffix == ".probe":
-        return "probe"
-    if suffix in RF_DOCUMENT_EXTENSIONS:
-        return "rf"
-    return "unsupported"
-
-
-def discover_json_files(root: Path | None = None, current_path: Path | None = None) -> list[Path]:
-    base = (root or Path.cwd()).expanduser()
-    candidates: list[Path] = []
-    for folder in (base / DEFAULT_JSON_DIR, base):
-        if folder.is_dir():
-            try:
-                candidates.extend(
-                    candidate
-                    for candidate in folder.iterdir()
-                    if candidate.suffix.lower() in RF_DOCUMENT_EXTENSIONS
-                    and candidate.name.lower() != "tuning_curves.json"
-                )
-            except OSError:
-                continue
-    if current_path is not None:
-        candidates.append(current_path)
-
-    unique: dict[str, Path] = {}
-    for candidate in candidates:
-        resolved = _resolve_existing_file(candidate)
-        if resolved is not None:
-            unique[str(resolved)] = resolved
-    return sorted(unique.values(), key=lambda path: (safe_mtime(path), path.name), reverse=True)
-
-
-def latest_json_path(root: Path | None = None) -> Path:
-    files = discover_json_files(root)
-    return files[0] if files else DEFAULT_JSON
-
-
-def startup_file_dialog_directory() -> Path:
-    """Return a stable existing directory for a no-document file picker."""
-
-    documents = Path.home() / "Documents"
-    return documents if documents.is_dir() else Path.home()
-
-
-def support_documentation_path(
-    *,
-    module_path: Path | None = None,
-    executable_path: Path | None = None,
-    frozen: bool | None = None,
-) -> Path | None:
-    """Return the installed local README used by the Help menu."""
-
-    module_path = Path(__file__) if module_path is None else Path(module_path)
-    executable_path = (
-        Path(sys.executable) if executable_path is None else Path(executable_path)
-    )
-    frozen = getattr(sys, "frozen", False) if frozen is None else frozen
-    candidates: list[Path] = []
-    if frozen:
-        executable = executable_path.expanduser().resolve()
-        candidates.extend(
-            (
-                executable.parent.parent / "Resources" / "README.md",
-                executable.parent / "Resources" / "README.md",
-            )
-        )
-        bundle_root = getattr(sys, "_MEIPASS", None)
-        if bundle_root:
-            candidates.append(Path(bundle_root) / "README.md")
-    candidates.append(module_path.expanduser().resolve().parent / "README.md")
-
-    for candidate in candidates:
-        resolved = _resolve_existing_file(candidate)
-        if resolved is not None:
-            return resolved
-    return None
-
-
-def viewer_settings_path(
-    *,
-    platform: str | None = None,
-    environ: Mapping[str, str] | None = None,
-    home: Path | None = None,
-) -> Path:
-    """Return the per-user settings path without requiring a GUI."""
-
-    platform = sys.platform if platform is None else platform
-    environ = os.environ if environ is None else environ
-    home = Path.home() if home is None else Path(home)
-    if platform == "darwin":
-        return home / "Library" / "Application Support" / "RF Map Viewer" / "settings.json"
-    if platform.startswith("win"):
-        appdata = environ.get("APPDATA")
-        base = Path(appdata) if appdata else home / "AppData" / "Roaming"
-        return base / "RF Map Viewer" / "settings.json"
-    xdg_config = environ.get("XDG_CONFIG_HOME")
-    base = Path(xdg_config) if xdg_config else home / ".config"
-    return base / "rf-map-viewer" / "settings.json"
-
-
-def normalize_hd_bin_count(value: int) -> int:
-    """Clamp a requested display count to the greatest divisor of 180 below it."""
-
-    requested = max(1, min(HD_RAW_BIN_COUNT, int(value)))
-    return max(divisor for divisor in HD_BIN_DIVISORS if divisor <= requested)
-
-
-@dataclass(frozen=True)
-class ViewerSettings:
-    schema_version: int = SETTINGS_SCHEMA_VERSION
-    show_tuning_curve: bool = True
-    auto_load_tuning_curve: bool = True
-    tuning_curve_session: int = DEFAULT_TUNING_CURVE_SESSION
-    show_waveform: bool = True
-    show_probe_layout: bool = True
-    auto_load_probe_layout: bool = True
-    rf_sum_start_ms: float = DEFAULT_RF_SUM_START_MS
-    rf_sum_end_ms: float = DEFAULT_RF_SUM_END_MS
-    rf_filter_units_with_zero_bins: bool = True
-    rf_zero_bin_threshold: int = 1
-    rf_time_resolution_ms: float = 1.0
-    rf_value_mode: str = VALUE_MODE_RATE
-    rf_x_bins: int = 0
-    rf_y_bins: int = 0
-    rf_smooth_radius: int = 0
-    rf_flip_y: bool = False
-    rf_palette: str = "Gray"
-    rf_polar_radius: str = POLAR_RADIUS_MODES[1]
-    rf_polar_layout: bool = False
-    rf_rgb_mode: bool = False
-    default_viewer_tab: str = "rf"
-    waveform_channel_mode: str = "same_x_column"
-    tuning_plot_mode: str = "Auto"
-    tuning_layout: str = TUNING_LAYOUTS[0]
-    tuning_display_bins: int = DEFAULT_HD_DISPLAY_BINS
-    tuning_smoothing: bool = True
-    tuning_smooth_sigma: float = DEFAULT_HD_SMOOTH_SIGMA
-    tuning_compare_scale: bool = False
-
-    @classmethod
-    def from_mapping(cls, payload: object) -> ViewerSettings:
-        defaults = cls()
-        if not isinstance(payload, Mapping):
-            return defaults
-        schema = payload.get("schema_version", SETTINGS_SCHEMA_VERSION)
-        if type(schema) is not int or schema != SETTINGS_SCHEMA_VERSION:
-            return defaults
-
-        def boolean(name: str) -> bool:
-            value = payload.get(name, getattr(defaults, name))
-            return value if type(value) is bool else getattr(defaults, name)
-
-        def finite_float(name: str, *, positive: bool = False) -> float:
-            value = payload.get(name, getattr(defaults, name))
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
-                return getattr(defaults, name)
-            result = float(value)
-            if not math.isfinite(result) or (positive and result <= 0.0):
-                return getattr(defaults, name)
-            return result
-
-        def integer(name: str, low: int, high: int) -> int:
-            value = payload.get(name, getattr(defaults, name))
-            if type(value) is not int:
-                return getattr(defaults, name)
-            return max(low, min(high, value))
-
-        def positive_integer(name: str) -> int:
-            value = payload.get(name, getattr(defaults, name))
-            if type(value) is not int or value <= 0:
-                return getattr(defaults, name)
-            return value
-
-        start_ms = finite_float("rf_sum_start_ms")
-        end_ms = finite_float("rf_sum_end_ms")
-        if start_ms >= end_ms:
-            start_ms = defaults.rf_sum_start_ms
-            end_ms = defaults.rf_sum_end_ms
-
-        value_mode = payload.get("rf_value_mode", defaults.rf_value_mode)
-        if value_mode not in VALUE_MODES:
-            value_mode = defaults.rf_value_mode
-        palette = payload.get("rf_palette", defaults.rf_palette)
-        if palette not in PALETTES:
-            palette = defaults.rf_palette
-        polar_radius = payload.get("rf_polar_radius", defaults.rf_polar_radius)
-        if polar_radius not in POLAR_RADIUS_MODES:
-            polar_radius = defaults.rf_polar_radius
-        viewer_tab = payload.get("default_viewer_tab", defaults.default_viewer_tab)
-        if viewer_tab not in {"rf", "delay", "timeline"}:
-            viewer_tab = defaults.default_viewer_tab
-        waveform_channel_mode = payload.get(
-            "waveform_channel_mode", defaults.waveform_channel_mode
-        )
-        if waveform_channel_mode not in WAVEFORM_CHANNEL_MODES:
-            waveform_channel_mode = defaults.waveform_channel_mode
-        tuning_mode = payload.get("tuning_plot_mode", defaults.tuning_plot_mode)
-        if tuning_mode not in TUNING_PLOT_MODES:
-            tuning_mode = defaults.tuning_plot_mode
-        tuning_layout = payload.get("tuning_layout", defaults.tuning_layout)
-        if tuning_layout not in TUNING_LAYOUTS:
-            tuning_layout = defaults.tuning_layout
-        raw_hd_bins = payload.get("tuning_display_bins", defaults.tuning_display_bins)
-        if type(raw_hd_bins) is not int:
-            raw_hd_bins = defaults.tuning_display_bins
-
-        return cls(
-            show_tuning_curve=boolean("show_tuning_curve"),
-            auto_load_tuning_curve=boolean("auto_load_tuning_curve"),
-            tuning_curve_session=positive_integer("tuning_curve_session"),
-            show_waveform=boolean("show_waveform"),
-            show_probe_layout=boolean("show_probe_layout"),
-            auto_load_probe_layout=boolean("auto_load_probe_layout"),
-            rf_sum_start_ms=start_ms,
-            rf_sum_end_ms=end_ms,
-            rf_filter_units_with_zero_bins=boolean(
-                "rf_filter_units_with_zero_bins"
-            ),
-            rf_zero_bin_threshold=integer(
-                "rf_zero_bin_threshold", 1, 100_000
-            ),
-            rf_time_resolution_ms=finite_float("rf_time_resolution_ms", positive=True),
-            rf_value_mode=value_mode,
-            rf_x_bins=integer("rf_x_bins", 0, 100_000),
-            rf_y_bins=integer("rf_y_bins", 0, 100_000),
-            rf_smooth_radius=integer("rf_smooth_radius", 0, 3),
-            rf_flip_y=boolean("rf_flip_y"),
-            rf_palette=palette,
-            rf_polar_radius=polar_radius,
-            rf_polar_layout=boolean("rf_polar_layout"),
-            rf_rgb_mode=boolean("rf_rgb_mode"),
-            default_viewer_tab=viewer_tab,
-            waveform_channel_mode=waveform_channel_mode,
-            tuning_plot_mode=tuning_mode,
-            tuning_layout=tuning_layout,
-            tuning_display_bins=normalize_hd_bin_count(raw_hd_bins),
-            tuning_smoothing=boolean("tuning_smoothing"),
-            tuning_smooth_sigma=finite_float("tuning_smooth_sigma", positive=True),
-            tuning_compare_scale=boolean("tuning_compare_scale"),
-        )
-
-    def to_mapping(self) -> dict[str, object]:
-        return asdict(self)
-
-
-def load_viewer_settings(path: Path | None = None) -> ViewerSettings:
-    settings_path = viewer_settings_path() if path is None else Path(path)
-    try:
-        payload = json.loads(settings_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        return ViewerSettings()
-    return ViewerSettings.from_mapping(payload)
-
-
-def save_viewer_settings(settings: ViewerSettings, path: Path | None = None) -> Path:
-    settings_path = viewer_settings_path() if path is None else Path(path)
-    settings_path.parent.mkdir(parents=True, exist_ok=True)
-    temporary_path: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            "w",
-            encoding="utf-8",
-            dir=settings_path.parent,
-            prefix=f".{settings_path.name}.",
-            suffix=".tmp",
-            delete=False,
-        ) as stream:
-            json.dump(settings.to_mapping(), stream, indent=2, sort_keys=True)
-            stream.write("\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-            temporary_path = Path(stream.name)
-        os.replace(temporary_path, settings_path)
-    finally:
-        if temporary_path is not None and temporary_path.exists():
-            temporary_path.unlink()
-    return settings_path
-
-
-@dataclass(frozen=True)
-class TuningCurveClassificationProvenance:
-    method: str | None = None
-    class_0: str | None = None
-    class_1: str | None = None
-    class_2: str | None = None
-    class_null: str | None = None
-    rayleigh_alpha: float | None = None
-    rayleigh_test: str | None = None
-    shuffle_alpha: float | None = None
-    num_shuffle: int | None = None
-    shuffle_seed: int | None = None
-
-
-@dataclass(frozen=True)
-class TuningCurveTTLProvenance:
-    ttl_pulse_count: int | None = None
-    first_exposure_s: float | None = None
-    last_exposure_s: float | None = None
-    median_period_s: float | None = None
-    measured_rate_hz: float | None = None
-    camera_input_channel: int | None = None
-    camera_ttl_threshold: float | None = None
-    camera_ttl_active_high: bool | None = None
-    motive_frame_count_raw: int | None = None
-    matched_motive_frame_count: int | None = None
-    dropped_motive_frame_ids: tuple[int, ...] | None = None
-    frame_alignment_policy_requested: str | None = None
-    frame_alignment_policy_applied: str | None = None
-    frame_timestamp_mapping: str | None = None
-
-
-@dataclass(frozen=True)
-class TuningCurveMetadata:
-    session: str | None = None
-    probe: str | None = None
-    kilosort_dir: str | None = None
-    timebase: str | None = None
-    adc_time_origin_raw_s: float | None = None
-    timestamp_reference: str | None = None
-    angle_convention_note: str | None = None
-    num_angle_bins: int | None = None
-    feature_fs_hz: float | None = None
-    classification: TuningCurveClassificationProvenance | None = None
-    ttl_qc: TuningCurveTTLProvenance | None = None
-
-
-@dataclass(frozen=True)
-class TuningCurveData:
-    path: Path
-    curves: Mapping[int, tuple[float, ...]]
-    spike_counts: Mapping[int, tuple[float, ...]] = field(default_factory=dict)
-    occupancy_time_s: tuple[float, ...] | None = None
-    hd_classes: Mapping[int, int | None] = field(default_factory=dict)
-    metadata: TuningCurveMetadata | None = None
-
-    @classmethod
-    def load(cls, path: Path) -> TuningCurveData:
-        resolved = Path(path).expanduser().resolve()
-        try:
-            payload = json.loads(resolved.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"Invalid tuning-curve JSON: {exc}") from exc
-        if not isinstance(payload, dict) or not payload:
-            raise ValueError("Tuning-curve JSON must be a non-empty cluster mapping.")
-        if {
-            "unit_id",
-            "spike_counts",
-            "firing_rate_hz",
-            "unit_data",
-            "occupancy_time_s",
-        }.issubset(payload):
-            return cls._load_columnar(resolved)
-        if "schema_version" in payload:
-            if type(payload["schema_version"]) is not int or payload["schema_version"] != 2:
-                raise ValueError(
-                    f"Unsupported tuning-curve schema version: {payload['schema_version']!r}."
-                )
-            return cls._load_schema_v2(resolved, payload)
-        return cls._load_legacy(resolved, payload)
-
-    @classmethod
-    def _load_columnar(cls, resolved: Path) -> TuningCurveData:
-        """Adapt the current columnar HD model to the live-view interface."""
-
-        data = load_hd_tuning(resolved)
-        curves = {
-            unit.unit_id: tuple(float(value) for value in unit.raw_rates_hz)
-            for unit in data
-        }
-        spike_counts = {
-            unit.unit_id: tuple(float(value) for value in unit.spike_counts)
-            for unit in data
-        }
-        hd_classes = {unit.unit_id: unit.hd_class for unit in data}
-        try:
-            metadata = cls._load_metadata(dict(data.metadata))
-        except ValueError:
-            # Plot data remain valid even when a newer metadata-only field has
-            # no legacy presentation counterpart.
-            metadata = None
-        return cls(
-            path=resolved,
-            curves=curves,
-            spike_counts=spike_counts,
-            occupancy_time_s=tuple(float(value) for value in data.occupancy_time_s),
-            hd_classes=hd_classes,
-            metadata=metadata,
-        )
-
-    @classmethod
-    def _load_legacy(cls, resolved: Path, payload: Mapping[object, object]) -> TuningCurveData:
-        curves: dict[int, tuple[float, ...]] = {}
-        for raw_cluster_id, raw_rates in payload.items():
-            try:
-                cluster_id = int(raw_cluster_id)
-            except (TypeError, ValueError) as exc:
-                raise ValueError(f"Invalid cluster ID: {raw_cluster_id!r}") from exc
-            if cluster_id in curves:
-                raise ValueError(f"Duplicate cluster ID after normalization: {cluster_id}")
-            if not isinstance(raw_rates, list) or len(raw_rates) != HD_RAW_BIN_COUNT:
-                length = len(raw_rates) if isinstance(raw_rates, list) else "non-list"
-                raise ValueError(
-                    f"Cluster {cluster_id} must contain exactly {HD_RAW_BIN_COUNT} rates; got {length}."
-                )
-            rates: list[float] = []
-            for index, raw_rate in enumerate(raw_rates):
-                if isinstance(raw_rate, bool) or not isinstance(raw_rate, (int, float)):
-                    raise ValueError(f"Cluster {cluster_id} rate {index + 1} is not numeric.")
-                rate = float(raw_rate)
-                if not math.isfinite(rate) or rate < 0.0:
-                    raise ValueError(
-                        f"Cluster {cluster_id} rate {index + 1} must be finite and non-negative."
-                    )
-                rates.append(rate)
-            curves[cluster_id] = tuple(rates)
-        return cls(path=resolved, curves=curves)
-
-    @staticmethod
-    def _metadata_string(
-        payload: Mapping[object, object], key: str, context: str
-    ) -> str | None:
-        value = payload.get(key)
-        if value is None:
-            return None
-        if not isinstance(value, str):
-            raise ValueError(f"Schema v2 {context}.{key} must be a string or null.")
-        return value
-
-    @staticmethod
-    def _metadata_float(
-        payload: Mapping[object, object], key: str, context: str
-    ) -> float | None:
-        value = payload.get(key)
-        if value is None:
-            return None
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise ValueError(f"Schema v2 {context}.{key} must be numeric or null.")
-        number = float(value)
-        if not math.isfinite(number):
-            raise ValueError(f"Schema v2 {context}.{key} must be finite.")
-        return number
-
-    @staticmethod
-    def _metadata_int(
-        payload: Mapping[object, object], key: str, context: str
-    ) -> int | None:
-        value = payload.get(key)
-        if value is None:
-            return None
-        if type(value) is not int:
-            raise ValueError(f"Schema v2 {context}.{key} must be an integer or null.")
-        return int(value)
-
-    @staticmethod
-    def _metadata_bool(
-        payload: Mapping[object, object], key: str, context: str
-    ) -> bool | None:
-        value = payload.get(key)
-        if value is None:
-            return None
-        if type(value) is not bool:
-            raise ValueError(f"Schema v2 {context}.{key} must be boolean or null.")
-        return bool(value)
-
-    @staticmethod
-    def _metadata_int_tuple(
-        payload: Mapping[object, object], key: str, context: str
-    ) -> tuple[int, ...] | None:
-        value = payload.get(key)
-        if value is None:
-            return None
-        if not isinstance(value, list) or any(type(item) is not int for item in value):
-            raise ValueError(
-                f"Schema v2 {context}.{key} must be an integer list or null."
-            )
-        return tuple(int(item) for item in value)
-
-    @classmethod
-    def _load_metadata(cls, raw_metadata: object) -> TuningCurveMetadata | None:
-        if raw_metadata is None:
-            return None
-        if not isinstance(raw_metadata, dict):
-            raise ValueError("Schema v2 metadata must be an object or null.")
-        classification_raw = raw_metadata.get("classification")
-        if classification_raw is None:
-            classification = None
-        elif not isinstance(classification_raw, dict):
-            raise ValueError(
-                "Schema v2 metadata.classification must be an object or null."
-            )
-        else:
-            context = "metadata.classification"
-            classification = TuningCurveClassificationProvenance(
-                method=cls._metadata_string(classification_raw, "method", context),
-                class_0=cls._metadata_string(classification_raw, "class_0", context),
-                class_1=cls._metadata_string(classification_raw, "class_1", context),
-                class_2=cls._metadata_string(classification_raw, "class_2", context),
-                class_null=cls._metadata_string(
-                    classification_raw, "class_null", context
-                ),
-                rayleigh_alpha=cls._metadata_float(
-                    classification_raw, "rayleigh_alpha", context
-                ),
-                rayleigh_test=cls._metadata_string(
-                    classification_raw, "rayleigh_test", context
-                ),
-                shuffle_alpha=cls._metadata_float(
-                    classification_raw, "shuffle_alpha", context
-                ),
-                num_shuffle=cls._metadata_int(
-                    classification_raw, "num_shuffle", context
-                ),
-                shuffle_seed=cls._metadata_int(
-                    classification_raw, "shuffle_seed", context
-                ),
-            )
-
-        ttl_raw = raw_metadata.get("ttl_qc")
-        if ttl_raw is None:
-            ttl_qc = None
-        elif not isinstance(ttl_raw, dict):
-            raise ValueError("Schema v2 metadata.ttl_qc must be an object or null.")
-        else:
-            context = "metadata.ttl_qc"
-            ttl_qc = TuningCurveTTLProvenance(
-                ttl_pulse_count=cls._metadata_int(
-                    ttl_raw, "ttl_pulse_count", context
-                ),
-                first_exposure_s=cls._metadata_float(
-                    ttl_raw, "first_exposure_s", context
-                ),
-                last_exposure_s=cls._metadata_float(
-                    ttl_raw, "last_exposure_s", context
-                ),
-                median_period_s=cls._metadata_float(
-                    ttl_raw, "median_period_s", context
-                ),
-                measured_rate_hz=cls._metadata_float(
-                    ttl_raw, "measured_rate_hz", context
-                ),
-                camera_input_channel=cls._metadata_int(
-                    ttl_raw, "camera_input_channel", context
-                ),
-                camera_ttl_threshold=cls._metadata_float(
-                    ttl_raw, "camera_ttl_threshold", context
-                ),
-                camera_ttl_active_high=cls._metadata_bool(
-                    ttl_raw, "camera_ttl_active_high", context
-                ),
-                motive_frame_count_raw=cls._metadata_int(
-                    ttl_raw, "motive_frame_count_raw", context
-                ),
-                matched_motive_frame_count=cls._metadata_int(
-                    ttl_raw, "matched_motive_frame_count", context
-                ),
-                dropped_motive_frame_ids=cls._metadata_int_tuple(
-                    ttl_raw, "dropped_motive_frame_ids", context
-                ),
-                frame_alignment_policy_requested=cls._metadata_string(
-                    ttl_raw, "frame_alignment_policy_requested", context
-                ),
-                frame_alignment_policy_applied=cls._metadata_string(
-                    ttl_raw, "frame_alignment_policy_applied", context
-                ),
-                frame_timestamp_mapping=cls._metadata_string(
-                    ttl_raw, "frame_timestamp_mapping", context
-                ),
-            )
-
-        context = "metadata"
-        return TuningCurveMetadata(
-            session=cls._metadata_string(raw_metadata, "session", context),
-            probe=cls._metadata_string(raw_metadata, "probe", context),
-            kilosort_dir=cls._metadata_string(raw_metadata, "kilosort_dir", context),
-            timebase=cls._metadata_string(raw_metadata, "timebase", context),
-            adc_time_origin_raw_s=cls._metadata_float(
-                raw_metadata, "adc_time_origin_raw_s", context
-            ),
-            timestamp_reference=cls._metadata_string(
-                raw_metadata, "timestamp_reference", context
-            ),
-            angle_convention_note=cls._metadata_string(
-                raw_metadata, "angle_convention_note", context
-            ),
-            num_angle_bins=cls._metadata_int(
-                raw_metadata, "num_angle_bins", context
-            ),
-            feature_fs_hz=cls._metadata_float(
-                raw_metadata, "feature_fs_hz", context
-            ),
-            classification=classification,
-            ttl_qc=ttl_qc,
-        )
-
-    @classmethod
-    def _load_schema_v2(cls, resolved: Path, payload: Mapping[object, object]) -> TuningCurveData:
-        metadata = cls._load_metadata(payload.get("metadata"))
-        raw_edges = payload.get("angle_bin_edges_deg")
-        if not isinstance(raw_edges, list) or len(raw_edges) != HD_RAW_BIN_COUNT + 1:
-            raise ValueError(
-                f"Schema v2 angle_bin_edges_deg must contain {HD_RAW_BIN_COUNT + 1} values."
-            )
-        edges: list[float] = []
-        for index, raw_edge in enumerate(raw_edges):
-            if isinstance(raw_edge, bool) or not isinstance(raw_edge, (int, float)):
-                raise ValueError(f"Schema v2 angle edge {index + 1} is not numeric.")
-            edge = float(raw_edge)
-            if not math.isfinite(edge):
-                raise ValueError(f"Schema v2 angle edge {index + 1} must be finite.")
-            edges.append(edge)
-        if not all(after > before for before, after in zip(edges, edges[1:])):
-            raise ValueError("Schema v2 angle_bin_edges_deg must be strictly increasing.")
-        expected_width = 360.0 / HD_RAW_BIN_COUNT
-        if not all(
-            math.isclose(edge, index * expected_width, rel_tol=0.0, abs_tol=1e-8)
-            for index, edge in enumerate(edges)
-        ):
-            raise ValueError("Schema v2 angle bins must span 0–360° in 180 equal bins.")
-
-        raw_occupancy = payload.get("occupancy_time_s")
-        if not isinstance(raw_occupancy, list) or len(raw_occupancy) != HD_RAW_BIN_COUNT:
-            raise ValueError(
-                f"Schema v2 occupancy_time_s must contain {HD_RAW_BIN_COUNT} values."
-            )
-        occupancy: list[float] = []
-        for index, raw_value in enumerate(raw_occupancy):
-            if isinstance(raw_value, bool) or not isinstance(raw_value, (int, float)):
-                raise ValueError(f"Schema v2 occupancy time {index + 1} is not numeric.")
-            value = float(raw_value)
-            if not math.isfinite(value) or value < 0.0:
-                raise ValueError(
-                    f"Schema v2 occupancy time {index + 1} must be finite and non-negative."
-                )
-            occupancy.append(value)
-        if not any(value > 0.0 for value in occupancy):
-            raise ValueError("Schema v2 occupancy_time_s must contain positive occupancy.")
-
-        raw_units = payload.get("units")
-        if not isinstance(raw_units, list) or not raw_units:
-            raise ValueError("Schema v2 units must be a non-empty list.")
-        curves: dict[int, tuple[float, ...]] = {}
-        spike_counts: dict[int, tuple[int, ...]] = {}
-        hd_classes: dict[int, int | None] = {}
-        for unit_index, raw_unit in enumerate(raw_units):
-            if not isinstance(raw_unit, dict):
-                raise ValueError(f"Schema v2 unit {unit_index + 1} must be an object.")
-            raw_unit_id = raw_unit.get("unit_id")
-            if type(raw_unit_id) is not int:
-                raise ValueError(f"Schema v2 unit {unit_index + 1} has an invalid unit_id.")
-            unit_id = int(raw_unit_id)
-            if unit_id in curves:
-                raise ValueError(f"Duplicate schema v2 unit_id: {unit_id}")
-
-            raw_counts = raw_unit.get("spike_counts")
-            raw_rates = raw_unit.get("firing_rate_hz")
-            if not isinstance(raw_counts, list) or len(raw_counts) != HD_RAW_BIN_COUNT:
-                raise ValueError(
-                    f"Unit {unit_id} spike_counts must contain {HD_RAW_BIN_COUNT} values."
-                )
-            if not isinstance(raw_rates, list) or len(raw_rates) != HD_RAW_BIN_COUNT:
-                raise ValueError(
-                    f"Unit {unit_id} firing_rate_hz must contain {HD_RAW_BIN_COUNT} values."
-                )
-
-            counts: list[int] = []
-            rates: list[float] = []
-            for bin_index, (raw_count, raw_rate, occupied_s) in enumerate(
-                zip(raw_counts, raw_rates, occupancy)
-            ):
-                if type(raw_count) is not int or raw_count < 0:
-                    raise ValueError(
-                        f"Unit {unit_id} spike count {bin_index + 1} must be a non-negative integer."
-                    )
-                count = int(raw_count)
-                if occupied_s == 0.0:
-                    if count != 0 or raw_rate is not None:
-                        raise ValueError(
-                            f"Unit {unit_id} bin {bin_index + 1} has zero occupancy and must contain count 0 / rate null."
-                        )
-                    rate = math.nan
-                else:
-                    if isinstance(raw_rate, bool) or not isinstance(raw_rate, (int, float)):
-                        raise ValueError(
-                            f"Unit {unit_id} firing rate {bin_index + 1} is not numeric."
-                        )
-                    rate = float(raw_rate)
-                    expected_rate = count / occupied_s
-                    if (
-                        not math.isfinite(rate)
-                        or rate < 0.0
-                        or not math.isclose(rate, expected_rate, rel_tol=1e-7, abs_tol=1e-9)
-                    ):
-                        raise ValueError(
-                            f"Unit {unit_id} firing rate {bin_index + 1} does not match count / occupancy."
-                        )
-                counts.append(count)
-                rates.append(rate)
-
-            hd_class = raw_unit.get("hd_class")
-            if hd_class is not None and (type(hd_class) is not int or hd_class not in {0, 1, 2}):
-                raise ValueError(f"Unit {unit_id} hd_class must be 0, 1, 2, or null.")
-            curves[unit_id] = tuple(rates)
-            spike_counts[unit_id] = tuple(counts)
-            hd_classes[unit_id] = hd_class
-        return cls(
-            path=resolved,
-            curves=curves,
-            spike_counts=spike_counts,
-            occupancy_time_s=tuple(occupancy),
-            hd_classes=hd_classes,
-            metadata=metadata,
-        )
-
-    def rates_for(self, cluster_id: int) -> tuple[float, ...] | None:
-        return self.curves.get(int(cluster_id))
-
-    def hd_class_for(self, cluster_id: int) -> int | None:
-        return self.hd_classes.get(int(cluster_id))
-
-    def processed_for(
-        self,
-        cluster_id: int,
-        display_bins: int,
-        *,
-        smoothing: bool,
-        sigma: float,
-    ) -> tuple[tuple[float, ...], tuple[float, ...]] | None:
-        cluster_id = int(cluster_id)
-        rates = self.rates_for(cluster_id)
-        if rates is None:
-            return None
-        counts = self.spike_counts.get(cluster_id)
-        if counts is not None and self.occupancy_time_s is not None:
-            display_bins = normalize_hd_bin_count(display_bins)
-            if smoothing:
-                return smooth_tuning_counts(
-                    counts,
-                    self.occupancy_time_s,
-                    display_bins,
-                    sigma,
-                )
-            return aggregate_tuning_counts(
-                counts,
-                self.occupancy_time_s,
-                display_bins,
-            )
-        return processed_tuning_curve(
-            rates,
-            display_bins,
-            smoothing=smoothing,
-            sigma=sigma,
-        )
-
-
-def discover_tuning_curve_path(
-    rf_json_path: Path,
-    session_index: int | None = None,
-) -> Path | None:
-    """Find a tuning curve for the RF document's day/probe.
-
-    When ``session_index`` is provided, only that positive-numbered session is
-    considered.  ``None`` retains the legacy earliest-available lookup for
-    callers that do not expose the GUI's explicit session setting.
-    """
-
-    if session_index is not None and (
-        type(session_index) is not int or session_index <= 0
-    ):
-        raise ValueError("Tuning Curve Session must be a positive integer.")
-
-    rf_json_path = Path(rf_json_path).expanduser()
-    probe_name = probe_name_for_json(rf_json_path)
-    if probe_name is None:
-        return None
-    session_pattern = re.compile(r"^(?P<date>\d{6,8})_(?P<index>\d+)$")
-    session_dir: Path | None = None
-    session_match: re.Match[str] | None = None
-    for candidate in (rf_json_path.parent, *rf_json_path.parents):
-        match = session_pattern.fullmatch(candidate.name)
-        if match is not None:
-            session_dir = candidate
-            session_match = match
-            break
-    if session_dir is None or session_match is None:
-        return None
-
-    recording_date = session_match.group("date")
-    sessions: list[tuple[int, Path]] = []
-    try:
-        siblings = session_dir.parent.iterdir()
-    except OSError:
-        return None
-    for sibling in siblings:
-        if not sibling.is_dir():
-            continue
-        match = session_pattern.fullmatch(sibling.name)
-        if match is None or match.group("date") != recording_date:
-            continue
-        sessions.append((int(match.group("index")), sibling))
-    for index, session in sorted(sessions):
-        if session_index is not None and index != session_index:
-            continue
-        directory = session / "data" / "tuning_curves" / probe_name
-        for filename in TUNING_CURVE_FILENAMES:
-            resolved = _resolve_existing_file(directory / filename)
-            if resolved is not None:
-                return resolved
-    return None
-
-
-def aggregate_tuning_curve(
-    rates: Sequence[float],
-    display_bins: int,
-) -> tuple[tuple[float, ...], tuple[float, ...]]:
-    """Average available raw HD rates and return display centers and rates."""
-
-    if len(rates) != HD_RAW_BIN_COUNT:
-        raise ValueError(f"Expected {HD_RAW_BIN_COUNT} raw HD rates; got {len(rates)}.")
-    display_bins = normalize_hd_bin_count(display_bins)
-    group_size = HD_RAW_BIN_COUNT // display_bins
-    values: list[float] = []
-    for start in range(0, HD_RAW_BIN_COUNT, group_size):
-        group = tuple(
-            float(value)
-            for value in rates[start : start + group_size]
-            if math.isfinite(float(value))
-        )
-        values.append(sum(group) / len(group) if group else math.nan)
-    bin_width_deg = 360.0 / display_bins
-    centers = tuple((index + 0.5) * bin_width_deg for index in range(display_bins))
-    return centers, tuple(values)
-
-
-def aggregate_tuning_counts(
-    spike_counts: Sequence[int],
-    occupancy_time_s: Sequence[float],
-    display_bins: int,
-) -> tuple[tuple[float, ...], tuple[float, ...]]:
-    """Aggregate counts and occupancy before converting to firing rate."""
-
-    centers, counts, occupancy = aggregate_tuning_observations(
-        spike_counts,
-        occupancy_time_s,
-        display_bins,
-    )
-    return centers, tuple(
-        count / occupied_s if occupied_s > 0.0 else math.nan
-        for count, occupied_s in zip(counts, occupancy)
-    )
-
-
-def aggregate_tuning_observations(
-    spike_counts: Sequence[float],
-    occupancy_time_s: Sequence[float],
-    display_bins: int,
-) -> tuple[tuple[float, ...], tuple[float, ...], tuple[float, ...]]:
-    """Return grouped angle centers, spike counts, and occupancy seconds."""
-
-    if len(spike_counts) != HD_RAW_BIN_COUNT:
-        raise ValueError(f"Expected {HD_RAW_BIN_COUNT} spike-count bins; got {len(spike_counts)}.")
-    if len(occupancy_time_s) != HD_RAW_BIN_COUNT:
-        raise ValueError(
-            f"Expected {HD_RAW_BIN_COUNT} occupancy-time bins; got {len(occupancy_time_s)}."
-    )
-    display_bins = normalize_hd_bin_count(display_bins)
-    group_size = HD_RAW_BIN_COUNT // display_bins
-    counts: list[float] = []
-    occupancy: list[float] = []
-    for start in range(0, HD_RAW_BIN_COUNT, group_size):
-        stop = start + group_size
-        counts.append(sum(float(value) for value in spike_counts[start:stop]))
-        occupancy.append(
-            sum(float(value) for value in occupancy_time_s[start:stop])
-        )
-    bin_width_deg = 360.0 / display_bins
-    centers = tuple((index + 0.5) * bin_width_deg for index in range(display_bins))
-    return centers, tuple(counts), tuple(occupancy)
-
-
-def tuning_smoothing_sigma(sigma: float, display_bins: int) -> float:
-    """Keep smoothing at a fixed angular width as the display bin count changes."""
-
-    sigma = float(sigma)
-    if not math.isfinite(sigma) or sigma <= 0.0:
-        raise ValueError("Tuning-curve smoothing sigma must be positive and finite.")
-    display_bins = normalize_hd_bin_count(display_bins)
-    return sigma * display_bins / DEFAULT_HD_DISPLAY_BINS
-
-
-@lru_cache(maxsize=64)
-def _circular_gaussian_kernel(sigma: float) -> tuple[tuple[int, float], ...]:
-    """Return SciPy-compatible order-zero Gaussian weights and offsets."""
-
-    radius = int(GAUSSIAN_TRUNCATE * sigma + 0.5)
-    offsets = range(-radius, radius + 1)
-    weights = [math.exp(-0.5 * (offset / sigma) ** 2) for offset in offsets]
-    weight_total = sum(weights)
-    return tuple(
-        (offset, weight / weight_total)
-        for offset, weight in zip(range(-radius, radius + 1), weights)
-    )
-
-
-def smooth_tuning_curve(rates: Sequence[float], sigma: float) -> tuple[float, ...]:
-    sigma = float(sigma)
-    if not math.isfinite(sigma) or sigma <= 0.0:
-        raise ValueError("Tuning-curve smoothing sigma must be positive and finite.")
-    values = tuple(float(value) for value in rates)
-    if not values:
-        return ()
-    kernel = _circular_gaussian_kernel(sigma)
-    count = len(values)
-    return tuple(
-        sum(
-            weight * values[(index + offset) % count]
-            for offset, weight in kernel
-        )
-        for index in range(count)
-    )
-
-
-def smooth_tuning_counts(
-    spike_counts: Sequence[int],
-    occupancy_time_s: Sequence[float],
-    display_bins: int,
-    sigma: float,
-) -> tuple[tuple[float, ...], tuple[float, ...]]:
-    """Smooth raw counts and occupancy, aggregate them, then compute rates."""
-
-    sigma_bins = tuning_smoothing_sigma(sigma, HD_RAW_BIN_COUNT)
-    smoothed_counts = smooth_tuning_curve(spike_counts, sigma_bins)
-    smoothed_occupancy = smooth_tuning_curve(occupancy_time_s, sigma_bins)
-    centers, counts, occupancy = aggregate_tuning_observations(
-        smoothed_counts,
-        smoothed_occupancy,
-        display_bins,
-    )
-    return centers, tuple(
-        count / occupied_s if occupied_s > 1e-12 else math.nan
-        for count, occupied_s in zip(counts, occupancy)
-    )
-
-
-def smooth_tuning_rates_missing_aware(
-    rates: Sequence[float],
-    sigma: float,
-) -> tuple[float, ...]:
-    """Circularly smooth raw rates without treating missing bins as zero Hz."""
-
-    values = tuple(float(value) for value in rates)
-    observed = tuple(1.0 if math.isfinite(value) else 0.0 for value in values)
-    numerator = smooth_tuning_curve(
-        tuple(value if math.isfinite(value) else 0.0 for value in values),
-        sigma,
-    )
-    denominator = smooth_tuning_curve(observed, sigma)
-    return tuple(
-        value / weight if weight > 1e-12 else math.nan
-        for value, weight in zip(numerator, denominator)
-    )
-
-
-def tuning_rate_peak(rates: Sequence[float]) -> float:
-    return max(
-        (float(rate) for rate in rates if math.isfinite(float(rate))),
-        default=0.0,
-    )
-
-
-def processed_tuning_curve(
-    rates: Sequence[float],
-    display_bins: int,
-    *,
-    smoothing: bool,
-    sigma: float,
-) -> tuple[tuple[float, ...], tuple[float, ...]]:
-    display_bins = normalize_hd_bin_count(display_bins)
-    source_rates = (
-        smooth_tuning_rates_missing_aware(
-            rates,
-            tuning_smoothing_sigma(sigma, HD_RAW_BIN_COUNT),
-        )
-        if smoothing
-        else rates
-    )
-    return aggregate_tuning_curve(source_rates, display_bins)
-
-
-def center_tuning_curve_on_zero(
-    angles_deg: Sequence[float],
-    rates: Sequence[float],
-) -> tuple[tuple[float, ...], tuple[float, ...]]:
-    """Mirror a circular HD curve onto -180..180 with 0 degrees centered."""
-
-    if len(angles_deg) != len(rates):
-        raise ValueError("Tuning-curve angles and rates must have the same length.")
-    centered = sorted(
-        (
-            ((-float(angle) + 180.0) % 360.0) - 180.0,
-            float(rate),
-        )
-        for angle, rate in zip(angles_deg, rates)
-    )
-    return (
-        tuple(angle for angle, _rate in centered),
-        tuple(rate for _angle, rate in centered),
-    )
-
-
-def head_direction_unit_vector(angle_deg: float) -> tuple[float, float]:
-    """Map HD degrees to Canvas coordinates: 0 north, positive counter-clockwise."""
-
-    radians = math.radians(float(angle_deg))
-    return -math.sin(radians), -math.cos(radians)
-
-
-class _NSSize(ctypes.Structure):
-    _fields_ = (("width", ctypes.c_double), ("height", ctypes.c_double))
-
-
-def allow_macos_fullscreen_resize(window: tk.Misc) -> bool:
-    """Remove Tk 8.6's initial-display size cap from native full screen."""
-
-    if sys.platform != "darwin":
-        return False
-    try:
-        window.update_idletasks()
-        process = ctypes.CDLL(None)
-        process.TkMacOSXDrawable.argtypes = (ctypes.c_void_p,)
-        process.TkMacOSXDrawable.restype = ctypes.c_void_p
-        native_window = process.TkMacOSXDrawable(window.winfo_id())
-        if not native_window:
-            return False
-
-        objc = ctypes.CDLL("/usr/lib/libobjc.A.dylib")
-        objc.sel_registerName.argtypes = (ctypes.c_char_p,)
-        objc.sel_registerName.restype = ctypes.c_void_p
-        message_address = ctypes.cast(objc.objc_msgSend, ctypes.c_void_p).value
-        if not message_address:
-            return False
-        send_size = ctypes.CFUNCTYPE(
-            None,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            _NSSize,
-        )(message_address)
-        selector = objc.sel_registerName(b"setMaxFullScreenContentSize:")
-        maximum = MACOS_FULLSCREEN_MAX_SIZE
-        send_size(native_window, selector, _NSSize(maximum, maximum))
-    except (AttributeError, OSError, TypeError, tk.TclError):
-        return False
-    return True
-
-
-@dataclass(frozen=True)
-class UnitMetrics:
-    total: list[list[float]]
-    peak: list[list[float]]
-    peak_bin: list[list[int | None]]
-    delay_ms: list[list[float | None]]
-    entropy: list[list[float]]
-    bin_totals: list[float]
-    max_total: float
-    max_peak: float
-    max_bin_count: float
-    total_spikes: float
-    best_y: int
-    best_x: int
-
-
-@dataclass(frozen=True, slots=True)
-class ProbeChannel:
-    """One physical probe channel loaded from a companion ``channels.csv``."""
-
-    channel_id: int
-    x_um: float
-    y_um: float
-    shank_id: int
-    channel_index: int = 0
-    raw_channel_index: int = 0
-
-
-@dataclass(frozen=True, slots=True)
-class ProbeUnitPosition:
-    """One unit location loaded from the required companion ``positions.csv``."""
-
-    unit_id: int
-    x_um: float | None
-    y_um: float | None
-    unit_index: int = 0
-
-
-@dataclass(frozen=True)
-class SpatialRegion:
-    """A physical probe-space selection used to filter RF units."""
-
-    x_min: float
-    y_min: float
-    x_max: float
-    y_max: float
-
-    @classmethod
-    def from_corners(
-        cls, x0: float, y0: float, x1: float, y1: float
-    ) -> SpatialRegion:
-        return cls(min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
-
-    @classmethod
-    def centered(
-        cls,
-        x_um: float,
-        y_um: float,
-        width_um: float = PROBE_CLICK_WIDTH_UM,
-        height_um: float = PROBE_CLICK_HEIGHT_UM,
-    ) -> SpatialRegion:
-        return cls.from_corners(
-            x_um - width_um / 2.0,
-            y_um - height_um / 2.0,
-            x_um + width_um / 2.0,
-            y_um + height_um / 2.0,
-        )
-
-    def contains(self, x_um: float, y_um: float) -> bool:
-        return self.x_min <= x_um <= self.x_max and self.y_min <= y_um <= self.y_max
-
-
-@dataclass(frozen=True, slots=True)
-class ProbeGeometry:
-    """Immutable probe geometry captured for a figure-composer session."""
-
-    probe_name: str
-    positions_path: Path
-    channels_path: Path | None
-    channels: tuple[ProbeChannel, ...]
-    units: tuple[ProbeUnitPosition, ...]
-
-    @property
-    def units_by_id(self) -> dict[int, ProbeUnitPosition]:
-        return {unit.unit_id: unit for unit in self.units}
-
-    @property
-    def positioned_units(self) -> tuple[ProbeUnitPosition, ...]:
-        return tuple(
-            unit
-            for unit in self.units
-            if unit.x_um is not None and unit.y_um is not None
-        )
-
-    def unit_ids_in_region(
-        self,
-        region: SpatialRegion,
-        available_ids: Sequence[int],
-    ) -> list[int]:
-        positions = self.units_by_id
-        return [
-            int(unit_id)
-            for unit_id in available_ids
-            if int(unit_id) in positions
-            and positions[int(unit_id)].x_um is not None
-            and positions[int(unit_id)].y_um is not None
-            and region.contains(
-                float(positions[int(unit_id)].x_um),
-                float(positions[int(unit_id)].y_um),
-            )
-        ]
-
-
-def _finite_csv_float(value: str | None, label: str) -> float:
-    try:
-        parsed = float(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise ValueError(f"{label} must be numeric") from exc
-    if not math.isfinite(parsed):
-        raise ValueError(f"{label} must be finite")
-    return parsed
-
-
-def _probe_unit_coordinates(
-    x_value: str | None,
-    y_value: str | None,
-) -> tuple[float | None, float | None]:
-    """Accept only a finite position or SpikeInterface's explicit nan,nan."""
-
-    try:
-        x_um = float(x_value)  # type: ignore[arg-type]
-        y_um = float(y_value)  # type: ignore[arg-type]
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise ValueError("unit x_um and y_um must be numeric") from exc
-    if math.isnan(x_um) and math.isnan(y_um):
-        return None, None
-    if not math.isfinite(x_um) or not math.isfinite(y_um):
-        raise ValueError(
-            "unit x_um and y_um must both be finite or both be nan"
-        )
-    return x_um, y_um
-
-
-def _csv_integer(value: str | None, label: str) -> int:
-    parsed = _finite_csv_float(value, label)
-    if not parsed.is_integer():
-        raise ValueError(f"{label} must be an integer")
-    return int(parsed)
-
-
-def _read_probe_csv(
-    path: Path,
-    required_columns: tuple[str, ...],
-) -> tuple[dict[str, int], list[dict[str, str]]]:
-    with path.open("r", encoding="utf-8-sig", newline="") as handle:
-        reader = csv.DictReader(handle)
-        fieldnames = reader.fieldnames
-        if fieldnames is None:
-            raise ValueError(f"{path.name} is missing a header")
-        duplicate_columns = sorted(
-            {name for name in fieldnames if fieldnames.count(name) > 1}
-        )
-        if duplicate_columns:
-            raise ValueError(
-                f"{path.name} contains duplicate columns: {', '.join(duplicate_columns)}"
-            )
-        missing = [column for column in required_columns if column not in fieldnames]
-        if missing:
-            raise ValueError(
-                f"{path.name} is missing required columns: {', '.join(missing)}"
-            )
-        rows = list(reader)
-    return {name: index for index, name in enumerate(fieldnames)}, rows
-
-
-def probe_name_for_json(path: Path) -> str | None:
-    """Infer ProbeA/ProbeB from RF filenames and containing directories."""
-
-    filename_match = re.search(r"(?:^|[\s_-])([ab])$", path.stem, re.IGNORECASE)
-    if filename_match:
-        return f"Probe{filename_match.group(1).upper()}"
-    for part in (path.name, *(parent.name for parent in path.parents)):
-        match = re.search(r"probe[\s_-]*([ab])(?:\b|[_-])", part, re.IGNORECASE)
-        if match:
-            return f"Probe{match.group(1).upper()}"
-    return None
-
-
-def probe_name_for_rf(path: str | Path) -> str | None:
-    """Use the full legacy/current filename vocabulary for probe inference."""
-
-    return probe_name_for_json(Path(path))
-
-
-def _geometry_path_pairs(
-    base: Path, probe_name: str
-) -> tuple[tuple[Path, Path | None], ...]:
-    layouts = (
-        (
-            base / "spike_position" / probe_name,
-            base / "waveform" / probe_name / "channels.csv",
-        ),
-        (base / probe_name, base / probe_name / "channels.csv"),
-        (base, base / "channels.csv"),
-    )
-    return tuple(
-        (directory / filename, channels)
-        for directory, channels in layouts
-        for filename in PROBE_POSITION_FILENAMES
-    )
-
-
-def _probe_geometry_search_roots(
-    json_path: Path,
-    data_root: Path | None,
-) -> list[Path]:
-    roots: list[Path] = []
-    if data_root is not None:
-        roots.append(data_root.expanduser())
-    elif configured := os.environ.get("RF_MAPPING_PROBE_DATA_ROOT"):
-        roots.append(Path(configured).expanduser())
-
-    source = json_path.expanduser()
-    parents = tuple(source.parents)
-    session = next(
-        (parent for parent in parents if _RECORDING_SESSION_RE.fullmatch(parent.name)),
-        None,
-    )
-    if session is not None:
-        boundary = next(
-            (
-                parent
-                for parent in parents
-                if parent.name == "data" and parent.parent == session
-            ),
-            session,
-        )
-        for parent in parents:
-            roots.append(parent)
-            if parent == boundary:
-                break
-    elif data_boundary := next(
-        (parent for parent in parents if parent.name == "data"),
-        None,
-    ):
-        for parent in parents:
-            roots.append(parent)
-            if parent == data_boundary:
-                break
-    else:
-        # Compact fixtures and manual exports may keep geometry one or two
-        # directory levels above the JSON, but never require a walk to root.
-        roots.extend(parents[:2])
-
-    unique: list[Path] = []
-    seen: set[str] = set()
-    for root in roots:
-        key = str(root)
-        if key not in seen:
-            seen.add(key)
-            unique.append(root)
-    return unique
-
-
-def discover_probe_geometry_paths(
-    rf_path: str | Path,
-    *,
-    data_root: Path | None = None,
-) -> tuple[str, Path, Path | None] | None:
-    """Discover session probe geometry beside an RF mapping JSON.
-
-    The active pipeline stores unit positions below ``data/spike_position``
-    and physical channels below ``data/waveform``. Both ``positions.probe``
-    and the legacy ``positions.csv`` name are accepted in every supported
-    layout; ``channels.csv`` remains the optional physical-channel companion.
-    """
-
-    source = Path(rf_path).expanduser()
-    probe_name = probe_name_for_json(source)
-    if probe_name is None:
-        return None
-    first_malformed: tuple[str, Path, Path | None] | None = None
-    for base in _probe_geometry_search_roots(source, data_root):
-        for positions_path, channels_path in _geometry_path_pairs(base, probe_name):
-            resolved_positions = _resolve_existing_file(positions_path)
-            if resolved_positions is None:
-                continue
-            candidate = (
-                probe_name,
-                resolved_positions,
-                _resolve_existing_file(channels_path) if channels_path else None,
-            )
-            try:
-                _read_probe_csv(
-                    resolved_positions,
-                    ("unit_index", "unit_id", "x_um", "y_um"),
-                )
-            except (OSError, ValueError):
-                # Keep the first malformed candidate so RFMappingData can
-                # surface its precise validation error if no valid fallback
-                # exists, while still allowing a later trusted root to win.
-                if first_malformed is None:
-                    first_malformed = candidate
-                continue
-            return candidate
-    return first_malformed
-
-
-def load_probe_geometry(
-    probe_name_or_positions: str | Path,
-    positions_path: Path | None = None,
-    channels_path: Path | None = None,
-    *,
-    probe_name: str | None = None,
-    infer_sibling_channels: bool = True,
-) -> ProbeGeometry:
-    """Load validated unit positions and optional channel sites from CSV."""
-
-    if probe_name is not None:
-        # Legacy API: load_probe_geometry(positions, channels, probe_name=...).
-        if channels_path is not None:
-            raise TypeError("channels_path was provided twice")
-        channels_path = positions_path
-        positions_path = Path(probe_name_or_positions)
-        normalized_probe_name = probe_name
-    else:
-        # Canonical API: load_probe_geometry(probe_name, positions, channels).
-        if positions_path is None:
-            # Compact legacy API without an explicit probe name.
-            positions_path = Path(probe_name_or_positions)
-            normalized_probe_name = "Probe"
-        else:
-            normalized_probe_name = str(probe_name_or_positions)
-
-    positions_resolved = _resolve_existing_file(positions_path)
-    if positions_resolved is None:
-        raise ValueError(f"CSV file not found: {positions_path}")
-    if channels_path is None and infer_sibling_channels:
-        sibling = positions_resolved.with_name("channels.csv")
-        channels_path = sibling if sibling.is_file() else None
-
-    _fields, position_rows = _read_probe_csv(
-        positions_resolved,
-        ("unit_index", "unit_id", "x_um", "y_um"),
-    )
-    units: list[ProbeUnitPosition] = []
-    seen_unit_ids: set[int] = set()
-    for row_number, row in enumerate(position_rows, start=2):
-        try:
-            unit_index = _csv_integer(row.get("unit_index"), "unit_index")
-            unit_id = _csv_integer(row.get("unit_id"), "unit_id")
-            x_um, y_um = _probe_unit_coordinates(
-                row.get("x_um"), row.get("y_um")
-            )
-        except ValueError as exc:
-            raise ValueError(
-                f"Invalid positions.csv value on row {row_number}: {exc}"
-            ) from exc
-        if unit_id in seen_unit_ids:
-            raise ValueError(f"Duplicate unit_id {unit_id} in positions.csv")
-        seen_unit_ids.add(unit_id)
-        units.append(ProbeUnitPosition(unit_id, x_um, y_um, unit_index))
-
-    channels: list[ProbeChannel] = []
-    validated_channels_path = (
-        _resolve_existing_file(channels_path) if channels_path is not None else None
-    )
-    if validated_channels_path is not None:
-        try:
-            _fields, channel_rows = _read_probe_csv(
-                validated_channels_path,
-                (
-                    "channel_index",
-                    "channel_id",
-                    "raw_channel_index",
-                    "x_um",
-                    "y_um",
-                    "shank_id",
-                ),
-            )
-            for row_number, row in enumerate(channel_rows, start=2):
-                try:
-                    channel_index = _csv_integer(row.get("channel_index"), "channel_index")
-                    raw_channel_index = _csv_integer(row.get("raw_channel_index"), "raw_channel_index")
-                    channel_id = _csv_integer(row.get("channel_id"), "channel_id")
-                    x_um = _finite_csv_float(row.get("x_um"), "channel x_um")
-                    y_um = _finite_csv_float(row.get("y_um"), "channel y_um")
-                    shank_id = _csv_integer(row.get("shank_id"), "shank_id")
-                except ValueError as exc:
-                    raise ValueError(
-                        f"Invalid channels.csv value on row {row_number}: {exc}"
-                    ) from exc
-                channels.append(
-                    ProbeChannel(
-                        channel_id,
-                        x_um,
-                        y_um,
-                        shank_id,
-                        channel_index,
-                        raw_channel_index,
-                    )
-                )
-        except (OSError, ValueError):
-            # Unit positions are sufficient for a useful probe plot.  An
-            # optional stale/malformed channel file must not suppress them.
-            channels = []
-            validated_channels_path = None
-
-    return ProbeGeometry(
-        probe_name=normalized_probe_name,
-        positions_path=positions_resolved,
-        channels_path=validated_channels_path,
-        channels=tuple(channels),
-        units=tuple(units),
-    )
-
-
-def discover_probe_geometry(
-    json_path: Path,
-    *,
-    data_root: Path | None = None,
-) -> ProbeGeometry | None:
-    """Load probe geometry using the bounded current-session policy.
-
-    ``data_root`` remains an explicit opt-in for compact fixtures and manually
-    curated layouts; normal discovery never walks outside the RF data scope.
-    """
-
-    if data_root is not None:
-        probe_name = probe_name_for_rf(json_path)
-        if probe_name is None:
-            return None
-        for positions, channels in _geometry_path_pairs(data_root, probe_name):
-            if positions.is_file():
-                return load_probe_geometry(
-                    probe_name,
-                    positions.resolve(),
-                    channels.resolve() if channels.is_file() else None,
-                )
-        return None
-
-    probe_name = probe_name_for_json(json_path)
-    if probe_name is None:
-        return None
-    positions_only: ProbeGeometry | None = None
-    for root in _probe_geometry_search_roots(json_path, data_root):
-        for positions, channels in _geometry_path_pairs(root, probe_name):
-            positions_resolved = _resolve_existing_file(positions)
-            if positions_resolved is None:
-                continue
-            channels_resolved = (
-                _resolve_existing_file(channels) if channels is not None else None
-            )
-            try:
-                geometry = load_probe_geometry(
-                    probe_name,
-                    positions_resolved,
-                    channels_resolved,
-                )
-            except (OSError, ValueError):
-                if channels_resolved is None:
-                    continue
-                try:
-                    geometry = load_probe_geometry(
-                        probe_name,
-                        positions_resolved,
-                        None,
-                        infer_sibling_channels=False,
-                    )
-                except (OSError, ValueError):
-                    continue
-            if geometry.channels:
-                return geometry
-            if positions_only is None:
-                positions_only = geometry
-    return positions_only
-
-
-@dataclass(frozen=True)
-class SpatialGroupObservations:
-    count: float
-    occupancy_time_s: float
-    source_pixel_count: int
-
-
-@dataclass(frozen=True)
-class SpatialGroupTemporalMetrics:
-    mean_total_count: float
-    peak_group_index: int | None
-    delay_ms: float | None
-    entropy: float
-
-
-@dataclass(frozen=True)
-class ViewerSyncState:
-    """Persistent viewer controls shared by paired windows.
-
-    The selected unit is stored by cluster ID rather than by its per-file
-    array index so windows with different unit lists can still be paired.
-    Time selections are stored in physical milliseconds so files with
-    different time axes or display-group resolutions remain synchronized. A
-    selected spatial cell is represented by its source-index midpoint for the
-    same reason.
-    """
-
-    unit_id: int
-    value_mode: str
-    timeline_bin_center_ms: float
-    timeline_selection_start_ms: float
-    timeline_selection_end_ms: float
-    timeline_anchor_center_ms: float | None
-    rf_start_ms: float
-    rf_end_ms: float
-    time_resolution_ms: float
-    x_bins: int
-    y_bins: int
-    smooth_radius: int
-    flip_y: bool
-    palette: str
-    polar_radius: str
-    polar_layout: bool
-    rgb_mode: bool
-    selected_cell_y_midpoint: float | None
-    selected_cell_x_midpoint: float | None
-    timeline_scroll_fraction: float
-    selected_tab: str
-    tuning_plot_mode: str = "Auto"
-    tuning_display_bins: int = DEFAULT_HD_DISPLAY_BINS
-    tuning_smoothing: bool = True
-    tuning_smooth_sigma: float = DEFAULT_HD_SMOOTH_SIGMA
-    tuning_compare_scale: bool = False
-    show_tuning_curve: bool = True
-    show_waveform: bool = True
-    show_probe_layout: bool = True
-
-    def changed_fields(self, baseline: ViewerSyncState) -> frozenset[str]:
-        fields: set[str] = set()
-        if self.unit_id != baseline.unit_id:
-            fields.add("unit")
-        if self.value_mode != baseline.value_mode:
-            fields.add("value_mode")
-        if self.timeline_bin_center_ms != baseline.timeline_bin_center_ms:
-            fields.add("active_time")
-        if (
-            self.timeline_selection_start_ms != baseline.timeline_selection_start_ms
-            or self.timeline_selection_end_ms != baseline.timeline_selection_end_ms
-            or self.timeline_anchor_center_ms != baseline.timeline_anchor_center_ms
-        ):
-            fields.add("timeline_selection")
-        if self.rf_start_ms != baseline.rf_start_ms or self.rf_end_ms != baseline.rf_end_ms:
-            fields.add("rf_range")
-        if self.time_resolution_ms != baseline.time_resolution_ms:
-            fields.add("time_resolution")
-        if self.x_bins != baseline.x_bins:
-            fields.add("x_bins")
-        if self.y_bins != baseline.y_bins:
-            fields.add("y_bins")
-        if self.smooth_radius != baseline.smooth_radius:
-            fields.add("smoothing")
-        if self.flip_y != baseline.flip_y:
-            fields.add("flip_y")
-        if self.palette != baseline.palette:
-            fields.add("palette")
-        if self.polar_radius != baseline.polar_radius:
-            fields.add("polar_radius")
-        if self.polar_layout != baseline.polar_layout:
-            fields.add("spatial_format")
-        if self.rgb_mode != baseline.rgb_mode:
-            fields.add("delay_rgb")
-        if (
-            self.selected_cell_y_midpoint != baseline.selected_cell_y_midpoint
-            or self.selected_cell_x_midpoint != baseline.selected_cell_x_midpoint
-        ):
-            fields.add("selected_cell")
-        if abs(self.timeline_scroll_fraction - baseline.timeline_scroll_fraction) > 1e-6:
-            fields.add("timeline_scroll")
-        if self.selected_tab != baseline.selected_tab:
-            fields.add("selected_tab")
-        if (
-            self.tuning_plot_mode != baseline.tuning_plot_mode
-            or self.tuning_display_bins != baseline.tuning_display_bins
-            or self.tuning_smoothing != baseline.tuning_smoothing
-            or self.tuning_smooth_sigma != baseline.tuning_smooth_sigma
-            or self.tuning_compare_scale != baseline.tuning_compare_scale
-        ):
-            fields.add("tuning_display")
-        if (
-            self.show_tuning_curve != baseline.show_tuning_curve
-            or self.show_waveform != baseline.show_waveform
-            or self.show_probe_layout != baseline.show_probe_layout
-        ):
-            fields.add("optional_views")
-        return frozenset(fields)
-
-    def merging(
-        self,
-        incoming: ViewerSyncState,
-        fields: frozenset[str],
-    ) -> ViewerSyncState:
-        updates: dict[str, object] = {}
-        if "unit" in fields:
-            updates["unit_id"] = incoming.unit_id
-        if "value_mode" in fields:
-            updates["value_mode"] = incoming.value_mode
-        if "active_time" in fields:
-            updates["timeline_bin_center_ms"] = incoming.timeline_bin_center_ms
-        if "timeline_selection" in fields:
-            updates.update(
-                timeline_selection_start_ms=incoming.timeline_selection_start_ms,
-                timeline_selection_end_ms=incoming.timeline_selection_end_ms,
-                timeline_anchor_center_ms=incoming.timeline_anchor_center_ms,
-            )
-        if "rf_range" in fields:
-            updates.update(rf_start_ms=incoming.rf_start_ms, rf_end_ms=incoming.rf_end_ms)
-        if "time_resolution" in fields:
-            updates["time_resolution_ms"] = incoming.time_resolution_ms
-        if "x_bins" in fields:
-            updates["x_bins"] = incoming.x_bins
-        if "y_bins" in fields:
-            updates["y_bins"] = incoming.y_bins
-        if "smoothing" in fields:
-            updates["smooth_radius"] = incoming.smooth_radius
-        if "flip_y" in fields:
-            updates["flip_y"] = incoming.flip_y
-        if "palette" in fields:
-            updates["palette"] = incoming.palette
-        if "polar_radius" in fields:
-            updates["polar_radius"] = incoming.polar_radius
-        if "spatial_format" in fields:
-            updates["polar_layout"] = incoming.polar_layout
-        if "delay_rgb" in fields:
-            updates["rgb_mode"] = incoming.rgb_mode
-        if "selected_cell" in fields:
-            updates.update(
-                selected_cell_y_midpoint=incoming.selected_cell_y_midpoint,
-                selected_cell_x_midpoint=incoming.selected_cell_x_midpoint,
-            )
-        if "timeline_scroll" in fields:
-            updates["timeline_scroll_fraction"] = incoming.timeline_scroll_fraction
-        if "selected_tab" in fields:
-            updates["selected_tab"] = incoming.selected_tab
-        if "tuning_display" in fields:
-            updates.update(
-                tuning_plot_mode=incoming.tuning_plot_mode,
-                tuning_display_bins=incoming.tuning_display_bins,
-                tuning_smoothing=incoming.tuning_smoothing,
-                tuning_smooth_sigma=incoming.tuning_smooth_sigma,
-                tuning_compare_scale=incoming.tuning_compare_scale,
-            )
-        if "optional_views" in fields:
-            updates.update(
-                show_tuning_curve=incoming.show_tuning_curve,
-                show_waveform=incoming.show_waveform,
-                show_probe_layout=incoming.show_probe_layout,
-            )
-        return replace(self, **updates)
-
-
-class RFMappingData:
-    """GUI adapter around the implementation-local RF JSON model."""
-
-    def __init__(
-        self,
-        path: Path,
-        *,
-        isolated: bool = False,
-        cancelled: Callable[[], bool] | None = None,
-    ):
-        source_identity = FrozenFileIdentity.capture(path)
-        self.path = source_identity.path
-        self.rf_maps: RFMapList = (
-            load_rf_maps_isolated(self.path, cancelled=cancelled)
-            if isolated
-            else load_rf_maps(self.path)
-        )
-        source_identity.verify_path()
-        self.source_identity = source_identity
-        first = self.rf_maps[0]
-        self.n_units = len(self.rf_maps)
-        self.n_y = first.n_y
-        self.n_x = first.n_x
-        self.n_bins = first.n_time_bins
-        self.size = (self.n_units, self.n_y, self.n_x, self.n_bins)
-        self.counts = [rf_map.spike_counts for rf_map in self.rf_maps]
-        self.unit_pool = list(self.rf_maps.unit_ids)
-        self.x_positions = first.x_positions.tolist()
-        self.y_positions = first.y_positions.tolist()
-        self.time_bin_edges = first.time_bin_edges_s.tolist()
-        self.occupancy_time_s = first.occupancy_time_s.tolist()
-        self._occupancy_array = first.occupancy_time_s
-        self._count_prefix_cache: dict[int, np.ndarray] = {}
-        self._count_window_cache: dict[
-            tuple[int, tuple[AxisGroup, ...]], np.ndarray
-        ] = {}
-        self._spatial_exposure_cache: dict[
-            tuple[tuple[AxisGroup, ...], tuple[AxisGroup, ...]],
-            tuple[np.ndarray, np.ndarray],
-        ] = {}
-        self._count_cache_lock = threading.Lock()
-        self._metrics_cache: dict[int, UnitMetrics] = {}
-        self._best_cell_cache: dict[int, tuple[int, int]] = {}
-        self._zero_spike_bin_count_cache: dict[tuple[int, int, int], int] = {}
-        self._hd_tuning_lock = threading.Lock()
-        self._hd_tuning_checked = False
-        self._hd_tuning: HDTuningData | TuningCurveData | None = None
-        self._hd_tuning_error: str | None = None
-        self._hd_tuning_identity: FrozenFileIdentity | None = None
-        self._probe_geometry_lock = threading.Lock()
-        self._probe_geometry_checked = False
-        self._probe_geometry: ProbeGeometry | None = None
-        self._probe_geometry_error: str | None = None
-        self._probe_file_identities: tuple[FrozenFileIdentity, ...] = ()
-        self._waveform_lock = threading.Lock()
-        self._waveform_checked = False
-        self._waveform_store: WaveformArtifactStore | None = None
-        self._waveform_error: str | None = None
-        self._waveform_file_identities: tuple[FrozenFileIdentity, ...] = ()
-
-    def rf_map(self, unit_idx: int) -> RFMap:
-        """Return one unit by its original JSON array index."""
-
-        return self.rf_maps.by_index(unit_idx)
-
-    def rf_map_by_unit_id(self, unit_id: int) -> RFMap:
-        """Return a per-unit object by its recorded cluster/unit ID."""
-
-        return self.rf_maps.by_unit_id(unit_id)
-
-    @property
-    def spatial_bin_count(self) -> int:
-        return self.n_y * self.n_x
-
-    def zero_spike_spatial_bin_count(
-        self,
-        unit_idx: int,
-        start: int,
-        end: int,
-    ) -> int:
-        """Return native RF bins with zero spikes in an inclusive time range."""
-
-        requested_start, requested_end = min(start, end), max(start, end)
-        start = max(0, min(self.n_bins - 1, requested_start))
-        end = max(0, min(self.n_bins - 1, requested_end))
-        key = (int(unit_idx), start, end)
-        cached = self._zero_spike_bin_count_cache.get(key)
-        if cached is not None:
-            return cached
-        result = self.rf_map(unit_idx).zero_spike_spatial_bin_count(
-            self.time_bin_edges[start],
-            self.time_bin_edges[end + 1],
-        )
-        self._zero_spike_bin_count_cache[key] = result
-        return result
-
-    def hd_tuning(
-        self,
-        session_index: int | None = None,
-    ) -> HDTuningData | TuningCurveData | None:
-        """Lazily discover and validate the companion HD tuning JSON."""
-
-        if self._hd_tuning_checked:
-            return self._hd_tuning
-        # Preview rendering runs on Tk's main thread while final export runs on
-        # a worker.  Publish the checked flag only after discovery/loading is
-        # complete so another caller can never observe a false "missing" state.
-        with self._hd_tuning_lock:
-            if self._hd_tuning_checked:
-                return self._hd_tuning
-            tuning: HDTuningData | TuningCurveData | None = None
-            error: str | None = None
-            tuning_path = (
-                discover_hd_tuning_path(self.path)
-                if session_index is None
-                else discover_tuning_curve_path(self.path, session_index)
-            )
-            identity: FrozenFileIdentity | None = None
-            if tuning_path is not None:
-                try:
-                    identity = FrozenFileIdentity.capture(tuning_path)
-                    try:
-                        tuning = load_hd_tuning(identity.path)
-                    except (KeyError, TypeError, ValueError):
-                        # 1.8 numeric-key and nested schema-v2 documents remain
-                        # valid live/export companions in the full viewer.
-                        tuning = TuningCurveData.load(identity.path)
-                    identity.verify_path()
-                except Exception as exc:
-                    error = str(exc)
-            self._hd_tuning = tuning
-            self._hd_tuning_identity = identity
-            self._hd_tuning_error = error
-            self._hd_tuning_checked = True
-        return self._hd_tuning
-
-    def attach_hd_tuning(self, path: Path) -> TuningCurveData:
-        """Atomically attach one manually selected HD document."""
-
-        identity = FrozenFileIdentity.capture(path)
-        tuning = TuningCurveData.load(identity.path)
-        self._publish_hd_tuning(identity, tuning)
-        return tuning
-
-    def _publish_hd_tuning(
-        self,
-        identity: FrozenFileIdentity,
-        tuning: TuningCurveData,
-    ) -> None:
-        """Publish a previously parsed, still-identical tuning document."""
-
-        identity.verify_path()
-        with self._hd_tuning_lock:
-            self._hd_tuning = tuning
-            self._hd_tuning_identity = identity
-            self._hd_tuning_error = None
-            self._hd_tuning_checked = True
-
-    @property
-    def hd_tuning_error(self) -> str | None:
-        self.hd_tuning()
-        return self._hd_tuning_error
-
-    def probe_geometry(self) -> ProbeGeometry | None:
-        """Lazily discover and validate companion probe geometry CSV files."""
-
-        if self._probe_geometry_checked:
-            return self._probe_geometry
-        with self._probe_geometry_lock:
-            if self._probe_geometry_checked:
-                return self._probe_geometry
-            geometry: ProbeGeometry | None = None
-            error: str | None = None
-            discovered = discover_probe_geometry_paths(self.path)
-            identities: tuple[FrozenFileIdentity, ...] = ()
-            if discovered is not None:
-                probe_name, positions_path, channels_path = discovered
-                try:
-                    positions_identity = FrozenFileIdentity.capture(positions_path)
-                    channels_identity = (
-                        FrozenFileIdentity.capture(channels_path)
-                        if channels_path is not None
-                        else None
-                    )
-                    identities = tuple(
-                        identity
-                        for identity in (positions_identity, channels_identity)
-                        if identity is not None
-                    )
-                    geometry = load_probe_geometry(
-                        probe_name,
-                        positions_identity.path,
-                        channels_identity.path if channels_identity is not None else None,
-                    )
-                    for identity in identities:
-                        identity.verify_path()
-                    rf_unit_ids = set(self.unit_pool)
-                    matching_units = tuple(
-                        unit for unit in geometry.units if unit.unit_id in rf_unit_ids
-                    )
-                    if not matching_units:
-                        raise ValueError(
-                            "positions.csv contains no unit IDs from this RF "
-                            "dataset's unitPool"
-                        )
-                    # A positions.csv can contain a broader sorting result than
-                    # the selected RF export.  Never draw those unrelated units
-                    # as though they belonged to this RF payload.
-                    geometry = replace(geometry, units=matching_units)
-                except Exception as exc:
-                    geometry = None
-                    error = str(exc)
-            self._probe_geometry = geometry
-            self._probe_geometry_error = error
-            self._probe_file_identities = identities
-            # Publish only after the immutable geometry/error state is ready;
-            # previews and final exports may request it from different threads.
-            self._probe_geometry_checked = True
-        return self._probe_geometry
-
-    def attach_probe_geometry(
-        self,
-        positions_path: Path,
-        channels_path: Path | None = None,
-        *,
-        probe_name: str | None = None,
-    ) -> ProbeGeometry:
-        """Atomically attach validated probe inputs and freeze provenance."""
-
-        positions_identity = FrozenFileIdentity.capture(positions_path)
-        channels_identity = (
-            FrozenFileIdentity.capture(channels_path)
-            if channels_path is not None
-            else None
-        )
-        identities = tuple(
-            identity
-            for identity in (positions_identity, channels_identity)
-            if identity is not None
-        )
-        geometry = load_probe_geometry(
-            probe_name
-            or probe_name_for_json(self.path)
-            or positions_identity.path.parent.name,
-            positions_identity.path,
-            channels_identity.path if channels_identity is not None else None,
-        )
-        for identity in identities:
-            identity.verify_path()
-        rf_unit_ids = set(self.unit_pool)
-        matching_units = tuple(
-            unit for unit in geometry.units if unit.unit_id in rf_unit_ids
-        )
-        if not matching_units:
-            raise ValueError(
-                "positions.csv contains no unit IDs from this RF dataset's unitPool"
-            )
-        geometry = replace(geometry, units=matching_units)
-        with self._probe_geometry_lock:
-            self._probe_geometry = geometry
-            self._probe_geometry_error = None
-            self._probe_file_identities = identities
-            self._probe_geometry_checked = True
-        return geometry
-
-    @property
-    def probe_geometry_error(self) -> str | None:
-        self.probe_geometry()
-        return self._probe_geometry_error
-
-    def waveform_store(self) -> WaveformArtifactStore | None:
-        """Lazily discover the read-only schema-v4 waveform artifact."""
-
-        if self._waveform_checked:
-            return self._waveform_store
-        with self._waveform_lock:
-            if self._waveform_checked:
-                return self._waveform_store
-            store: WaveformArtifactStore | None = None
-            error: str | None = None
-            try:
-                artifact = discover_waveform_artifact(self.path)
-                if artifact is not None:
-                    store = WaveformArtifactStore.open(artifact)
-            except Exception as exc:
-                error = str(exc)
-            self._waveform_store = store
-            self._waveform_error = error
-            self._waveform_checked = True
-        return self._waveform_store
-
-    @property
-    def waveform_error(self) -> str | None:
-        self.waveform_store()
-        return self._waveform_error
-
-    def waveform_payload(
-        self,
-        unit_id: int,
-        channel_mode: str,
-    ) -> WaveformPayload:
-        store = self.waveform_store()
-        if store is None:
-            if self._waveform_error:
-                raise ValueError(
-                    f"Waveform artifact could not be loaded: {self._waveform_error}"
-                )
-            raise ValueError(
-                "No companion data/waveform/Probe*/manifest.json was found "
-                "for this RF dataset."
-            )
-        try:
-            return store.payload_for(
-                int(unit_id),
-                mode=channel_mode,
-                local_channel_count=5,
-                baseline_end_ms=-0.25,
-            )
-        except KeyError as exc:
-            raise ValueError(
-                f"Waveform is unavailable for RF unit {int(unit_id)}."
-            ) from exc
-
-    def waveform_plot_payload(
-        self,
-        unit_id: int,
-        channel_mode: str,
-    ) -> dict[str, object]:
-        """Return one shared immutable-data contract for Tk and Pillow."""
-
-        payload = self.waveform_payload(unit_id, channel_mode)
-        summary = payload.summary
-        return {
-            "matrix": payload.matrix,
-            "times_ms": payload.times_ms,
-            "time_edges_ms": payload.time_edges_ms,
-            "channel_labels": tuple(
-                f"ch {channel.channel_id} · x {channel.x_um:g} y {channel.y_um:g} · s{channel.shank_id}"
-                for channel in payload.channels
-            ),
-            "best_channel_row": payload.best_channel_row,
-            "best_channel_index": payload.best_channel_index,
-            "amplitude_limit_uv": payload.amplitude_limit_uv,
-            "unit_id": int(summary.unit_id),
-            "max_ptp_uv": float(summary.max_ptp_uv),
-            "channel_mode": payload.mode,
-        }
-
-    def capture_waveform_inputs(
-        self,
-        unit_ids: Iterable[int],
-    ) -> tuple[FrozenFileIdentity, ...]:
-        """Freeze metadata and selected templates for export provenance."""
-
-        store = self.waveform_store()
-        if store is None:
-            self._waveform_file_identities = ()
-            return ()
-        paths: dict[Path, None] = {}
-        for unit_id in unit_ids:
-            try:
-                source_paths = store.source_paths_for_unit(int(unit_id))
-            except KeyError:
-                continue
-            for path in source_paths:
-                paths[Path(path).expanduser().resolve()] = None
-        identities = tuple(FrozenFileIdentity.capture(path) for path in paths)
-        self._waveform_file_identities = identities
-        return identities
-
-    def display_y_indices(self, flip_y: bool = True) -> list[int]:
-        if flip_y:
-            return list(range(self.n_y - 1, -1, -1))
-        return list(range(self.n_y))
-
-    def cluster_id(self, unit_idx: int) -> int:
-        return self.rf_map(unit_idx).unit_id
-
-    def bin_label(self, bin_idx: int) -> str:
-        start = self.time_bin_edges[bin_idx] * 1000.0
-        end = self.time_bin_edges[bin_idx + 1] * 1000.0
-        return f"{bin_idx}: {start:.0f}-{end:.0f} ms"
-
-    def bin_center_ms(self, bin_idx: int) -> float:
-        return (self.time_bin_edges[bin_idx] + self.time_bin_edges[bin_idx + 1]) * 500.0
-
-    def infer_total_deg(self) -> float:
-        if self.n_x <= 1:
-            return 360.0
-        diffs = [self.x_positions[i + 1] - self.x_positions[i] for i in range(self.n_x - 1)]
-        step = sum(diffs) / len(diffs)
-        if all(abs(d - step) < 1e-6 for d in diffs) and abs(step) > 1e-9:
-            return abs(step) * self.n_x
-        return abs(self.x_positions[-1] - self.x_positions[0])
-
-    def metrics(self, unit_idx: int) -> UnitMetrics:
-        cached = self._metrics_cache.get(unit_idx)
-        if cached is not None:
-            return cached
-
-        unit = self.counts[unit_idx]
-        total: list[list[float]] = []
-        peak: list[list[float]] = []
-        peak_bin: list[list[int | None]] = []
-        delay_ms: list[list[float | None]] = []
-        entropy: list[list[float]] = []
-        bin_totals = [0.0 for _ in range(self.n_bins)]
-
-        max_total = 0.0
-        max_peak = 0.0
-        max_bin_count = 0.0
-        total_spikes = 0.0
-        best_y = 0
-        best_x = 0
-        best_rate = -1.0
-
-        for y_idx in range(self.n_y):
-            total_row: list[float] = []
-            peak_row: list[float] = []
-            peak_bin_row: list[int | None] = []
-            delay_row: list[float | None] = []
-            entropy_row: list[float] = []
-            for x_idx in range(self.n_x):
-                hist = [float(v) for v in unit[y_idx][x_idx]]
-                cell_total = sum(hist)
-                cell_peak = max(hist) if hist else 0.0
-                if cell_total > 0:
-                    best_bin = max(range(self.n_bins), key=lambda i: hist[i])
-                    delay = self.bin_center_ms(best_bin)
-                    ent = 0.0
-                    for count in hist:
-                        if count > 0:
-                            p = count / cell_total
-                            ent -= p * math.log(p)
-                    ent = ent / math.log(self.n_bins) if self.n_bins > 1 else 0.0
-                else:
-                    best_bin = None
-                    delay = None
-                    ent = 0.0
-
-                for bin_idx, count in enumerate(hist):
-                    bin_totals[bin_idx] += count
-                    if count > max_bin_count:
-                        max_bin_count = count
-
-                if cell_total > max_total:
-                    max_total = cell_total
-                occupancy = self.occupancy_time_s[y_idx][x_idx]
-                cell_rate = cell_total / occupancy if occupancy > 0.0 else -1.0
-                if cell_rate > best_rate:
-                    best_rate = cell_rate
-                    best_y = y_idx
-                    best_x = x_idx
-                if cell_peak > max_peak:
-                    max_peak = cell_peak
-
-                total_spikes += cell_total
-                total_row.append(cell_total)
-                peak_row.append(cell_peak)
-                peak_bin_row.append(best_bin)
-                delay_row.append(delay)
-                entropy_row.append(ent)
-
-            total.append(total_row)
-            peak.append(peak_row)
-            peak_bin.append(peak_bin_row)
-            delay_ms.append(delay_row)
-            entropy.append(entropy_row)
-
-        metrics = UnitMetrics(
-            total=total,
-            peak=peak,
-            peak_bin=peak_bin,
-            delay_ms=delay_ms,
-            entropy=entropy,
-            bin_totals=bin_totals,
-            max_total=max_total,
-            max_peak=max_peak,
-            max_bin_count=max_bin_count,
-            total_spikes=total_spikes,
-            best_y=best_y,
-            best_x=best_x,
-        )
-        self._metrics_cache[unit_idx] = metrics
-        self._best_cell_cache[unit_idx] = (best_y, best_x)
-        return metrics
-
-    def best_cell(self, unit_idx: int) -> tuple[int, int]:
-        """Return the strongest occupancy-normalized cell without full metrics.
-
-        RF navigation only needs a sensible default cell.  Keeping this path
-        separate avoids calculating every cell's peak, delay, and entropy the
-        first time each unit is visited, while avoiding a bias toward cells
-        with longer stimulus occupancy.
-        """
-
-        cached = self._best_cell_cache.get(unit_idx)
-        if cached is not None:
-            return cached
-        unit = self.counts[unit_idx]
-        best_y = 0
-        best_x = 0
-        best_rate = -1.0
-        for y_idx, row in enumerate(unit):
-            for x_idx, histogram in enumerate(row):
-                total = sum(float(value) for value in histogram)
-                occupancy = self.occupancy_time_s[y_idx][x_idx]
-                rate = total / occupancy if occupancy > 0.0 else -1.0
-                if rate > best_rate:
-                    best_rate = rate
-                    best_y = y_idx
-                    best_x = x_idx
-        result = (best_y, best_x)
-        self._best_cell_cache[unit_idx] = result
-        return result
-
-    def aggregate_matrix(
-        self,
-        unit_idx: int,
-        mode: str,
-        bin_idx: int,
-        range_start: int,
-        range_end: int,
-    ) -> list[list[float]]:
-        if mode == "Total":
-            metrics = self.metrics(unit_idx)
-            return clone_matrix(metrics.total)
-        if mode == "Peak":
-            metrics = self.metrics(unit_idx)
-            return clone_matrix(metrics.peak)
-
-        unit = self.counts[unit_idx]
-        if mode == "Bin":
-            return [
-                [float(unit[y_idx][x_idx][bin_idx]) for x_idx in range(self.n_x)]
-                for y_idx in range(self.n_y)
-            ]
-        if mode == "Range sum":
-            start = max(0, min(range_start, range_end))
-            end = min(self.n_bins - 1, max(range_start, range_end))
-            summed = self.rf_map(unit_idx).sum(
-                self.time_bin_edges[start],
-                self.time_bin_edges[end + 1],
-            )
-            return summed.spike_counts[..., 0].astype(float).tolist()
-        raise ValueError(f"Unknown RF mode: {mode}")
-
-    def supports_value_mode(self, value_mode: str) -> bool:
-        return value_mode in VALUE_MODES
-
-    def time_span_seconds(self, start: int, end: int) -> float:
-        requested_start, requested_end = min(start, end), max(start, end)
-        start = max(0, min(self.n_bins - 1, requested_start))
-        end = max(0, min(self.n_bins - 1, requested_end))
-        return self.time_bin_edges[end + 1] - self.time_bin_edges[start]
-
-    def _normalized_time_groups(
-        self,
-        time_groups: Sequence[AxisGroup],
-    ) -> tuple[AxisGroup, ...]:
-        return tuple(
-            (
-                max(0, min(self.n_bins - 1, min(start, end))),
-                max(0, min(self.n_bins - 1, max(start, end))),
-            )
-            for start, end in time_groups
-        )
-
-    def _unit_count_prefix(self, unit_idx: int) -> np.ndarray:
-        """Return a small per-unit ``uint64`` time prefix with LRU retention."""
-
-        unit_idx = int(self.rf_map(unit_idx).unit_index)
-        with self._count_cache_lock:
-            cached = self._count_prefix_cache.pop(unit_idx, None)
-            if cached is not None:
-                self._count_prefix_cache[unit_idx] = cached
-                return cached
-
-        source = np.asarray(self.counts[unit_idx])
-        prefix = np.zeros(
-            (self.n_y, self.n_x, self.n_bins + 1),
-            dtype=np.uint64,
-        )
-        np.cumsum(source, axis=-1, dtype=np.uint64, out=prefix[..., 1:])
-        prefix.setflags(write=False)
-        with self._count_cache_lock:
-            existing = self._count_prefix_cache.pop(unit_idx, None)
-            if existing is not None:
-                prefix = existing
-            self._count_prefix_cache[unit_idx] = prefix
-            while len(self._count_prefix_cache) > RF_COUNT_CACHE_UNIT_LIMIT:
-                oldest = next(iter(self._count_prefix_cache))
-                self._count_prefix_cache.pop(oldest)
-        return prefix
-
-    def _spatial_group_exposure_arrays(
-        self,
-        y_groups: Sequence[AxisGroup],
-        x_groups: Sequence[AxisGroup],
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """Return pooled occupancy and valid-pixel counts for one layout.
-
-        There are few spatial groups compared with timeline frames, so this
-        one-time calculation retains the original row-major Python summation
-        order. That keeps exported firing-rate values reproducible down to the
-        last floating-point bit while the large count workload stays batched.
-        """
-
-        normalized_y = tuple(
-            (
-                max(0, min(self.n_y - 1, min(group))),
-                max(0, min(self.n_y - 1, max(group))),
-            )
-            for group in y_groups
-        )
-        normalized_x = tuple(
-            (
-                max(0, min(self.n_x - 1, min(group))),
-                max(0, min(self.n_x - 1, max(group))),
-            )
-            for group in x_groups
-        )
-        key = (normalized_y, normalized_x)
-        with self._count_cache_lock:
-            cached = self._spatial_exposure_cache.pop(key, None)
-            if cached is not None:
-                self._spatial_exposure_cache[key] = cached
-                return cached
-
-        occupancy = np.zeros(
-            (len(normalized_y), len(normalized_x)),
-            dtype=np.float64,
-        )
-        source_pixel_counts = np.zeros_like(occupancy)
-        for y_group_index, (y_start, y_end) in enumerate(normalized_y):
-            for x_group_index, (x_start, x_end) in enumerate(normalized_x):
-                positive = [
-                    float(self.occupancy_time_s[y_index][x_index])
-                    for y_index in range(y_start, y_end + 1)
-                    for x_index in range(x_start, x_end + 1)
-                    if self.occupancy_time_s[y_index][x_index] > 0.0
-                ]
-                occupancy[y_group_index, x_group_index] = sum(positive)
-                source_pixel_counts[y_group_index, x_group_index] = len(positive)
-        occupancy.setflags(write=False)
-        source_pixel_counts.setflags(write=False)
-        result = (occupancy, source_pixel_counts)
-        with self._count_cache_lock:
-            existing = self._spatial_exposure_cache.pop(key, None)
-            if existing is not None:
-                result = existing
-            self._spatial_exposure_cache[key] = result
-            while len(self._spatial_exposure_cache) > 8:
-                oldest = next(iter(self._spatial_exposure_cache))
-                self._spatial_exposure_cache.pop(oldest)
-        return result
-
-    def count_windows_array(
-        self,
-        unit_idx: int,
-        time_groups: Sequence[AxisGroup],
-    ) -> np.ndarray:
-        """Return inclusive time-window counts as ``(window, y, x)``."""
-
-        unit_idx = int(self.rf_map(unit_idx).unit_index)
-        groups = self._normalized_time_groups(time_groups)
-        if not groups:
-            empty = np.empty((0, self.n_y, self.n_x), dtype=np.uint64)
-            empty.setflags(write=False)
-            return empty
-        key = (unit_idx, groups)
-        with self._count_cache_lock:
-            cached = self._count_window_cache.pop(key, None)
-            if cached is not None:
-                self._count_window_cache[key] = cached
-                return cached
-
-        if len(groups) == 1:
-            start, end = groups[0]
-            windows = np.sum(
-                self.counts[unit_idx][..., start : end + 1],
-                axis=-1,
-                dtype=np.uint64,
-            )[None, ...]
-        else:
-            prefix = self._unit_count_prefix(unit_idx)
-            starts = np.fromiter(
-                (start for start, _end in groups),
-                dtype=np.intp,
-                count=len(groups),
-            )
-            stops = np.fromiter(
-                (end + 1 for _start, end in groups),
-                dtype=np.intp,
-                count=len(groups),
-            )
-            windows = np.moveaxis(
-                prefix[..., stops] - prefix[..., starts],
-                -1,
-                0,
-            )
-        windows.setflags(write=False)
-        with self._count_cache_lock:
-            existing = self._count_window_cache.pop(key, None)
-            if existing is not None:
-                windows = existing
-            self._count_window_cache[key] = windows
-            while len(self._count_window_cache) > RF_COUNT_CACHE_UNIT_LIMIT:
-                oldest = next(iter(self._count_window_cache))
-                self._count_window_cache.pop(oldest)
-        return windows
-
-    def spatial_group_response_frames(
-        self,
-        unit_idx: int,
-        time_groups: Sequence[AxisGroup],
-        value_mode: str,
-        y_groups: Sequence[AxisGroup],
-        x_groups: Sequence[AxisGroup],
-        *,
-        smooth_radius: int = 0,
-    ) -> np.ndarray:
-        """Pool and normalize all requested timeline frames in one array pass."""
-
-        if value_mode not in VALUE_MODES:
-            raise ValueError(f"Unknown value mode: {value_mode}")
-        window_counts = self.count_windows_array(unit_idx, time_groups)
-        grouped_counts = _rectangular_group_sums(
-            window_counts,
-            y_groups,
-            x_groups,
-        )
-        grouped_occupancy, source_pixel_counts = (
-            self._spatial_group_exposure_arrays(y_groups, x_groups)
-        )
-        valid = source_pixel_counts > 0.0
-
-        if value_mode == VALUE_MODE_COUNT:
-            response = np.divide(
-                grouped_counts,
-                source_pixel_counts,
-                out=np.full_like(grouped_counts, np.nan),
-                where=valid,
-            )
-            return _smooth_matrix_array(response, smooth_radius)
-
-        counts_for_smoothing = np.where(valid, grouped_counts, np.nan)
-        occupancy_for_smoothing = np.where(valid, grouped_occupancy, np.nan)
-        counts_for_smoothing = _smooth_matrix_array(
-            counts_for_smoothing,
-            smooth_radius,
-        )
-        occupancy_for_smoothing = _smooth_matrix_array(
-            occupancy_for_smoothing,
-            smooth_radius,
-        )
-        return np.divide(
-            counts_for_smoothing,
-            occupancy_for_smoothing,
-            out=np.full_like(counts_for_smoothing, np.nan),
-            where=valid & (occupancy_for_smoothing > 0.0),
-        )
-
-    def spatial_group_histograms_array(
-        self,
-        unit_idx: int,
-        y_groups: Sequence[AxisGroup],
-        x_groups: Sequence[AxisGroup],
-        *,
-        smooth_radius: int = 0,
-    ) -> np.ndarray:
-        """Return mean count histograms as ``(y_group, x_group, time)``."""
-
-        counts_by_time = np.moveaxis(
-            np.asarray(self.counts[int(self.rf_map(unit_idx).unit_index)]),
-            -1,
-            0,
-        )
-        grouped = np.moveaxis(
-            _rectangular_group_sums(counts_by_time, y_groups, x_groups),
-            0,
-            -1,
-        )
-        _grouped_occupancy, source_pixel_counts = (
-            self._spatial_group_exposure_arrays(y_groups, x_groups)
-        )
-        grouped = np.divide(
-            grouped,
-            np.maximum(source_pixel_counts, 1.0)[..., None],
-        )
-        if smooth_radius > 0:
-            grouped = np.moveaxis(
-                _smooth_matrix_array(
-                    np.moveaxis(grouped, -1, 0),
-                    smooth_radius,
-                ),
-                0,
-                -1,
-            )
-        return grouped
-
-    def spatial_group_temporal_arrays(
-        self,
-        unit_idx: int,
-        y_groups: Sequence[AxisGroup],
-        x_groups: Sequence[AxisGroup],
-        time_groups: Sequence[AxisGroup],
-        *,
-        smooth_radius: int = 0,
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """Derive delay and entropy for every grouped spatial cell in bulk."""
-
-        histograms = self.spatial_group_histograms_array(
-            unit_idx,
-            y_groups,
-            x_groups,
-            smooth_radius=smooth_radius,
-        )
-        totals = histograms.sum(axis=-1, dtype=np.float64)
-        groups = self._normalized_time_groups(time_groups)
-        delay = np.full(totals.shape, np.nan, dtype=np.float64)
-        if groups:
-            prefix = np.pad(
-                histograms.cumsum(axis=-1, dtype=np.float64),
-                [(0, 0)] * (histograms.ndim - 1) + [(1, 0)],
-                mode="constant",
-            )
-            starts = np.fromiter(
-                (start for start, _end in groups),
-                dtype=np.intp,
-                count=len(groups),
-            )
-            stops = np.fromiter(
-                (end + 1 for _start, end in groups),
-                dtype=np.intp,
-                count=len(groups),
-            )
-            grouped_counts = prefix[..., stops] - prefix[..., starts]
-            durations = np.asarray(
-                [
-                    self.time_bin_edges[end + 1]
-                    - self.time_bin_edges[start]
-                    for start, end in groups
-                ],
-                dtype=np.float64,
-            )
-            peaks = np.argmax(grouped_counts / durations, axis=-1)
-            centers_ms = np.asarray(
-                [
-                    (
-                        self.time_bin_edges[start]
-                        + self.time_bin_edges[end + 1]
-                    )
-                    * 500.0
-                    for start, end in groups
-                ],
-                dtype=np.float64,
-            )
-            delay = np.where(totals > 0.0, centers_ms[peaks], np.nan)
-
-        entropy = np.full(totals.shape, np.nan, dtype=np.float64)
-        entropy_scale = math.log(self.n_bins) if self.n_bins > 1 else 1.0
-        # Entropy is a small final reduction (one pass over each displayed
-        # histogram). Keep its historical Python addition order so existing
-        # exports remain byte-for-byte reproducible after the large pooling and
-        # smoothing stages move to NumPy.
-        for spatial_index in np.ndindex(totals.shape):
-            histogram = histograms[spatial_index].tolist()
-            total = sum(histogram)
-            if total <= 0.0:
-                continue
-            value = -sum(
-                (count / total) * math.log(count / total)
-                for count in histogram
-                if count > 0.0
-            )
-            entropy[spatial_index] = value / entropy_scale
-        return delay, entropy
-
-    def all_positions_timeline_values(
-        self,
-        unit_idx: int,
-        time_groups: Sequence[AxisGroup],
-        value_mode: str,
-    ) -> list[float]:
-        if value_mode not in VALUE_MODES:
-            raise ValueError(f"Unknown value mode: {value_mode}")
-        totals = self.count_windows_array(unit_idx, time_groups).sum(
-            axis=(1, 2),
-            dtype=np.uint64,
-        ).astype(np.float64)
-        if value_mode == VALUE_MODE_RATE:
-            occupancy_total = sum(
-                float(duration)
-                for row in self.occupancy_time_s
-                for duration in row
-                if duration > 0.0
-            )
-            if occupancy_total <= 0.0:
-                return [0.0 for _group in time_groups]
-            totals /= occupancy_total
-        return totals.tolist()
-
-    def spatial_group_response_values(
-        self,
-        unit_idx: int,
-        y_group: AxisGroup,
-        x_group: AxisGroup,
-        time_groups: Sequence[AxisGroup],
-        value_mode: str,
-    ) -> list[float | None]:
-        if value_mode not in VALUE_MODES:
-            raise ValueError(f"Unknown value mode: {value_mode}")
-        groups = self._normalized_time_groups(time_groups)
-        if not groups:
-            return []
-        occupancy, pixels = self._spatial_group_exposure_arrays([y_group], [x_group])
-        denominator = float(
-            pixels[0, 0] if value_mode == VALUE_MODE_COUNT else occupancy[0, 0]
-        )
-        if denominator <= 0:
-            return [None] * len(groups)
-        # Inspector and hover queries need only the selected source rectangle.
-        # Building an integral image for every spatial cell here scales poorly
-        # even when the unit's full-frame count cache is already warm.
-        source = self._spatial_group_slice(unit_idx, y_group, x_group)
-        starts = np.asarray([start for start, _end in groups], dtype=np.intp)
-        stops = np.asarray([end + 1 for _start, end in groups], dtype=np.intp)
-        if np.all(stops == starts + 1):
-            windows = source[..., starts]
-        else:
-            prefix = np.empty(source.shape[:-1] + (self.n_bins + 1,), dtype=np.uint64)
-            prefix[..., 0] = 0
-            np.cumsum(source, axis=-1, dtype=np.uint64, out=prefix[..., 1:])
-            windows = prefix[..., stops] - prefix[..., starts]
-        values = windows.sum(axis=(0, 1), dtype=np.float64) / denominator
-        return values.tolist()
-
-    def _spatial_group_slice(
-        self, unit_idx: int, y_group: AxisGroup, x_group: AxisGroup
-    ) -> np.ndarray:
-        y_start = max(0, min(self.n_y - 1, min(y_group)))
-        y_end = max(0, min(self.n_y - 1, max(y_group)))
-        x_start = max(0, min(self.n_x - 1, min(x_group)))
-        x_end = max(0, min(self.n_x - 1, max(x_group)))
-        return self.rf_map(unit_idx).spike_counts[
-            y_start : y_end + 1, x_start : x_end + 1
-        ]
-
-    def response_value(
-        self,
-        unit_idx: int,
-        y_idx: int,
-        x_idx: int,
-        start: int,
-        end: int,
-        value_mode: str,
-    ) -> float | None:
-        requested_start, requested_end = min(start, end), max(start, end)
-        start = max(0, min(self.n_bins - 1, requested_start))
-        end = max(0, min(self.n_bins - 1, requested_end))
-        count = float(
-            self.rf_map(unit_idx).spike_counts[
-                y_idx, x_idx, start : end + 1
-            ].sum(dtype=np.uint64)
-        )
-        occupancy_time_s = self.occupancy_time_s[y_idx][x_idx]
-        if occupancy_time_s <= 0:
-            return None
-        if value_mode == VALUE_MODE_COUNT:
-            return count
-        if value_mode not in VALUE_MODES:
-            raise ValueError(f"Unknown value mode: {value_mode}")
-        if value_mode == VALUE_MODE_RATE:
-            return count / occupancy_time_s
-        raise ValueError(f"Unknown value mode: {value_mode}")
-
-    def response_matrix(
-        self,
-        unit_idx: int,
-        start: int,
-        end: int,
-        value_mode: str,
-    ) -> list[list[float | None]]:
-        requested_start, requested_end = min(start, end), max(start, end)
-        start = max(0, min(self.n_bins - 1, requested_start))
-        end = max(0, min(self.n_bins - 1, requested_end))
-        if value_mode not in VALUE_MODES:
-            raise ValueError(f"Unknown value mode: {value_mode}")
-        counts = self.count_windows_array(unit_idx, [(start, end)])[0].astype(
-            np.float64,
-            copy=False,
-        )
-        valid = self._occupancy_array > 0.0
-        if value_mode == VALUE_MODE_COUNT:
-            values = np.where(valid, counts, np.nan)
-        else:
-            values = np.divide(
-                counts,
-                self._occupancy_array,
-                out=np.full_like(counts, np.nan),
-                where=valid,
-            )
-        return _nullable_array_list(values)
-
-    def spatial_group_observations(
-        self,
-        unit_idx: int,
-        y_group: AxisGroup,
-        x_group: AxisGroup,
-        start: int,
-        end: int,
-    ) -> SpatialGroupObservations:
-        """Pool raw observations for one displayed spatial cell.
-
-        ``occupancyTimeSec`` is exposure metadata for each source position. A
-        displayed cell that combines positions therefore has one pooled
-        numerator and one pooled exposure; averaging already-normalized source
-        rates would give briefly occupied positions too much weight.
-        """
-
-        start, end = self._normalized_time_groups([(start, end)])[0]
-        source = self._spatial_group_slice(unit_idx, y_group, x_group)
-        grouped_count = source[..., start : end + 1].sum(
-            axis=-1, dtype=np.uint64
-        ).sum(dtype=np.float64)
-        grouped_occupancy, source_pixel_counts = (
-            self._spatial_group_exposure_arrays([y_group], [x_group])
-        )
-        return SpatialGroupObservations(
-            count=float(grouped_count),
-            occupancy_time_s=float(grouped_occupancy[0, 0]),
-            source_pixel_count=int(source_pixel_counts[0, 0]),
-        )
-
-    def spatial_group_response_value(
-        self,
-        unit_idx: int,
-        y_group: AxisGroup,
-        x_group: AxisGroup,
-        start: int,
-        end: int,
-        value_mode: str,
-    ) -> float | None:
-        observations = self.spatial_group_observations(
-            unit_idx,
-            y_group,
-            x_group,
-            start,
-            end,
-        )
-        if value_mode == VALUE_MODE_COUNT:
-            if observations.source_pixel_count <= 0:
-                return None
-            return observations.count / observations.source_pixel_count
-        if value_mode not in VALUE_MODES:
-            raise ValueError(f"Unknown value mode: {value_mode}")
-        if observations.occupancy_time_s <= 0:
-            return None
-        return observations.count / observations.occupancy_time_s
-
-    def spatial_group_response_matrix(
-        self,
-        unit_idx: int,
-        start: int,
-        end: int,
-        value_mode: str,
-        y_groups: list[AxisGroup],
-        x_groups: list[AxisGroup],
-    ) -> list[list[float | None]]:
-        values = self.spatial_group_response_frames(
-            unit_idx,
-            [(start, end)],
-            value_mode,
-            y_groups,
-            x_groups,
-        )[0]
-        return _nullable_array_list(values)
-
-    def spatial_group_count_histogram(
-        self,
-        unit_idx: int,
-        y_group: AxisGroup,
-        x_group: AxisGroup,
-    ) -> list[float]:
-        y_start = max(0, min(self.n_y - 1, min(y_group)))
-        y_end = max(0, min(self.n_y - 1, max(y_group)))
-        x_start = max(0, min(self.n_x - 1, min(x_group)))
-        x_end = max(0, min(self.n_x - 1, max(x_group)))
-        histogram = np.sum(
-            self.counts[unit_idx][y_start : y_end + 1, x_start : x_end + 1],
-            axis=(0, 1),
-            dtype=np.uint64,
-        )
-        return histogram.astype(np.float64).tolist()
-
-    def spatial_group_source_pixel_count(
-        self,
-        y_group: AxisGroup,
-        x_group: AxisGroup,
-    ) -> int:
-        """Return source bins with positive stimulus occupancy."""
-
-        y_start = max(0, min(self.n_y - 1, min(y_group)))
-        y_end = max(0, min(self.n_y - 1, max(y_group)))
-        x_start = max(0, min(self.n_x - 1, min(x_group)))
-        x_end = max(0, min(self.n_x - 1, max(x_group)))
-        return int(
-            np.count_nonzero(
-                self._occupancy_array[
-                    y_start : y_end + 1,
-                    x_start : x_end + 1,
-                ]
-                > 0.0
-            )
-        )
-
-    def spatial_group_temporal_metrics(
-        self,
-        unit_idx: int,
-        y_group: AxisGroup,
-        x_group: AxisGroup,
-        time_groups: list[AxisGroup],
-    ) -> SpatialGroupTemporalMetrics:
-        """Derive delay and entropy after pooling the full count histogram."""
-
-        hist = self.spatial_group_count_histogram(unit_idx, y_group, x_group)
-        source_pixel_count = self.spatial_group_source_pixel_count(y_group, x_group)
-        return self.temporal_metrics_from_histogram(
-            hist,
-            time_groups,
-            source_pixel_count=source_pixel_count,
-        )
-
-    def temporal_metrics_from_histogram(
-        self,
-        hist: Sequence[float],
-        time_groups: list[AxisGroup],
-        *,
-        source_pixel_count: int = 1,
-    ) -> SpatialGroupTemporalMetrics:
-        if len(hist) != self.n_bins:
-            raise ValueError(
-                f"Expected {self.n_bins} temporal count bins; got {len(hist)}."
-            )
-        hist = [float(value) for value in hist]
-        total = sum(hist)
-        grouped: list[tuple[int, int, float, float]] = []
-        for raw_start, raw_end in time_groups:
-            start = max(0, min(self.n_bins - 1, min(raw_start, raw_end)))
-            end = max(0, min(self.n_bins - 1, max(raw_start, raw_end)))
-            count = sum(hist[start : end + 1])
-            duration_s = self.time_bin_edges[end + 1] - self.time_bin_edges[start]
-            grouped.append((start, end, count, count / duration_s))
-        if total > 0 and grouped:
-            peak_group_index = max(
-                range(len(grouped)),
-                key=lambda index: grouped[index][3],
-            )
-            group_start, group_end, _count, _rate = grouped[peak_group_index]
-            delay_ms = (
-                self.time_bin_edges[group_start]
-                + self.time_bin_edges[group_end + 1]
-            ) * 500.0
-            entropy = -sum(
-                (count / total) * math.log(count / total)
-                for count in hist
-                if count > 0
-            )
-            if self.n_bins > 1:
-                entropy /= math.log(self.n_bins)
-        else:
-            peak_group_index = None
-            delay_ms = None
-            entropy = 0.0
-        return SpatialGroupTemporalMetrics(
-            mean_total_count=total / max(1, int(source_pixel_count)),
-            peak_group_index=peak_group_index,
-            delay_ms=delay_ms,
-            entropy=entropy,
-        )
-
-
-def clone_matrix(matrix: list[list[float]]) -> list[list[float]]:
-    return [row[:] for row in matrix]
-
-
-def display_matrix(
-    matrix: list[list[float | None]],
-    data: RFMappingData,
-    flip_y: bool,
-) -> list[list[float | None]]:
-    return [matrix[y_idx][:] for y_idx in data.display_y_indices(flip_y)]
-
-
-def axis_groups_for_target(source_count: int, target_count: int) -> list[AxisGroup]:
-    target = max(1, min(source_count, int(target_count)))
-    groups: list[AxisGroup] = []
-    for group_idx in range(target):
-        start = group_idx * source_count // target
-        end = ((group_idx + 1) * source_count // target) - 1
-        groups.append((start, max(start, end)))
-    return groups
-
-
-def physical_time_groups(
-    edges_ms: Sequence[float],
-    target_duration_ms: float,
-) -> list[AxisGroup]:
-    """Group native bins by measured timestamps around a target duration.
-
-    Starting at each native edge, the next boundary is the available edge
-    nearest ``target_duration_ms`` later. Exact ties choose the earlier edge so
-    the requested target is not silently exceeded. The final residual interval
-    is retained. Uniform edges with an integer-bin target therefore reproduce
-    fixed-count grouping exactly.
-    """
-
-    edges = tuple(float(edge) for edge in edges_ms)
-    if len(edges) < 2:
-        return []
-    source_bin_count = len(edges) - 1
-    target = float(target_duration_ms)
-    if not math.isfinite(target) or target <= 0.0:
-        target = max(edges[1] - edges[0], math.ulp(0.0))
-
-    groups: list[AxisGroup] = []
-    start = 0
-    while start < source_bin_count:
-        target_edge = edges[start] + target
-        upper = bisect_left(
-            edges,
-            target_edge,
-            lo=start + 1,
-            hi=source_bin_count + 1,
-        )
-        upper = min(source_bin_count, upper)
-        lower = max(start + 1, upper - 1)
-        end_exclusive = (
-            lower
-            if abs(edges[lower] - target_edge) <= abs(edges[upper] - target_edge)
-            else upper
-        )
-        groups.append((start, end_exclusive - 1))
-        start = end_exclusive
-    return groups
-
-
-def display_group_index_for_source_bin(groups: list[AxisGroup], source_bin: int) -> int:
-    """Return the display group containing a source bin, clamped at the ends."""
-    if not groups:
-        return 0
-    for index, (start, end) in enumerate(groups):
-        if start <= source_bin <= end:
-            return index
-    return 0 if source_bin < groups[0][0] else len(groups) - 1
-
-
-def x_groups_for_count(n_x: int, group_size: int) -> list[AxisGroup]:
-    group_size = max(1, min(n_x, int(group_size)))
-    return [(start, min(start + group_size - 1, n_x - 1)) for start in range(0, n_x, group_size)]
-
-
-def reduce_x_matrix(
-    matrix: list[list[float | None]],
-    x_groups: list[AxisGroup],
-) -> list[list[float | None]]:
-    reduced: list[list[float | None]] = []
-    for row in matrix:
-        out_row: list[float | None] = []
-        for start, end in x_groups:
-            values = [
-                float(row[x_idx])
-                for x_idx in range(start, end + 1)
-                if row[x_idx] is not None and math.isfinite(float(row[x_idx]))
-            ]
-            out_row.append(sum(values) / len(values) if values else None)
-        reduced.append(out_row)
-    return reduced
-
-
-def reduce_matrix_xy(
-    matrix: list[list[float | None]],
-    y_groups: list[AxisGroup],
-    x_groups: list[AxisGroup],
-) -> list[list[float | None]]:
-    reduced: list[list[float | None]] = []
-    for y_start, y_end in y_groups:
-        out_row: list[float | None] = []
-        for x_start, x_end in x_groups:
-            values: list[float] = []
-            for y_idx in range(y_start, y_end + 1):
-                row = matrix[y_idx]
-                for x_idx in range(x_start, x_end + 1):
-                    value = row[x_idx]
-                    if value is not None and math.isfinite(float(value)):
-                        values.append(float(value))
-            out_row.append(sum(values) / len(values) if values else None)
-        reduced.append(out_row)
-    return reduced
-
-
-def smooth_matrix(
-    matrix: list[list[float | None]],
-    radius: int,
-) -> list[list[float | None]]:
-    radius = max(0, int(radius))
-    if radius <= 0:
-        return [row[:] for row in matrix]
-    rows = len(matrix)
-    cols = len(matrix[0]) if rows else 0
-    current = [row[:] for row in matrix]
-    for _ in range(radius):
-        out: list[list[float | None]] = []
-        for y in range(rows):
-            out_row: list[float | None] = []
-            for x in range(cols):
-                center = current[y][x]
-                if center is None or not math.isfinite(float(center)):
-                    out_row.append(None)
-                    continue
-                total = 0.0
-                weight_total = 0.0
-                for dy in (-1, 0, 1):
-                    yy = y + dy
-                    if yy < 0 or yy >= rows:
-                        continue
-                    for dx in (-1, 0, 1):
-                        xx = x + dx
-                        if xx < 0 or xx >= cols:
-                            continue
-                        value = current[yy][xx]
-                        if value is None or not math.isfinite(float(value)):
-                            continue
-                        weight = 4.0 if dx == 0 and dy == 0 else (2.0 if dx == 0 or dy == 0 else 1.0)
-                        total += float(value) * weight
-                        weight_total += weight
-                out_row.append(total / weight_total if weight_total else None)
-            out.append(out_row)
-        current = out
-    return current
-
-
-def _smooth_matrix_array(values: np.ndarray, radius: int) -> np.ndarray:
-    """Apply ``smooth_matrix`` semantics to one matrix or a frame stack.
-
-    Only the final two dimensions are spatial. Missing centers remain missing,
-    while finite neighbors contribute with the same 4/2/1 center/edge/corner
-    weights as the scalar implementation.
-    """
-
-    current = np.asarray(values, dtype=np.float64)
-    if current.ndim < 2:
-        raise ValueError("matrix array must have at least two dimensions")
-    current = current.copy()
-    for _iteration in range(max(0, int(radius))):
-        finite_centers = np.isfinite(current)
-        padded_values = np.pad(
-            np.where(finite_centers, current, 0.0),
-            [(0, 0)] * (current.ndim - 2) + [(1, 1), (1, 1)],
-            mode="constant",
-        )
-        padded_finite = np.pad(
-            finite_centers,
-            [(0, 0)] * (current.ndim - 2) + [(1, 1), (1, 1)],
-            mode="constant",
-            constant_values=False,
-        )
-        rows, columns = current.shape[-2:]
-        total = np.zeros_like(current, dtype=np.float64)
-        weight_total = np.zeros_like(current, dtype=np.float64)
-        for dy in range(3):
-            for dx in range(3):
-                weight = 4.0 if dx == 1 and dy == 1 else (2.0 if dx == 1 or dy == 1 else 1.0)
-                source = padded_values[..., dy : dy + rows, dx : dx + columns]
-                source_finite = padded_finite[
-                    ..., dy : dy + rows, dx : dx + columns
-                ]
-                total += source * weight
-                weight_total += source_finite * weight
-        current = np.divide(
-            total,
-            weight_total,
-            out=np.full_like(total, np.nan),
-            where=finite_centers & (weight_total > 0.0),
-        )
-    return current
-
-
-def _rectangular_group_sums(
-    values: np.ndarray,
-    y_groups: Sequence[AxisGroup],
-    x_groups: Sequence[AxisGroup],
-) -> np.ndarray:
-    """Sum Cartesian products of inclusive rectangular groups in one batch."""
-
-    source = np.asarray(values, dtype=np.float64)
-    if source.ndim < 2:
-        raise ValueError("spatial values must have at least two dimensions")
-    n_y, n_x = source.shape[-2:]
-    if not y_groups or not x_groups:
-        return np.empty(
-            source.shape[:-2] + (len(y_groups), len(x_groups)),
-            dtype=np.float64,
-        )
-
-    y_starts = np.asarray(
-        [max(0, min(n_y - 1, min(group))) for group in y_groups],
-        dtype=np.intp,
-    )
-    y_stops = np.asarray(
-        [max(0, min(n_y - 1, max(group))) + 1 for group in y_groups],
-        dtype=np.intp,
-    )
-    x_starts = np.asarray(
-        [max(0, min(n_x - 1, min(group))) for group in x_groups],
-        dtype=np.intp,
-    )
-    x_stops = np.asarray(
-        [max(0, min(n_x - 1, max(group))) + 1 for group in x_groups],
-        dtype=np.intp,
-    )
-    integral = np.pad(
-        source,
-        [(0, 0)] * (source.ndim - 2) + [(1, 0), (1, 0)],
-        mode="constant",
-    )
-    integral = integral.cumsum(axis=-2).cumsum(axis=-1)
-    return (
-        integral[..., y_stops[:, None], x_stops[None, :]]
-        - integral[..., y_starts[:, None], x_stops[None, :]]
-        - integral[..., y_stops[:, None], x_starts[None, :]]
-        + integral[..., y_starts[:, None], x_starts[None, :]]
-    )
-
-
-def _nullable_array_list(values: np.ndarray) -> list:
-    """Convert finite array values to Python floats and NaN to ``None``."""
-
-    source = np.asarray(values, dtype=np.float64)
-    result = source.astype(object)
-    result[~np.isfinite(source)] = None
-    return result.tolist()
-
-
-def finite_min_max(matrix: list[list[float | None]]) -> tuple[float, float]:
-    values = [
-        float(value)
-        for row in matrix
-        for value in row
-        if value is not None and math.isfinite(float(value))
-    ]
-    if not values:
-        return 0.0, 1.0
-    low = min(values)
-    high = max(values)
-    if abs(high - low) < 1e-12:
-        high = low + 1.0
-    return low, high
-
-
-def nonnegative_response_range(
-    matrix: Sequence[Sequence[float | None]],
-) -> tuple[float, float]:
-    """Use a truthful zero baseline for non-negative response estimands."""
-
-    peak = max(
-        (
-            max(0.0, float(value))
-            for row in matrix
-            for value in row
-            if value is not None and math.isfinite(float(value))
-        ),
-        default=0.0,
-    )
-    return 0.0, peak
-
-
-def palette_response_range(
-    matrix: list[list[float | None]],
-    palette: str,
-) -> tuple[float, float]:
-    """Return the response range used by each display palette.
-
-    Gray retains the previous Python viewer's contrast-stretched range, while
-    color palettes keep the explicit zero baseline.
-    """
-
-    if palette == "Gray":
-        return finite_min_max(matrix)
-    return nonnegative_response_range(matrix)
-
-
-def clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
-    return max(low, min(high, value))
-
-
-def hex_color(rgb: tuple[int, int, int]) -> str:
-    return "#{:02x}{:02x}{:02x}".format(*rgb)
-
-
-def shade_hex(color: str, factor: float) -> str:
-    color = color.lstrip("#")
-    r = clamp(int(color[0:2], 16) * factor, 0, 255)
-    g = clamp(int(color[2:4], 16) * factor, 0, 255)
-    b = clamp(int(color[4:6], 16) * factor, 0, 255)
-    return hex_color((int(round(r)), int(round(g)), int(round(b))))
-
-
-def lerp(a: float, b: float, t: float) -> float:
-    return a + (b - a) * t
-
-
-def lerp_color(a: tuple[int, int, int], b: tuple[int, int, int], t: float) -> tuple[int, int, int]:
-    return (
-        int(round(lerp(a[0], b[0], t))),
-        int(round(lerp(a[1], b[1], t))),
-        int(round(lerp(a[2], b[2], t))),
-    )
-
-
-def palette_color(value: float | None, low: float, high: float, palette: str) -> str:
-    if value is None or not math.isfinite(float(value)):
-        return "#e6e8eb"
-    t = clamp((float(value) - low) / (high - low if high != low else 1.0))
-    if palette == "Gray":
-        shade = int(round(18 + t * 232))
-        return hex_color((shade, shade, shade))
-    if palette == "Inferno":
-        return gradient_color(
-            t,
-            (
-                (0.0, (22, 11, 57)),
-                (0.25, (90, 18, 110)),
-                (0.50, (190, 54, 85)),
-                (0.75, (249, 140, 10)),
-                (1.0, (252, 255, 164)),
-            ),
-        )
-    return gradient_color(
-        t,
-        (
-            (0.0, (68, 1, 84)),
-            (0.25, (59, 82, 139)),
-            (0.50, (33, 145, 140)),
-            (0.75, (94, 201, 98)),
-            (1.0, (253, 231, 37)),
-        ),
-    )
-
-
-def delay_color(value: float | None, low: float = 0.0, high: float = 100.0) -> str:
-    if value is None:
-        return "#eceff2"
-    t = clamp((float(value) - low) / (high - low if high != low else 1.0))
-    return gradient_color(
-        t,
-        (
-            (0.0, (47, 88, 167)),
-            (0.35, (44, 171, 184)),
-            (0.68, (246, 204, 89)),
-            (1.0, (203, 71, 45)),
-        ),
-    )
-
-
-def waveform_color(value: float | None, amplitude_limit_uv: float) -> str:
-    """Return the notebook's red-white-blue diverging waveform color."""
-
-    if value is None or not math.isfinite(float(value)):
-        return "#e6e8eb"
-    limit = max(float(amplitude_limit_uv), 1e-12)
-    t = clamp((float(value) + limit) / (2.0 * limit))
-    return gradient_color(
-        t,
-        (
-            (0.0, (5, 48, 97)),
-            (0.25, (67, 147, 195)),
-            (0.50, (247, 247, 247)),
-            (0.75, (214, 96, 77)),
-            (1.0, (103, 0, 31)),
-        ),
-    )
-
-
-def gradient_color(t: float, stops: tuple[tuple[float, tuple[int, int, int]], ...]) -> str:
-    t = clamp(t)
-    for i in range(len(stops) - 1):
-        left_t, left_c = stops[i]
-        right_t, right_c = stops[i + 1]
-        if left_t <= t <= right_t:
-            local = (t - left_t) / (right_t - left_t if right_t != left_t else 1.0)
-            return hex_color(lerp_color(left_c, right_c, local))
-    return hex_color(stops[-1][1])
-
-
-def text_color_for(fill: str) -> str:
-    fill = fill.lstrip("#")
-    r = int(fill[0:2], 16)
-    g = int(fill[2:4], 16)
-    b = int(fill[4:6], 16)
-    luminance = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255.0
-    return "#0f172a" if luminance > 0.58 else "#f8fafc"
-
-
-def point_in_polygon(x: float, y: float, points: tuple[tuple[float, float], ...]) -> bool:
-    inside = False
-    j = len(points) - 1
-    for i in range(len(points)):
-        xi, yi = points[i]
-        xj, yj = points[j]
-        intersects = (yi > y) != (yj > y)
-        if intersects:
-            x_cross = (xj - xi) * (y - yi) / (yj - yi if yj != yi else 1e-12) + xi
-            if x < x_cross:
-                inside = not inside
-        j = i
-    return inside
-
-
-def format_pos(value: float) -> str:
-    if abs(value - round(value)) < 1e-9:
-        return str(int(round(value)))
-    return f"{value:.2f}"
-
-
-def format_ms(value: float) -> str:
-    if abs(value - round(value)) < 1e-9:
-        return str(int(round(value)))
-    return f"{value:.3f}".rstrip("0").rstrip(".")
-
-
-def value_mode_unit(value_mode: str) -> str:
-    if value_mode == VALUE_MODE_COUNT:
-        return "spikes"
-    if value_mode == VALUE_MODE_RATE:
-        return "Hz"
-    raise ValueError(f"Unknown value mode: {value_mode}")
-
-
-def value_mode_slug(value_mode: str) -> str:
-    if value_mode == VALUE_MODE_COUNT:
-        return "spike_count"
-    if value_mode == VALUE_MODE_RATE:
-        return "mean_firing_rate_hz"
-    raise ValueError(f"Unknown value mode: {value_mode}")
-
-
-def value_mode_suffix(value_mode: str) -> str:
-    if value_mode == VALUE_MODE_COUNT:
-        return " spikes"
-    if value_mode == VALUE_MODE_RATE:
-        return " Hz"
-    raise ValueError(f"Unknown value mode: {value_mode}")
-
-
-def format_response_value(value: float | None, value_mode: str) -> str:
-    if value is None:
-        return "n/a"
-    if value_mode == VALUE_MODE_COUNT:
-        return f"{value:.0f}"
-    return f"{value:.2f}".rstrip("0").rstrip(".")
-
-
-def spatial_grid_dimensions(
-    available_width: float,
-    available_height: float,
-    columns: int,
-    rows: int,
-    *,
-    minimum_cell_width: float = 0.0,
-) -> tuple[float, float, float, float]:
-    """Fit a spatial grid and keep singleton-y maps near the legacy 30:7 shape.
-
-    Multi-row RF maps retain square cells.  A singleton y axis has no physical
-    height increment to preserve, so stretching only that display row avoids
-    turning vertical-bar datasets into an unreadable strip without changing
-    their data or hit-test groups.
-    """
-
-    columns = max(1, int(columns))
-    rows = max(1, int(rows))
-    width = max(0.0, float(available_width))
-    height = max(0.0, float(available_height))
-    if rows == 1:
-        aspect = SINGLETON_Y_REFERENCE_COLUMNS / SINGLETON_Y_REFERENCE_ROWS
-        grid_width = min(width, height * aspect)
-        cell_width = max(float(minimum_cell_width), grid_width / columns)
-        grid_width = cell_width * columns
-        grid_height = grid_width / aspect
-        return cell_width, grid_height, grid_width, grid_height
-
-    cell = max(
-        float(minimum_cell_width),
-        min(width / columns, height / rows),
-    )
-    return cell, cell, cell * columns, cell * rows
-
-
-def polar_ring_span(rows: int) -> float:
-    """Return the visual radial width of one scientific y row."""
-
-    return float(SINGLETON_Y_REFERENCE_ROWS if int(rows) == 1 else 1)
-
-
-def matrix_ppm_data(
-    matrix: list[list[float | None]],
-    width: int,
-    height: int,
-    color_for_value: Callable[[float | None], str],
-) -> bytes:
-    """Rasterize a matrix into a binary PPM image using nearest-neighbor cells."""
-    width = max(1, int(width))
-    height = max(1, int(height))
-    rows = len(matrix)
-    cols = len(matrix[0]) if rows else 0
-    if rows == 0 or cols == 0:
-        return f"P6\n{width} {height}\n255\n".encode("ascii") + bytes([230, 232, 235]) * (width * height)
-
-    rgb_by_cell: list[list[tuple[int, int, int]]] = []
-    for row in matrix:
-        if len(row) != cols:
-            raise ValueError("Cannot rasterize a ragged matrix")
-        rgb_row: list[tuple[int, int, int]] = []
-        for value in row:
-            color = color_for_value(value).lstrip("#")
-            if len(color) != 6:
-                raise ValueError(f"Expected #RRGGBB color, got {color!r}")
-            rgb_row.append(tuple(int(color[index : index + 2], 16) for index in (0, 2, 4)))
-        rgb_by_cell.append(rgb_row)
-
-    pixels = bytearray(width * height * 3)
-    offset = 0
-    for pixel_y in range(height):
-        source_y = min(rows - 1, pixel_y * rows // height)
-        for pixel_x in range(width):
-            source_x = min(cols - 1, pixel_x * cols // width)
-            red, green, blue = rgb_by_cell[source_y][source_x]
-            pixels[offset : offset + 3] = bytes((red, green, blue))
-            offset += 3
-    return f"P6\n{width} {height}\n255\n".encode("ascii") + bytes(pixels)
-
-
-class SettingsValidationError(ValueError):
-    """Validation failure associated with one Settings tab."""
-
-    def __init__(self, tab_name: str, message: str):
-        super().__init__(message)
-        self.tab_name = tab_name
-
-
-def matrix_atlas_ppm_data(
-    tiles: list[
-        tuple[list[list[float | None]], float, float, float]
-        | tuple[list[list[float | None]], float, float, float, float]
-    ],
-    width: int,
-    height: int,
-    color_for_value: Callable[[float | None], str],
-) -> bytes:
-    """Rasterize many equally-scaled matrices into one white PPM atlas."""
-    width = max(1, int(width))
-    height = max(1, int(height))
-    pixels = bytearray(b"\xff" * (width * height * 3))
-    color_cache: dict[str, bytes] = {}
-    value_color_cache: dict[float | None, bytes] = {}
-
-    for tile in tiles:
-        if len(tile) == 4:
-            matrix, origin_x, origin_y, cell_width = tile
-            cell_height = cell_width
-        else:
-            matrix, origin_x, origin_y, cell_width, cell_height = tile
-        rows = len(matrix)
-        cols = len(matrix[0]) if rows else 0
-        if any(len(row) != cols for row in matrix):
-            raise ValueError("Cannot rasterize a ragged matrix")
-        cell_width = float(cell_width)
-        cell_height = float(cell_height)
-        if cell_width <= 0.0 or cell_height <= 0.0:
-            continue
-        x_ranges: list[tuple[int, int]] = []
-        for col_idx in range(cols):
-            x0 = max(0, min(width, int(round(origin_x + col_idx * cell_width))))
-            x1 = max(
-                x0,
-                min(width, int(round(origin_x + (col_idx + 1) * cell_width))),
-            )
-            x_ranges.append((x0, x1))
-        for row_idx, row in enumerate(matrix):
-            y0 = max(0, min(height, int(round(origin_y + row_idx * cell_height))))
-            y1 = max(
-                y0,
-                min(height, int(round(origin_y + (row_idx + 1) * cell_height))),
-            )
-            if y1 <= y0:
-                continue
-            scanlines: list[tuple[int, bytes]] = []
-            scanline_start: int | None = None
-            scanline_end = 0
-            scanline_parts: list[bytes] = []
-            for col_idx, value in enumerate(row):
-                x0, x1 = x_ranges[col_idx]
-                if x1 <= x0:
-                    continue
-                value_key = None if value is None else float(value)
-                rgb = value_color_cache.get(value_key)
-                if rgb is None:
-                    color = color_for_value(value).lower()
-                    rgb = color_cache.get(color)
-                    if rgb is None:
-                        raw = color.lstrip("#")
-                        if len(raw) != 6:
-                            raise ValueError(f"Expected #RRGGBB color, got {color!r}")
-                        rgb = bytes(
-                            int(raw[index : index + 2], 16)
-                            for index in (0, 2, 4)
-                        )
-                        color_cache[color] = rgb
-                    value_color_cache[value_key] = rgb
-                if scanline_start is not None and x0 != scanline_end:
-                    scanlines.append((scanline_start, b"".join(scanline_parts)))
-                    scanline_start = None
-                    scanline_parts = []
-                if scanline_start is None:
-                    scanline_start = x0
-                scanline_end = x1
-                scanline_parts.append(rgb * (x1 - x0))
-            if scanline_start is not None:
-                scanlines.append((scanline_start, b"".join(scanline_parts)))
-            for x0, scanline in scanlines:
-                for pixel_y in range(y0, y1):
-                    offset = (pixel_y * width + x0) * 3
-                    pixels[offset : offset + len(scanline)] = scanline
-
-    return f"P6\n{width} {height}\n255\n".encode("ascii") + bytes(pixels)
-
-
-@lru_cache(maxsize=256)
-def _polar_tile_pixel_runs(
-    origin_x_fraction: float,
-    origin_y_fraction: float,
-    scale: float,
-    total_deg: float,
-    rows: int,
-    cols: int,
-    ring_span: float = 1.0,
-) -> tuple[tuple[int, int, int, int, int], ...]:
-    """Map one polar tile's scanlines to ring/column runs for reuse."""
-
-    ring_span = max(float(ring_span), 1e-9)
-    radius_units = INNER_BLANK_ROWS + rows * ring_span
-    diameter = 2.0 * radius_units * scale
-    center_x = origin_x_fraction + diameter / 2.0
-    center_y = origin_y_fraction + diameter / 2.0
-    local_width = int(math.ceil(origin_x_fraction + diameter))
-    local_height = int(math.ceil(origin_y_fraction + diameter))
-    column_span = total_deg / cols
-    theta_start = 90.0 + total_deg / 2.0
-    theta_end = 90.0 - total_deg / 2.0
-    runs: list[tuple[int, int, int, int, int]] = []
-
-    for pixel_y in range(local_height):
-        dy = (center_y - (pixel_y + 0.5)) / scale
-        run_start: int | None = None
-        run_value: tuple[int, int] | None = None
-        for pixel_x in range(local_width):
-            dx = ((pixel_x + 0.5) - center_x) / scale
-            radius = math.hypot(dx, dy)
-            value: tuple[int, int] | None = None
-            if INNER_BLANK_ROWS <= radius < radius_units:
-                ring_idx = int((radius - INNER_BLANK_ROWS) / ring_span)
-                if 0 <= ring_idx < rows:
-                    theta_deg = math.degrees(math.atan2(dy, dx))
-                    if total_deg >= 359.999:
-                        relative = (theta_start - theta_deg) % 360.0
-                    else:
-                        while theta_deg > theta_start:
-                            theta_deg -= 360.0
-                        while theta_deg < theta_end:
-                            theta_deg += 360.0
-                        if theta_end <= theta_deg <= theta_start:
-                            relative = theta_start - theta_deg
-                        else:
-                            relative = None
-                    if relative is not None:
-                        column = max(
-                            0,
-                            min(cols - 1, int(relative / column_span)),
-                        )
-                        value = ring_idx, column
-
-            if value == run_value:
-                continue
-            if run_value is not None and run_start is not None:
-                runs.append(
-                    (pixel_y, run_start, pixel_x, run_value[0], run_value[1])
-                )
-            run_start = pixel_x if value is not None else None
-            run_value = value
-        if run_value is not None and run_start is not None:
-            runs.append(
-                (pixel_y, run_start, local_width, run_value[0], run_value[1])
-            )
-    return tuple(runs)
-
-
-def polar_matrix_atlas_ppm_data(
-    tiles: list[
-        tuple[
-            list[list[float | None]],
-            float,
-            float,
-            float,
-            float,
-            list[int],
-        ]
-        | tuple[
-            list[list[float | None]],
-            float,
-            float,
-            float,
-            float,
-            list[int],
-            float,
-        ]
-    ],
-    width: int,
-    height: int,
-    color_for_value: Callable[[float | None], str],
-) -> bytes:
-    """Rasterize polar matrices into one white PPM atlas.
-
-    Keeping the timeline previews in a single image avoids creating thousands
-    of individual Tk canvas polygons when the source contains many time bins.
-    """
-    width = max(1, int(width))
-    height = max(1, int(height))
-    pixels = bytearray(b"\xff" * (width * height * 3))
-    color_cache: dict[str, bytes] = {}
-    value_color_cache: dict[float | None, bytes] = {}
-
-    for tile in tiles:
-        if len(tile) == 6:
-            matrix, origin_x, origin_y, scale, total_deg, ring_rows = tile
-            ring_span = 1.0
-        else:
-            (
-                matrix,
-                origin_x,
-                origin_y,
-                scale,
-                total_deg,
-                ring_rows,
-                ring_span,
-            ) = tile
-        rows = len(matrix)
-        cols = len(matrix[0]) if rows else 0
-        if rows == 0 or cols == 0:
-            continue
-        if any(len(row) != cols for row in matrix):
-            raise ValueError("Cannot rasterize a ragged polar matrix")
-        if len(ring_rows) != rows:
-            raise ValueError("Polar ring order must match matrix rows")
-
-        rgb_by_cell: list[list[bytes]] = []
-        for row in matrix:
-            rgb_row: list[bytes] = []
-            for value in row:
-                value_key = None if value is None else float(value)
-                rgb = value_color_cache.get(value_key)
-                if rgb is None:
-                    color = color_for_value(value).lower()
-                    rgb = color_cache.get(color)
-                    if rgb is None:
-                        raw = color.lstrip("#")
-                        if len(raw) != 6:
-                            raise ValueError(f"Expected #RRGGBB color, got {color!r}")
-                        rgb = bytes(
-                            int(raw[index : index + 2], 16)
-                            for index in (0, 2, 4)
-                        )
-                        color_cache[color] = rgb
-                    value_color_cache[value_key] = rgb
-                rgb_row.append(rgb)
-            rgb_by_cell.append(rgb_row)
-
-        scale = max(float(scale), 1e-9)
-        origin_x_floor = math.floor(origin_x)
-        origin_y_floor = math.floor(origin_y)
-        runs = _polar_tile_pixel_runs(
-            float(origin_x - origin_x_floor),
-            float(origin_y - origin_y_floor),
-            scale,
-            float(total_deg),
-            rows,
-            cols,
-            float(ring_span),
-        )
-        for local_y, local_x0, local_x1, ring_idx, column in runs:
-            pixel_y = origin_y_floor + local_y
-            if not (0 <= pixel_y < height):
-                continue
-            pixel_x0 = max(0, origin_x_floor + local_x0)
-            pixel_x1 = min(width, origin_x_floor + local_x1)
-            if pixel_x1 <= pixel_x0:
-                continue
-            rgb = rgb_by_cell[ring_rows[ring_idx]][column]
-            offset = (pixel_y * width + pixel_x0) * 3
-            scanline = rgb * (pixel_x1 - pixel_x0)
-            pixels[offset : offset + len(scanline)] = scanline
-
-    return f"P6\n{width} {height}\n255\n".encode("ascii") + bytes(pixels)
-
-
-class SettingsWindow(tk.Toplevel):
-    """Single native-style settings window shared by all viewer windows."""
-
-    TAB_NAMES = ("General", "RF Map", "Waveform", "Tuning Curve")
-
-    def __init__(self, owner: RFMViewer):
-        self.owner = owner
-        self._app_root = owner._app_root
-        super().__init__(self._app_root)
-        self.title("RF Map Viewer Settings")
-        self.geometry("680x720")
-        self.minsize(620, 640)
-        self.transient(owner)
-        self.protocol("WM_DELETE_WINDOW", self._close)
-        self._create_variables(owner._app_root._rfm_settings)
-        self._build()
-        self._select_remembered_tab()
-        self._sync_dependent_controls()
-
-    def transient(self, master: tk.Misc | None = None) -> str | None:
-        """Normalize Tk's queried window object to its stable path string."""
-
-        result = super().transient(master)
-        if master is None and result:
-            return str(result)
-        return result
-
-    def _create_variables(self, settings: ViewerSettings) -> None:
-        self.show_tuning_curve_var = tk.BooleanVar(value=settings.show_tuning_curve)
-        self.auto_load_tuning_curve_var = tk.BooleanVar(value=settings.auto_load_tuning_curve)
-        self.tuning_curve_session_var = tk.StringVar(
-            value=str(settings.tuning_curve_session)
-        )
-        self.show_waveform_var = tk.BooleanVar(value=settings.show_waveform)
-        self.show_probe_layout_var = tk.BooleanVar(value=settings.show_probe_layout)
-        self.auto_load_probe_layout_var = tk.BooleanVar(value=settings.auto_load_probe_layout)
-        self.rf_sum_start_var = tk.StringVar(value=format_ms(settings.rf_sum_start_ms))
-        self.rf_sum_end_var = tk.StringVar(value=format_ms(settings.rf_sum_end_ms))
-        self.rf_filter_units_with_zero_bins_var = tk.BooleanVar(
-            value=settings.rf_filter_units_with_zero_bins
-        )
-        self.rf_zero_bin_threshold_var = tk.StringVar(
-            value=str(settings.rf_zero_bin_threshold)
-        )
-        self.rf_time_resolution_var = tk.StringVar(value=format_ms(settings.rf_time_resolution_ms))
-        self.rf_value_mode_var = tk.StringVar(value=settings.rf_value_mode)
-        self.rf_x_bins_var = tk.StringVar(
-            value="Native" if settings.rf_x_bins == 0 else str(settings.rf_x_bins)
-        )
-        self.rf_y_bins_var = tk.StringVar(
-            value="Native" if settings.rf_y_bins == 0 else str(settings.rf_y_bins)
-        )
-        self.rf_smooth_radius_var = tk.IntVar(value=settings.rf_smooth_radius)
-        self.rf_flip_y_var = tk.BooleanVar(value=settings.rf_flip_y)
-        self.rf_palette_var = tk.StringVar(value=settings.rf_palette)
-        self.rf_polar_radius_var = tk.StringVar(value=settings.rf_polar_radius)
-        self.rf_layout_var = tk.StringVar(
-            value="Polar" if settings.rf_polar_layout else "Rectangle"
-        )
-        self.rf_rgb_mode_var = tk.BooleanVar(value=settings.rf_rgb_mode)
-        viewer_tab_labels = {
-            "rf": "RF",
-            "delay": "Delay / RGB",
-            "timeline": "Timeline",
-        }
-        self.default_viewer_tab_var = tk.StringVar(
-            value=viewer_tab_labels.get(settings.default_viewer_tab, "RF")
-        )
-        self.waveform_channel_mode_var = tk.StringVar(
-            value=WAVEFORM_CHANNEL_MODE_LABELS.get(
-                settings.waveform_channel_mode,
-                WAVEFORM_CHANNEL_MODE_LABELS["same_x_column"],
-            )
-        )
-        self.tuning_plot_mode_var = tk.StringVar(value=settings.tuning_plot_mode)
-        self.tuning_layout_var = tk.StringVar(value=settings.tuning_layout)
-        self.tuning_display_bins_var = tk.StringVar(value=str(settings.tuning_display_bins))
-        self.tuning_smoothing_var = tk.BooleanVar(value=settings.tuning_smoothing)
-        self.tuning_compare_scale_var = tk.BooleanVar(value=settings.tuning_compare_scale)
-        self.tuning_smooth_sigma_var = tk.StringVar(
-            value=f"{settings.tuning_smooth_sigma * 360.0 / DEFAULT_HD_DISPLAY_BINS:g}"
-        )
-        self.error_var = tk.StringVar(value="")
-        self._tab_error_vars = {
-            name: tk.StringVar(value="") for name in self.TAB_NAMES
-        }
-
-    def _build(self) -> None:
-        self.columnconfigure(0, weight=1)
-        self.rowconfigure(0, weight=1)
-        outer = ttk.Frame(self, padding=(16, 14, 16, 12))
-        outer.grid(row=0, column=0, sticky="nsew")
-        outer.columnconfigure(0, weight=1)
-        outer.rowconfigure(0, weight=1)
-
-        self.notebook = ttk.Notebook(outer)
-        self.notebook.grid(row=0, column=0, sticky="nsew")
-        self.notebook.enable_traversal()
-        self._tab_name_by_widget: dict[str, str] = {}
-        self._tab_widget_by_name: dict[str, str] = {}
-        general = self._new_tab("General")
-        rf_map = self._new_tab("RF Map")
-        waveform = self._new_tab("Waveform")
-        tuning = self._new_tab("Tuning Curve")
-        self._build_general_tab(general)
-        self._build_rf_tab(rf_map)
-        self._build_waveform_tab(waveform)
-        self._build_tuning_tab(tuning)
-        self.notebook.bind("<<NotebookTabChanged>>", self._remember_selected_tab)
-
-        footer = ttk.Frame(outer)
-        footer.grid(row=1, column=0, sticky="ew", pady=(12, 0))
-        footer.columnconfigure(0, weight=1)
-        ttk.Label(
-            footer,
-            textvariable=self.error_var,
-            foreground="#b42318",
-            wraplength=280,
-            justify="left",
-        ).grid(row=0, column=0, sticky="w")
-        ttk.Button(footer, text="Cancel", command=self._close).grid(
-            row=0, column=1, padx=(12, 8)
-        )
-        ttk.Button(footer, text="Save", command=self._save).grid(row=0, column=2)
-
-        for variable in (
-            self.show_tuning_curve_var,
-            self.auto_load_tuning_curve_var,
-            self.show_waveform_var,
-            self.show_probe_layout_var,
-            self.rf_filter_units_with_zero_bins_var,
-            self.tuning_smoothing_var,
-        ):
-            variable.trace_add("write", lambda *_args: self._sync_dependent_controls())
-
-    def _new_tab(self, name: str) -> ttk.Frame:
-        tab = ttk.Frame(self.notebook, padding=(18, 16))
-        # Keep forms anchored to the leading edge instead of centering their
-        # controls in the available Settings width.
-        tab.columnconfigure(0, minsize=164)
-        tab.columnconfigure(1, weight=0)
-        tab.columnconfigure(2, weight=1)
-        self.notebook.add(tab, text=name)
-        self._tab_name_by_widget[str(tab)] = name
-        self._tab_widget_by_name[name] = str(tab)
-        ttk.Label(
-            tab,
-            textvariable=self._tab_error_vars[name],
-            foreground="#b42318",
-            wraplength=500,
-            justify="left",
-        ).grid(row=99, column=0, columnspan=2, sticky="w", pady=(16, 0))
-        return tab
-
-    @staticmethod
-    def _section_label(parent: ttk.Frame, text: str, row: int) -> None:
-        ttk.Label(
-            parent,
-            text=text,
-            font=("TkDefaultFont", 11, "bold"),
-        ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(8 if row else 0, 8))
-
-    def _build_general_tab(self, tab: ttk.Frame) -> None:
-        self._section_label(tab, "Views and loading", 0)
-        ttk.Checkbutton(
-            tab,
-            text="Show HD tuning curve beside the RF map",
-            variable=self.show_tuning_curve_var,
-        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 6))
-        self.auto_tuning_check = ttk.Checkbutton(
-            tab,
-            text="Automatically find and load tuning_curves.tc or .json",
-            variable=self.auto_load_tuning_curve_var,
-        )
-        self.auto_tuning_check.grid(row=2, column=0, columnspan=2, sticky="w", padx=(22, 0), pady=(0, 14))
-        ttk.Checkbutton(
-            tab,
-            text="Show probe layout in the sidebar",
-            variable=self.show_probe_layout_var,
-        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(0, 6))
-        self.auto_probe_check = ttk.Checkbutton(
-            tab,
-            text="Automatically find and load probe geometry",
-            variable=self.auto_load_probe_layout_var,
-        )
-        self.auto_probe_check.grid(row=4, column=0, columnspan=2, sticky="w", padx=(22, 0))
-        ttk.Label(
-            tab,
-            text=(
-                "Hidden views are not discovered, read, or rendered. Turning off automatic "
-                "loading does not remove a file that is already attached."
-            ),
-            foreground="#667085",
-            wraplength=500,
-            justify="left",
-        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(20, 0))
-
-    def _labeled_entry(
-        self,
-        tab: ttk.Frame,
-        row: int,
-        label: str,
-        variable: tk.Variable,
-        *,
-        width: int = 12,
-    ) -> ttk.Entry:
-        ttk.Label(tab, text=label).grid(row=row, column=0, sticky="w", pady=5)
-        entry = ttk.Entry(tab, textvariable=variable, width=width)
-        entry.grid(row=row, column=1, sticky="w", pady=5)
-        return entry
-
-    def _labeled_combo(
-        self,
-        tab: ttk.Frame,
-        row: int,
-        label: str,
-        variable: tk.StringVar,
-        values: Sequence[str],
-        *,
-        width: int = 24,
-    ) -> ttk.Combobox:
-        ttk.Label(tab, text=label).grid(row=row, column=0, sticky="w", pady=5)
-        combo = ttk.Combobox(
-            tab,
-            state="readonly",
-            values=tuple(values),
-            textvariable=variable,
-            width=width,
-        )
-        combo.grid(row=row, column=1, sticky="w", pady=5)
-        return combo
-
-    def _build_rf_tab(self, tab: ttk.Frame) -> None:
-        self._section_label(tab, "Timing", 0)
-        range_frame = ttk.Frame(tab)
-        range_frame.grid(row=1, column=1, sticky="w", pady=5)
-        ttk.Label(tab, text="Default RF sum range (ms)").grid(row=1, column=0, sticky="w", pady=5)
-        ttk.Entry(range_frame, textvariable=self.rf_sum_start_var, width=8).grid(row=0, column=0)
-        ttk.Label(range_frame, text="to").grid(row=0, column=1, padx=6)
-        ttk.Entry(range_frame, textvariable=self.rf_sum_end_var, width=8).grid(row=0, column=2)
-        self._labeled_entry(tab, 2, "Target time width (ms)", self.rf_time_resolution_var)
-        self._labeled_combo(tab, 3, "Value", self.rf_value_mode_var, VALUE_MODES)
-
-        self._section_label(tab, "Unit filtering", 4)
-        ttk.Checkbutton(
-            tab,
-            text="Hide units with zero-spike RF bins in the current RF window",
-            variable=self.rf_filter_units_with_zero_bins_var,
-        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(0, 6))
-        ttk.Label(tab, text="Hide at this many zero bins").grid(
-            row=6, column=0, sticky="w", pady=5
-        )
-        self.rf_zero_bin_threshold_entry = ttk.Entry(
-            tab,
-            textvariable=self.rf_zero_bin_threshold_var,
-            width=12,
-        )
-        self.rf_zero_bin_threshold_entry.grid(row=6, column=1, sticky="w", pady=5)
-        ttk.Label(
-            tab,
-            text=(
-                "Counts native spatial RF bins before display rebinning or smoothing. "
-                "The filter follows the RF window in the main viewer."
-            ),
-            foreground="#667085",
-            wraplength=440,
-            justify="left",
-        ).grid(row=7, column=0, columnspan=2, sticky="w", pady=(0, 10))
-
-        self._section_label(tab, "Spatial display", 8)
-        bins_frame = ttk.Frame(tab)
-        bins_frame.grid(row=9, column=1, sticky="w", pady=5)
-        ttk.Label(tab, text="Display bins").grid(row=9, column=0, sticky="w", pady=5)
-        ttk.Label(bins_frame, text="X").grid(row=0, column=0)
-        ttk.Entry(bins_frame, textvariable=self.rf_x_bins_var, width=8).grid(row=0, column=1, padx=(4, 12))
-        ttk.Label(bins_frame, text="Y").grid(row=0, column=2)
-        ttk.Entry(bins_frame, textvariable=self.rf_y_bins_var, width=8).grid(row=0, column=3, padx=(4, 0))
-        self._labeled_combo(tab, 10, "Layout", self.rf_layout_var, ("Rectangle", "Polar"))
-        self._labeled_combo(tab, 11, "Palette", self.rf_palette_var, PALETTES)
-        self._labeled_combo(tab, 12, "Polar radius", self.rf_polar_radius_var, POLAR_RADIUS_MODES)
-        ttk.Label(tab, text="RF smoothing radius").grid(row=13, column=0, sticky="w", pady=5)
-        ttk.Spinbox(
-            tab,
-            from_=0,
-            to=3,
-            increment=1,
-            textvariable=self.rf_smooth_radius_var,
-            width=10,
-        ).grid(row=13, column=1, sticky="w", pady=5)
-        toggles = ttk.Frame(tab)
-        toggles.grid(row=14, column=1, sticky="w", pady=5)
-        ttk.Checkbutton(toggles, text="Flip Y", variable=self.rf_flip_y_var).grid(row=0, column=0, padx=(0, 18))
-        ttk.Checkbutton(toggles, text="RGB composite", variable=self.rf_rgb_mode_var).grid(row=0, column=1)
-        self._labeled_combo(
-            tab,
-            15,
-            "Initial tab",
-            self.default_viewer_tab_var,
-            ("RF", "Delay / RGB", "Timeline"),
-        )
-        ttk.Label(
-            tab,
-            text="Use “Native” for all source X or Y bins.",
-            foreground="#667085",
-        ).grid(row=16, column=0, columnspan=2, sticky="w", pady=(8, 0))
-
-    def _build_waveform_tab(self, tab: ttk.Frame) -> None:
-        self._section_label(tab, "Local average waveform", 0)
-        ttk.Checkbutton(
-            tab,
-            text="Show a compact waveform in the left sidebar",
-            variable=self.show_waveform_var,
-        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 8))
-        ttk.Label(
-            tab,
-            text=(
-                "Double-click the waveform to enlarge it; double-click again "
-                "or press Esc to return."
-            ),
-            foreground="#667085",
-            wraplength=500,
-            justify="left",
-        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(0, 8))
-        self.waveform_channel_mode_combo = self._labeled_combo(
-            tab,
-            3,
-            "Nearby channels",
-            self.waveform_channel_mode_var,
-            tuple(WAVEFORM_CHANNEL_MODE_LABELS.values()),
-        )
-        ttk.Label(
-            tab,
-            text=(
-                "The display follows the notebook: the best-PTP channel plus the "
-                "four nearest channels matching this rule, ordered from larger to "
-                "smaller probe Y. It is not forced to two channels above and two below."
-            ),
-            foreground="#667085",
-            wraplength=500,
-            justify="left",
-        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(12, 0))
-
-    def _build_tuning_tab(self, tab: ttk.Frame) -> None:
-        self._section_label(tab, "Data source", 0)
-        self.tuning_curve_session_entry = self._labeled_entry(
-            tab,
-            1,
-            "Tuning Curve Session",
-            self.tuning_curve_session_var,
-        )
-        ttk.Label(
-            tab,
-            text=(
-                "Automatic loading reads the same-date DATE_SESSION folder. "
-                "The session must be a positive integer."
-            ),
-            foreground="#667085",
-            wraplength=440,
-            justify="left",
-        ).grid(row=2, column=1, sticky="w", pady=(0, 12))
-
-        self._section_label(tab, "Head-direction display", 3)
-        self._labeled_combo(
-            tab,
-            4,
-            "Plot style",
-            self.tuning_plot_mode_var,
-            TUNING_PLOT_MODES,
-        )
-        ttk.Label(
-            tab,
-            text="Auto follows the RF map's Rectangle or Polar layout.",
-            foreground="#667085",
-            wraplength=440,
-        ).grid(row=5, column=1, sticky="w", pady=(0, 10))
-        self._labeled_combo(
-            tab,
-            6,
-            "RF + tuning arrangement",
-            self.tuning_layout_var,
-            TUNING_LAYOUTS,
-        )
-        self._labeled_entry(tab, 7, "Displayed HD bins", self.tuning_display_bins_var)
-        ttk.Label(
-            tab,
-            text="On Save, the value is rounded down to a divisor of 180 (for example, 8 → 6).",
-            foreground="#667085",
-            wraplength=440,
-            justify="left",
-        ).grid(row=8, column=1, sticky="w", pady=(0, 12))
-        ttk.Checkbutton(
-            tab,
-            text="Compare cells in this file on one shared 0–peak Hz scale",
-            variable=self.tuning_compare_scale_var,
-        ).grid(row=9, column=0, columnspan=2, sticky="w", pady=(0, 10))
-        ttk.Checkbutton(
-            tab,
-            text="Smooth the 180-bin source curve",
-            variable=self.tuning_smoothing_var,
-        ).grid(row=10, column=0, columnspan=2, sticky="w", pady=(0, 6))
-        ttk.Label(tab, text="Gaussian σ (degrees)").grid(
-            row=11,
-            column=0,
-            sticky="w",
-            pady=5,
-        )
-        self.tuning_sigma_entry = ttk.Entry(
-            tab,
-            textvariable=self.tuning_smooth_sigma_var,
-            width=12,
-        )
-        self.tuning_sigma_entry.grid(row=11, column=1, sticky="w", pady=5)
-        ttk.Label(
-            tab,
-            text=(
-                "Circular Gaussian smoothing uses mode=wrap on the raw 180-bin curve "
-                "before display aggregation, preserving one angular width at every resolution."
-            ),
-            foreground="#667085",
-            wraplength=440,
-            justify="left",
-        ).grid(row=12, column=0, columnspan=2, sticky="w", pady=(14, 0))
-
-    def _select_remembered_tab(self) -> None:
-        remembered = getattr(self._app_root, "_rfm_settings_tab", "General")
-        for tab_id in self.notebook.tabs():
-            if self._tab_name_by_widget.get(str(tab_id)) == remembered:
-                self.notebook.select(tab_id)
-                return
-
-    def _remember_selected_tab(self, _event: object | None = None) -> None:
-        selected = str(self.notebook.select())
-        self._app_root._rfm_settings_tab = self._tab_name_by_widget.get(
-            selected, "General"
-        )
-        self.after_idle(self._refresh_selected_tab_text)
-
-    def _refresh_selected_tab_text(self) -> None:
-        """Work around stale controls in initially hidden ttk tabs on macOS Tk."""
-
-        try:
-            selected = self.nametowidget(self.notebook.select())
-        except (KeyError, tk.TclError):
-            return
-        pending = list(selected.winfo_children())
-        while pending:
-            widget = pending.pop()
-            pending.extend(widget.winfo_children())
-            if isinstance(widget, (ttk.Label, ttk.Checkbutton)):
-                try:
-                    if not widget.cget("textvariable"):
-                        widget.configure(text=widget.cget("text"))
-                except tk.TclError:
-                    continue
-            elif isinstance(widget, (ttk.Entry, ttk.Combobox, ttk.Spinbox)):
-                try:
-                    # Aqua occasionally leaves a previously hidden field blank
-                    # until it receives focus. Re-applying the variable asks the
-                    # native theme to paint the current value immediately.
-                    variable = widget.cget("textvariable")
-                    if variable:
-                        widget.configure(textvariable=variable)
-                except tk.TclError:
-                    continue
-        try:
-            selected.update_idletasks()
-        except tk.TclError:
-            pass
-
-    def _clear_tab_errors(self) -> None:
-        for name, variable in self._tab_error_vars.items():
-            variable.set("")
-            tab_id = self._tab_widget_by_name.get(name)
-            if tab_id is not None:
-                self.notebook.tab(tab_id, text=name)
-
-    def _show_validation_error(self, error: SettingsValidationError) -> None:
-        self._clear_tab_errors()
-        tab_name = error.tab_name if error.tab_name in self.TAB_NAMES else "General"
-        self._tab_error_vars[tab_name].set(str(error))
-        tab_id = self._tab_widget_by_name[tab_name]
-        self.notebook.tab(tab_id, text=f"{tab_name} •")
-        self.notebook.select(tab_id)
-
-    def _sync_dependent_controls(self) -> None:
-        self.auto_tuning_check.state(
-            ["!disabled"] if self.show_tuning_curve_var.get() else ["disabled"]
-        )
-        self.tuning_curve_session_entry.state(
-            ["!disabled"]
-            if self.show_tuning_curve_var.get()
-            and self.auto_load_tuning_curve_var.get()
-            else ["disabled"]
-        )
-        self.auto_probe_check.state(
-            ["!disabled"] if self.show_probe_layout_var.get() else ["disabled"]
-        )
-        self.waveform_channel_mode_combo.state(
-            ["!disabled"] if self.show_waveform_var.get() else ["disabled"]
-        )
-        self.rf_zero_bin_threshold_entry.state(
-            ["!disabled"]
-            if self.rf_filter_units_with_zero_bins_var.get()
-            else ["disabled"]
-        )
-        self.tuning_sigma_entry.state(
-            ["!disabled"] if self.tuning_smoothing_var.get() else ["disabled"]
-        )
-
-    @staticmethod
-    def _positive_float(raw: str, label: str) -> float:
-        try:
-            value = float(raw)
-        except ValueError as exc:
-            raise ValueError(f"{label} must be a number.") from exc
-        if not math.isfinite(value) or value <= 0.0:
-            raise ValueError(f"{label} must be positive and finite.")
-        return value
-
-    @staticmethod
-    def _native_or_positive_int(raw: str, label: str) -> int:
-        cleaned = raw.strip()
-        if cleaned.casefold() in {"native", "auto"}:
-            return 0
-        try:
-            value = int(cleaned)
-        except ValueError as exc:
-            raise ValueError(f"{label} must be “Native” or a positive integer.") from exc
-        if value <= 0:
-            raise ValueError(f"{label} must be “Native” or a positive integer.")
-        return value
-
-    def _validated_settings(self) -> ViewerSettings:
-        try:
-            start_ms = float(self.rf_sum_start_var.get())
-            end_ms = float(self.rf_sum_end_var.get())
-        except ValueError as exc:
-            raise SettingsValidationError(
-                "RF Map", "RF sum range must contain two numbers."
-            ) from exc
-        if not math.isfinite(start_ms) or not math.isfinite(end_ms) or start_ms >= end_ms:
-            raise SettingsValidationError(
-                "RF Map", "RF sum range must be finite and start before end."
-            )
-        try:
-            time_resolution = self._positive_float(
-                self.rf_time_resolution_var.get(), "Time resolution"
-            )
-            x_bins = self._native_or_positive_int(self.rf_x_bins_var.get(), "X bins")
-            y_bins = self._native_or_positive_int(self.rf_y_bins_var.get(), "Y bins")
-            smooth_radius = max(0, min(3, int(self.rf_smooth_radius_var.get())))
-        except (tk.TclError, ValueError) as exc:
-            raise SettingsValidationError("RF Map", str(exc)) from exc
-        try:
-            zero_bin_threshold = int(self.rf_zero_bin_threshold_var.get().strip())
-        except ValueError as exc:
-            raise SettingsValidationError(
-                "RF Map", "Zero-bin threshold must be a positive integer."
-            ) from exc
-        if zero_bin_threshold <= 0:
-            raise SettingsValidationError(
-                "RF Map", "Zero-bin threshold must be a positive integer."
-            )
-        active = self.owner._active_viewer()
-        maximum_zero_bins = active.data.spatial_bin_count
-        if zero_bin_threshold > maximum_zero_bins:
-            raise SettingsValidationError(
-                "RF Map",
-                f"Zero-bin threshold is too large; max is {maximum_zero_bins}.",
-            )
-
-        value_mode = self.rf_value_mode_var.get()
-        palette = self.rf_palette_var.get()
-        polar_radius = self.rf_polar_radius_var.get()
-        layout = self.rf_layout_var.get()
-        tab_keys = {
-            "RF": "rf",
-            "Delay / RGB": "delay",
-            "Timeline": "timeline",
-        }
-        initial_tab = self.default_viewer_tab_var.get()
-        waveform_channel_mode = WAVEFORM_CHANNEL_MODE_BY_LABEL.get(
-            self.waveform_channel_mode_var.get()
-        )
-        if value_mode not in VALUE_MODES:
-            raise SettingsValidationError("RF Map", "Choose a supported RF value mode.")
-        if palette not in PALETTES:
-            raise SettingsValidationError("RF Map", "Choose a supported RF palette.")
-        if polar_radius not in POLAR_RADIUS_MODES:
-            raise SettingsValidationError("RF Map", "Choose a supported polar-radius mode.")
-        if layout not in {"Rectangle", "Polar"}:
-            raise SettingsValidationError("RF Map", "Choose Rectangle or Polar layout.")
-        if initial_tab not in tab_keys:
-            raise SettingsValidationError("RF Map", "Choose a supported initial tab.")
-        if waveform_channel_mode is None:
-            raise SettingsValidationError(
-                "Waveform", "Choose Same x column or Same shank."
-            )
-
-        try:
-            tuning_curve_session = int(self.tuning_curve_session_var.get().strip())
-        except ValueError as exc:
-            raise SettingsValidationError(
-                "Tuning Curve",
-                "Tuning Curve Session must be a positive integer.",
-            ) from exc
-        if tuning_curve_session <= 0:
-            raise SettingsValidationError(
-                "Tuning Curve",
-                "Tuning Curve Session must be a positive integer.",
-            )
-
-        smoothing = bool(self.tuning_smoothing_var.get())
-        try:
-            sigma_degrees = self._positive_float(
-                self.tuning_smooth_sigma_var.get(), "Tuning smoothing sigma"
-            )
-            sigma = sigma_degrees * DEFAULT_HD_DISPLAY_BINS / 360.0
-        except ValueError as exc:
-            if smoothing:
-                raise SettingsValidationError("Tuning Curve", str(exc)) from exc
-            current = getattr(self._app_root, "_rfm_settings", ViewerSettings())
-            sigma = float(current.tuning_smooth_sigma)
-            if not math.isfinite(sigma) or sigma <= 0.0:
-                sigma = ViewerSettings().tuning_smooth_sigma
-            self.tuning_smooth_sigma_var.set(
-                f"{sigma * 360.0 / DEFAULT_HD_DISPLAY_BINS:g}"
-            )
-        try:
-            raw_hd_bins = int(self.tuning_display_bins_var.get().strip())
-        except ValueError as exc:
-            raise SettingsValidationError(
-                "Tuning Curve", "Displayed HD bins must be an integer."
-            ) from exc
-        if raw_hd_bins <= 0:
-            raise SettingsValidationError(
-                "Tuning Curve", "Displayed HD bins must be a positive integer."
-            )
-        hd_bins = normalize_hd_bin_count(raw_hd_bins)
-        self.tuning_display_bins_var.set(str(hd_bins))
-        tuning_mode = self.tuning_plot_mode_var.get()
-        if tuning_mode not in TUNING_PLOT_MODES:
-            raise SettingsValidationError(
-                "Tuning Curve", "Choose Auto, Polar, or Line plot style."
-            )
-        tuning_layout = self.tuning_layout_var.get()
-        if tuning_layout not in TUNING_LAYOUTS:
-            raise SettingsValidationError(
-                "Tuning Curve", "Choose Side by side or Stacked arrangement."
-            )
-        return ViewerSettings(
-            show_tuning_curve=bool(self.show_tuning_curve_var.get()),
-            auto_load_tuning_curve=bool(self.auto_load_tuning_curve_var.get()),
-            tuning_curve_session=tuning_curve_session,
-            show_waveform=bool(self.show_waveform_var.get()),
-            show_probe_layout=bool(self.show_probe_layout_var.get()),
-            auto_load_probe_layout=bool(self.auto_load_probe_layout_var.get()),
-            rf_sum_start_ms=start_ms,
-            rf_sum_end_ms=end_ms,
-            rf_filter_units_with_zero_bins=bool(
-                self.rf_filter_units_with_zero_bins_var.get()
-            ),
-            rf_zero_bin_threshold=zero_bin_threshold,
-            rf_time_resolution_ms=time_resolution,
-            rf_value_mode=value_mode,
-            rf_x_bins=x_bins,
-            rf_y_bins=y_bins,
-            rf_smooth_radius=smooth_radius,
-            rf_flip_y=bool(self.rf_flip_y_var.get()),
-            rf_palette=palette,
-            rf_polar_radius=polar_radius,
-            rf_polar_layout=layout == "Polar",
-            rf_rgb_mode=bool(self.rf_rgb_mode_var.get()),
-            default_viewer_tab=tab_keys[initial_tab],
-            waveform_channel_mode=waveform_channel_mode,
-            tuning_plot_mode=tuning_mode,
-            tuning_layout=tuning_layout,
-            tuning_display_bins=hd_bins,
-            tuning_smoothing=smoothing,
-            tuning_smooth_sigma=sigma,
-            tuning_compare_scale=bool(self.tuning_compare_scale_var.get()),
-        )
-
-    def _commit(self, *, close: bool) -> None:
-        self.error_var.set("")
-        self._clear_tab_errors()
-        try:
-            settings = self._validated_settings()
-        except SettingsValidationError as exc:
-            self._show_validation_error(exc)
-            return
-        except (KeyError, tk.TclError, ValueError) as exc:
-            selected = self._tab_name_by_widget.get(
-                str(self.notebook.select()), "General"
-            )
-            self._show_validation_error(SettingsValidationError(selected, str(exc)))
-            return
-        active = self.owner._active_viewer()
-        if not getattr(active, "_viewer_ready", False):
-            self.error_var.set("The viewer is still opening. Try again when it is ready.")
-            return
-        if not active._apply_viewer_settings(settings, persist=True, broadcast=True):
-            self.error_var.set("Settings could not be saved.")
-            return
-        self.error_var.set("")
-        if close:
-            self._close()
-
-    def _save(self) -> None:
-        self._commit(close=True)
-
-    def _close(self) -> None:
-        if getattr(self._app_root, "_rfm_settings_window", None) is self:
-            self._app_root._rfm_settings_window = None
-        try:
-            self.destroy()
-        except tk.TclError:
-            pass
+from rfmapping_viewer.viewer_state import ViewerSyncState, WaveformLoadResult
 
 
 class RFMViewer(tk.Toplevel):
@@ -5328,28 +151,22 @@ class RFMViewer(tk.Toplevel):
             master = tk.Tk()
             master.withdraw()
         self._app_root = master.winfo_toplevel()
-        if not hasattr(self._app_root, "_rfm_settings_path"):
+        if not hasattr(self._app_root, "_rfm_viewer_windows"):
             self._app_root._rfm_settings_path = viewer_settings_path()
-        if not hasattr(self._app_root, "_rfm_settings"):
             self._app_root._rfm_settings = load_viewer_settings(
                 self._app_root._rfm_settings_path
             )
-        if not hasattr(self._app_root, "_rfm_settings_window"):
             self._app_root._rfm_settings_window = None
             self._app_root._rfm_settings_tab = "General"
-        if not hasattr(self._app_root, "_rfm_tuning_cache"):
             self._app_root._rfm_tuning_cache = {}
-        self.settings: ViewerSettings = self._app_root._rfm_settings
-        super().__init__(self._app_root)
-        windows = getattr(self._app_root, "_rfm_viewer_windows", None)
-        if windows is None:
-            windows = []
-            self._app_root._rfm_viewer_windows = windows
-        windows.append(self)
-        if not hasattr(self._app_root, "_rfm_pairing_enabled"):
+            self._app_root._rfm_viewer_windows = []
             self._app_root._rfm_pairing_enabled = False
             self._app_root._rfm_pairing_state = None
             self._app_root._rfm_pairing_broadcasting = False
+            self._app_root._rfm_quitting = False
+        self.settings: ViewerSettings = self._app_root._rfm_settings
+        super().__init__(self._app_root)
+        self._app_root._rfm_viewer_windows.append(self)
         self._quitting = False
         self._viewer_ready = False
         self._pair_apply_in_progress = False
@@ -5372,15 +189,24 @@ class RFMViewer(tk.Toplevel):
         )
         self._waveform_poll_after: str | None = None
         self._waveform_generation = 0
-        self._waveform_result_queue: queue.SimpleQueue[dict[str, object]] = (
+        self._waveform_result_queue: queue.SimpleQueue[WaveformLoadResult] = (
             queue.SimpleQueue()
         )
+        self._waveform_worker_running = False
+        self._waveform_pending_request: tuple[
+            int, RFMappingData, tuple[int, str]
+        ] | None = None
         self._redraw_after: str | None = None
         self._focus_after: str | None = None
         self._optional_redraw_after: str | None = None
         self._optional_redraw_dirty: set[str] = set()
         self._pending_open_documents: list[Path] = []
         self._show_settings_when_ready = False
+        self._figure_export_window: FigureExportWindow | None = None
+        self._base_bin_cache: tuple[Sequence[float], float] | None = None
+        self._time_groups_cache: tuple[
+            Sequence[float], str, tuple[AxisGroup, ...]
+        ] | None = None
         self.title("RF Map Viewer")
         self.withdraw()
         self._install_application_handlers()
@@ -5421,13 +247,17 @@ class RFMViewer(tk.Toplevel):
         plot_start_ms, plot_end_ms = self._default_plot_time_bounds_ms()
         self.range_start_ms_var = tk.StringVar(value=format_ms(plot_start_ms))
         self.range_end_ms_var = tk.StringVar(value=format_ms(plot_end_ms))
+        self.rf_subtract_var = tk.BooleanVar(value=False)
+        self.subtract_start_ms_var = tk.StringVar(value="0")
+        self.subtract_end_ms_var = tk.StringVar(value="80")
+        self._reset_rf_window_defaults()
         self.flip_y_var = tk.BooleanVar(value=self.settings.rf_flip_y)
         self.palette_var = tk.StringVar(value=self.settings.rf_palette)
         self.polar_radius_var = tk.StringVar(value=self.settings.rf_polar_radius)
         self.polar_layout_var = tk.BooleanVar(value=self.settings.rf_polar_layout)
         self.rgb_mode_var = tk.BooleanVar(value=self.settings.rf_rgb_mode)
         self.pair_windows_var = tk.BooleanVar(
-            value=bool(getattr(self._app_root, "_rfm_pairing_enabled", False))
+            value=bool(self._app_root._rfm_pairing_enabled)
         )
         self.x_bins_var = tk.IntVar(
             value=min(data.n_x, self.settings.rf_x_bins or data.n_x)
@@ -5673,8 +503,8 @@ class RFMViewer(tk.Toplevel):
         self._initialize_viewer(data)
 
     def _cancel_startup_callback(self) -> None:
-        self._startup_generation = getattr(self, "_startup_generation", 0) + 1
-        cancel_event = self.__dict__.get("_startup_cancel_event")
+        self._startup_generation += 1
+        cancel_event = self._startup_cancel_event
         if cancel_event is not None:
             cancel_event.set()
             self._startup_cancel_event = None
@@ -5686,7 +516,7 @@ class RFMViewer(tk.Toplevel):
             except tk.TclError:
                 pass
             self._startup_after = None
-        if getattr(self, "_startup_poll_after", None) is not None:
+        if self._startup_poll_after is not None:
             try:
                 self.after_cancel(self._startup_poll_after)
             except tk.TclError:
@@ -5695,7 +525,7 @@ class RFMViewer(tk.Toplevel):
 
     def destroy(self) -> None:
         if (
-            not getattr(self._app_root, "_rfm_quitting", False)
+            not self._app_root._rfm_quitting
             and _active_export_jobs(self._app_root, self)
         ):
             messagebox.showinfo(
@@ -5704,6 +534,7 @@ class RFMViewer(tk.Toplevel):
                 parent=self,
             )
             return
+        self._quitting = True
         self._cancel_startup_callback()
         if self._optional_autoload_after is not None:
             try:
@@ -5719,6 +550,7 @@ class RFMViewer(tk.Toplevel):
                 pass
             self._optional_poll_after = None
         self._waveform_generation += 1
+        self._waveform_pending_request = None
         if self._waveform_poll_after is not None:
             try:
                 self.after_cancel(self._waveform_poll_after)
@@ -5743,16 +575,16 @@ class RFMViewer(tk.Toplevel):
             except tk.TclError:
                 pass
             self._focus_after = None
-        windows = getattr(self._app_root, "_rfm_viewer_windows", [])
+        windows = self._app_root._rfm_viewer_windows
         if self in windows:
             windows.remove(self)
-        if not getattr(self._app_root, "_rfm_quitting", False):
+        if not self._app_root._rfm_quitting:
             self._pair_ready_viewer_set_changed()
         try:
             super().destroy()
         except tk.TclError:
             return
-        if getattr(self._app_root, "_rfm_quitting", False):
+        if self._app_root._rfm_quitting:
             return
         if windows:
             windows[-1]._install_application_handlers()
@@ -5939,6 +771,26 @@ class RFMViewer(tk.Toplevel):
             accelerator="⇧P",
             command=self._cycle_palette,
         )
+        view_menu.add_separator()
+        view_menu.add_checkbutton(
+            label="Subtract RF Windows (A − B)",
+            accelerator="−",
+            variable=self.rf_subtract_var,
+            command=self._on_rf_mode_changed,
+        )
+        view_menu.add_command(
+            label="Show Display Options",
+            accelerator="D",
+            command=self._toggle_display_controls,
+        )
+        self._display_options_menu_index = view_menu.index("end")
+        view_menu.add_command(
+            label="Show Filtered Units",
+            accelerator="⌘⇧.",
+            command=self._toggle_zero_bin_filter,
+        )
+        self._unit_filter_menu_index = view_menu.index("end")
+        self._view_menu = view_menu
         if sys.platform != "darwin":
             view_menu.add_separator()
             view_menu.add_command(
@@ -6662,7 +1514,7 @@ class RFMViewer(tk.Toplevel):
         else:
             self.sidebar_collapsed_rail.grid_remove()
             self.sidebar_panel.grid()
-            if schedule_redraw and self.__dict__.get("_viewer_ready", False):
+            if schedule_redraw and self._viewer_ready:
                 self._schedule_optional_redraw("probe")
 
     def _toggle_tuning_collapsed(self) -> None:
@@ -6678,7 +1530,7 @@ class RFMViewer(tk.Toplevel):
         if (
             not collapsed
             and schedule_redraw
-            and self.__dict__.get("_viewer_ready", False)
+            and self._viewer_ready
         ):
             if self.show_tuning_curve_var.get():
                 self._schedule_optional_redraw("tuning")
@@ -6688,6 +1540,7 @@ class RFMViewer(tk.Toplevel):
         controls.grid(row=1, column=0, sticky="ew")
         controls.columnconfigure(6, weight=1)
         self.plot_controls_frame = controls
+        controls.bind("<Configure>", lambda _event: self._sync_context_controls())
 
         ttk.Label(controls, text="Metric", style="Panel.TLabel").grid(
             row=0, column=0, sticky="w", padx=(0, 6)
@@ -6740,9 +1593,13 @@ class RFMViewer(tk.Toplevel):
             textvariable=self.range_start_ms_var,
             command=self._on_range_changed,
         )
-        self.range_start_spin.grid(row=0, column=1, sticky="w")
+        self.range_open_label = ttk.Label(range_controls, text="(", style="Panel.TLabel")
+        self.range_open_label.grid(row=0, column=1)
+        self.range_start_spin.grid(row=0, column=2, sticky="w")
+        self.range_start_unit_label = ttk.Label(range_controls, text="ms", style="Panel.TLabel")
+        self.range_start_unit_label.grid(row=0, column=3, padx=(4, 0))
         ttk.Label(range_controls, text="–", style="Panel.TLabel").grid(
-            row=0, column=2, padx=5
+            row=0, column=4, padx=5
         )
         self.range_end_spin = ttk.Spinbox(
             range_controls,
@@ -6753,9 +1610,40 @@ class RFMViewer(tk.Toplevel):
             textvariable=self.range_end_ms_var,
             command=self._on_range_changed,
         )
-        self.range_end_spin.grid(row=0, column=3, sticky="w")
-        ttk.Label(range_controls, text="ms", style="Panel.TLabel").grid(
-            row=0, column=4, sticky="w", padx=(4, 8)
+        self.range_end_spin.grid(row=0, column=5, sticky="w")
+        self.range_end_unit_label = ttk.Label(range_controls, text="ms", style="Panel.TLabel")
+        self.range_end_unit_label.grid(row=0, column=6, sticky="w", padx=(4, 8))
+
+        self.subtract_controls_frame = ttk.Frame(range_controls, style="Panel.TFrame")
+        self.subtract_controls_frame.grid(row=0, column=7, sticky="w")
+        ttk.Label(self.subtract_controls_frame, text="− (", style="Panel.TLabel").grid(
+            row=0, column=0, padx=(0, 4)
+        )
+        self.subtract_start_spin = ttk.Spinbox(
+            self.subtract_controls_frame,
+            from_=self._time_axis_start_ms(),
+            to=self._time_axis_end_ms(),
+            increment=self._base_bin_ms(),
+            width=6,
+            textvariable=self.subtract_start_ms_var,
+            command=self._on_range_changed,
+        )
+        self.subtract_start_spin.grid(row=0, column=1)
+        ttk.Label(self.subtract_controls_frame, text="ms –", style="Panel.TLabel").grid(
+            row=0, column=2, padx=4
+        )
+        self.subtract_end_spin = ttk.Spinbox(
+            self.subtract_controls_frame,
+            from_=self._time_axis_start_ms(),
+            to=self._time_axis_end_ms(),
+            increment=self._base_bin_ms(),
+            width=6,
+            textvariable=self.subtract_end_ms_var,
+            command=self._on_range_changed,
+        )
+        self.subtract_end_spin.grid(row=0, column=3)
+        ttk.Label(self.subtract_controls_frame, text="ms)", style="Panel.TLabel").grid(
+            row=0, column=4, padx=(4, 8)
         )
 
         self.reset_plot_range_button = ttk.Button(
@@ -6763,7 +1651,7 @@ class RFMViewer(tk.Toplevel):
             text="Reset",
             command=self._reset_plot_range,
         )
-        self.reset_plot_range_button.grid(row=0, column=5, sticky="w")
+        self.reset_plot_range_button.grid(row=0, column=8, sticky="w")
 
         self.delay_controls_frame = ttk.Frame(controls, style="Panel.TFrame")
         self.rgb_mode_toggle = ttk.Checkbutton(
@@ -6783,7 +1671,7 @@ class RFMViewer(tk.Toplevel):
 
         self.display_toggle_button = ttk.Button(
             controls,
-            text="Display Options",
+            text="Display Options (D)",
             command=self._toggle_display_controls,
         )
         self.display_toggle_button.grid(row=0, column=8, sticky="e", padx=(10, 0))
@@ -6857,10 +1745,12 @@ class RFMViewer(tk.Toplevel):
     def _wire_events(self) -> None:
         self.unit_combo.bind("<<ComboboxSelected>>", self._on_unit_selected)
         self.value_mode_combo.bind("<<ComboboxSelected>>", self._on_value_mode_changed)
-        self.range_start_spin.bind("<Return>", self._on_range_changed)
-        self.range_end_spin.bind("<Return>", self._on_range_changed)
-        self.range_start_spin.bind("<FocusOut>", self._on_range_changed)
-        self.range_end_spin.bind("<FocusOut>", self._on_range_changed)
+        for spin in (
+            self.range_start_spin, self.range_end_spin,
+            self.subtract_start_spin, self.subtract_end_spin,
+        ):
+            spin.bind("<Return>", self._on_range_changed)
+            spin.bind("<FocusOut>", self._on_range_changed)
         self.time_res_spin.bind("<Return>", self._on_time_resolution_changed)
         self.time_res_spin.bind("<FocusOut>", self._on_time_resolution_changed)
         self.x_bins_spin.bind("<Return>", self._on_control_changed)
@@ -6885,6 +1775,13 @@ class RFMViewer(tk.Toplevel):
         self.bind("<KeyPress-f>", lambda event: self._run_navigation_shortcut(event, self._toggle_flip_y))
         self.bind("<KeyPress-p>", lambda event: self._run_navigation_shortcut(event, self._toggle_polar_layout))
         self.bind("<KeyPress-P>", lambda event: self._run_navigation_shortcut(event, self._cycle_palette))
+        for sequence, action in (
+            ("<KeyPress-minus>", self._toggle_rf_subtraction),
+            ("<KeyPress-d>", self._toggle_display_controls),
+        ):
+            callback = lambda event, action=action: self._run_navigation_shortcut(event, action)
+            self.bind(sequence, callback)
+            self.notebook.bind(sequence, callback, add="+")
         # TNotebook handles letter traversal before a toplevel bindtag.  Own P
         # on the notebook widget itself so Polar toggles before tab mnemonics.
         self.notebook.bind(
@@ -6916,6 +1813,7 @@ class RFMViewer(tk.Toplevel):
             self.bind("<Command-e>", lambda _event: self._open_figure_exporter())
             self.bind("<Command-Shift-E>", lambda _event: self._export_current_matrix())
             self.bind("<Command-w>", lambda _event: self._close_window())
+            self._bind_unit_filter_shortcut()
         for key, canvas in self.canvases.items():
             canvas.bind("<Configure>", self._schedule_redraw)
             canvas.bind("<Motion>", lambda event, k=key: self._on_canvas_motion(k, event))
@@ -6949,12 +1847,26 @@ class RFMViewer(tk.Toplevel):
     def _toggle_display_controls(self) -> None:
         expanded = not self.display_expanded_var.get()
         self.display_expanded_var.set(expanded)
+        self._sync_display_controls()
+
+    def _sync_display_controls(self) -> None:
+        expanded = self.display_expanded_var.get()
         self.display_toggle_button.configure(
-            text="Hide Display Options" if expanded else "Display Options"
+            text="Hide (D)" if expanded else "Display Options (D)"
+        )
+        self._view_menu.entryconfigure(
+            self._display_options_menu_index,
+            label="Hide Display Options" if expanded else "Show Display Options",
+        )
+        self._view_menu.entryconfigure(
+            self._unit_filter_menu_index,
+            label="Show Filtered Units" if self.settings.rf_filter_units_with_zero_bins
+            else "Hide Units with Zero RF Bins",
         )
         if expanded:
             self.display_controls_frame.grid(
-                row=1, column=0, columnspan=9, sticky="ew", pady=(7, 0)
+                row=2 if self._rf_range_uses_second_row() and self._active_tab_key() == "rf" else 1,
+                column=0, columnspan=9, sticky="ew", pady=(7, 0)
             )
         else:
             self.display_controls_frame.grid_remove()
@@ -7026,6 +1938,67 @@ class RFMViewer(tk.Toplevel):
         self.flip_y_var.set(not self.flip_y_var.get())
         self._on_control_changed()
 
+    def _bind_unit_filter_shortcut(self, target: tk.Misc | None = None) -> None:
+        def toggle(_event: object) -> str:
+            self._active_viewer()._toggle_zero_bin_filter()
+            return "break"
+
+        # Aqua may report the period, its shifted keysym, or kana_fullstop
+        # for the same physical key while a punctuation input method is active.
+        target = self if target is None else target
+        for keysym in ("period", "greater", "kana_fullstop"):
+            target.bind(f"<Command-Shift-{keysym}>", toggle)
+
+    def _toggle_zero_bin_filter(self) -> None:
+        enabled = not self.settings.rf_filter_units_with_zero_bins
+        defaults = replace(self._app_root._rfm_settings, rf_filter_units_with_zero_bins=enabled)
+        try:
+            save_viewer_settings(defaults, self._app_root._rfm_settings_path)
+        except OSError as exc:
+            messagebox.showerror("Could not save settings", str(exc), parent=self)
+            return
+        self._app_root._rfm_settings = defaults
+        ready = self._ready_pairing_viewers()
+        for window in ready:
+            window.settings = replace(window.settings, rf_filter_units_with_zero_bins=enabled)
+        settings_window = self._app_root._rfm_settings_window
+        if settings_window is not None and settings_window.winfo_exists():
+            settings_window.rf_filter_units_with_zero_bins_var.set(enabled)
+        # Apply to all windows before reconciling the paired visible-unit union.
+        self._pair_ready_viewer_set_changed()
+        for window in ready:
+            window._update_all()
+            window._sync_unit_combo()
+        self._publish_pairing_state_if_changed()
+
+    def _toggle_rf_subtraction(self) -> None:
+        self.rf_subtract_var.set(not self.rf_subtract_var.get())
+        self._on_rf_mode_changed()
+
+    def _on_rf_mode_changed(self) -> None:
+        subtract = self.rf_subtract_var.get()
+        if subtract != self._rf_controls_subtract:
+            self._rf_mode_ranges[self._rf_controls_subtract] = self._selected_time_bounds_ms()
+            first, last = self._rf_mode_ranges[subtract]
+            self.range_start_ms_var.set(format_ms(first))
+            self.range_end_ms_var.set(format_ms(last))
+            self._rf_controls_subtract = subtract
+        self._on_range_changed()
+
+    def _reset_rf_window_defaults(self) -> None:
+        settings = self.settings
+        self._rf_mode_ranges = {
+            False: (settings.rf_sum_start_ms, settings.rf_sum_end_ms),
+            True: (settings.rf_difference_start_ms, settings.rf_difference_end_ms),
+        }
+        self._rf_controls_subtract = settings.rf_subtract
+        self.rf_subtract_var.set(settings.rf_subtract)
+        first, last = self._rf_mode_ranges[settings.rf_subtract]
+        self.range_start_ms_var.set(format_ms(first))
+        self.range_end_ms_var.set(format_ms(last))
+        self.subtract_start_ms_var.set(format_ms(settings.rf_subtract_start_ms))
+        self.subtract_end_ms_var.set(format_ms(settings.rf_subtract_end_ms))
+
     def _toggle_polar_layout(self) -> None:
         self.polar_layout_var.set(not self.polar_layout_var.get())
         self._on_spatial_format_changed()
@@ -7048,6 +2021,9 @@ class RFMViewer(tk.Toplevel):
             "F   Invert Y\n"
             "P   Toggle Rectangle / Polar layout\n"
             "Shift+P   Cycle palette\n"
+            "−   Toggle RF sum / A − B\n"
+            "D   Show / hide Display Options\n"
+            "Command+Shift+.   Hide / show units filtered by RF bins\n"
             "Esc   Show Full Timeline Range\n"
             "[ / ]   Previous / next unit (legacy)\n"
             "Command-O   Open an RF map in a new window\n"
@@ -7086,21 +2062,17 @@ class RFMViewer(tk.Toplevel):
         self.protocol("WM_DELETE_WINDOW", self._close_window)
         self._app_root._rfm_active_viewer = self
         self.bind_all("<Control-o>", self._dispatch_open_json)
-        settings_callback = getattr(self, "_dispatch_settings", lambda *_args: None)
-        help_callback = getattr(
-            self, "_open_support_documentation", lambda *_args: None
-        )
-        self.bind_all("<Control-comma>", settings_callback)
+        self.bind_all("<Control-comma>", self._dispatch_settings)
 
         if sys.platform != "darwin":
             return
         try:
             self.bind_all("<Command-o>", self._dispatch_open_json)
-            self.bind_all("<Command-comma>", settings_callback)
+            self.bind_all("<Command-comma>", self._dispatch_settings)
             self.tk.createcommand("::tk::mac::OpenDocument", self._dispatch_macos_open_documents)
             self.tk.createcommand("::tk::mac::Quit", self._quit_application)
-            self.tk.createcommand("::tk::mac::ShowPreferences", settings_callback)
-            self.tk.createcommand("::tk::mac::ShowHelp", help_callback)
+            self.tk.createcommand("::tk::mac::ShowPreferences", self._dispatch_settings)
+            self.tk.createcommand("::tk::mac::ShowHelp", self._open_support_documentation)
         except tk.TclError:
             # The in-app Open button and window close protocol remain usable
             # if this Tk build does not expose the macOS application callbacks.
@@ -7108,15 +2080,15 @@ class RFMViewer(tk.Toplevel):
 
     def _active_viewer(self) -> RFMViewer:
         active = getattr(self._app_root, "_rfm_active_viewer", None)
-        windows = getattr(self._app_root, "_rfm_viewer_windows", [])
+        windows = self._app_root._rfm_viewer_windows
         return active if active in windows else (windows[-1] if windows else self)
 
     def _ready_pairing_viewers(self) -> list[RFMViewer]:
-        windows = getattr(self._app_root, "_rfm_viewer_windows", [])
+        windows = self._app_root._rfm_viewer_windows
         return [
             window
             for window in windows
-            if getattr(window, "_viewer_ready", False) and hasattr(window, "data")
+            if window._viewer_ready
         ]
 
     def _pairing_unit_ids(
@@ -7152,36 +2124,16 @@ class RFMViewer(tk.Toplevel):
         return next((unit_id for unit_id in unit_ids if unit_id > requested), unit_ids[0])
 
     def _local_unit_index(self, unit_id: int) -> int | None:
-        lookup = getattr(self.data, "rf_map_by_unit_id", None)
-        if callable(lookup):
-            try:
-                return lookup(int(unit_id)).unit_index
-            except KeyError:
-                return None
         try:
-            return self.data.unit_pool.index(int(unit_id))
-        except ValueError:
+            return self.data.rf_map_by_unit_id(int(unit_id)).unit_index
+        except KeyError:
             return None
 
     def _selected_unit_id_value(self) -> int:
-        selected = self.__dict__.get("_selected_unit_id")
-        if selected is not None:
-            return int(selected)
-        local_index = int(self.unit_idx.get())
-        if 0 <= local_index < self.data.n_units:
-            return int(self.data.cluster_id(local_index))
-        return int(self.data.unit_pool[0])
+        return int(self._selected_unit_id)
 
     def _selected_local_unit_index(self) -> int | None:
-        if not hasattr(self, "settings"):
-            unit_id = self._selected_unit_id_value()
-            local_index = self._local_unit_index(unit_id)
-            if local_index is None:
-                return None
-            if int(self.unit_idx.get()) != local_index:
-                self.unit_idx.set(local_index)
-            return local_index
-        navigation_ids = RFMViewer._unit_navigation_ids(self)
+        navigation_ids = self._unit_navigation_ids()
         if not navigation_ids:
             if int(self.unit_idx.get()) != -1:
                 self.unit_idx.set(-1)
@@ -7240,23 +2192,18 @@ class RFMViewer(tk.Toplevel):
         if selected in local_units:
             target = selected
         else:
-            last_supported = self.__dict__.get("_last_supported_unit_id")
+            last_supported = self._last_supported_unit_id
             target = int(last_supported) if last_supported in local_units else local_units[0]
         changed = target != selected or self._selected_local_unit_index() is None
         self._set_selected_unit_id(target)
-        if changed and self.__dict__.get("_viewer_ready", False):
+        if changed and self._viewer_ready:
             self.selected_cell = None
             self._update_all()
 
     def _local_quality_visible_unit_ids(self) -> list[int]:
         unit_ids = [int(unit_id) for unit_id in self.data.unit_pool]
-        settings = self.__dict__.get("settings", ViewerSettings())
-        if (
-            not settings.rf_filter_units_with_zero_bins
-            or not hasattr(self.data, "zero_spike_spatial_bin_count")
-            or not hasattr(self.data, "rf_map_by_unit_id")
-            or not hasattr(self, "range_start_ms_var")
-        ):
+        settings = self.settings
+        if not settings.rf_filter_units_with_zero_bins:
             return unit_ids
         start, end = self._source_bins_for_time_controls()
         threshold = settings.rf_zero_bin_threshold
@@ -7272,7 +2219,7 @@ class RFMViewer(tk.Toplevel):
         ]
 
     def _local_unit_passes_quality_filter(self, unit_id: int) -> bool:
-        if not hasattr(self, "settings") or not self.settings.rf_filter_units_with_zero_bins:
+        if not self.settings.rf_filter_units_with_zero_bins:
             return True
         local_index = self._local_unit_index(unit_id)
         if local_index is None:
@@ -7296,7 +2243,7 @@ class RFMViewer(tk.Toplevel):
         )
 
     def _unit_navigation_ids(self) -> list[int]:
-        if getattr(self._app_root, "_rfm_pairing_enabled", False):
+        if self._app_root._rfm_pairing_enabled:
             ready, eligible = self._pairing_eligibility()
             if eligible:
                 unit_ids = RFMViewer._quality_filtered_pairing_unit_ids(self, ready)
@@ -7304,8 +2251,8 @@ class RFMViewer(tk.Toplevel):
                 unit_ids = RFMViewer._local_quality_visible_unit_ids(self)
         else:
             unit_ids = RFMViewer._local_quality_visible_unit_ids(self)
-        region = self.__dict__.get("spatial_region")
-        geometry = self.__dict__.get("probe_geometry")
+        region = self.spatial_region
+        geometry = self.probe_geometry
         if region is not None and geometry is not None:
             return geometry.unit_ids_in_region(region, unit_ids)
         return unit_ids
@@ -7338,7 +2285,7 @@ class RFMViewer(tk.Toplevel):
 
     def _refresh_pairing_controls(self) -> None:
         ready, eligible = self._pairing_eligibility()
-        active = bool(getattr(self._app_root, "_rfm_pairing_enabled", False) and eligible)
+        active = bool(self._app_root._rfm_pairing_enabled and eligible)
         matching_units = self._unit_lists_match(ready)
         if len(ready) < 2:
             status = "Open another loaded viewer window to enable sync."
@@ -7356,7 +2303,7 @@ class RFMViewer(tk.Toplevel):
         else:
             status = f"{len(ready)} loaded windows have matching unit lists."
 
-        windows = getattr(self._app_root, "_rfm_viewer_windows", [])
+        windows = self._app_root._rfm_viewer_windows
         for window in windows:
             if not hasattr(window, "pair_windows_var"):
                 continue
@@ -7389,14 +2336,14 @@ class RFMViewer(tk.Toplevel):
         adopt_viewer: RFMViewer | None = None,
     ) -> None:
         ready, eligible = self._pairing_eligibility()
-        if not getattr(self._app_root, "_rfm_pairing_enabled", False):
+        if not self._app_root._rfm_pairing_enabled:
             self._refresh_pairing_controls()
             return
         if not eligible:
             self._disable_window_pairing()
             return
 
-        state = getattr(self._app_root, "_rfm_pairing_state", None)
+        state = self._app_root._rfm_pairing_state
         if state is None:
             source = ready[0]
             state = source._capture_pairing_state()
@@ -7494,6 +2441,9 @@ class RFMViewer(tk.Toplevel):
             timeline_anchor_center_ms=anchor_center_ms,
             rf_start_ms=rf_start_ms,
             rf_end_ms=rf_end_ms,
+            rf_subtract=bool(self.rf_subtract_var.get()),
+            rf_subtract_start_ms=float(self.subtract_start_ms_var.get()),
+            rf_subtract_end_ms=float(self.subtract_end_ms_var.get()),
             time_resolution_ms=float(self.time_res_ms_var.get()),
             x_bins=self._x_target_bins(),
             y_bins=self._y_target_bins(),
@@ -7622,7 +2572,7 @@ class RFMViewer(tk.Toplevel):
                 )
             if "unit" in fields:
                 if (
-                    self.__dict__.get("spatial_region") is not None
+                    self.spatial_region is not None
                     and int(state.unit_id) not in self._unit_navigation_ids()
                 ):
                     self.spatial_region = None
@@ -7660,8 +2610,13 @@ class RFMViewer(tk.Toplevel):
             if "delay_rgb" in fields:
                 self.rgb_mode_var.set(bool(state.rgb_mode))
             if "rf_range" in fields:
+                self._rf_mode_ranges[self._rf_controls_subtract] = self._selected_time_bounds_ms()
+                self._rf_controls_subtract = state.rf_subtract
                 self.range_start_ms_var.set(format_ms(state.rf_start_ms))
                 self.range_end_ms_var.set(format_ms(state.rf_end_ms))
+                self.rf_subtract_var.set(state.rf_subtract)
+                self.subtract_start_ms_var.set(format_ms(state.rf_subtract_start_ms))
+                self.subtract_end_ms_var.set(format_ms(state.rf_subtract_end_ms))
             if "timeline_scroll" in fields:
                 self._timeline_scroll_fraction = max(
                     0.0, min(1.0, float(state.timeline_scroll_fraction))
@@ -7809,13 +2764,13 @@ class RFMViewer(tk.Toplevel):
             self._pair_apply_in_progress = False
 
     def _publish_pairing_state_if_changed(self) -> None:
-        if not self.__dict__.get("_viewer_ready", False):
+        if not self._viewer_ready:
             return
-        if self.__dict__.get("_pair_apply_in_progress", False):
+        if self._pair_apply_in_progress:
             return
-        if not getattr(self._app_root, "_rfm_pairing_enabled", False):
+        if not self._app_root._rfm_pairing_enabled:
             return
-        if getattr(self._app_root, "_rfm_pairing_broadcasting", False):
+        if self._app_root._rfm_pairing_broadcasting:
             return
 
         ready, eligible = self._pairing_eligibility()
@@ -7831,7 +2786,7 @@ class RFMViewer(tk.Toplevel):
         self._pair_last_local_state = state
         if not changed_fields:
             return
-        canonical = getattr(self._app_root, "_rfm_pairing_state", None)
+        canonical = self._app_root._rfm_pairing_state
         self._app_root._rfm_pairing_state = (
             canonical.merging(state, changed_fields) if canonical is not None else state
         )
@@ -7859,7 +2814,7 @@ class RFMViewer(tk.Toplevel):
         if not getattr(active, "_viewer_ready", False):
             active._show_settings_when_ready = True
             return
-        existing = getattr(self._app_root, "_rfm_settings_window", None)
+        existing = self._app_root._rfm_settings_window
         if existing is not None:
             try:
                 if existing.winfo_exists():
@@ -7909,8 +2864,7 @@ class RFMViewer(tk.Toplevel):
             if not self.data.supports_value_mode(value_mode):
                 value_mode = VALUE_MODE_RATE
             self.value_mode_var.set(value_mode)
-            self.range_start_ms_var.set(format_ms(settings.rf_sum_start_ms))
-            self.range_end_ms_var.set(format_ms(settings.rf_sum_end_ms))
+            self._reset_rf_window_defaults()
             self.time_res_ms_var.set(format_ms(settings.rf_time_resolution_ms))
             self.x_bins_var.set(min(self.data.n_x, settings.rf_x_bins or self.data.n_x))
             self.y_bins_var.set(min(self.data.n_y, settings.rf_y_bins or self.data.n_y))
@@ -7983,8 +2937,8 @@ class RFMViewer(tk.Toplevel):
 
         if (
             broadcast
-            and getattr(self._app_root, "_rfm_pairing_enabled", False)
-            and not getattr(self._app_root, "_rfm_pairing_broadcasting", False)
+            and self._app_root._rfm_pairing_enabled
+            and not self._app_root._rfm_pairing_broadcasting
         ):
             self._app_root._rfm_pairing_broadcasting = True
             try:
@@ -8038,7 +2992,7 @@ class RFMViewer(tk.Toplevel):
         self.destroy()
 
     def _quit_application(self, _event: object | None = None) -> None:
-        if getattr(self._app_root, "_rfm_quitting", False):
+        if self._app_root._rfm_quitting:
             return
         if _active_export_jobs(self._app_root):
             messagebox.showinfo(
@@ -8224,7 +3178,7 @@ class RFMViewer(tk.Toplevel):
         self._optional_autoload_after = None
         if (
             generation != self._optional_autoload_generation
-            or not self.__dict__.get("_viewer_ready", False)
+            or not self._viewer_ready
             or self._quitting
         ):
             return
@@ -8349,7 +3303,7 @@ class RFMViewer(tk.Toplevel):
             return
         if (
             current_result.get("data_path") != self.data.path
-            or not self.__dict__.get("_viewer_ready", False)
+            or not self._viewer_ready
         ):
             return
 
@@ -8938,7 +3892,7 @@ class RFMViewer(tk.Toplevel):
         if hasattr(self, "tuning_provenance_button"):
             self.tuning_provenance_button.grid()
 
-        if getattr(self._app_root, "_rfm_pairing_enabled", False):
+        if self._app_root._rfm_pairing_enabled:
             ready, eligible = self._pairing_eligibility()
             rf_unit_ids = (
                 set(self._quality_filtered_pairing_unit_ids(ready))
@@ -9677,9 +4631,11 @@ class RFMViewer(tk.Toplevel):
         self._publish_pairing_state_if_changed()
 
     def _reset_plot_range(self) -> None:
-        start_ms, end_ms = self._default_plot_time_bounds_ms()
+        start_ms, end_ms = self._default_plot_time_bounds_ms(difference=self.rf_subtract_var.get())
         self.range_start_ms_var.set(format_ms(start_ms))
         self.range_end_ms_var.set(format_ms(end_ms))
+        self.subtract_start_ms_var.set(format_ms(self.settings.rf_subtract_start_ms))
+        self.subtract_end_ms_var.set(format_ms(self.settings.rf_subtract_end_ms))
         self._on_range_changed()
 
     def _on_time_resolution_changed(self, _event: object | None = None) -> None:
@@ -9724,10 +4680,10 @@ class RFMViewer(tk.Toplevel):
         self._publish_pairing_state_if_changed()
 
     def _on_control_changed(self, _event: object | None = None) -> None:
-        if self.__dict__.get("_pair_apply_in_progress", False):
+        if self._pair_apply_in_progress:
             return
         self._normalize_control_values()
-        self._update_all()
+        self._update_all(update_optional_views=False)
         self._publish_pairing_state_if_changed()
 
     def _on_spatial_format_changed(self) -> None:
@@ -9736,8 +4692,9 @@ class RFMViewer(tk.Toplevel):
         self._on_control_changed()
 
     def _on_tab_changed(self, _event: object | None = None) -> None:
-        self._sync_context_controls()
-        self._on_control_changed()
+        if not self._pair_apply_in_progress:
+            self._update_all()
+            self._publish_pairing_state_if_changed()
 
     def _sync_context_controls(self) -> None:
         if not hasattr(self, "rgb_mode_toggle"):
@@ -9756,8 +4713,28 @@ class RFMViewer(tk.Toplevel):
             self.timeline_context_frame.grid(row=0, column=7, sticky="w")
             self.rgb_mode_toggle.state(["disabled"])
         else:
-            self.range_controls_frame.grid(row=0, column=7, sticky="w")
+            difference = self.rf_subtract_var.get()
+            second_row = self._rf_range_uses_second_row()
+            self.range_controls_frame.grid(
+                row=1 if second_row else 0,
+                column=0 if second_row else 7,
+                columnspan=9 if second_row else 1,
+                sticky="w",
+                pady=(7, 0) if second_row else 0,
+            )
+            for widget in (
+                self.range_open_label, self.range_start_unit_label,
+                self.subtract_controls_frame,
+            ):
+                widget.grid() if difference else widget.grid_remove()
+            self.range_end_unit_label.configure(text="ms)" if difference else "ms")
             self.rgb_mode_toggle.state(["disabled"])
+        self._sync_display_controls()
+
+    def _rf_range_uses_second_row(self) -> bool:
+        # Keep all four time inputs and the display toggle reachable at the
+        # minimum window width, including when returning to ordinary sum mode.
+        return self.rf_subtract_var.get() or self.plot_controls_frame.winfo_width() < 1100
 
     def _schedule_redraw(self, _event: object | None = None) -> None:
         if self._redraw_after is not None:
@@ -9871,6 +4848,7 @@ class RFMViewer(tk.Toplevel):
                 value = 0
             var.set(max(0, min(max_bin, value)))
         self._source_bins_for_time_controls()
+        self._source_bins_for_subtract_controls()
         if self._timeline_range_anchor is not None:
             self._timeline_range_anchor = max(0, min(max_bin, self._timeline_range_anchor))
         self._x_target_bins()
@@ -9879,7 +4857,7 @@ class RFMViewer(tk.Toplevel):
         self._sync_time_control_ranges()
         self._last_time_group_count = time_count
         self._last_time_groups = list(time_groups)
-        selected_cell = self.__dict__.get("selected_cell")
+        selected_cell = self.selected_cell
         if selected_cell is not None:
             y_start, y_end, x_start, x_end = selected_cell
             self.selected_cell = self._cell_for_pairing_midpoint(
@@ -9893,11 +4871,12 @@ class RFMViewer(tk.Toplevel):
         except (tk.TclError, TypeError, ValueError):
             return fallback
 
-    def _default_plot_time_bounds_ms(self) -> tuple[float, float]:
-        settings = self.__dict__.get("settings", ViewerSettings())
+    def _default_plot_time_bounds_ms(self, *, difference: bool | None = None) -> tuple[float, float]:
+        settings = self.settings
+        difference = settings.rf_subtract if difference is None else difference
         start, end = self._snap_time_range_to_bins(
-            settings.rf_sum_start_ms,
-            settings.rf_sum_end_ms,
+            settings.rf_difference_start_ms if difference else settings.rf_sum_start_ms,
+            settings.rf_difference_end_ms if difference else settings.rf_sum_end_ms,
         )
         return (
             self.data.time_bin_edges[start] * 1000.0,
@@ -9929,16 +4908,32 @@ class RFMViewer(tk.Toplevel):
                 end_edge = min(self.data.n_bins, start_edge + 1)
         return start_edge, end_edge - 1
 
-    def _source_bins_for_time_controls(self) -> AxisGroup:
+    def _source_bins_for_time_controls(
+        self,
+        start_var: tk.StringVar | None = None,
+        end_var: tk.StringVar | None = None,
+    ) -> AxisGroup:
+        start_var = self.range_start_ms_var if start_var is None else start_var
+        end_var = self.range_end_ms_var if end_var is None else end_var
         edges_ms = [edge * 1000.0 for edge in self.data.time_bin_edges]
         axis_start, axis_end = edges_ms[0], edges_ms[-1]
-        requested_start = self._parse_time_control(self.range_start_ms_var, axis_start)
-        requested_end = self._parse_time_control(self.range_end_ms_var, axis_end)
+        requested_start = self._parse_time_control(start_var, axis_start)
+        requested_end = self._parse_time_control(end_var, axis_end)
         start, end = self._snap_time_range_to_bins(requested_start, requested_end)
         start_edge, end_edge = start, end + 1
-        self.range_start_ms_var.set(format_ms(edges_ms[start_edge]))
-        self.range_end_ms_var.set(format_ms(edges_ms[end_edge]))
+        start_var.set(format_ms(edges_ms[start_edge]))
+        end_var.set(format_ms(edges_ms[end_edge]))
         return start, end
+
+    def _source_bins_for_subtract_controls(self) -> AxisGroup:
+        return self._source_bins_for_time_controls(
+            self.subtract_start_ms_var, self.subtract_end_ms_var,
+        )
+
+    def _rf_subtraction_range(self) -> AxisGroup | None:
+        if not self.rf_subtract_var.get():
+            return None
+        return self._source_bins_for_subtract_controls()
 
     def _sync_time_range_controls(self) -> None:
         # Timeline selection is intentionally independent of the RF sum range
@@ -9954,7 +4949,7 @@ class RFMViewer(tk.Toplevel):
         selected = self.notebook.select()
         return self._tab_keys.get(str(selected), "rf")
 
-    def _draw_active_tab(self) -> None:
+    def _draw_active_tab(self, *, update_optional_views: bool = True) -> None:
         key = self._active_tab_key()
         if self._selected_local_unit_index() is None:
             self._draw_unavailable_unit(key)
@@ -9977,12 +4972,13 @@ class RFMViewer(tk.Toplevel):
             return
         if key == "rf":
             self._draw_rf()
-            self._draw_tuning_curve()
+            if update_optional_views:
+                self._draw_tuning_curve()
         elif key == "delay":
             self._draw_rgb() if self.rgb_mode_var.get() else self._draw_delay()
         elif key == "timeline":
             self._draw_timeline()
-        if self.show_waveform_var.get():
+        if update_optional_views and self.show_waveform_var.get():
             self._draw_waveform()
 
     def _request_waveform_payload(self) -> None:
@@ -9992,40 +4988,45 @@ class RFMViewer(tk.Toplevel):
             self._selected_unit_id_value(),
             self.waveform_channel_mode_var.get(),
         )
-        if (
-            self._waveform_loading_key == key
-            or self._waveform_payload_key == key
-            or getattr(self, "_waveform_error_key", None) == key
-        ):
+        if self._waveform_loading_key == key:
+            return
+        if self._waveform_payload_key == key or self._waveform_error_key == key:
+            if self._waveform_loading_key is not None:
+                self._waveform_generation += 1
+                self._waveform_loading_key = None
+                self._waveform_pending_request = None
             return
         self._waveform_generation += 1
-        generation = self._waveform_generation
         self._waveform_loading_key = key
-        data = self.data
+        self._waveform_pending_request = (self._waveform_generation, self.data, key)
+        self._start_waveform_load()
+        self._schedule_waveform_result_poll()
+
+    def _start_waveform_load(self) -> None:
+        if self._waveform_worker_running or self._waveform_pending_request is None:
+            return
+        generation, data, key = self._waveform_pending_request
+        self._waveform_pending_request = None
+        if self._quitting or generation != self._waveform_generation:
+            return
+        self._waveform_worker_running = True
+        result_queue = self._waveform_result_queue
 
         def load() -> None:
-            result: dict[str, object] = {
-                "generation": generation,
-                "data_path": data.path,
-                "key": key,
-                "payload": None,
-                "error": None,
-            }
+            payload = None
+            error = None
             try:
-                result["payload"] = data.waveform_plot_payload(
-                    key[0], key[1]
-                )
+                payload = data.waveform_plot_payload(key[0], key[1])
             except Exception as exc:
-                result["error"] = str(exc)
+                error = str(exc)
             finally:
-                self._waveform_result_queue.put(result)
+                result_queue.put(WaveformLoadResult(generation, data.path, key, payload, error))
 
         threading.Thread(
             target=load,
             name=f"rfmapping-waveform-{generation}",
             daemon=True,
         ).start()
-        self._schedule_waveform_result_poll()
 
     def _schedule_waveform_result_poll(self) -> None:
         if self._waveform_poll_after is None:
@@ -10035,45 +5036,38 @@ class RFMViewer(tk.Toplevel):
 
     def _poll_waveform_results(self) -> None:
         self._waveform_poll_after = None
-        current: dict[str, object] | None = None
+        current: WaveformLoadResult | None = None
         while True:
             try:
                 result = self._waveform_result_queue.get_nowait()
             except queue.Empty:
                 break
-            if result.get("generation") == self._waveform_generation:
+            self._waveform_worker_running = False
+            if result.generation == self._waveform_generation:
                 current = result
+        self._start_waveform_load()
         if current is None:
-            if self._waveform_loading_key is not None and not self._quitting:
+            if (
+                self._waveform_loading_key is not None or self._waveform_worker_running
+            ) and not self._quitting:
                 self._schedule_waveform_result_poll()
             return
         if (
-            current.get("data_path") != self.data.path
-            or not self.__dict__.get("_viewer_ready", False)
+            current.data_path != self.data.path
+            or not self._viewer_ready
         ):
             return
-        raw_key = current.get("key")
-        if not (
-            isinstance(raw_key, tuple)
-            and len(raw_key) == 2
-            and isinstance(raw_key[0], int)
-            and isinstance(raw_key[1], str)
-        ):
-            return
-        key = (raw_key[0], raw_key[1])
         self._waveform_loading_key = None
-        payload = current.get("payload")
-        error = current.get("error")
-        if isinstance(payload, Mapping):
-            self.waveform_payload = payload
-            self._waveform_payload_key = key
+        if current.payload is not None:
+            self.waveform_payload = current.payload
+            self._waveform_payload_key = current.key
             self._waveform_error = None
             self._waveform_error_key = None
         else:
             self.waveform_payload = None
             self._waveform_payload_key = None
-            self._waveform_error = str(error or "Waveform data is unavailable.")
-            self._waveform_error_key = key
+            self._waveform_error = current.error or "Waveform data is unavailable."
+            self._waveform_error_key = current.key
         if self.show_waveform_var.get():
             self._draw_waveform()
 
@@ -10103,18 +5097,14 @@ class RFMViewer(tk.Toplevel):
         )
 
     def _draw_waveform(self) -> None:
-        primary_canvas = getattr(
-            self,
-            "waveform_canvas",
-            self.canvases["waveform"],
-        )
-        targets = [(primary_canvas, self.waveform_subtitle_label)]
-        if getattr(self, "_waveform_zoomed", False):
+        self._request_waveform_payload()
+        targets = [(self.waveform_canvas, self.waveform_subtitle_label)]
+        if self._waveform_zoomed:
             targets.append(
                 (self.waveform_zoom_canvas, self.waveform_zoom_subtitle_label)
             )
         for canvas, subtitle_label in targets:
-            RFMViewer._draw_waveform_canvas(self, canvas, subtitle_label)
+            self._draw_waveform_canvas(canvas, subtitle_label)
 
     def _draw_waveform_canvas(
         self,
@@ -10130,7 +5120,7 @@ class RFMViewer(tk.Toplevel):
             self.waveform_channel_mode_var.get(),
         )
         if self._waveform_payload_key != key:
-            if getattr(self, "_waveform_error_key", None) == key:
+            if self._waveform_error_key == key:
                 subtitle_label.configure(
                     text=f"Cluster {key[0]} · waveform unavailable"
                 )
@@ -10140,7 +5130,6 @@ class RFMViewer(tk.Toplevel):
                     self._waveform_error or "Waveform data is unavailable.",
                 )
                 return
-            self._request_waveform_payload()
             subtitle_label.configure(
                 text=f"Cluster {key[0]} · loading waveform artifact…"
             )
@@ -10415,12 +5404,13 @@ class RFMViewer(tk.Toplevel):
             font=("TkDefaultFont", 12),
         )
 
-    def _update_all(self) -> None:
+    def _update_all(self, *, update_optional_views: bool = True) -> None:
         if self._redraw_after is not None:
             self.after_cancel(self._redraw_after)
             self._redraw_after = None
         self._normalize_control_values()
-        self._reconcile_unit_filter_selection()
+        if update_optional_views:
+            self._reconcile_unit_filter_selection()
         self.hover_cell = None
         self._hover_signature = None
         self._hover_tooltip_text = ""
@@ -10461,20 +5451,28 @@ class RFMViewer(tk.Toplevel):
         self.unit_stats_label.configure(text="")
         self._update_cell_label()
         self._sync_context_controls()
-        self._draw_probe_canvas()
-        self._draw_active_tab()
+        if update_optional_views:
+            self._draw_probe_canvas()
+        self._draw_active_tab(update_optional_views=update_optional_views)
 
     def _current_matrix(self) -> list[list[float | None]]:
         unit_idx = self._selected_local_unit_index()
         if unit_idx is None:
             return [[None for _x in range(self.data.n_x)] for _y in range(self.data.n_y)]
         start, end = self._source_bins_for_display_range()
-        return self.data.response_matrix(
+        matrix = self.data.response_matrix(
             unit_idx,
             start,
             end,
             self.value_mode_var.get(),
         )
+        subtract_range = self._rf_subtraction_range()
+        if subtract_range is not None:
+            matrix = subtract_response_matrices(
+                matrix,
+                self.data.response_matrix(unit_idx, *subtract_range, self.value_mode_var.get()),
+            )
+        return matrix
 
     def _delay_matrix_for_time_groups(self, floor: float = 0.0) -> list[list[float | None]]:
         delay, _entropy, _x_groups, _y_groups = self._grouped_temporal_metric_matrices(
@@ -10485,11 +5483,9 @@ class RFMViewer(tk.Toplevel):
 
     def _base_bin_ms(self) -> float:
         edges = self.data.time_bin_edges
-        cached = self.__dict__.get("_base_bin_cache")
+        cached = self._base_bin_cache
         if cached is not None and cached[0] is edges:
             return cached[1]
-        if len(edges) < 2:
-            return 1.0
         diffs = [
             (edges[i + 1] - edges[i]) * 1000.0
             for i in range(len(edges) - 1)
@@ -10500,21 +5496,13 @@ class RFMViewer(tk.Toplevel):
         return base
 
     def _time_axis_start_ms(self) -> float:
-        if not self.data.time_bin_edges:
-            return 0.0
         return self.data.time_bin_edges[0] * 1000.0
 
     def _time_axis_end_ms(self) -> float:
-        if not self.data.time_bin_edges:
-            return self._base_bin_ms() * self.data.n_bins
         return self.data.time_bin_edges[-1] * 1000.0
 
     def _time_axis_range_ms(self) -> tuple[float, float]:
-        start = self._time_axis_start_ms()
-        end = self._time_axis_end_ms()
-        if end <= start:
-            end = start + self._base_bin_ms()
-        return start, end
+        return self._time_axis_start_ms(), self._time_axis_end_ms()
 
     def _total_time_ms(self) -> float:
         start, end = self._time_axis_range_ms()
@@ -10540,7 +5528,7 @@ class RFMViewer(tk.Toplevel):
             requested = self.time_res_ms_var.get()
         except (tk.TclError, ValueError):
             requested = None
-        cached = self.__dict__.get("_time_groups_cache")
+        cached = self._time_groups_cache
         if cached is not None and cached[0] is edges and cached[1] == requested:
             return cached[2]
         group_size = self._time_group_size()
@@ -10645,10 +5633,9 @@ class RFMViewer(tk.Toplevel):
     def _sync_time_control_ranges(self) -> None:
         axis_start, axis_end = self._time_axis_range_ms()
         source_step = self._base_bin_ms()
-        if hasattr(self, "range_start_spin"):
-            self.range_start_spin.configure(from_=axis_start, to=axis_end, increment=source_step)
-        if hasattr(self, "range_end_spin"):
-            self.range_end_spin.configure(from_=axis_start, to=axis_end, increment=source_step)
+        for name in ("range_start_spin", "range_end_spin", "subtract_start_spin", "subtract_end_spin"):
+            if hasattr(self, name):
+                getattr(self, name).configure(from_=axis_start, to=axis_end, increment=source_step)
         if hasattr(self, "time_res_spin"):
             base = self._base_bin_ms()
             self.time_res_spin.configure(from_=base, to=self._total_time_ms(), increment=base)
@@ -10728,6 +5715,18 @@ class RFMViewer(tk.Toplevel):
         )
         return _nullable_array_list(frames[0]), x_groups, y_groups
 
+    def _prepare_rf_plot_matrix(
+        self,
+    ) -> tuple[list[list[float | None]], list[AxisGroup], list[AxisGroup]]:
+        matrix, x_groups, y_groups = self._prepare_response_plot_matrix(
+            *self._source_bins_for_time_controls()
+        )
+        subtract_range = self._rf_subtraction_range()
+        if subtract_range is not None:
+            baseline, _, _ = self._prepare_response_plot_matrix(*subtract_range)
+            matrix = subtract_response_matrices(matrix, baseline)
+        return matrix, x_groups, y_groups
+
     def _grouped_temporal_metric_matrices(
         self,
         floor: float = 0.0,
@@ -10744,67 +5743,15 @@ class RFMViewer(tk.Toplevel):
         unit_idx = self._selected_local_unit_index()
         if unit_idx is None:
             return [], [], x_groups, y_groups
-        safe_floor = max(0.0, float(floor))
-        histograms = [
-            [
-                [
-                    value
-                    / max(
-                        1,
-                        self.data.spatial_group_source_pixel_count(
-                            y_group,
-                            x_group,
-                        ),
-                    )
-                    for value in self.data.spatial_group_count_histogram(
-                        unit_idx,
-                        y_group,
-                        x_group,
-                    )
-                ]
-                for x_group in x_groups
-            ]
-            for y_group in y_groups
-        ]
-        if smooth and self._smooth_radius() > 0 and histograms and histograms[0]:
-            output = [
-                [
-                    [0.0 for _bin_idx in range(self.data.n_bins)]
-                    for _x_group in x_groups
-                ]
-                for _y_group in y_groups
-            ]
-            for bin_idx in range(self.data.n_bins):
-                temporal_slice = [
-                    [histogram[bin_idx] for histogram in row]
-                    for row in histograms
-                ]
-                smoothed_slice = smooth_matrix(
-                    temporal_slice,
-                    self._smooth_radius(),
-                )
-                for y_idx, row in enumerate(smoothed_slice):
-                    for x_idx, value in enumerate(row):
-                        output[y_idx][x_idx][bin_idx] = float(value or 0.0)
-            histograms = output
-        delay: list[list[float | None]] = []
-        entropy: list[list[float | None]] = []
-        time_groups = self._time_groups()
-        for y_idx, _y_group in enumerate(y_groups):
-            delay_row: list[float | None] = []
-            entropy_row: list[float | None] = []
-            for x_idx, _x_group in enumerate(x_groups):
-                metrics = self.data.temporal_metrics_from_histogram(
-                    histograms[y_idx][x_idx],
-                    time_groups,
-                )
-                delay_row.append(
-                    metrics.delay_ms if metrics.mean_total_count > safe_floor else None
-                )
-                entropy_row.append(metrics.entropy)
-            delay.append(delay_row)
-            entropy.append(entropy_row)
-        return delay, entropy, x_groups, y_groups
+        delay, entropy = self.data.spatial_group_temporal_arrays(
+            unit_idx,
+            y_groups,
+            x_groups,
+            self._time_groups(),
+            smooth_radius=self._smooth_radius() if smooth else 0,
+            count_floor=max(0.0, float(floor)),
+        )
+        return _nullable_array_list(delay), _nullable_array_list(entropy), x_groups, y_groups
 
     def _group_hist(self, y_start: int, y_end: int, x_start: int, x_end: int) -> list[float]:
         unit_idx = self._selected_local_unit_index()
@@ -10883,11 +5830,32 @@ class RFMViewer(tk.Toplevel):
 
     def _current_matrix_label(self) -> str:
         start_ms, end_ms = self._selected_time_bounds_ms()
+        if self._rf_subtraction_range() is not None:
+            return f"{self.value_mode_var.get()}: {self._rf_window_expression()}"
         return f"{self.value_mode_var.get()}: {format_ms(start_ms)} to {format_ms(end_ms)} ms"
+
+    def _rf_window_expression(self) -> str:
+        start_ms, end_ms = self._selected_time_bounds_ms()
+        first = f"{format_ms(start_ms)} ms – {format_ms(end_ms)} ms"
+        subtract_range = self._rf_subtraction_range()
+        if subtract_range is None:
+            return first
+        start, end = subtract_range
+        second = (
+            f"{format_ms(self.data.time_bin_edges[start] * 1000.0)} ms – "
+            f"{format_ms(self.data.time_bin_edges[end + 1] * 1000.0)} ms"
+        )
+        return f"({first}) − ({second})"
 
     def _rf_sum_range_value_text(self, value: float | None) -> str:
         value_mode = self.value_mode_var.get()
         start_ms, end_ms = self._selected_time_bounds_ms()
+        if self._rf_subtraction_range() is not None:
+            value_text = "NaN" if value is None else format_response_value(value, value_mode)
+            return (
+                f"RF A − B {self._rf_window_expression()}: "
+                f"{value_text} {value_mode_unit(value_mode)}"
+            )
         return (
             f"RF sum range {format_ms(start_ms)}–{format_ms(end_ms)} ms: "
             f"{format_response_value(value, value_mode)} {value_mode_unit(value_mode)}"
@@ -10927,6 +5895,9 @@ class RFMViewer(tk.Toplevel):
         range_start, range_end = self._source_bins_for_time_controls()
         range_value = self._group_response_value(
             y_start, y_end, x_idx, x_end, range_start, range_end
+        )
+        range_value = self._subtract_group_response_value(
+            range_value, y_start, y_end, x_idx, x_end
         )
         total_value = self._group_response_value(
             y_start, y_end, x_idx, x_end, 0, self.data.n_bins - 1
@@ -11029,6 +6000,9 @@ class RFMViewer(tk.Toplevel):
             plot_start,
             plot_end,
         )
+        plot_value = self._subtract_group_response_value(
+            plot_value, y_start, y_end, x_start, x_end
+        )
         return "\n".join(
             [
                 self._y_group_text(y_start, y_end),
@@ -11040,9 +6014,22 @@ class RFMViewer(tk.Toplevel):
             ]
         )
 
+    def _subtract_group_response_value(
+        self, value: float | None, y_start: int, y_end: int, x_start: int, x_end: int,
+    ) -> float | None:
+        subtract_range = self._rf_subtraction_range()
+        if subtract_range is None:
+            return value
+        baseline = self._group_response_value(
+            y_start, y_end, x_start, x_end, *subtract_range
+        )
+        if value is None or baseline is None:
+            return None
+        difference = value - baseline
+        return difference if difference >= 0.0 else None
+
     def _draw_rf(self) -> None:
-        source_start, source_end = self._source_bins_for_display_range()
-        prepared = self._prepare_response_plot_matrix(source_start, source_end)
+        prepared = self._prepare_rf_plot_matrix()
         matrix = PreparedSpatialMatrix(*prepared)
         title = f"RF map - {self._current_matrix_label()}"
         if self.polar_layout_var.get():
@@ -11153,7 +6140,9 @@ class RFMViewer(tk.Toplevel):
                     outline="#ffffff",
                     width=0,
                 )
-                if value is None or not math.isfinite(float(value)):
+                if (value is None or not math.isfinite(float(value))) and not (
+                    key == "rf" and self.rf_subtract_var.get()
+                ):
                     self._draw_missing_hatch(canvas, x, y, x + cell_x, y + cell_y)
 
         self._draw_selection_outline(
@@ -11315,8 +6304,12 @@ class RFMViewer(tk.Toplevel):
             fill="#e6e8eb",
             outline="#c4c6ca",
         )
-        self._draw_missing_hatch(canvas, x, legend_y, x + 13, legend_y + 13)
-        if palette == "Delay":
+        difference = canvas is self.canvases.get("rf") and self.rf_subtract_var.get()
+        if not difference:
+            self._draw_missing_hatch(canvas, x, legend_y, x + 13, legend_y + 13)
+        if difference:
+            missing_label = "NaN"
+        elif palette == "Delay":
             missing_label = "No detected peak"
         else:
             missing_label = "No occupancy"
@@ -11454,11 +6447,12 @@ class RFMViewer(tk.Toplevel):
                 fill = delay_color(value, low, high) if palette == "Delay" else palette_color(value, low, high, palette)
                 points = self._polar_cell_points(cx, cy, scale, r_inner, r_outer, theta_edges[col], theta_edges[col + 1])
                 missing = value is None or not math.isfinite(float(value))
+                hatch_missing = missing and not (key == "rf" and self.rf_subtract_var.get())
                 canvas.create_polygon(
                     points,
                     fill=fill,
-                    outline="#c4c6ca" if missing else "",
-                    stipple="gray25" if missing else "",
+                    outline="#c4c6ca" if hatch_missing else "",
+                    stipple="gray25" if hatch_missing else "",
                 )
 
         self._draw_polar_selection_outline(
@@ -11619,25 +6613,14 @@ class RFMViewer(tk.Toplevel):
         for display_y in range(n_rows):
             y = y0 + display_y * cell_y
             for group_idx, (x_start, x_end) in enumerate(x_groups):
-                raw_total = total_disp[display_y][group_idx]
-                missing = raw_total is None or not math.isfinite(float(raw_total))
-                total_value = 0.0 if missing else float(raw_total)
-                total_norm = clamp(total_value / max_total)
-                delay = delay_disp[display_y][group_idx]
-                delay_norm = 0.0 if delay is None else clamp((delay - min_delay) / delay_span)
-                entropy_norm = clamp(entropy_disp[display_y][group_idx] or 0.0)
-                if missing:
-                    fill = "#e6e8eb"
-                elif total_value <= 0:
-                    fill = "#000000"
-                else:
-                    fill = hex_color(
-                        (
-                            int(round(total_norm * 255)),
-                            int(round(delay_norm * 255)),
-                            int(round(entropy_norm * 255)),
-                        )
-                    )
+                color = rgb_response_color(
+                    total_disp[display_y][group_idx],
+                    delay_disp[display_y][group_idx],
+                    entropy_disp[display_y][group_idx],
+                    max_total, min_delay, delay_span,
+                )
+                missing = color is None
+                fill = "#e6e8eb" if missing else hex_color(color)
                 x = x0 + group_idx * cell_x
                 canvas.create_rectangle(
                     x,
@@ -11764,22 +6747,14 @@ class RFMViewer(tk.Toplevel):
 
         for ring_idx, display_row in enumerate(ring_rows):
             for column in range(len(x_groups)):
-                raw_total = total_disp[display_row][column]
-                missing = raw_total is None or not math.isfinite(float(raw_total))
-                total_value = 0.0 if missing else float(raw_total)
-                delay = delay_disp[display_row][column]
-                if missing:
-                    fill = "#e6e8eb"
-                elif total_value <= 0:
-                    fill = "#000000"
-                else:
-                    fill = hex_color(
-                        (
-                            int(round(clamp(total_value / max_total) * 255)),
-                            int(round((0.0 if delay is None else clamp((delay - min_delay) / delay_span)) * 255)),
-                            int(round(clamp(entropy_disp[display_row][column] or 0.0) * 255)),
-                        )
-                    )
+                color = rgb_response_color(
+                    total_disp[display_row][column],
+                    delay_disp[display_row][column],
+                    entropy_disp[display_row][column],
+                    max_total, min_delay, delay_span,
+                )
+                missing = color is None
+                fill = "#e6e8eb" if missing else hex_color(color)
                 points = self._polar_cell_points(
                     cx,
                     cy,
@@ -12974,6 +7949,7 @@ class RFMViewer(tk.Toplevel):
         plot_start_ms, plot_end_ms = self._default_plot_time_bounds_ms()
         self.range_start_ms_var.set(format_ms(plot_start_ms))
         self.range_end_ms_var.set(format_ms(plot_end_ms))
+        self._reset_rf_window_defaults()
         value_mode = self.settings.rf_value_mode
         self.value_mode_var.set(
             value_mode if self.data.supports_value_mode(value_mode) else VALUE_MODE_RATE
@@ -13037,7 +8013,7 @@ class RFMViewer(tk.Toplevel):
         self._schedule_optional_autoload()
 
     def _open_figure_exporter(self) -> None:
-        existing = self.__dict__.get("_figure_export_window")
+        existing = self._figure_export_window
         if existing is not None:
             try:
                 if existing.winfo_exists():
@@ -13064,16 +8040,20 @@ class RFMViewer(tk.Toplevel):
                 parent=self,
             )
             return
-        source_start, source_end = self._source_bins_for_display_range()
-        matrix, x_groups, y_groups = self._prepare_response_plot_matrix(
-            source_start,
-            source_end,
-            smooth=True,
-        )
+        matrix, x_groups, y_groups = self._prepare_rf_plot_matrix()
         export_space = "displayed"
 
         range_start, range_end = self._plot_range_group_indices()
         range_start_ms, range_end_ms = self._selected_time_bounds_ms()
+        subtract_range = self._rf_subtraction_range()
+        subtract_start_ms = (
+            self.data.time_bin_edges[subtract_range[0]] * 1000.0
+            if subtract_range is not None else ""
+        )
+        subtract_end_ms = (
+            self.data.time_bin_edges[subtract_range[1] + 1] * 1000.0
+            if subtract_range is not None else ""
+        )
         value_mode = self.value_mode_var.get()
         path = filedialog.asksaveasfilename(
             title=f"Export {export_space} RF matrix",
@@ -13130,6 +8110,9 @@ class RFMViewer(tk.Toplevel):
                         "flip_y",
                         "palette",
                         "source_json",
+                        "rf_window_operation",
+                        "rf_subtract_start_ms",
+                        "rf_subtract_end_ms",
                     ]
                 )
                 for display_y, (y_start, y_end) in enumerate(y_groups):
@@ -13181,6 +8164,9 @@ class RFMViewer(tk.Toplevel):
                                 self.flip_y_var.get(),
                                 self.palette_var.get(),
                                 self.data.path,
+                                "A - B" if subtract_range is not None else "sum",
+                                subtract_start_ms,
+                                subtract_end_ms,
                             ]
                         )
 
@@ -13189,1792 +8175,6 @@ class RFMViewer(tk.Toplevel):
             messagebox.showerror("Export failed", str(exc))
             return
         messagebox.showinfo("Export complete", f"Wrote {export_space} matrix to {path}")
-
-
-@dataclass(frozen=True)
-class FigureViewerSnapshot:
-    """Immutable viewer settings used by preview and final figure rendering."""
-
-    value_mode: str
-    rf_source_start: int
-    rf_source_end: int
-    time_groups: tuple[AxisGroup, ...]
-    x_groups: tuple[AxisGroup, ...]
-    y_groups: tuple[AxisGroup, ...]
-    smooth_radius: int
-    palette: str
-    polar_radius: str
-    timeline_polar: bool
-    selected_cell: CellRef | None
-    total_degrees: float
-    timeline_range_start: int = 0
-    timeline_range_end: int = -1
-    timeline_active_bin: int = 0
-    hd_display_bins: int = DEFAULT_HD_DISPLAY_BINS
-    hd_smoothing: bool = True
-    hd_smooth_sigma: float = DEFAULT_HD_SMOOTH_SIGMA
-    tuning_curve_session: int = DEFAULT_TUNING_CURVE_SESSION
-    unit_filter_enabled: bool = False
-    zero_bin_threshold: int = 1
-    visible_unit_ids: tuple[int, ...] | None = None
-    waveform_channel_mode: str = "same_x_column"
-
-    @classmethod
-    def capture(cls, viewer: RFMViewer) -> FigureViewerSnapshot:
-        source_start, source_end = viewer._source_bins_for_time_controls()
-        timeline_range_start, timeline_range_end = viewer._display_range_indices()
-        return cls(
-            value_mode=viewer.value_mode_var.get(),
-            rf_source_start=source_start,
-            rf_source_end=source_end,
-            time_groups=tuple(viewer._time_groups()),
-            x_groups=tuple(viewer._x_groups()),
-            y_groups=tuple(viewer._display_y_groups()),
-            smooth_radius=viewer._smooth_radius(),
-            palette=viewer.palette_var.get(),
-            polar_radius=viewer.polar_radius_var.get(),
-            timeline_polar=bool(viewer.polar_layout_var.get()),
-            selected_cell=viewer.selected_cell,
-            total_degrees=viewer.data.infer_total_deg(),
-            timeline_range_start=timeline_range_start,
-            timeline_range_end=timeline_range_end,
-            timeline_active_bin=max(
-                0,
-                min(len(viewer._time_groups()) - 1, int(viewer.bin_var.get())),
-            ),
-            hd_display_bins=normalize_hd_bin_count(
-                viewer.tuning_display_bins_var.get()
-            ),
-            hd_smoothing=bool(viewer.tuning_smoothing_var.get()),
-            hd_smooth_sigma=float(viewer.tuning_smooth_sigma_var.get()),
-            tuning_curve_session=int(viewer.settings.tuning_curve_session),
-            unit_filter_enabled=bool(
-                viewer.settings.rf_filter_units_with_zero_bins
-            ),
-            zero_bin_threshold=int(viewer.settings.rf_zero_bin_threshold),
-            visible_unit_ids=tuple(viewer._local_quality_visible_unit_ids()),
-            waveform_channel_mode=viewer.waveform_channel_mode_var.get(),
-        )
-
-
-class GUIFigureDataProvider:
-    """Prepare every registered figure without mutating the live viewer."""
-
-    def __init__(
-        self,
-        data: RFMappingData,
-        snapshot: FigureViewerSnapshot,
-        *,
-        shared_rf_scale: tuple[float, float] | None = None,
-        shared_waveform_limit: float | None = None,
-        response_cache: dict[
-            tuple[object, ...], list[list[float | None]]
-        ]
-        | None = None,
-        response_cache_lock: threading.Lock | None = None,
-    ):
-        self.data = data
-        self.snapshot = snapshot
-        self.shared_rf_scale = shared_rf_scale
-        self.shared_waveform_limit = shared_waveform_limit
-        self._response_cache = response_cache if response_cache is not None else {}
-        self._response_cache_lock = (
-            response_cache_lock
-            if response_cache_lock is not None
-            else threading.Lock()
-        )
-        self._temporal_cache: dict[
-            tuple[int, bool],
-            tuple[list[list[float | None]], list[list[float | None]]],
-        ] = {}
-        self._temporal_cache_lock = threading.Lock()
-        # Capture companion geometry with the same source-session object used
-        # for every other plot.  A non-modal composer must not start reading a
-        # different CSV after the parent viewer switches JSON documents.
-        self.probe_geometry = data.probe_geometry()
-        self.probe_geometry_error = data.probe_geometry_error
-        self.hd_tuning = data.hd_tuning(snapshot.tuning_curve_session)
-        self.hd_tuning_error = data.hd_tuning_error
-        self.waveform_store = data.waveform_store()
-        self.waveform_error = data.waveform_error
-
-    def __call__(self, unit_id: int, template: PlotSpec) -> PlotSpec:
-        try:
-            unit_idx = self.data.rf_map_by_unit_id(unit_id).unit_index
-        except KeyError:
-            return replace(
-                template,
-                data={"unavailable": f"Unit {unit_id} is unavailable in this RF dataset."},
-            )
-
-        kind = template.kind
-        options = dict(template.options)
-        options.setdefault("palette", self.snapshot.palette)
-        options.setdefault("total_degrees", self.snapshot.total_degrees)
-        if kind in {
-            PlotKind.RF_POLAR,
-            PlotKind.DELAY_POLAR,
-            PlotKind.RGB_POLAR,
-            PlotKind.TIMELINE_CURRENT,
-        }:
-            options.setdefault("inner_blank_rows", INNER_BLANK_ROWS)
-        if kind in {PlotKind.RF_CARTESIAN, PlotKind.RF_POLAR}:
-            payload = self._rf_matrix(unit_idx, polar=kind is PlotKind.RF_POLAR)
-            if self.shared_rf_scale is not None:
-                options.setdefault("vmin", self.shared_rf_scale[0])
-                options.setdefault("vmax", self.shared_rf_scale[1])
-            options.setdefault("value_unit", value_mode_unit(self.snapshot.value_mode))
-            options.setdefault("show_colorbar", True)
-        elif kind in {PlotKind.DELAY_CARTESIAN, PlotKind.DELAY_POLAR}:
-            options["palette"] = "delay"
-            options["vmin"] = self.data.time_bin_edges[0] * 1000.0
-            options["vmax"] = self.data.time_bin_edges[-1] * 1000.0
-            payload = self._delay_matrix(unit_idx, polar=kind is PlotKind.DELAY_POLAR)
-        elif kind in {PlotKind.RGB_CARTESIAN, PlotKind.RGB_POLAR}:
-            payload = self._rgb_matrix(unit_idx, polar=kind is PlotKind.RGB_POLAR)
-        elif kind is PlotKind.TIMELINE_CURRENT:
-            options["polar"] = self.snapshot.timeline_polar
-            payload = self._timeline_payload(unit_idx)
-        elif kind in {PlotKind.HD_LINE, PlotKind.HD_POLAR}:
-            payload = self._hd_payload(unit_id)
-        elif kind is PlotKind.PROBE_LAYOUT:
-            options.setdefault("coordinate_unit", "µm")
-            payload = self._probe_payload(unit_id)
-            if self.probe_geometry is not None:
-                template = replace(
-                    template,
-                    title=f"{self.probe_geometry.probe_name} layout",
-                )
-        elif kind is PlotKind.WAVEFORM_LOCAL_AVERAGE:
-            payload = self._waveform_payload(unit_id)
-            options["palette"] = "rdbu_r"
-            options["value_unit"] = "µV"
-            options["show_colorbar"] = True
-            if "unavailable" not in payload:
-                local_limit = float(payload["amplitude_limit_uv"])
-                limit = (
-                    self.shared_waveform_limit
-                    if self.shared_waveform_limit is not None
-                    else local_limit
-                )
-                options["vmin"] = -abs(float(limit))
-                options["vmax"] = abs(float(limit))
-        else:
-            payload = {"unavailable": f"Unsupported figure kind: {kind.value}"}
-        if kind in {PlotKind.RF_CARTESIAN, PlotKind.DELAY_CARTESIAN, PlotKind.RGB_CARTESIAN}:
-            options.setdefault(
-                "x_values",
-                [
-                    (self.data.x_positions[start] + self.data.x_positions[end]) / 2.0
-                    for start, end in self.snapshot.x_groups
-                ],
-            )
-            options.setdefault(
-                "y_values",
-                [
-                    (self.data.y_positions[start] + self.data.y_positions[end]) / 2.0
-                    for start, end in self.snapshot.y_groups
-                ],
-            )
-            options.setdefault("x_unit", "°")
-            options.setdefault("y_unit", "°")
-            options.setdefault("show_axes", True)
-        if kind in {PlotKind.DELAY_CARTESIAN, PlotKind.DELAY_POLAR}:
-            options.setdefault("value_unit", "ms")
-            options.setdefault("show_colorbar", True)
-        return replace(template, data=payload, options=options)
-
-    def shared_rf_bounds(
-        self,
-        unit_ids: Iterable[int],
-        cancelled: Callable[[], bool] | None = None,
-    ) -> tuple[float, float]:
-        matrices = []
-        for unit_id in unit_ids:
-            if cancelled is not None and cancelled():
-                raise RuntimeError("Preview superseded by a newer recipe")
-            unit_idx = self.data.rf_map_by_unit_id(int(unit_id)).unit_index
-            matrices.append(self._rf_matrix(unit_idx, polar=False))
-        bounds = shared_scalar_scale(matrices)
-        return float(bounds["vmin"]), float(bounds["vmax"])
-
-    def shared_waveform_amplitude_limit(
-        self,
-        unit_ids: Iterable[int],
-        cancelled: Callable[[], bool] | None = None,
-    ) -> float | None:
-        limit = 0.0
-        found = False
-        for unit_id in unit_ids:
-            if cancelled is not None and cancelled():
-                raise RuntimeError("Preview superseded by a newer recipe")
-            try:
-                payload = self.data.waveform_payload(
-                    int(unit_id), self.snapshot.waveform_channel_mode
-                )
-            except (OSError, ValueError):
-                continue
-            limit = max(limit, float(payload.amplitude_limit_uv))
-            found = True
-        return limit if found else None
-
-    def _prepare(
-        self,
-        matrix: list[list[float | None]],
-        *,
-        polar: bool,
-    ) -> list[list[float | None]]:
-        prepared = reduce_matrix_xy(
-            matrix,
-            list(self.snapshot.y_groups),
-            list(self.snapshot.x_groups),
-        )
-        prepared = smooth_matrix(prepared, self.snapshot.smooth_radius)
-        if not polar:
-            return prepared
-        if self.snapshot.polar_radius == POLAR_RADIUS_MODES[0]:
-            ring_rows = sorted(
-                range(len(self.snapshot.y_groups)),
-                key=lambda index: self.snapshot.y_groups[index][0],
-            )
-        else:
-            ring_rows = list(range(len(prepared) - 1, -1, -1))
-        return [prepared[index] for index in ring_rows]
-
-    def _rf_matrix(self, unit_idx: int, *, polar: bool) -> list[list[float | None]]:
-        return self._grouped_response_matrix(
-            unit_idx,
-            self.snapshot.rf_source_start,
-            self.snapshot.rf_source_end,
-            polar=polar,
-        )
-
-    def _polarize_grouped(
-        self,
-        matrix: list[list[float | None]],
-        *,
-        polar: bool,
-    ) -> list[list[float | None]]:
-        if not polar:
-            return matrix
-        if self.snapshot.polar_radius == POLAR_RADIUS_MODES[0]:
-            ring_rows = sorted(
-                range(len(self.snapshot.y_groups)),
-                key=lambda index: self.snapshot.y_groups[index][0],
-            )
-        else:
-            ring_rows = list(range(len(matrix) - 1, -1, -1))
-        return [matrix[index] for index in ring_rows]
-
-    def _grouped_response_matrix(
-        self,
-        unit_idx: int,
-        source_start: int,
-        source_end: int,
-        *,
-        polar: bool,
-    ) -> list[list[float | None]]:
-        """Pool count/exposure observations before spatial smoothing."""
-
-        normalized = self.data._normalized_time_groups(
-            [(source_start, source_end)]
-        )[0]
-        key = (
-            int(unit_idx),
-            normalized[0],
-            normalized[1],
-            self.snapshot.value_mode,
-            tuple(self.snapshot.y_groups),
-            tuple(self.snapshot.x_groups),
-            int(self.snapshot.smooth_radius),
-            bool(polar),
-            self.snapshot.polar_radius if polar else None,
-        )
-        with self._response_cache_lock:
-            cached = self._response_cache.get(key)
-        if cached is not None:
-            return cached
-
-        if polar:
-            matrix = self._polarize_grouped(
-                self._grouped_response_matrix(
-                    unit_idx,
-                    normalized[0],
-                    normalized[1],
-                    polar=False,
-                ),
-                polar=True,
-            )
-        else:
-            frames = self.data.spatial_group_response_frames(
-                unit_idx,
-                [normalized],
-                self.snapshot.value_mode,
-                self.snapshot.y_groups,
-                self.snapshot.x_groups,
-                smooth_radius=self.snapshot.smooth_radius,
-            )
-            matrix = _nullable_array_list(frames[0])
-        with self._response_cache_lock:
-            existing = self._response_cache.setdefault(key, matrix)
-        return existing
-
-    def _delay_raw(self, unit_idx: int) -> list[list[float | None]]:
-        unit = self.data.rf_map(unit_idx).spike_counts
-        metrics = self.data.metrics(unit_idx)
-        result: list[list[float | None]] = []
-        for y_idx in range(self.data.n_y):
-            row: list[float | None] = []
-            for x_idx in range(self.data.n_x):
-                if metrics.total[y_idx][x_idx] <= 0:
-                    row.append(None)
-                    continue
-                hist = unit[y_idx, x_idx]
-                grouped = [
-                    float(hist[start : end + 1].sum())
-                    for start, end in self.snapshot.time_groups
-                ]
-                if not grouped or max(grouped) <= 0:
-                    row.append(None)
-                    continue
-                peak = max(range(len(grouped)), key=grouped.__getitem__)
-                start, end = self.snapshot.time_groups[peak]
-                row.append(
-                    (
-                        self.data.time_bin_edges[start]
-                        + self.data.time_bin_edges[end + 1]
-                    )
-                    * 500.0
-                )
-            result.append(row)
-        return result
-
-    def _delay_matrix(self, unit_idx: int, *, polar: bool) -> list[list[float | None]]:
-        delay, _entropy = self._grouped_temporal_matrices(unit_idx, polar=polar)
-        return delay
-
-    def _grouped_temporal_matrices(
-        self,
-        unit_idx: int,
-        *,
-        polar: bool,
-    ) -> tuple[list[list[float | None]], list[list[float | None]]]:
-        key = (int(unit_idx), bool(polar))
-        with self._temporal_cache_lock:
-            cached = self._temporal_cache.get(key)
-        if cached is not None:
-            return cached
-        if polar:
-            delay, entropy = self._grouped_temporal_matrices(
-                unit_idx,
-                polar=False,
-            )
-            result = (
-                self._polarize_grouped(delay, polar=True),
-                self._polarize_grouped(entropy, polar=True),
-            )
-        else:
-            delay_values, entropy_values = self.data.spatial_group_temporal_arrays(
-                unit_idx,
-                self.snapshot.y_groups,
-                self.snapshot.x_groups,
-                self.snapshot.time_groups,
-                smooth_radius=self.snapshot.smooth_radius,
-            )
-            result = (
-                _nullable_array_list(delay_values),
-                _nullable_array_list(entropy_values),
-            )
-        with self._temporal_cache_lock:
-            return self._temporal_cache.setdefault(key, result)
-
-    def _rgb_matrix(self, unit_idx: int, *, polar: bool) -> list[list[tuple[int, int, int]]]:
-        response = self._grouped_response_matrix(
-            unit_idx,
-            0,
-            self.data.n_bins - 1,
-            polar=polar,
-        )
-        delay, entropy = self._grouped_temporal_matrices(unit_idx, polar=polar)
-        response_values = [
-            float(value)
-            for row in response
-            for value in row
-            if value is not None and math.isfinite(float(value))
-        ]
-        response_high = max(response_values, default=0.0)
-        max_response = max(response_high, 1.0)
-        delay_start = self.data.time_bin_edges[0] * 1000.0
-        delay_end = self.data.time_bin_edges[-1] * 1000.0
-        delay_span = max(delay_end - delay_start, 1.0)
-        rgb: list[list[tuple[int, int, int]]] = []
-        for y_idx, row in enumerate(response):
-            output_row: list[tuple[int, int, int]] = []
-            for x_idx, value in enumerate(row):
-                response_value = float(value) if value is not None else 0.0
-                delay_value = delay[y_idx][x_idx]
-                entropy_value = entropy[y_idx][x_idx]
-                if response_value <= 0:
-                    output_row.append((237, 240, 243))
-                else:
-                    output_row.append(
-                        (
-                            int(round(clamp(response_value / max_response) * 255)),
-                            int(
-                                round(
-                                    clamp(
-                                        (
-                                            (float(delay_value) if delay_value is not None else delay_start)
-                                            - delay_start
-                                        )
-                                        / delay_span
-                                    )
-                                    * 255
-                                )
-                            ),
-                            int(round(clamp(float(entropy_value or 0.0)) * 255)),
-                        )
-                    )
-            rgb.append(output_row)
-        return rgb
-
-    def _all_positions_timeline(self, unit_idx: int) -> list[float]:
-        return self.data.all_positions_timeline_values(
-            unit_idx,
-            self.snapshot.time_groups,
-            self.snapshot.value_mode,
-        )
-
-    def _selected_timeline(self, unit_idx: int) -> list[float] | None:
-        if self.snapshot.selected_cell is None:
-            return None
-        y_start, y_end, x_start, x_end = self.snapshot.selected_cell
-        values = self.data.spatial_group_response_values(
-            unit_idx,
-            (y_start, y_end),
-            (x_start, x_end),
-            self.snapshot.time_groups,
-            self.snapshot.value_mode,
-        )
-        return [float(value) if value is not None else 0.0 for value in values]
-
-    def _timeline_payload(self, unit_idx: int) -> dict[str, object]:
-        frame_values = self.data.spatial_group_response_frames(
-            unit_idx,
-            self.snapshot.time_groups,
-            self.snapshot.value_mode,
-            self.snapshot.y_groups,
-            self.snapshot.x_groups,
-            smooth_radius=self.snapshot.smooth_radius,
-        )
-        if self.snapshot.timeline_polar:
-            if self.snapshot.polar_radius == POLAR_RADIUS_MODES[0]:
-                ring_rows = sorted(
-                    range(len(self.snapshot.y_groups)),
-                    key=lambda index: self.snapshot.y_groups[index][0],
-                )
-            else:
-                ring_rows = list(range(len(self.snapshot.y_groups) - 1, -1, -1))
-            frame_values = frame_values[:, ring_rows, :]
-        frames = _nullable_array_list(frame_values)
-        times = [
-            (
-                self.data.time_bin_edges[start]
-                + self.data.time_bin_edges[end + 1]
-            )
-            * 500.0
-            for start, end in self.snapshot.time_groups
-        ]
-        group_count = len(self.snapshot.time_groups)
-        selection_start = max(
-            0,
-            min(group_count - 1, int(self.snapshot.timeline_range_start)),
-        )
-        requested_end = self.snapshot.timeline_range_end
-        selection_end = (
-            group_count - 1
-            if requested_end < 0
-            else max(selection_start, min(group_count - 1, int(requested_end)))
-        )
-        time_edges = [
-            self.data.time_bin_edges[start] * 1000.0
-            for start, _end in self.snapshot.time_groups
-        ]
-        if self.snapshot.time_groups:
-            time_edges.append(
-                self.data.time_bin_edges[self.snapshot.time_groups[-1][1] + 1] * 1000.0
-            )
-        return {
-            "times": times,
-            "time_edges": time_edges,
-            "time_unit": "ms",
-            "value_unit": value_mode_unit(self.snapshot.value_mode),
-            "totals": self._all_positions_timeline(unit_idx),
-            "selected": self._selected_timeline(unit_idx),
-            "frames": frames,
-            "selection_start_index": selection_start,
-            "selection_end_index": selection_end,
-            "active_index": max(
-                0,
-                min(group_count - 1, int(self.snapshot.timeline_active_bin)),
-            ),
-        }
-
-    def _hd_payload(self, unit_id: int) -> dict[str, object]:
-        tuning = self.hd_tuning
-        if tuning is None:
-            detail = self.hd_tuning_error
-            return {
-                "unavailable": (
-                    f"HD tuning data could not be loaded: {detail}"
-                    if detail
-                    else "No companion HD tuning JSON was found for this RF dataset."
-                )
-            }
-        if isinstance(tuning, TuningCurveData):
-            processed = tuning.processed_for(
-                unit_id,
-                self.snapshot.hd_display_bins,
-                smoothing=self.snapshot.hd_smoothing,
-                sigma=self.snapshot.hd_smooth_sigma,
-            )
-            if processed is None:
-                return {"unavailable": f"HD tuning is unavailable for unit {unit_id}."}
-            angles, rates = processed
-            return {"angles_deg": list(angles), "rates": list(rates)}
-        try:
-            curve = tuning.processed_curve(
-                unit_id,
-                display_bins=self.snapshot.hd_display_bins,
-                smoothing=self.snapshot.hd_smoothing,
-                sigma=self.snapshot.hd_smooth_sigma,
-            )
-        except KeyError:
-            return {"unavailable": f"HD tuning is unavailable for unit {unit_id}."}
-        return {
-            "angles_deg": curve.angles_deg.tolist(),
-            "rates": curve.rates_hz.tolist(),
-        }
-
-    def _probe_payload(self, unit_id: int) -> dict[str, object]:
-        geometry = self.probe_geometry
-        if geometry is None:
-            detail = self.probe_geometry_error
-            return {
-                "unavailable": (
-                    f"Probe geometry could not be loaded: {detail}"
-                    if detail
-                    else "No companion positions.csv was found for this RF dataset."
-                )
-            }
-        selected_unit = next(
-            (unit for unit in geometry.units if unit.unit_id == unit_id),
-            None,
-        )
-        if selected_unit is None:
-            return {
-                "unavailable": (
-                    f"Probe position is unavailable for RF unit {unit_id}; "
-                    "the selected unit is absent from positions.csv."
-                )
-            }
-        missing_position = (
-            selected_unit.x_um is None and selected_unit.y_um is None
-        )
-        points: list[dict[str, object]] = [
-            {
-                "x": channel.x_um,
-                "y": channel.y_um,
-                "label": "",
-                "color": "#94a3b8",
-            }
-            for channel in geometry.channels
-        ]
-        # A Probe plot belongs to one output page and therefore one unit. Keep
-        # physical channels as spatial context, but never leak markers for the
-        # other selected/exported units onto this page.
-        if not missing_position:
-            if selected_unit.x_um is None or selected_unit.y_um is None:
-                raise ValueError(
-                    f"Probe position for unit {unit_id} is incomplete"
-                )
-            points.append(
-                {
-                    "x": selected_unit.x_um,
-                    "y": selected_unit.y_um,
-                    "label": str(selected_unit.unit_id),
-                    "color": "#dc2626",
-                }
-            )
-        if not points and not missing_position:
-            return {"unavailable": "Probe geometry contains no channels or units."}
-        return {
-            "points": points,
-            **({"missingPosition": True} if missing_position else {}),
-        }
-
-    def _waveform_payload(self, unit_id: int) -> dict[str, object]:
-        if self.waveform_store is None:
-            detail = self.waveform_error
-            return {
-                "unavailable": (
-                    f"Waveform artifact could not be loaded: {detail}"
-                    if detail
-                    else "No companion waveform artifact was found for this RF dataset."
-                )
-            }
-        try:
-            return self.data.waveform_plot_payload(
-                int(unit_id), self.snapshot.waveform_channel_mode
-            )
-        except (OSError, ValueError) as exc:
-            return {"unavailable": str(exc)}
-
-
-def _figure_snapshot_metadata(data: RFMappingData, snapshot: FigureViewerSnapshot) -> dict[str, object]:
-    visible_unit_ids = (
-        tuple(int(unit_id) for unit_id in data.unit_pool)
-        if snapshot.visible_unit_ids is None
-        else snapshot.visible_unit_ids
-    )
-    return {
-        "valueMode": snapshot.value_mode,
-        "valueUnit": value_mode_unit(snapshot.value_mode),
-        "rfSourceBins": [snapshot.rf_source_start, snapshot.rf_source_end],
-        "rfTimeRangeMs": [
-            data.time_bin_edges[snapshot.rf_source_start] * 1000.0,
-            data.time_bin_edges[snapshot.rf_source_end + 1] * 1000.0,
-        ],
-        "timeBinEdgesMs": [edge * 1000.0 for edge in data.time_bin_edges],
-        "timeGroups": [list(group) for group in snapshot.time_groups],
-        "xPositions": list(data.x_positions),
-        "yPositions": list(data.y_positions),
-        "xGroups": [list(group) for group in snapshot.x_groups],
-        "yGroups": [list(group) for group in snapshot.y_groups],
-        "smoothRadius": snapshot.smooth_radius,
-        "palette": snapshot.palette,
-        "polarRadius": snapshot.polar_radius,
-        "timelinePolar": snapshot.timeline_polar,
-        "timelineRange": [snapshot.timeline_range_start, snapshot.timeline_range_end],
-        "timelineActiveBin": snapshot.timeline_active_bin,
-        "tuningCurveSession": snapshot.tuning_curve_session,
-        "waveformChannelMode": snapshot.waveform_channel_mode,
-        "totalDegrees": snapshot.total_degrees,
-        "selectedCell": list(snapshot.selected_cell) if snapshot.selected_cell is not None else None,
-        "occupancyTimeSecAvailable": True,
-        "occupancyTimeSecSize": [data.n_y, data.n_x],
-        "unitFilter": {
-            "enabled": snapshot.unit_filter_enabled,
-            "zeroSpikeSpatialBinThreshold": snapshot.zero_bin_threshold,
-            "spatialBinCount": data.spatial_bin_count,
-            "comparison": "hide when zero-bin count is greater than or equal to threshold",
-            "visibleUnitIds": list(visible_unit_ids),
-            "excludedUnitIds": [
-                int(unit_id)
-                for unit_id in data.unit_pool
-                if int(unit_id) not in visible_unit_ids
-            ],
-        },
-    }
-
-
-def _figure_provenance_metadata(
-    data: RFMappingData,
-    snapshot: FigureViewerSnapshot,
-    cancelled: Callable[[], bool] | None = None,
-) -> dict[str, object]:
-    source_hash = _hash_frozen_file(data.source_identity, cancelled)
-    companions: list[dict[str, object]] = []
-    for kind, identities in (
-        ("headDirection", (data._hd_tuning_identity,) if data._hd_tuning_identity else ()),
-        ("probeGeometry", data._probe_file_identities),
-        ("waveform", data._waveform_file_identities),
-    ):
-        for identity in identities:
-            companions.append({"kind": kind, **identity.metadata(_hash_frozen_file(identity, cancelled))})
-    return {
-        "provenanceVersion": 1,
-        "application": {
-            "name": "RF Map Viewer",
-            "version": APP_VERSION,
-            "edition": APP_EDITION,
-        },
-        "source": data.source_identity.metadata(source_hash),
-        "snapshot": _figure_snapshot_metadata(data, snapshot),
-        "companions": companions,
-        "companionStatus": {
-            "headDirection": "available" if data._hd_tuning is not None else (data._hd_tuning_error or "unavailable"),
-            "probeGeometry": "available" if data._probe_geometry is not None else (data._probe_geometry_error or "unavailable"),
-            "waveform": "available" if data._waveform_store is not None else (data._waveform_error or "unavailable"),
-        },
-        "renderingContract": {
-            "preview": "same-page-renderer",
-            "svg": "lossless PNG embedded in SVG; plot primitives are not vector paths",
-        },
-    }
-
-
-class FigureExportWindow(tk.Toplevel):
-    """Page-based, multi-unit figure composer with exact live preview."""
-
-    def __init__(self, viewer: RFMViewer):
-        super().__init__(viewer)
-        self.viewer = viewer
-        self._app_root = viewer._app_root
-        # The composer is a recipe for one immutable source session.  Never
-        # combine its captured provider with indices from a JSON subsequently
-        # selected in the still-interactive parent viewer.
-        self.data = viewer.data
-        self.snapshot = FigureViewerSnapshot.capture(viewer)
-        self.unit_ids = self.snapshot.visible_unit_ids or ()
-        if not self.unit_ids:
-            raise ValueError(
-                "No units pass the zero-spike RF-bin filter for the current RF window."
-            )
-        self._selected_unit_indices: set[int] = set()
-        self._unit_selection_anchor: int | None = None
-        self._unit_selection_focus: int | None = None
-        selected_unit_id = int(viewer._selected_unit_id_value())
-        self.current_unit_id = (
-            selected_unit_id if selected_unit_id in self.unit_ids else self.unit_ids[0]
-        )
-        self._provider_lock = threading.Lock()
-        self._base_data_provider: GUIFigureDataProvider | None = None
-        self._provenance_metadata: dict[str, object] | None = None
-        self._context_cache: dict[tuple[object, ...], tuple[tuple[ExportPage, ...], dict[str, object], GUIFigureDataProvider]] = {}
-        self.pages: list[dict[str, object]] = [
-            {"name": "Page 1", "plots": [self._current_plot_kind()]}
-        ]
-        self._preview_photo = None
-        self._preview_after: str | None = None
-        self._preview_poll_after: str | None = None
-        self._preview_generation = 0
-        self._preview_future: Future | None = None
-        self._preview_futures: set[Future] = set()
-        self._preview_futures_lock = threading.Lock()
-        self._preview_queue: queue.SimpleQueue[tuple[int, object]] = queue.SimpleQueue()
-        self._preview_shutdown = threading.Event()
-        self._preview_cancel_events: dict[int, threading.Event] = {}
-        self._export_busy = False
-        self._export_future: Future | None = None
-        self._export_poll_after: str | None = None
-        self.title("Export Figures — RF Map Viewer")
-        self.geometry("1380x840")
-        self.minsize(1050, 680)
-        self.transient(viewer)
-        self.protocol("WM_DELETE_WINDOW", self._close)
-        self._build()
-        self._populate_units()
-        self._refresh_pages(select=0)
-        self._refresh_current_plots()
-        self._schedule_preview()
-
-    def _current_plot_kind(self) -> PlotKind:
-        tab = self.viewer._active_tab_key()
-        polar = bool(self.viewer.polar_layout_var.get())
-        if tab == "rf":
-            return PlotKind.RF_POLAR if polar else PlotKind.RF_CARTESIAN
-        if tab == "delay":
-            if self.viewer.rgb_mode_var.get():
-                return PlotKind.RGB_POLAR if polar else PlotKind.RGB_CARTESIAN
-            return PlotKind.DELAY_POLAR if polar else PlotKind.DELAY_CARTESIAN
-        return PlotKind.TIMELINE_CURRENT
-
-    def _build(self) -> None:
-        self.columnconfigure(0, weight=0)
-        self.columnconfigure(1, weight=1)
-        self.columnconfigure(2, weight=0)
-        self.rowconfigure(1, weight=1)
-        ttk.Label(
-            self,
-            text="Export Figures",
-            font=("TkDefaultFont", 17, "bold"),
-        ).grid(row=0, column=0, columnspan=3, sticky="w", padx=16, pady=(14, 4))
-        ttk.Label(
-            self,
-            text=(
-                "Each selected unit receives every page below. Preview and final "
-                "files use the same renderer; SVG embeds a lossless raster."
-            ),
-            foreground="#667085",
-        ).grid(row=0, column=1, columnspan=2, sticky="e", padx=16, pady=(14, 4))
-
-        left = ttk.Frame(self, padding=14)
-        left.grid(row=1, column=0, sticky="nsew")
-        center = ttk.Frame(self, padding=(6, 14))
-        center.grid(row=1, column=1, sticky="nsew")
-        right = ttk.Frame(self, padding=14)
-        right.grid(row=1, column=2, sticky="nsew")
-        center.columnconfigure(0, weight=1)
-        center.rowconfigure(1, weight=1)
-
-        ttk.Label(left, text="Figure type", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
-        self.format_var = tk.StringVar(value="PDF")
-        format_combo = ttk.Combobox(
-            left,
-            state="readonly",
-            values=("PDF", "PNG", "SVG (embedded raster)"),
-            textvariable=self.format_var,
-            width=24,
-        )
-        format_combo.pack(fill="x", pady=(5, 12))
-        format_combo.bind("<<ComboboxSelected>>", lambda _event: self._on_format_changed())
-
-        ttk.Label(
-            left,
-            text="Units  (click · Shift-click · ⌘-click)",
-            font=("TkDefaultFont", 11, "bold"),
-        ).pack(anchor="w")
-        self.unit_list = tk.Listbox(left, selectmode="extended", exportselection=False, width=30, height=13)
-        self.unit_list.pack(fill="both", expand=True, pady=(5, 5))
-        try:
-            checkbox_width = int(
-                self.tk.call(
-                    "font",
-                    "measure",
-                    self.unit_list.cget("font"),
-                    "☑  ",
-                )
-            )
-        except (tk.TclError, TypeError, ValueError):
-            checkbox_width = 24
-        self._unit_checkbox_hit_width = max(24, checkbox_width)
-        self.unit_list.bind(
-            "<Button-1>",
-            lambda event: self._on_unit_list_click(event),
-        )
-        self.unit_list.bind(
-            "<Shift-Button-1>",
-            lambda event: self._on_unit_list_click(event, shift=True),
-        )
-        if self.tk.call("tk", "windowingsystem") == "aqua":
-            self.unit_list.bind(
-                "<Command-Button-1>",
-                lambda event: self._on_unit_list_click(event, command=True),
-            )
-            self.unit_list.bind(
-                "<Command-Shift-Button-1>",
-                lambda event: self._on_unit_list_click(
-                    event,
-                    command=True,
-                    shift=True,
-                ),
-            )
-        else:
-            self.unit_list.bind(
-                "<Control-Button-1>",
-                lambda event: self._on_unit_list_click(event, command=True),
-            )
-            self.unit_list.bind(
-                "<Control-Shift-Button-1>",
-                lambda event: self._on_unit_list_click(
-                    event,
-                    command=True,
-                    shift=True,
-                ),
-            )
-        unit_buttons = ttk.Frame(left)
-        unit_buttons.pack(fill="x", pady=(0, 12))
-        ttk.Button(unit_buttons, text="Current", command=self._select_current_unit).pack(side="left")
-        ttk.Button(unit_buttons, text="All", command=self._select_all_units).pack(side="left", padx=5)
-        ttk.Button(unit_buttons, text="Clear", command=self._clear_units).pack(side="left")
-
-        ttk.Label(
-            left,
-            text="Pages per selected unit  (shared template)",
-            font=("TkDefaultFont", 11, "bold"),
-        ).pack(anchor="w")
-        self.page_list = tk.Listbox(left, exportselection=False, width=30, height=8)
-        self.page_list.pack(fill="both", expand=True, pady=(5, 5))
-        self.page_list.bind("<<ListboxSelect>>", lambda _event: self._on_page_selected())
-        page_buttons = ttk.Frame(left)
-        page_buttons.pack(fill="x")
-        ttk.Button(page_buttons, text="+ Page", command=self._add_page).pack(side="left")
-        ttk.Button(page_buttons, text="− Page", command=self._remove_page).pack(side="left", padx=5)
-        ttk.Button(
-            page_buttons,
-            text="↑",
-            width=3,
-            command=lambda: self._move_page(-1),
-        ).pack(side="left", padx=(0, 2))
-        ttk.Button(
-            page_buttons,
-            text="↓",
-            width=3,
-            command=lambda: self._move_page(1),
-        ).pack(side="left")
-
-        ttk.Label(center, text="Live preview", font=("TkDefaultFont", 11, "bold")).grid(row=0, column=0, sticky="w")
-        self.preview_label = ttk.Label(center, text="Preparing preview…", anchor="center", relief="solid")
-        self.preview_label.grid(row=1, column=0, sticky="nsew", pady=(6, 6))
-        self.preview_status = ttk.Label(center, text="", foreground="#667085")
-        self.preview_status.grid(row=2, column=0, sticky="w")
-
-        ttk.Label(right, text="Page name", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
-        self.page_name_var = tk.StringVar(value="Page 1")
-        page_name_entry = ttk.Entry(right, textvariable=self.page_name_var, width=34)
-        page_name_entry.pack(fill="x", pady=(5, 12))
-        page_name_entry.bind("<Return>", self._rename_page)
-        page_name_entry.bind("<FocusOut>", self._rename_page)
-
-        ttk.Label(right, text="Available views", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
-        self.available_kinds = [definition.kind for definition in PLOT_KIND_REGISTRY.values()]
-        self.available_list = tk.Listbox(right, exportselection=False, width=36, height=11)
-        for kind in self.available_kinds:
-            self.available_list.insert("end", PLOT_KIND_REGISTRY[kind.value].label)
-        self.available_list.selection_set(0)
-        self.available_list.pack(fill="both", expand=True, pady=(5, 5))
-        ttk.Button(right, text="Add view to page →", command=self._add_plot).pack(fill="x", pady=(0, 12))
-
-        ttk.Label(right, text="Views on current page", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
-        self.current_plot_list = tk.Listbox(right, exportselection=False, width=36, height=10)
-        self.current_plot_list.pack(fill="both", expand=True, pady=(5, 5))
-        plot_buttons = ttk.Frame(right)
-        plot_buttons.pack(fill="x")
-        ttk.Button(plot_buttons, text="Remove", command=self._remove_plot).pack(side="left")
-        ttk.Button(plot_buttons, text="↑", width=3, command=lambda: self._move_plot(-1)).pack(side="left", padx=(5, 2))
-        ttk.Button(plot_buttons, text="↓", width=3, command=lambda: self._move_plot(1)).pack(side="left")
-
-        footer = ttk.Frame(self, padding=(16, 8, 16, 14))
-        footer.grid(row=2, column=0, columnspan=3, sticky="ew")
-        footer.columnconfigure(1, weight=1)
-        ttk.Label(footer, text="Destination").grid(row=0, column=0, sticky="w")
-        self.destination_var = tk.StringVar(value="")
-        ttk.Entry(footer, textvariable=self.destination_var).grid(row=0, column=1, sticky="ew", padx=8)
-        ttk.Button(footer, text="Choose…", command=self._choose_destination).grid(row=0, column=2)
-        self.export_button = ttk.Button(footer, text="Export", command=self._start_export)
-        self.export_button.grid(row=0, column=3, padx=(12, 0))
-        ttk.Button(footer, text="Close", command=self._close).grid(row=0, column=4, padx=(6, 0))
-        self.export_status = ttk.Label(footer, text="", foreground="#475467")
-        self.export_status.grid(row=1, column=0, columnspan=5, sticky="w", pady=(7, 0))
-
-    def _populate_units(self) -> None:
-        self._select_current_unit()
-
-    def _refresh_unit_rows(self, *, see_focus: bool = False) -> None:
-        yview = self.unit_list.yview()
-        self.unit_list.delete(0, "end")
-        for index, unit_id in enumerate(self.unit_ids):
-            rf_map = self.data.rf_map_by_unit_id(unit_id)
-            checkbox = "☑" if index in self._selected_unit_indices else "☐"
-            self.unit_list.insert(
-                "end",
-                f"{checkbox}  index {rf_map.unit_index:03d}  ·  unit {rf_map.unit_id}",
-            )
-        self.unit_list.selection_clear(0, "end")
-        for index in sorted(self._selected_unit_indices):
-            self.unit_list.selection_set(index)
-        if self._unit_selection_focus is not None:
-            self.unit_list.activate(self._unit_selection_focus)
-            if see_focus:
-                self.unit_list.see(self._unit_selection_focus)
-            elif yview:
-                self.unit_list.yview_moveto(yview[0])
-
-    def _unit_index_at_event(self, event) -> int | None:
-        if not self.unit_ids:
-            return None
-        index = int(self.unit_list.nearest(event.y))
-        bounds = self.unit_list.bbox(index)
-        if bounds is None:
-            return None
-        _x, y, _width, height = bounds
-        if not y <= int(event.y) < y + height:
-            return None
-        return index
-
-    def _on_unit_list_click(
-        self,
-        event,
-        *,
-        command: bool = False,
-        shift: bool = False,
-    ) -> str:
-        index = self._unit_index_at_event(event)
-        if index is None:
-            return "break"
-        bounds = self.unit_list.bbox(index)
-        checkbox_click = bool(
-            bounds is not None
-            and composer_unit_checkbox_hit(
-                int(event.x),
-                int(bounds[0]),
-                self._unit_checkbox_hit_width,
-            )
-        )
-        selected, anchor = composer_unit_selection_after_click(
-            self._selected_unit_indices,
-            index,
-            self._unit_selection_anchor,
-            len(self.unit_ids),
-            # Clicking the checkbox itself is an additive toggle even without
-            # a modifier. Shift retains its range meaning; Command retains its
-            # explicit toggle/add-range meaning anywhere on the row.
-            command=command or (checkbox_click and not shift),
-            shift=shift,
-        )
-        self._selected_unit_indices = set(selected)
-        self._unit_selection_anchor = anchor
-        self._unit_selection_focus = index
-        self._refresh_unit_rows()
-        self._schedule_preview()
-        return "break"
-
-    def _select_current_unit(self) -> None:
-        try:
-            index = self.unit_ids.index(self.current_unit_id)
-        except ValueError:
-            index = None
-        self._selected_unit_indices = set() if index is None else {index}
-        self._unit_selection_anchor = index
-        self._unit_selection_focus = index
-        self._refresh_unit_rows(see_focus=True)
-        self._schedule_preview()
-
-    def _select_all_units(self) -> None:
-        self._selected_unit_indices = set(range(len(self.unit_ids)))
-        try:
-            focus = self.unit_ids.index(self.current_unit_id)
-        except ValueError:
-            focus = 0 if self.unit_ids else None
-        self._unit_selection_anchor = focus
-        self._unit_selection_focus = focus
-        self._refresh_unit_rows(see_focus=True)
-        self._schedule_preview()
-
-    def _clear_units(self) -> None:
-        self._selected_unit_indices.clear()
-        self._unit_selection_anchor = None
-        self._unit_selection_focus = None
-        self._refresh_unit_rows()
-        self._schedule_preview()
-
-    def _selected_unit_ids(self) -> tuple[int, ...]:
-        return tuple(
-            unit_id
-            for index, unit_id in enumerate(self.unit_ids)
-            if index in self._selected_unit_indices
-        )
-
-    def _selected_page_index(self) -> int:
-        selection = self.page_list.curselection()
-        return int(selection[0]) if selection else 0
-
-    def _refresh_pages(self, *, select: int | None = None) -> None:
-        current = self._selected_page_index() if select is None else select
-        self.page_list.delete(0, "end")
-        for index, page in enumerate(self.pages):
-            plots = page["plots"]
-            self.page_list.insert("end", f"{index + 1}. {page['name']}  ({len(plots)} views)")
-        current = max(0, min(len(self.pages) - 1, current))
-        self.page_list.selection_set(current)
-        self.page_list.see(current)
-        self.page_name_var.set(str(self.pages[current]["name"]))
-
-    def _on_page_selected(self) -> None:
-        index = self._selected_page_index()
-        self.page_name_var.set(str(self.pages[index]["name"]))
-        self._refresh_current_plots()
-        self._schedule_preview()
-
-    def _rename_page(self, _event=None) -> None:
-        index = self._selected_page_index()
-        name = self.page_name_var.get().strip()
-        if not name:
-            self.page_name_var.set(str(self.pages[index]["name"]))
-            return
-        self.pages[index]["name"] = name
-        self._refresh_pages(select=index)
-        self._schedule_preview()
-
-    def _add_page(self) -> None:
-        self.pages.append({"name": f"Page {len(self.pages) + 1}", "plots": []})
-        self._refresh_pages(select=len(self.pages) - 1)
-        self._refresh_current_plots()
-        self._schedule_preview()
-
-    def _remove_page(self) -> None:
-        if len(self.pages) <= 1:
-            messagebox.showinfo("Keep one page", "Each unit must have at least one page.", parent=self)
-            return
-        index = self._selected_page_index()
-        self.pages.pop(index)
-        self._refresh_pages(select=max(0, index - 1))
-        self._refresh_current_plots()
-        self._schedule_preview()
-
-    def _move_page(self, delta: int) -> None:
-        index = self._selected_page_index()
-        target = index + delta
-        if not 0 <= target < len(self.pages):
-            return
-        self.pages[index], self.pages[target] = self.pages[target], self.pages[index]
-        self._refresh_pages(select=target)
-        self._refresh_current_plots()
-        self._schedule_preview()
-
-    def _current_plot_kinds(self) -> list[PlotKind]:
-        return self.pages[self._selected_page_index()]["plots"]  # type: ignore[return-value]
-
-    def _refresh_current_plots(self, *, select: int | None = None) -> None:
-        plots = self._current_plot_kinds()
-        self.current_plot_list.delete(0, "end")
-        for kind in plots:
-            self.current_plot_list.insert("end", PLOT_KIND_REGISTRY[kind.value].label)
-        if plots and select is not None:
-            index = max(0, min(len(plots) - 1, select))
-            self.current_plot_list.selection_set(index)
-        self._refresh_pages(select=self._selected_page_index())
-
-    def _add_plot(self) -> None:
-        selection = self.available_list.curselection()
-        if not selection:
-            return
-        plots = self._current_plot_kinds()
-        plots.append(self.available_kinds[int(selection[0])])
-        self._refresh_current_plots(select=len(plots) - 1)
-        self._schedule_preview()
-
-    def _remove_plot(self) -> None:
-        selection = self.current_plot_list.curselection()
-        if not selection:
-            return
-        index = int(selection[0])
-        plots = self._current_plot_kinds()
-        plots.pop(index)
-        self._refresh_current_plots(select=max(0, index - 1))
-        self._schedule_preview()
-
-    def _move_plot(self, delta: int) -> None:
-        selection = self.current_plot_list.curselection()
-        if not selection:
-            return
-        index = int(selection[0])
-        target = index + delta
-        plots = self._current_plot_kinds()
-        if not 0 <= target < len(plots):
-            return
-        plots[index], plots[target] = plots[target], plots[index]
-        self._refresh_current_plots(select=target)
-        self._schedule_preview()
-
-    def _export_pages(self) -> tuple[ExportPage, ...]:
-        pages: list[ExportPage] = []
-        for index, page in enumerate(self.pages):
-            kinds: list[PlotKind] = page["plots"]  # type: ignore[assignment]
-            if not kinds:
-                raise ValueError(f"Page {index + 1} ({page['name']}) has no views.")
-            pages.append(
-                ExportPage(
-                    str(page["name"]),
-                    tuple(PlotSpec(kind) for kind in kinds),
-                )
-            )
-        return tuple(pages)
-
-    def _resolved_export_pages(
-        self,
-        raw_pages: tuple[ExportPage, ...],
-        shared_rf_scale: tuple[float, float] | None,
-        shared_waveform_limit: float | None = None,
-    ) -> tuple[ExportPage, ...]:
-        pages: list[ExportPage] = []
-        for page in raw_pages:
-            plots: list[PlotSpec] = []
-            for plot in page.plots:
-                options = dict(plot.options)
-                x_values = [
-                    (self.data.x_positions[start] + self.data.x_positions[end]) / 2.0
-                    for start, end in self.snapshot.x_groups
-                ]
-                y_values = [
-                    (self.data.y_positions[start] + self.data.y_positions[end]) / 2.0
-                    for start, end in self.snapshot.y_groups
-                ]
-                if self.snapshot.polar_radius == POLAR_RADIUS_MODES[0]:
-                    polar_row_indices = sorted(
-                        range(len(self.snapshot.y_groups)),
-                        key=lambda index: self.snapshot.y_groups[index][0],
-                    )
-                else:
-                    polar_row_indices = list(range(len(y_values) - 1, -1, -1))
-                polar_y_values = [y_values[index] for index in polar_row_indices]
-                spatial_kinds = {
-                    PlotKind.RF_CARTESIAN,
-                    PlotKind.RF_POLAR,
-                    PlotKind.DELAY_CARTESIAN,
-                    PlotKind.DELAY_POLAR,
-                    PlotKind.RGB_CARTESIAN,
-                    PlotKind.RGB_POLAR,
-                }
-                if plot.kind in spatial_kinds:
-                    options.update(
-                        x_values=x_values,
-                        y_values=y_values,
-                        x_unit="°",
-                        y_unit="°",
-                        show_axes=True,
-                        palette=self.snapshot.palette,
-                        total_degrees=self.snapshot.total_degrees,
-                    )
-                if plot.kind in {
-                    PlotKind.RF_POLAR,
-                    PlotKind.DELAY_POLAR,
-                    PlotKind.RGB_POLAR,
-                }:
-                    # The provider has already reordered its payload into
-                    # inner-to-outer rows. Freeze matching radial labels and
-                    # prohibit a second renderer-side reversal.
-                    options.update(
-                        y_values=polar_y_values,
-                        inner_blank_rows=INNER_BLANK_ROWS,
-                        ring_order="inner_to_outer",
-                        reverse_rings=False,
-                        clockwise=True,
-                    )
-                if plot.kind in {PlotKind.DELAY_CARTESIAN, PlotKind.DELAY_POLAR}:
-                    options.update(
-                        palette="delay",
-                        vmin=self.data.time_bin_edges[0] * 1000.0,
-                        vmax=self.data.time_bin_edges[-1] * 1000.0,
-                        value_unit="ms",
-                        show_colorbar=True,
-                    )
-                if plot.kind is PlotKind.TIMELINE_CURRENT:
-                    options.update(
-                        polar=self.snapshot.timeline_polar,
-                        inner_blank_rows=INNER_BLANK_ROWS,
-                        palette=self.snapshot.palette,
-                        total_degrees=self.snapshot.total_degrees,
-                        value_unit=value_mode_unit(self.snapshot.value_mode),
-                        time_unit="ms",
-                    )
-                if plot.kind in {PlotKind.HD_LINE, PlotKind.HD_POLAR}:
-                    options.update(x_unit="°", y_unit="Hz", show_axes=True)
-                if plot.kind is PlotKind.PROBE_LAYOUT:
-                    options.update(
-                        coordinate_unit="µm",
-                        show_axes=True,
-                        show_scale_bar=True,
-                    )
-                if plot.kind is PlotKind.WAVEFORM_LOCAL_AVERAGE:
-                    options.update(
-                        palette="rdbu_r",
-                        value_unit="µV",
-                        show_axes=True,
-                        show_colorbar=True,
-                    )
-                    if shared_waveform_limit is not None:
-                        options.update(
-                            vmin=-abs(float(shared_waveform_limit)),
-                            vmax=abs(float(shared_waveform_limit)),
-                        )
-                if plot.kind in {PlotKind.RGB_CARTESIAN, PlotKind.RGB_POLAR}:
-                    options["show_colorbar"] = False
-                if shared_rf_scale is not None and plot.kind in {
-                    PlotKind.RF_CARTESIAN,
-                    PlotKind.RF_POLAR,
-                }:
-                    options.update(
-                        vmin=shared_rf_scale[0],
-                        vmax=shared_rf_scale[1],
-                        value_unit=value_mode_unit(self.snapshot.value_mode),
-                        show_colorbar=True,
-                    )
-                start_ms = self.data.time_bin_edges[self.snapshot.rf_source_start] * 1000.0
-                end_ms = self.data.time_bin_edges[self.snapshot.rf_source_end + 1] * 1000.0
-                full_start_ms = self.data.time_bin_edges[0] * 1000.0
-                full_end_ms = self.data.time_bin_edges[-1] * 1000.0
-                grouping = (
-                    f"{self.data.n_x}x{self.data.n_y} to "
-                    f"{len(self.snapshot.x_groups)}x{len(self.snapshot.y_groups)}; "
-                    f"smooth r={self.snapshot.smooth_radius}"
-                )
-                if plot.kind in {PlotKind.RF_CARTESIAN, PlotKind.RF_POLAR}:
-                    context = (
-                        f"{format_ms(start_ms)} to {format_ms(end_ms)} ms; "
-                        f"{self.snapshot.value_mode} ({value_mode_unit(self.snapshot.value_mode)}); "
-                        f"{grouping}"
-                    )
-                elif plot.kind in {
-                    PlotKind.DELAY_CARTESIAN,
-                    PlotKind.DELAY_POLAR,
-                    PlotKind.RGB_CARTESIAN,
-                    PlotKind.RGB_POLAR,
-                }:
-                    context = (
-                        f"full timeline {format_ms(full_start_ms)} to "
-                        f"{format_ms(full_end_ms)} ms; {grouping}"
-                    )
-                elif plot.kind is PlotKind.WAVEFORM_LOCAL_AVERAGE:
-                    context = (
-                        "best + nearest 4; "
-                        f"{WAVEFORM_CHANNEL_MODE_LABELS.get(self.snapshot.waveform_channel_mode, self.snapshot.waveform_channel_mode)}; "
-                        "baseline ≤ -0.25 ms"
-                    )
-                else:
-                    context = None
-                if context is not None:
-                    options["subtitle"] = context
-                title = plot.title or PLOT_KIND_REGISTRY[plot.kind.value].label
-                if (
-                    plot.kind is PlotKind.PROBE_LAYOUT
-                    and self._base_data_provider is not None
-                    and self._base_data_provider.probe_geometry is not None
-                ):
-                    title = f"{self._base_data_provider.probe_geometry.probe_name} layout"
-                plots.append(replace(plot, title=title, options=options))
-            pages.append(ExportPage(page.name, tuple(plots)))
-        return tuple(pages)
-
-    def _verify_export_inputs(self) -> None:
-        self.data.source_identity.verify_path()
-        identities = tuple(
-            identity
-            for identity in (
-                self.data._hd_tuning_identity,
-                *self.data._probe_file_identities,
-                *self.data._waveform_file_identities,
-            )
-            if identity is not None
-        )
-        for identity in identities:
-            identity.verify_path()
-
-    def _recipe_key(
-        self,
-        unit_ids: tuple[int, ...],
-        raw_pages: tuple[ExportPage, ...],
-    ) -> tuple[object, ...]:
-        return (
-            unit_ids,
-            tuple(
-                (page.name, tuple(plot.kind.value for plot in page.plots))
-                for page in raw_pages
-            ),
-        )
-
-    def _freeze_context(
-        self,
-        unit_ids: tuple[int, ...],
-        raw_pages: tuple[ExportPage, ...],
-        cancelled: Callable[[], bool] | None = None,
-    ) -> tuple[tuple[ExportPage, ...], dict[str, object], GUIFigureDataProvider]:
-        key = self._recipe_key(unit_ids, raw_pages)
-        with self._provider_lock:
-            if cancelled is not None and cancelled():
-                raise RuntimeError("Preview superseded by a newer recipe")
-            self._verify_export_inputs()
-            has_waveform = any(
-                plot.kind is PlotKind.WAVEFORM_LOCAL_AVERAGE
-                for page in raw_pages
-                for plot in page.plots
-            )
-            if has_waveform:
-                previous_waveform_inputs = self.data._waveform_file_identities
-                captured_waveform_inputs = self.data.capture_waveform_inputs(
-                    unit_ids
-                )
-                if captured_waveform_inputs != previous_waveform_inputs:
-                    self._provenance_metadata = None
-                self._verify_export_inputs()
-            cached = self._context_cache.get(key)
-            if cached is not None:
-                return cached
-            if self._base_data_provider is None:
-                self._base_data_provider = GUIFigureDataProvider(self.data, self.snapshot)
-            if self._provenance_metadata is None:
-                self._provenance_metadata = _figure_provenance_metadata(
-                    self.data,
-                    self.snapshot,
-                    cancelled,
-                )
-            has_rf = any(
-                plot.kind in {PlotKind.RF_CARTESIAN, PlotKind.RF_POLAR}
-                for page in raw_pages
-                for plot in page.plots
-            )
-            scale = (
-                self._base_data_provider.shared_rf_bounds(unit_ids, cancelled)
-                if has_rf
-                else None
-            )
-            waveform_limit = (
-                self._base_data_provider.shared_waveform_amplitude_limit(
-                    unit_ids, cancelled
-                )
-                if has_waveform
-                else None
-            )
-            pages = (
-                self._resolved_export_pages(raw_pages, scale, waveform_limit)
-                if has_waveform
-                else self._resolved_export_pages(raw_pages, scale)
-            )
-            provider = GUIFigureDataProvider(
-                self.data,
-                self.snapshot,
-                shared_rf_scale=scale,
-                shared_waveform_limit=waveform_limit,
-                response_cache=self._base_data_provider._response_cache,
-                response_cache_lock=self._base_data_provider._response_cache_lock,
-            )
-            metadata = dict(self._provenance_metadata)
-            if scale is not None:
-                metadata["sharedRFScale"] = {
-                    "vmin": scale[0],
-                    "vmax": scale[1],
-                    "unit": value_mode_unit(self.snapshot.value_mode),
-                    "unitIds": list(unit_ids),
-                }
-            if waveform_limit is not None:
-                metadata["sharedWaveformScale"] = {
-                    "vmin": -waveform_limit,
-                    "vmax": waveform_limit,
-                    "unit": "µV",
-                    "unitIds": list(unit_ids),
-                    "baselineEndMs": -0.25,
-                    "channelMode": self.snapshot.waveform_channel_mode,
-                }
-            result = (pages, metadata, provider)
-            if cancelled is not None and cancelled():
-                raise RuntimeError("Preview superseded by a newer recipe")
-            self._verify_export_inputs()
-            self._context_cache[key] = result
-            return result
-
-    def _preview_request(self) -> tuple[tuple[int, ...], tuple[ExportPage, ...], int, int, int]:
-        unit_ids = self._selected_unit_ids() or (self.current_unit_id,)
-        pages = self._export_pages()
-        page_index = self._selected_page_index()
-        available_width = max(480, self.preview_label.winfo_width() - 20)
-        available_height = max(360, self.preview_label.winfo_height() - 20)
-        return unit_ids, pages, page_index, available_width, available_height
-
-    def _preview_plan(
-        self,
-        unit_ids: tuple[int, ...],
-        pages: tuple[ExportPage, ...],
-        metadata: dict[str, object],
-    ) -> ExportPlan:
-        return ExportPlan(
-            FigureFormat.PDF,
-            unit_ids,
-            pages,
-            Path("/tmp/rfmap-live-preview.pdf"),
-            metadata=metadata,
-        )
-
-    def _schedule_preview(self) -> None:
-        self._preview_generation += 1
-        with self._preview_futures_lock:
-            old_futures = tuple(self._preview_futures)
-            old_cancel_events = tuple(self._preview_cancel_events.values())
-        for event in old_cancel_events:
-            event.set()
-        for future in old_futures:
-            future.cancel()
-        if self._preview_after is not None:
-            try:
-                self.after_cancel(self._preview_after)
-            except tk.TclError:
-                pass
-        generation = self._preview_generation
-        self._preview_after = self.after(
-            80,
-            lambda generation=generation: self._start_preview(generation),
-        )
-
-    def _start_preview(self, generation: int) -> None:
-        self._preview_after = None
-        try:
-            unit_ids, raw_pages, page_index, width, height = self._preview_request()
-        except Exception as exc:
-            self._show_preview_error(exc)
-            return
-        self.preview_status.configure(text="Preparing preview and provenance…")
-        cancel_event = threading.Event()
-        with self._preview_futures_lock:
-            self._preview_cancel_events[generation] = cancel_event
-
-        def cancelled() -> bool:
-            return self._preview_shutdown.is_set() or cancel_event.is_set()
-
-        def worker() -> tuple[int, int, object]:
-            pages, metadata, provider = self._freeze_context(
-                unit_ids,
-                raw_pages,
-                cancelled,
-            )
-            if cancelled():
-                raise RuntimeError("Preview superseded by a newer recipe")
-            plan = self._preview_plan(unit_ids, pages, metadata)
-            image = render_live_preview(
-                plan,
-                unit_ids[0],
-                page_index,
-                data_provider=provider,
-            )
-            if cancelled():
-                image.close()
-                raise RuntimeError("Preview superseded by a newer recipe")
-            image.thumbnail((width, height))
-            return unit_ids[0], page_index, image
-
-        future = _submit_daemon_future(worker, name="rfmap-preview")
-        self._preview_future = future
-        with self._preview_futures_lock:
-            self._preview_futures.add(future)
-
-        def finished(done: Future) -> None:
-            try:
-                payload: object = done.result()
-            except Exception as exc:
-                payload = exc
-            with self._preview_futures_lock:
-                self._preview_futures.discard(done)
-                self._preview_cancel_events.pop(generation, None)
-            if self._preview_shutdown.is_set():
-                if isinstance(payload, tuple) and len(payload) == 3:
-                    image = payload[2]
-                    if hasattr(image, "close"):
-                        image.close()
-                return
-            self._preview_queue.put((generation, payload))
-
-        future.add_done_callback(finished)
-        self._schedule_preview_poll()
-
-    def _schedule_preview_poll(self) -> None:
-        if self._preview_poll_after is None:
-            self._preview_poll_after = self.after(40, self._poll_preview)
-
-    def _poll_preview(self) -> None:
-        self._preview_poll_after = None
-        while True:
-            try:
-                generation, payload = self._preview_queue.get_nowait()
-            except queue.Empty:
-                break
-            if generation != self._preview_generation:
-                if isinstance(payload, tuple) and len(payload) == 3:
-                    stale_image = payload[2]
-                    if hasattr(stale_image, "close"):
-                        stale_image.close()
-                continue
-            self._preview_future = None
-            if isinstance(payload, Exception):
-                self._show_preview_error(payload)
-            else:
-                unit_id, page_index, image = payload
-                from PIL import ImageTk
-
-                try:
-                    self._preview_photo = ImageTk.PhotoImage(image)
-                finally:
-                    image.close()
-                self.preview_label.configure(image=self._preview_photo, text="")
-                self.preview_status.configure(
-                    text=(
-                        f"Preview: unit {unit_id}, page {page_index + 1} "
-                        "· same renderer · provenance verified"
-                    )
-                )
-        # A stale result may arrive before the latest worker. Keep polling until
-        # the current generation has either rendered or produced an error.
-        with self._preview_futures_lock:
-            preview_inflight = bool(self._preview_futures)
-        if preview_inflight or not self._preview_queue.empty():
-            self._schedule_preview_poll()
-
-    def _show_preview_error(self, exc: Exception) -> None:
-        self._preview_photo = None
-        self.preview_label.configure(image="", text=f"Preview unavailable\n{exc}")
-        self.preview_status.configure(
-            text=(
-                "Export will re-verify this source and fail safely until it is "
-                "reopened or the page recipe is fixed."
-            )
-        )
-
-    def _on_format_changed(self) -> None:
-        self.destination_var.set("")
-
-    def _default_base_name(self) -> str:
-        stem = self.data.path.stem
-        return f"{stem}_figures"
-
-    def _choose_destination(self) -> None:
-        figure_format = FigureFormat.coerce(self.format_var.get().split()[0])
-        initial_dir = self.data.path.parent
-        if figure_format is FigureFormat.PDF:
-            path = filedialog.asksaveasfilename(
-                parent=self,
-                title="Export multi-page PDF",
-                initialdir=initial_dir,
-                initialfile=f"{self._default_base_name()}.pdf",
-                defaultextension=".pdf",
-                filetypes=(("PDF document", "*.pdf"),),
-            )
-            if path:
-                self.destination_var.set(path)
-            return
-        parent = filedialog.askdirectory(
-            parent=self,
-            title=f"Choose parent folder for {figure_format.value.upper()} pages",
-            initialdir=initial_dir,
-            mustexist=True,
-        )
-        if parent:
-            self.destination_var.set(str(Path(parent) / self._default_base_name()))
-
-    def _start_export(self) -> None:
-        if self._export_busy:
-            return
-        unit_ids = self._selected_unit_ids()
-        if not unit_ids:
-            messagebox.showerror("No units", "Select at least one unit to export.", parent=self)
-            return
-        destination_text = self.destination_var.get().strip()
-        if not destination_text:
-            self._choose_destination()
-            destination_text = self.destination_var.get().strip()
-            if not destination_text:
-                return
-        try:
-            figure_format = FigureFormat.coerce(self.format_var.get().split()[0])
-            destination = Path(destination_text).expanduser()
-            raw_pages = self._export_pages()
-        except Exception as exc:
-            messagebox.showerror("Invalid export", str(exc), parent=self)
-            return
-
-        overwrite = False
-        if destination.exists():
-            if figure_format is not FigureFormat.PDF:
-                messagebox.showerror(
-                    "Choose a new folder",
-                    "PNG/SVG export never replaces an existing directory. Choose a new output folder name.",
-                    parent=self,
-                )
-                return
-            overwrite = messagebox.askyesno(
-                "Replace PDF?",
-                f"{destination} already exists. Replace this file?",
-                parent=self,
-            )
-            if not overwrite:
-                return
-
-        self._export_busy = True
-        self.export_button.state(["disabled"])
-        self.export_status.configure(text="Verifying provenance and freezing export plan…")
-
-        def worker():
-            pages, metadata, provider = self._freeze_context(unit_ids, raw_pages)
-            plan = ExportPlan(
-                figure_format,
-                unit_ids,
-                pages,
-                destination,
-                metadata=metadata,
-            )
-            return export_figures(
-                plan,
-                data_provider=provider,
-                overwrite=overwrite,
-                before_publish=self._verify_export_inputs,
-            )
-
-        future = _export_executor(self._app_root).submit(worker)
-        self._export_future = future
-        _register_export_job(self._app_root, self.viewer, future)
-        page_count = len(unit_ids) * len(raw_pages)
-        self.export_status.configure(text=f"Exporting {page_count} pages…")
-        self._export_poll_after = self.after(50, self._poll_export)
-
-    def _poll_export(self) -> None:
-        self._export_poll_after = None
-        future = self._export_future
-        if future is None:
-            return
-        if not future.done():
-            self._export_poll_after = self.after(50, self._poll_export)
-            return
-        try:
-            result = future.result()
-        except Exception as exc:
-            self._finish_export(error=str(exc))
-        else:
-            self._finish_export(result=result)
-
-    def _finish_export(self, *, result=None, error: str | None = None) -> None:
-        future = self._export_future
-        self._export_future = None
-        _unregister_export_job(self._app_root, future)
-        self._export_busy = False
-        self.export_button.state(["!disabled"])
-        if error is not None:
-            self.export_status.configure(text="Export failed.")
-            messagebox.showerror("Export failed", error, parent=self)
-            return
-        self.export_status.configure(
-            text=f"Exported {result.page_count} pages to {result.destination}"
-        )
-        messagebox.showinfo(
-            "Export complete",
-            f"Exported {result.page_count} pages to\n{result.destination}",
-            parent=self,
-        )
-
-    def _close(self) -> None:
-        if self._export_busy:
-            messagebox.showinfo(
-                "Export is running",
-                "Wait for the export to finish before closing the composer.",
-                parent=self,
-            )
-            return
-        self.viewer.__dict__.pop("_figure_export_window", None)
-        self.destroy()
-
-    def destroy(self) -> None:
-        if (
-            not getattr(self._app_root, "_rfm_quitting", False)
-            and self._export_busy
-        ):
-            messagebox.showinfo(
-                "Export is running",
-                "Wait for the export to finish before closing the composer.",
-                parent=self,
-            )
-            return
-        self._preview_generation += 1
-        self._preview_shutdown.set()
-        with self._preview_futures_lock:
-            cancel_events = tuple(self._preview_cancel_events.values())
-        for event in cancel_events:
-            event.set()
-        if self._preview_future is not None:
-            self._preview_future.cancel()
-        while True:
-            try:
-                _generation, payload = self._preview_queue.get_nowait()
-            except queue.Empty:
-                break
-            if isinstance(payload, tuple) and len(payload) == 3:
-                image = payload[2]
-                if hasattr(image, "close"):
-                    image.close()
-        for name in ("_preview_after", "_preview_poll_after", "_export_poll_after"):
-            callback = getattr(self, name, None)
-            if callback is not None:
-                try:
-                    self.after_cancel(callback)
-                except tk.TclError:
-                    pass
-                setattr(self, name, None)
-        super().destroy()
 
 
 def run_self_test(path: Path, *, isolated: bool = False) -> None:

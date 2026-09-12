@@ -18,8 +18,8 @@ through versioned file contracts, principally the RF JSON described in
 
 ## Component versions
 
-Python, Swift, and Web implement the same stable feature generation and are
-versioned `1.9.6`.
+The stable Python viewer is versioned `1.9.9`; Swift and Web remain at `1.9.6`
+within the same stable feature generation.
 The Free-Moving Python viewer begins the next generation as
 **`1.10.0-alpha.3`**. Component identity belongs in release tags and artifact
 names, not in a fourth version component. See
@@ -49,11 +49,11 @@ the legacy `30:7` visual footprint; the physical 3D sphere is unchanged. Drag
 the sphere to rotate the viewing direction or double-click to reset it. Legacy
 JSON, tuning-curve, head-direction, and probe companions are intentionally
 outside this alpha app. The stable Python viewer remains available separately
-at `1.9.6`; Swift and Web use the same stable version.
+at `1.9.9`; Swift and Web remain at `1.9.6`.
 
 ## Current RF format and filename aliases
 
-Stable version 1.9.6 requires the current raw-count plus
+Since stable version 1.9.6, the viewers require the current raw-count plus
 `occupancyTimeSec` RF schema written by `Utils/RFmapping_core.m`. Earlier RF
 payloads without occupancy metadata, including the previously normalized
 vertical-bar format, are intentionally unsupported. Firing rate is the default
@@ -98,8 +98,8 @@ Project code is run on `RFMAPPING_REMOTE_HOST` from your untracked `.env.local` 
 
 ```sh
 ssh "$RFMAPPING_REMOTE_HOST" 'cd ~/Developer/rfmapping_gui/python && \
-  PYTHONDONTWRITEBYTECODE=1 ~/.virtualenvs/rfmapping/bin/python -m pytest -q \
-    --ignore=tests/test_rfmapping_gui_tk.py'
+  RF_MAPPING_TEST_PYTHON="$HOME/.virtualenvs/rfmapping/bin/python" \
+    xvfb-run -a script/test_python_stable.sh'
 
 ssh "$RFMAPPING_REMOTE_HOST" 'cd ~/Developer/rfmapping_gui/web && \
   PYTHONDONTWRITEBYTECODE=1 ~/.virtualenvs/rfmapping/bin/python -m pytest -q'
@@ -108,10 +108,10 @@ ssh "$RFMAPPING_REMOTE_HOST" 'cd ~/Developer/rfmapping_gui/web/frontend && \
   npm ci --no-audit --no-fund && npm test && npm run build'
 ```
 
-The remote host is Linux and has no display, so it validates the Python HDF5
-model, aggregation, release scripts, and non-GUI smoke path. A real Tk launch
-or signed Python bundle requires a Tk-enabled Apple-silicon Mac; the Python
-bundle has a macOS 14.0 deployment minimum.
+The stable Python suite requires Tk. On a headless Linux host, Xvfb provides
+the display for real window-interaction tests. Pull requests run the same
+stable suite on macOS Apple Silicon. Building the macOS bundle requires a
+Tk-enabled Apple-silicon Mac; the bundle has a macOS 14.0 deployment minimum.
 
 See the implementation READMEs for target-specific install, build, and release
 commands.

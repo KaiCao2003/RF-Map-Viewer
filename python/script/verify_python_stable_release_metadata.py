@@ -33,20 +33,21 @@ def main() -> int:
 
     root = args.root.resolve()
     gui_path = root / "rfmapping_gui.py"
+    constants_path = root / "rfmapping_viewer/constants.py"
     requirements_path = root / "requirements.txt"
-    for required in (gui_path, requirements_path):
+    for required in (gui_path, constants_path, requirements_path):
         if not required.is_file():
             raise FileNotFoundError(f"required stable release input is missing: {required}")
 
-    source_version = literal_assignment(gui_path, "APP_VERSION")
-    source_edition = literal_assignment(gui_path, "APP_EDITION")
+    source_version = literal_assignment(constants_path, "APP_VERSION")
+    source_edition = literal_assignment(constants_path, "APP_EDITION")
     if source_version != args.version:
         raise ValueError(
-            f"rfmapping_gui.py APP_VERSION is {source_version!r}; expected {args.version!r}"
+            f"constants.py APP_VERSION is {source_version!r}; expected {args.version!r}"
         )
     if source_edition != args.edition:
         raise ValueError(
-            f"rfmapping_gui.py APP_EDITION is {source_edition!r}; expected {args.edition!r}"
+            f"constants.py APP_EDITION is {source_edition!r}; expected {args.edition!r}"
         )
 
     requirements = {
