@@ -13,7 +13,8 @@ from rfmapping_viewer.hd_tuning import (
     discover_hd_tuning_path,
     load_hd_tuning,
 )
-from rfmapping_viewer.rf_dataset import RFMap, RFMapList, load_rf_maps
+from rfmapping_viewer.rf_archive import IndexedRFMapList, RFCountSequence
+from rfmapping_viewer.rf_dataset import RFMap, is_indexed_rfmap, load_rf_maps
 from rfmapping_viewer.rf_loading import load_rf_maps_isolated
 from rfmapping_viewer.waveform import (
     WaveformArtifactStore,
@@ -77,7 +78,7 @@ class SpatialGroupTemporalMetrics:
 
 
 class RFMappingData:
-    """GUI adapter around the implementation-local RF JSON model."""
+    """GUI adapter for JSON and per-unit indexed RF documents."""
 
     def __init__(
         self,
@@ -88,12 +89,20 @@ class RFMappingData:
     ):
         source_identity = FrozenFileIdentity.capture(path)
         self.path = source_identity.path
-        self.rf_maps: RFMapList = (
-            load_rf_maps_isolated(self.path, cancelled=cancelled)
-            if isolated
-            else load_rf_maps(self.path)
-        )
-        source_identity.verify_path()
+        self.unit_archive: IndexedRFMapList | None = None
+        if is_indexed_rfmap(self.path):
+            self.unit_archive = IndexedRFMapList(self.path)
+            self.rf_maps = self.unit_archive
+        else:
+            self.rf_maps = (
+                load_rf_maps_isolated(self.path, cancelled=cancelled)
+                if isolated else load_rf_maps(self.path)
+            )
+        try:
+            source_identity.verify_path()
+        except Exception:
+            self.close()
+            raise
         self.source_identity = source_identity
         first = self.rf_maps[0]
         self.n_units = len(self.rf_maps)
@@ -101,7 +110,10 @@ class RFMappingData:
         self.n_x = first.n_x
         self.n_bins = first.n_time_bins
         self.size = (self.n_units, self.n_y, self.n_x, self.n_bins)
-        self.counts = [rf_map.spike_counts for rf_map in self.rf_maps]
+        self.counts = (
+            RFCountSequence(self.unit_archive) if self.unit_archive is not None
+            else [rf_map.spike_counts for rf_map in self.rf_maps]
+        )
         self.unit_pool = list(self.rf_maps.unit_ids)
         self.x_positions = first.x_positions.tolist()
         self.y_positions = first.y_positions.tolist()
@@ -139,8 +151,12 @@ class RFMappingData:
         self._waveform_error: str | None = None
         self._waveform_file_identities: tuple[FrozenFileIdentity, ...] = ()
 
+    def close(self) -> None:
+        if self.unit_archive is not None:
+            self.unit_archive.close()
+
     def rf_map(self, unit_idx: int) -> RFMap:
-        """Return one unit by its original JSON array index."""
+        """Return one unit by its original unitPool index."""
 
         return self.rf_maps.by_index(unit_idx)
 

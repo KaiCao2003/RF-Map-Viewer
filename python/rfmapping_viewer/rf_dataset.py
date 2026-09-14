@@ -1,7 +1,6 @@
-"""Viewer-only RF JSON model.
+"""Viewer-only RF model for JSON and indexed NPZ documents.
 
-The complete JSON document is loaded before extracting the arrays needed by
-the desktop viewer for unit/index lookup and half-open time-window sums.
+Both storage formats retain unit/index lookup and half-open time-window sums.
 Scientific RF detection and raw-trial reconstruction remain
 in the separate ``rfmapping`` analysis repository.
 
@@ -427,13 +426,28 @@ def _make_rf_map(
     )
 
 
-def load_rf_maps(path: str | Path) -> RFMapList:
-    """Load the full JSON document and extract the current RF arrays."""
+@dataclass(frozen=True)
+class RFHeader:
+    shape: tuple[int, int, int, int]
+    unit_ids: tuple[int, ...]
+    x_positions: NDArray[np.float64]
+    y_positions: NDArray[np.float64]
+    time_edges: NDArray[np.float64]
+    occupancy: NDArray[np.float64]
+    metadata: Mapping[str, Any]
 
-    source_path = Path(path)
-    with source_path.open("r", encoding="utf-8") as handle:
-        raw = json.load(handle)
+    def make_map(self, index: int, counts: NDArray[Any], path: Path) -> RFMap:
+        if np.any(counts[self.occupancy == 0, :] != 0):
+            raise ValueError("occupancyTimeSec is zero where unitsSpikeCounts is nonzero")
+        return _make_rf_map(
+            unit_index=index, unit_id=self.unit_ids[index], spike_counts=counts,
+            x_positions=self.x_positions, y_positions=self.y_positions,
+            time_bin_edges_s=self.time_edges, occupancy_time_s=self.occupancy,
+            metadata=self.metadata, source_path=path,
+        )
 
+
+def _parse_rf_header(raw: Mapping[str, Any]) -> RFHeader:
     size_values = _flat_list(raw["unitsSpikeCountsSize"], "unitsSpikeCountsSize")
     if len(size_values) != 4:
         raise ValueError("unitsSpikeCountsSize must contain four values")
@@ -443,8 +457,6 @@ def load_rf_maps(path: str | Path) -> RFMapList:
     if any(value <= 0 for value in shape):
         raise ValueError("unitsSpikeCountsSize values must be positive")
     n_units, n_y, n_x, n_time_bins = shape
-
-    spike_counts = _compact_spike_counts(raw.pop("unitsSpikeCounts"), shape)
 
     unit_pool = tuple(
         _integer(value, "unitPool value")
@@ -477,9 +489,9 @@ def load_rf_maps(path: str | Path) -> RFMapList:
         dtype=float,
     )
     if len(x_positions) != n_x:
-        raise ValueError("xPositions length does not match x dimension")
+        raise ValueError("xPositions length does not match x dimension of declared shape")
     if len(y_positions) != n_y:
-        raise ValueError("yPositions length does not match y dimension")
+        raise ValueError("yPositions length does not match y dimension of declared shape")
     if len(time_edges) != n_time_bins + 1:
         raise ValueError("timeBinEdges must contain nTimeBins + 1 edges")
     if not np.all(np.diff(time_edges) > 0):
@@ -488,32 +500,39 @@ def load_rf_maps(path: str | Path) -> RFMapList:
     occupancy_time_s = _occupancy_matrix(raw["occupancyTimeSec"], n_y, n_x)
     if not np.any(occupancy_time_s > 0):
         raise ValueError("occupancyTimeSec must contain at least one positive value")
-    if np.any(spike_counts[:, occupancy_time_s == 0, :] != 0):
-        raise ValueError(
-            "occupancyTimeSec is zero where unitsSpikeCounts is nonzero"
-        )
-
     metadata = {
         key: deepcopy(value)
         for key, value in raw.items()
         if key not in _STRUCTURAL_JSON_FIELDS
     }
+    return RFHeader(shape, unit_pool, x_positions, y_positions, time_edges,
+                    occupancy_time_s, metadata)
+
+
+def is_indexed_rfmap(path: str | Path) -> bool:
+    """Detect the archive by its signature, independent of the extension."""
+    with Path(path).open("rb") as handle:
+        return handle.read(4) == b"PK\x03\x04"
+
+
+def load_rf_maps(path: str | Path) -> RFMapList:
+    """Fully validate either supported storage format for noninteractive use."""
+    source_path = Path(path)
+    if is_indexed_rfmap(source_path):
+        from .rf_archive import IndexedRFMapList
+        archive = IndexedRFMapList(source_path)
+        try:
+            return RFMapList(tuple(archive), source_path)
+        finally:
+            archive.close()
+    with source_path.open("r", encoding="utf-8") as handle:
+        raw = json.load(handle)
+    values = raw.pop("unitsSpikeCounts")
+    header = _parse_rf_header(raw)
+    counts = _compact_spike_counts(values, header.shape)
     return RFMapList(
-        [
-            _make_rf_map(
-                unit_index=unit_index,
-                unit_id=unit_id,
-                spike_counts=spike_counts[unit_index],
-                x_positions=x_positions,
-                y_positions=y_positions,
-                time_bin_edges_s=time_edges,
-                occupancy_time_s=occupancy_time_s,
-                metadata=metadata,
-                source_path=source_path,
-            )
-            for unit_index, unit_id in enumerate(unit_pool)
-        ],
-        source_path,
+        [header.make_map(index, counts[index], source_path)
+         for index in range(header.shape[0])], source_path,
     )
 
 

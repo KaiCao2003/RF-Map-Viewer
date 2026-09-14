@@ -1,12 +1,12 @@
 # Component versioning and releases
 
 Python is the feature reference for this repository. The supported stable
-feature generation is `1.9.x`; an implementation one complete feature
-generation behind uses `1.8.x`. Patch numbers identify coordinated or
+feature generation is `1.10.x`; an implementation one complete feature
+generation behind uses `1.9.x`. Patch numbers identify coordinated or
 target-specific releases within that feature generation; supported input
 contracts are stated explicitly rather than inferred from the patch number.
 
-The Free-Moving viewer introduces the next `1.10` feature generation and is
+The separate Free-Moving viewer uses the `1.10` feature generation and is
 currently an alpha. Its canonical release version is
 `1.10.0-alpha.3`. Python packaging represents the same release as
 `1.10.0a3`, while the macOS marketing version remains the Apple-compatible
@@ -18,7 +18,7 @@ component tag and artifact name:
 
 | Component | Release | Tag | Channel |
 | --- | --- | --- | --- |
-| Python stable | `1.9.9` | `python-v1.9.9` | stable |
+| Python stable | `1.10.0` | `python-v1.10.0` | stable |
 | Python Free-Moving | `1.10.0-alpha.3` | `python-v1.10.0-alpha.3` | alpha |
 | Swift | `1.9.6` | `swift-v1.9.6` | stable |
 | Web | `1.9.6` | `web-v1.9.6` | stable |
@@ -50,9 +50,9 @@ selection, the schema-v4 SpikeInterface waveform viewer/exporter, and matching
 rectangle/polar and palette keyboard shortcuts.
 
 Each active component records a `feature_generation_offset` from the Python
-stable reference. The current Swift/Web offset is `0`; a viewer verified to be
-one complete generation behind would use offset `-1` and therefore the `1.8.x`
-series. Free-Moving uses offset `+1`, producing the `1.10.x` alpha series.
+stable reference. The current Swift/Web offset is `-1`; a viewer verified to be
+one complete generation behind would use offset `-1` and therefore the `1.9.x`
+series. Free-Moving uses offset `0`, producing the `1.10.x` alpha series.
 
 `versions.json` is the canonical machine-readable manifest. Validate every
 runtime, package, and build declaration from the repository root with:
@@ -62,12 +62,12 @@ python3 release/verify_versions.py
 ```
 
 Pushing one exact component tag invokes only that component's release job.
-The Python stable job builds and smoke-tests both its macOS arm64 archive and
-Windows x64 portable/setup packages before it creates or updates the matching
-component Release.
+The Python stable 1.10.0 job builds and smoke-tests its macOS arm64 archive.
+Windows remains at its separately recorded 1.9.9 version and is skipped unless
+its version matches the requested stable release.
 Manual workflow dispatch builds only the selected component candidate without
-publishing a tag or GitHub Release; selecting Python stable runs its paired
-macOS and Windows jobs. Python alpha releases are marked as GitHub prereleases.
+publishing a tag or GitHub Release; selecting Python stable runs its macOS job, plus Windows only when the
+recorded versions match. Python alpha releases are marked as GitHub prereleases.
 
 The alpha is written as `1.10.0-alpha.3`, not `1.10.0.3`: SemVer represents
 preview status after a hyphen. Python package metadata uses the PEP 440 spelling

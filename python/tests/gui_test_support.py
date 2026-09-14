@@ -49,6 +49,7 @@ def unit_data(unit_pool, **fields):
     units = {unit_id: SimpleNamespace(unit_index=index) for index, unit_id in enumerate(unit_pool)}
     return SimpleNamespace(**{
         "unit_pool": list(unit_pool),
+        "unit_archive": None,
         "n_units": len(unit_pool),
         "rf_map_by_unit_id": units.__getitem__,
         **fields,

@@ -116,6 +116,7 @@ from rfmapping_viewer.paths import (
     startup_file_dialog_directory,
     support_documentation_path,
 )
+from rfmapping_viewer.rf_dataset import is_indexed_rfmap
 from rfmapping_viewer.rf_model import RFMappingData
 from rfmapping_viewer.settings import (
     ViewerSettings,
@@ -184,6 +185,9 @@ class RFMViewer(tk.Toplevel):
         self._viewer_ready = False
         self._pair_apply_in_progress = False
         self._pair_last_local_state: ViewerSyncState | None = None
+        self._unit_cache_after: str | None = None
+        self._unit_cache_count = 0
+        self._unit_cache_waiting = False
         self._startup_after: str | None = None
         self._startup_poll_after: str | None = None
         self._startup_generation = 0
@@ -353,6 +357,7 @@ class RFMViewer(tk.Toplevel):
         self._select_tab_key(self.settings.default_viewer_tab)
         self._update_all()
         self._viewer_ready = True
+        self._start_unit_cache()
         self._pair_ready_viewer_set_changed(adopt_viewer=self)
         self.deiconify()
         allow_macos_fullscreen_resize(self)
@@ -366,6 +371,87 @@ class RFMViewer(tk.Toplevel):
         if self._show_settings_when_ready:
             self._show_settings_when_ready = False
             self.after_idle(self._show_settings)
+
+    def _unit_loading_message(self) -> str | None:
+        index = self._local_unit_index(self._selected_unit_id_value())
+        archive = self.data.unit_archive
+        if archive is None or index is None or archive.is_cached(index):
+            return None
+        error = archive.error
+        if error is not None:
+            return f"Unit cache paused: {error[1]} — use Retry below."
+        return f"Loading cluster {self._selected_unit_id_value()}…"
+
+    def _stop_unit_cache(self) -> None:
+        if self._unit_cache_after is not None:
+            self.after_cancel(self._unit_cache_after)
+            self._unit_cache_after = None
+
+    def _start_unit_cache(self) -> None:
+        self._stop_unit_cache()
+        self._unit_cache_count = 0
+        self.unit_cache_retry.grid_remove()
+        self.export_toolbar_button.state(["!disabled"])
+        archive = self.data.unit_archive
+        if archive is None:
+            self.unit_cache_frame.grid_remove()
+            return
+        self.unit_cache_frame.grid()
+        if archive.cache_count < self.data.n_units:
+            self.export_toolbar_button.state(["disabled"])
+        self.unit_cache_progress.configure(maximum=self.data.n_units,
+                                           value=archive.cache_count)
+        self.unit_cache_label.configure(text=f"Caching {archive.cache_count} / {self.data.n_units}")
+        # Let Tk present the first plot before starting background reads.
+        self._unit_cache_after = self.after_idle(self._begin_unit_cache)
+
+    def _begin_unit_cache(self) -> None:
+        self._unit_cache_after = None
+        if self._quitting:
+            return
+        self.data.unit_archive.start_preload()
+        self._poll_unit_cache()
+
+    def _retry_unit_cache(self) -> None:
+        self.data.unit_archive.start_preload(retry=True)
+        self.unit_cache_retry.grid_remove()
+        self._stop_unit_cache()
+        self._poll_unit_cache()
+
+    def _poll_unit_cache(self) -> None:
+        self._unit_cache_after = None
+        if self._quitting:
+            return
+        archive = self.data.unit_archive
+        count = archive.cache_count
+        error = archive.error
+        self.unit_cache_progress.configure(value=count)
+        self.unit_cache_label.configure(text=(
+            f"Cache paused ({count} / {self.data.n_units})" if error is not None
+            else f"Cached {count} / {self.data.n_units}"
+        ))
+        if error is not None:
+            self.unit_cache_retry.grid()
+        if count != self._unit_cache_count:
+            self._unit_cache_count = count
+            selected = self._selected_unit_id_value()
+            self._sync_unit_combo()
+            self._reconcile_unit_filter_selection()
+            if selected != self._selected_unit_id_value() or self._unit_cache_waiting:
+                self._unit_cache_waiting = False
+                self._update_all()
+        if error is not None:
+            self.status_label.configure(text=error[1])
+            return
+        if count == self.data.n_units:
+            self.export_toolbar_button.state(["!disabled"])
+            self._unit_cache_after = self.after(1000, self._hide_unit_cache)
+        else:
+            self._unit_cache_after = self.after(100, self._poll_unit_cache)
+
+    def _hide_unit_cache(self) -> None:
+        self._unit_cache_after = None
+        self.unit_cache_frame.grid_remove()
 
     def _focus_rf_canvas(self) -> None:
         self._focus_after = None
@@ -403,6 +489,8 @@ class RFMViewer(tk.Toplevel):
             else:
                 if not cancel_event.is_set():
                     self._startup_result_queue.put((generation, path, data, None))
+                else:
+                    data.close()
 
         threading.Thread(
             target=decode_document,
@@ -512,6 +600,8 @@ class RFMViewer(tk.Toplevel):
                 break
             if candidate[0] == self._startup_generation:
                 matching = candidate
+            elif candidate[2] is not None:
+                candidate[2].close()
         if matching is None:
             if not self._quitting and not self._viewer_ready:
                 self._schedule_startup_result_poll()
@@ -557,6 +647,9 @@ class RFMViewer(tk.Toplevel):
             )
             return
         self._quitting = True
+        self._stop_unit_cache()
+        if self._viewer_ready:
+            self.data.close()
         self._cancel_startup_callback()
         if self._optional_autoload_after is not None:
             try:
@@ -1005,14 +1098,31 @@ class RFMViewer(tk.Toplevel):
         self.notebook = ttk.Notebook(parent)
         self.notebook.grid(row=2, column=0, sticky="nsew")
 
+        status_bar = ttk.Frame(parent)
+        status_bar.grid(row=3, column=0, sticky="ew")
+        status_bar.columnconfigure(0, weight=1)
         self.status_label = ttk.Label(
-            parent,
+            status_bar,
             text="",
             style="Status.TLabel",
             anchor="w",
             padding=(10, 4),
         )
-        self.status_label.grid(row=3, column=0, sticky="ew")
+        self.status_label.grid(row=0, column=0, sticky="ew")
+        self.unit_cache_frame = ttk.Frame(status_bar, padding=(8, 2))
+        self.unit_cache_frame.grid(row=0, column=1, sticky="e")
+        self.unit_cache_label = ttk.Label(self.unit_cache_frame, style="Status.TLabel")
+        self.unit_cache_label.grid(row=0, column=0, padx=(0, 8))
+        self.unit_cache_progress = ttk.Progressbar(
+            self.unit_cache_frame, mode="determinate", length=100,
+        )
+        self.unit_cache_progress.grid(row=0, column=1)
+        self.unit_cache_retry = ttk.Button(
+            self.unit_cache_frame, text="Retry", command=self._retry_unit_cache,
+        )
+        self.unit_cache_retry.grid(row=0, column=2, padx=(6, 0))
+        self.unit_cache_retry.grid_remove()
+        self.unit_cache_frame.grid_remove()
 
         self.canvases: dict[str, tk.Canvas] = {}
         self._tab_keys = {}
@@ -2148,8 +2258,8 @@ class RFMViewer(tk.Toplevel):
 
     def _local_unit_index(self, unit_id: int) -> int | None:
         try:
-            return self.data.rf_map_by_unit_id(int(unit_id)).unit_index
-        except KeyError:
+            return self.data.unit_pool.index(int(unit_id))
+        except ValueError:
             return None
 
     def _selected_unit_id_value(self) -> int:
@@ -2173,6 +2283,11 @@ class RFMViewer(tk.Toplevel):
             return None
         if int(self.unit_idx.get()) != local_index:
             self.unit_idx.set(local_index)
+        archive = self.data.unit_archive
+        if archive is not None and not archive.is_cached(local_index):
+            archive.request(local_index)
+            self._unit_cache_waiting = True
+            return None
         return local_index
 
     def _set_selected_unit_id(self, unit_id: int) -> None:
@@ -2232,13 +2347,11 @@ class RFMViewer(tk.Toplevel):
         threshold = settings.rf_zero_bin_threshold
         return [
             unit_id
-            for unit_id in unit_ids
-            if self.data.zero_spike_spatial_bin_count(
-                self.data.rf_map_by_unit_id(unit_id).unit_index,
-                start,
-                end,
-            )
-            < threshold
+            for index, unit_id in enumerate(unit_ids)
+            if (
+                self.data.unit_archive is not None
+                and not self.data.unit_archive.is_cached(index)
+            ) or self.data.zero_spike_spatial_bin_count(index, start, end) < threshold
         ]
 
     def _local_unit_passes_quality_filter(self, unit_id: int) -> bool:
@@ -2247,6 +2360,9 @@ class RFMViewer(tk.Toplevel):
         local_index = self._local_unit_index(unit_id)
         if local_index is None:
             return False
+        archive = self.data.unit_archive
+        if archive is not None and not archive.is_cached(local_index):
+            return True
         start, end = self._source_bins_for_time_controls()
         return (
             self.data.zero_spike_spatial_bin_count(local_index, start, end)
@@ -3041,7 +3157,9 @@ class RFMViewer(tk.Toplevel):
     def _open_json_window(self, path: Path) -> RFMViewer | None:
         path = Path(path).expanduser()
         try:
-            use_background_load = path.stat().st_size >= ASYNC_DOCUMENT_LOAD_BYTES
+            use_background_load = (
+                path.stat().st_size >= ASYNC_DOCUMENT_LOAD_BYTES or is_indexed_rfmap(path)
+            )
         except OSError:
             use_background_load = False
         if use_background_load:
@@ -5414,10 +5532,11 @@ class RFMViewer(tk.Toplevel):
             self.spatial_region is not None and not self._unit_navigation_ids()
         )
         filter_status = self._quality_filter_status(unit_id)
+        loading_message = self._unit_loading_message()
         canvas.create_text(
             width / 2,
             height / 2 - 14,
-            text="N/A",
+            text="Loading…" if loading_message else "N/A",
             fill="#667085",
             font=("TkDefaultFont", 28, "bold"),
         )
@@ -5428,7 +5547,7 @@ class RFMViewer(tk.Toplevel):
                 "No units are inside the selected probe region."
                 if no_spatial_matches
                 else (
-                    filter_status
+                    loading_message or filter_status
                     or f"Cluster {unit_id} is not available in this session."
                 )
             ),
@@ -5450,6 +5569,7 @@ class RFMViewer(tk.Toplevel):
         cluster_id = self._selected_unit_id_value()
         if unit_idx is None:
             self.selected_cell = None
+            loading_message = self._unit_loading_message()
             self.header_label.configure(text=f"Unit N/A / cluster {cluster_id}")
             no_spatial_matches = (
                 self.spatial_region is not None and not self._unit_navigation_ids()
@@ -5460,19 +5580,21 @@ class RFMViewer(tk.Toplevel):
                     "No units match the probe region."
                     if no_spatial_matches
                     else (
-                        filter_status
+                        self._unit_loading_message() or filter_status
                         or f"N/A: cluster {cluster_id} is not available in this session."
                     )
                 )
             )
             self.unit_stats_label.configure(
                 text=(
-                    "N/A\nHidden by the zero-spike RF-bin filter."
-                    if filter_status
-                    else "N/A\nThis unit is available only in another paired window."
+                    loading_message or (
+                        "N/A\nHidden by the zero-spike RF-bin filter."
+                        if filter_status
+                        else "N/A\nThis unit is available only in another paired window."
+                    )
                 )
             )
-            self.cell_label.configure(text="N/A for this session")
+            self.cell_label.configure(text="Loading…" if loading_message else "N/A for this session")
             self._sync_context_controls()
             self._draw_probe_canvas()
             self._draw_active_tab()
@@ -7961,10 +8083,13 @@ class RFMViewer(tk.Toplevel):
 
     def _load_json_path(self, path: Path) -> None:
         try:
-            self.data = RFMappingData(path)
+            data = RFMappingData(path)
         except Exception as exc:
             messagebox.showerror("Could not load RF map", str(exc))
             return
+        self._stop_unit_cache()
+        self.data.close()
+        self.data = data
         self.settings = self._app_root._rfm_settings
         self.title(f"{self.data.path.name} — RF Map Viewer")
         self.unit_idx.set(0)
@@ -8043,8 +8168,13 @@ class RFMViewer(tk.Toplevel):
         self._update_all()
         self._pair_ready_viewer_set_changed(adopt_viewer=self)
         self._schedule_optional_autoload()
+        self._start_unit_cache()
 
     def _open_figure_exporter(self) -> None:
+        archive = self.data.unit_archive
+        if archive is not None and archive.cache_count < self.data.n_units:
+            self.status_label.configure(text="Figures will be available when all units finish loading.")
+            return
         existing = self._figure_export_window
         if existing is not None:
             try:

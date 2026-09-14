@@ -29,6 +29,7 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       python_stable_release: ${{ steps.versions.outputs.python_stable_release }}
+      python_stable_build_windows: ${{ steps.versions.outputs.python_stable_build_windows }}
       python_stable_tag: ${{ steps.versions.outputs.python_stable_tag }}
       python_stable_artifact: ${{ steps.versions.outputs.python_stable_artifact }}
       python_stable_checksum: ${{ steps.versions.outputs.python_stable_checksum }}
@@ -94,7 +95,7 @@ jobs:
 
   build-python-stable-windows:
     name: Build Python stable (Windows x64)
-    if: (github.event_name == 'workflow_dispatch' && inputs.component == 'python-stable') || github.ref_name == needs.validate-versions.outputs.python_stable_tag
+    if: needs.validate-versions.outputs.python_stable_build_windows == 'true' && ((github.event_name == 'workflow_dispatch' && inputs.component == 'python-stable') || github.ref_name == needs.validate-versions.outputs.python_stable_tag)
     needs: validate-versions
     runs-on: windows-2025
     steps:
@@ -227,7 +228,7 @@ jobs:
 
   publish-python-stable:
     name: Publish Python stable release
-    if: github.event_name == 'push' && github.ref_type == 'tag' && github.ref_name == needs.validate-versions.outputs.python_stable_tag
+    if: always() && github.event_name == 'push' && github.ref_type == 'tag' && github.ref_name == needs.validate-versions.outputs.python_stable_tag && needs.build-python-stable.result == 'success' && (needs.build-python-stable-windows.result == 'success' || (needs.validate-versions.outputs.python_stable_build_windows != 'true' && needs.build-python-stable-windows.result == 'skipped'))
     needs: [validate-versions, build-python-stable, build-python-stable-windows]
     runs-on: ubuntu-24.04
     permissions:
@@ -239,6 +240,7 @@ jobs:
           name: python-stable-${{ needs.validate-versions.outputs.python_stable_release }}
           path: release-assets
       - uses: actions/download-artifact@v6
+        if: needs.validate-versions.outputs.python_stable_build_windows == 'true'
         with:
           name: python-stable-windows-${{ needs.validate-versions.outputs.python_stable_release }}
           path: release-assets

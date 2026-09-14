@@ -26,14 +26,14 @@ class ComponentVersionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must be SemVer"):
             verify_manifest(invalid)
 
-    def test_one_feature_generation_behind_maps_to_1_8_series(self) -> None:
+    def test_one_feature_generation_behind_maps_to_1_9_series(self) -> None:
         candidate = copy.deepcopy(MANIFEST)
         swift = candidate["components"]["swift"]
-        swift["release_version"] = "1.8.4"
-        swift["marketing_version"] = "1.8.4"
+        swift["release_version"] = "1.9.4"
+        swift["marketing_version"] = "1.9.4"
         swift["feature_generation_offset"] = -1
-        swift["artifact"] = "RF_Map_Viewer-1.8.4-swift-macos-arm64.zip"
-        swift["tag"] = "swift-v1.8.4"
+        swift["artifact"] = "RF_Map_Viewer-1.9.4-swift-macos-arm64.zip"
+        swift["tag"] = "swift-v1.9.4"
         verify_manifest(candidate)
 
     def test_python_stable_windows_release_assets_are_canonical(self) -> None:
@@ -80,7 +80,7 @@ class ComponentVersionTests(unittest.TestCase):
     def test_only_exact_component_tags_are_accepted(self) -> None:
         verifier = ROOT / "release/verify_versions.py"
         for tag in (
-            "python-v1.9.6",
+            MANIFEST["components"]["python_stable"]["tag"],
             "python-v1.10.0-alpha.3",
             "swift-v1.9.6",
             "web-v1.9.6",

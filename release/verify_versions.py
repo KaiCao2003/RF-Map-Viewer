@@ -159,6 +159,8 @@ def verify_manifest(manifest: dict[str, Any]) -> None:
     )
     stable_release = python_stable["release_version"]
     stable_flavor = python_stable["artifact_flavor"]
+    windows_release = python_stable["windows_release_version"]
+    semver_core(windows_release)
     expect(
         python_stable.get("package_version"),
         stable_release,
@@ -182,18 +184,18 @@ def verify_manifest(manifest: dict[str, Any]) -> None:
     expect(
         python_stable.get("windows_portable_artifact"),
         "RF_Map_Viewer-"
-        f"python-{stable_release}-{stable_flavor}-windows-x64-portable.zip",
+        f"python-{windows_release}-{stable_flavor}-windows-x64-portable.zip",
         "Python stable Windows portable artifact",
     )
     expect(
         python_stable.get("windows_installer_artifact"),
         "RF_Map_Viewer-"
-        f"python-{stable_release}-{stable_flavor}-windows-x64-setup.exe",
+        f"python-{windows_release}-{stable_flavor}-windows-x64-setup.exe",
         "Python stable Windows installer artifact",
     )
     expect(
         python_stable.get("windows_checksum"),
-        f"SHA256SUMS-python-{stable_release}-{stable_flavor}-windows-x64.txt",
+        f"SHA256SUMS-python-{windows_release}-{stable_flavor}-windows-x64.txt",
         "Python stable Windows checksum",
     )
 
@@ -330,8 +332,8 @@ def verify_sources(root: Path, manifest: dict[str, Any]) -> None:
     )
     python_stable_windows = root / "python/script/build_python_stable_windows_app.ps1"
     for name, expected, label in (
-        ("AppVersion", python_stable["release_version"], "Windows app version"),
-        ("AppBuild", python_stable["build"], "Windows app build"),
+        ("AppVersion", python_stable["windows_release_version"], "Windows app version"),
+        ("AppBuild", python_stable["windows_build"], "Windows app build"),
         ("ReleaseEdition", python_stable["edition"], "Windows release edition"),
         (
             "ReleaseFlavor",
@@ -348,12 +350,12 @@ def verify_sources(root: Path, manifest: dict[str, Any]) -> None:
     python_stable_inno = root / "python/packaging/windows/RFMapViewer.iss"
     expect(
         inno_define(python_stable_inno, "MyAppVersion"),
-        python_stable["release_version"],
+        python_stable["windows_release_version"],
         "Python stable Inno Setup version",
     )
     expect(
         inno_define(python_stable_inno, "MyAppBuild"),
-        python_stable["build"],
+        python_stable["windows_build"],
         "Python stable Inno Setup build",
     )
     expect(
@@ -489,6 +491,9 @@ def main() -> int:
         web = component(manifest, "web")
         outputs = {
             "python_stable_release": python_stable["release_version"],
+            "python_stable_build_windows": str(
+                python_stable["windows_release_version"] == python_stable["release_version"]
+            ).lower(),
             "python_stable_tag": python_stable["tag"],
             "python_stable_artifact": python_stable["artifact"],
             "python_stable_checksum": python_stable["checksum"],

@@ -1,6 +1,7 @@
 # RF Mapping File Contract
 
-All three stable viewers consume the same current, read-only RF JSON document.
+All three stable viewers consume the read-only RF JSON document below.
+Python stable 1.10.0 additionally accepts the version-2 indexed archive.
 The preferred extension is `.rfmap`; `.json` is also accepted because
 `RFmapping_core.m` can write the same current payload under either filename.
 The extension does not change the schema.
@@ -50,3 +51,25 @@ extensions and HD tuning data is matched by recorded unit ID. RF maps are the
 primary viewer documents; `.tc` and `.probe` are attached to an open RF map so
 their recorded unit IDs have a dataset context. Inputs are never modified by a
 viewer.
+
+## Indexed `.rfmap` version 2 (Python stable 1.10.0)
+
+The file is a compressed NPZ (ZIP of NPY entries), keeping the `.rfmap`
+extension. Its ZIP directory indexes each `unit_<recorded ID>` entry; `unitPool`
+preserves display order. Keys are accessed without the `.npy` suffix.
+
+| Entry | Representation |
+| --- | --- |
+| `metadata` | One-dimensional `uint8` UTF-8 JSON; includes `formatVersion=2` and `unitsSpikeCountsSize` |
+| `unitPool` | One-dimensional `int64` recorded unit IDs |
+| `xPositions`, `yPositions` | One-dimensional spatial coordinates |
+| `timeBinEdges` | One-dimensional bin edges in seconds |
+| `occupancyTimeSec` | `(y, x)` occupancy seconds |
+| `unit_<ID>` | `(y, x, time)` raw counts, written as lossless `float64` |
+
+The declared overall shape still includes the unit axis, but there is no
+`unitsSpikeCounts` entry. NPY preserves MATLAB's array order and singleton
+dimensions; do not transpose or reshape unit arrays. Reading retains the full
+time axis and the same occupancy normalization and half-open window semantics
+as JSON. Python validates each unit when loaded and caches a losslessly compact
+unsigned-integer copy. The viewer never rewrites input files.

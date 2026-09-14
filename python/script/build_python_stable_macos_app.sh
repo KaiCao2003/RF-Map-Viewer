@@ -363,7 +363,7 @@ run_pyinstaller
 "$PLIST_BUDDY" -c "Add :UTExportedTypeDeclarations:0:UTTypeIdentifier string org.local.rfmapping.rfmap" "$INFO_PLIST"
 "$PLIST_BUDDY" -c "Add :UTExportedTypeDeclarations:0:UTTypeDescription string 'RF Map document'" "$INFO_PLIST"
 "$PLIST_BUDDY" -c "Add :UTExportedTypeDeclarations:0:UTTypeConformsTo array" "$INFO_PLIST"
-"$PLIST_BUDDY" -c "Add :UTExportedTypeDeclarations:0:UTTypeConformsTo:0 string public.json" "$INFO_PLIST"
+"$PLIST_BUDDY" -c "Add :UTExportedTypeDeclarations:0:UTTypeConformsTo:0 string public.data" "$INFO_PLIST"
 "$PLIST_BUDDY" -c "Add :UTExportedTypeDeclarations:0:UTTypeTagSpecification dict" "$INFO_PLIST"
 "$PLIST_BUDDY" -c "Add :UTExportedTypeDeclarations:0:UTTypeTagSpecification:public.filename-extension array" "$INFO_PLIST"
 "$PLIST_BUDDY" -c "Add :UTExportedTypeDeclarations:0:UTTypeTagSpecification:public.filename-extension:0 string rfmap" "$INFO_PLIST"
@@ -412,6 +412,30 @@ verify_arm64_macho_files
 "$APP_BINARY" --self-test "$SMOKE_JSON"
 "$APP_BINARY" --self-test-isolated "$SMOKE_JSON"
 "$APP_BINARY" --self-test-dnd
+INDEXED_SMOKE="$WORK_DIR/release-smoke.rfmap"
+"$BUILD_VENV/bin/python" - "$SMOKE_JSON" "$INDEXED_SMOKE" <<'PYTHON'
+import json
+import sys
+import numpy as np
+
+with open(sys.argv[1], encoding="utf-8") as source:
+    metadata = json.load(source)
+counts = np.asarray(metadata.pop("unitsSpikeCounts"), dtype=np.float64)
+arrays = {key: np.asarray(metadata.pop(key)) for key in (
+    "unitPool", "xPositions", "yPositions", "timeBinEdges", "occupancyTimeSec"
+)}
+arrays["unitPool"] = arrays["unitPool"].astype(np.int64).reshape(-1)
+for key in ("xPositions", "yPositions", "timeBinEdges"):
+    arrays[key] = arrays[key].reshape(-1)
+arrays["occupancyTimeSec"] = arrays["occupancyTimeSec"].reshape(counts.shape[1:3])
+metadata["formatVersion"] = 2
+arrays["metadata"] = np.frombuffer(json.dumps(metadata).encode("utf-8"), dtype=np.uint8)
+arrays.update({f"unit_{int(uid)}": counts[i] for i, uid in enumerate(arrays["unitPool"])})
+with open(sys.argv[2], "wb") as target:
+    np.savez_compressed(target, **arrays)
+PYTHON
+"$APP_BINARY" --self-test "$INDEXED_SMOKE"
+rm -f -- "$INDEXED_SMOKE"
 EXPORT_SMOKE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/rfmapping-stable-export-smoke.XXXXXX")"
 "$APP_BINARY" --self-test-export "$EXPORT_SMOKE_DIR"
 require_nonempty_file "$EXPORT_SMOKE_DIR/figure-export-smoke.pdf"

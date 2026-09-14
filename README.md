@@ -13,14 +13,14 @@ data. It is self-contained: none of its runtime paths import the sibling
 
 Scientific RF detection, trial reconstruction, notebooks, and Matlab-related
 sources remain in `../rfmapping`. The two repositories communicate only
-through versioned file contracts, principally the RF JSON described in
+through versioned file contracts, principally the RF formats described in
 [`contracts/rf-json.md`](contracts/rf-json.md).
 
 ## Component versions
 
-The stable Python viewer is versioned `1.9.9`; Swift and Web remain at `1.9.6`
-within the same stable feature generation.
-The Free-Moving Python viewer begins the next generation as
+The stable Python viewer is versioned `1.10.0`; Swift and Web remain at `1.9.6`
+in the previous stable feature generation.
+The separate Free-Moving Python viewer remains
 **`1.10.0-alpha.3`**. Component identity belongs in release tags and artifact
 names, not in a fourth version component. See
 [`release/README.md`](release/README.md) for the canonical mapping and tag
@@ -49,9 +49,15 @@ the legacy `30:7` visual footprint; the physical 3D sphere is unchanged. Drag
 the sphere to rotate the viewing direction or double-click to reset it. Legacy
 JSON, tuning-curve, head-direction, and probe companions are intentionally
 outside this alpha app. The stable Python viewer remains available separately
-at `1.9.9`; Swift and Web remain at `1.9.6`.
+at `1.10.0`; Swift and Web remain at `1.9.6`.
 
 ## Current RF format and filename aliases
+
+Python stable 1.10.0 also accepts the new version-2 indexed NPZ `.rfmap`
+format. It plots the first loaded unit and caches remaining units in the
+background, with progress in the bottom-right corner. Existing JSON inputs
+remain supported. Swift and Web retain their existing JSON contracts.
+
 
 Since stable version 1.9.6, the viewers require the current raw-count plus
 `occupancyTimeSec` RF schema written by `Utils/RFmapping_core.m`. Earlier RF
@@ -63,7 +69,7 @@ The current payload and companion documents retain these filename aliases:
 
 | Data | Preferred extension | Existing extension |
 | --- | --- | --- |
-| RF map (JSON) | `.rfmap` | `.json` |
+| RF map (JSON, or indexed NPZ in Python 1.10.0) | `.rfmap` | `.json` |
 | Tuning curve (JSON) | `.tc` | `.json` |
 | Spike positions (CSV) | `.probe` | `.csv` |
 

@@ -2,13 +2,15 @@
 
 This directory contains two separately versioned applications:
 
-- `rfmapping_gui.py`: the stable RF Map Viewer `1.9.9`;
+- `rfmapping_gui.py`: the stable RF Map Viewer `1.10.0`;
 - `rfmapping_fm_gui.py`: the Free-Moving RF Viewer `1.10.0-alpha.3`.
 
 They have distinct app names, bundle identifiers, release artifacts, and tags,
 so the alpha can be installed and released without replacing the stable app.
 
-## Stable viewer 1.9.9
+## Stable viewer 1.10.0
+
+Version 1.10.0 adds indexed RF input and progressive caching.
 
 Version 1.9.9 separates data, display calculations, settings, and figure
 composition into focused modules. Stable regression tests share synthetic
@@ -22,12 +24,22 @@ results use a bounded cache, spatial display controls avoid redrawing companion
 panels, and waveform navigation keeps one active read plus the latest pending
 unit. The stable macOS package excludes the separate Free-Moving/HDF5 modules.
 
-The stable viewer opens the current JSON-text RF `.rfmap` document and its
-tuning-curve, probe, and waveform companions. The reader loads the complete
-JSON with `json.load`, then directly reads `unitsSpikeCounts`,
-`unitsSpikeCountsSize`, `unitPool`, `xPositions`, `yPositions`, `timeBinEdges`,
-and `occupancyTimeSec`. Other fields remain metadata. Missing needed fields
-raise an error; the reader does not reconstruct an older layout.
+The stable viewer accepts legacy JSON `.rfmap`/`.json` files and version-2
+indexed NPZ `.rfmap` files. It detects the file signature rather than requiring
+a `.npz` extension. The indexed reader decodes shared metadata and the first
+unit, displays the plot, then caches the rest off the Tk thread. A small
+bottom-right progress bar reports cached units. Selecting an uncached unit
+prioritizes it; repeated visits reuse immutable arrays. Multi-unit Figure
+Composer is available after the cache completes. Errors preserve loaded units
+and expose Retry; closing or replacing a document cancels pending reads.
+
+Legacy JSON still loads the complete document. Indexed archives store UTF-8
+JSON in a `uint8` `metadata` entry, plus `unitPool`, `xPositions`, `yPositions`,
+`timeBinEdges`, `occupancyTimeSec`, and one `unit_<ID>` array per recorded ID.
+Each unit has axes `(y, x, time)`, including singleton dimensions. The reader
+requires `formatVersion=2`; no transpose, time-axis trimming, or rate conversion
+is applied while reading. See the shared file contract for details.
+
 Counts are raw non-negative integers. Occupancy dimensions come from the
 y-by-x axes in `unitsSpikeCountsSize`. Each qualifying trial contributes once
 per final spatial bin, and occupancy sums the qualifying trial durations.
@@ -103,13 +115,13 @@ Opening the app without a path shows the native file chooser. Release packages
 do not contain or auto-load sample RF data.
 
 Its macOS identity is `RF Map Viewer.app`, bundle ID
-`org.local.rfmapping.viewer`, and version/build `1.9.9` / `10911`. Build it with:
+`org.local.rfmapping.viewer`, and version/build `1.10.0` / `110000`. Build it with:
 
 ```sh
 script/build_python_stable_macos_app.sh
 ```
 
-The same Python release is packaged for Windows x64 as a portable ZIP and an
+The previous stable 1.9.9 release is packaged for Windows x64 as a portable ZIP and an
 Inno Setup installer. On a Windows build host with Python 3.14, PyInstaller,
 and Inno Setup 6 installed, build and smoke-test both artifacts with:
 
