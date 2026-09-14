@@ -147,8 +147,21 @@ class RFMViewer(tk.Toplevel):
         if data is not None and startup_path is not None:
             raise ValueError("Provide at most one of data or startup_path")
 
-        if master is None:
-            master = tk.Tk()
+        created_root = master is None
+        if created_root:
+            master = tk.Tk(useTk=False)
+            if sys.platform == "darwin":
+                # OpenApplication can arrive inside loadtk(). Stay in Tcl here:
+                # entering a Python callback during Tk_Init aborts on macOS.
+                master.tk.eval("""
+                    namespace eval ::tk::mac {
+                        variable rfmapOpenedApplication 0
+                        proc OpenApplication {} {
+                            set ::tk::mac::rfmapOpenedApplication 1
+                        }
+                    }
+                """)
+            master.loadtk()
             master.withdraw()
         self._app_root = master.winfo_toplevel()
         if not hasattr(self._app_root, "_rfm_viewer_windows"):
@@ -210,6 +223,12 @@ class RFMViewer(tk.Toplevel):
         self.title("RF Map Viewer")
         self.withdraw()
         self._install_application_handlers()
+        opened_application = False
+        if created_root and sys.platform == "darwin":
+            opened_application = self.tk.getboolean(
+                self.tk.getvar("::tk::mac::rfmapOpenedApplication")
+            )
+            self.tk.call("unset", "::tk::mac::rfmapOpenedApplication")
 
         if data is not None:
             self._initialize_viewer(data)
@@ -221,9 +240,12 @@ class RFMViewer(tk.Toplevel):
             )
         else:
             self._show_startup_chooser_shell()
-            # Give Finder's OpenDocument Apple event a short chance to replace
-            # this callback before a direct launch opens the modal chooser.
-            self._startup_after = self.after(200, self._open_startup_file_dialog)
+            # On macOS, OpenApplication opens the chooser; OpenDocument loads
+            # the Finder selection, regardless of when that event arrives.
+            if sys.platform != "darwin":
+                self._startup_after = self.after(200, self._open_startup_file_dialog)
+            elif opened_application:
+                self._dispatch_macos_open_application()
 
     def _initialize_viewer(self, data: RFMappingData) -> None:
         self._remove_startup_chooser_shell()
@@ -465,7 +487,7 @@ class RFMViewer(tk.Toplevel):
 
     def _open_startup_file_dialog(self) -> None:
         self._startup_after = None
-        if not self._quitting and not self._viewer_ready:
+        if not self._quitting and self._startup_chooser_frame is not None:
             self._open_json()
 
     def _remove_startup_loading_shell(self) -> None:
@@ -2069,6 +2091,7 @@ class RFMViewer(tk.Toplevel):
         try:
             self.bind_all("<Command-o>", self._dispatch_open_json)
             self.bind_all("<Command-comma>", self._dispatch_settings)
+            self.tk.createcommand("::tk::mac::OpenApplication", self._dispatch_macos_open_application)
             self.tk.createcommand("::tk::mac::OpenDocument", self._dispatch_macos_open_documents)
             self.tk.createcommand("::tk::mac::Quit", self._quit_application)
             self.tk.createcommand("::tk::mac::ShowPreferences", self._dispatch_settings)
@@ -2977,6 +3000,15 @@ class RFMViewer(tk.Toplevel):
             for window in self._ready_pairing_viewers():
                 window._pair_last_local_state = window._capture_pairing_state()
         return True
+
+    def _dispatch_macos_open_application(self) -> None:
+        viewer = self._active_viewer()
+        if (
+            not viewer._quitting
+            and viewer._startup_chooser_frame is not None
+            and viewer._startup_after is None
+        ):
+            viewer._startup_after = viewer.after_idle(viewer._open_startup_file_dialog)
 
     def _dispatch_macos_open_documents(self, *paths: str) -> None:
         self._active_viewer()._on_macos_open_documents(*paths)

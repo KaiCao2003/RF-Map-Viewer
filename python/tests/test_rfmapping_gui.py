@@ -30,7 +30,7 @@ class MacOSLifecycleTests(unittest.TestCase):
         viewer_type.assert_called_once_with()
         viewer.mainloop.assert_called_once_with()
 
-    def test_macos_handlers_include_open_document_and_quit(self) -> None:
+    def test_macos_handlers_include_open_application_open_document_and_quit(self) -> None:
         class FakeTk:
             def __init__(self) -> None:
                 self.commands = {}
@@ -48,6 +48,7 @@ class MacOSLifecycleTests(unittest.TestCase):
                 self._close_window = lambda *_args: None
                 self._dispatch_open_json = lambda *_args: None
                 self._dispatch_settings = lambda *_args: None
+                self._dispatch_macos_open_application = lambda *_args: None
                 self._dispatch_macos_open_documents = lambda *_args: None
                 self._open_support_documentation = lambda *_args: None
 
@@ -62,6 +63,7 @@ class MacOSLifecycleTests(unittest.TestCase):
             gui.RFMViewer._install_application_handlers(viewer)
 
         self.assertIs(viewer.protocols["WM_DELETE_WINDOW"], viewer._close_window)
+        self.assertIs(viewer.tk.commands["::tk::mac::OpenApplication"], viewer._dispatch_macos_open_application)
         self.assertIs(viewer.tk.commands["::tk::mac::OpenDocument"], viewer._dispatch_macos_open_documents)
         self.assertIs(viewer.tk.commands["::tk::mac::Quit"], viewer._quit_application)
         self.assertIs(

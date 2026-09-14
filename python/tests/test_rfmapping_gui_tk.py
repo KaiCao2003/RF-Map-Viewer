@@ -147,6 +147,81 @@ class TkViewerTests(unittest.TestCase):
         self.assertTrue(any("never loads sample data" in label for label in labels))
         self.assertEqual(buttons, ["Open RF Map…"])
 
+    def test_delayed_macos_document_open_never_opens_file_chooser(self) -> None:
+        with (
+            mock.patch.object(gui.sys, "platform", "darwin"),
+            mock.patch.object(gui.filedialog, "askopenfilename", return_value="") as dialog,
+        ):
+            viewer = gui.RFMViewer(master=self.app._app_root)
+            self.addCleanup(viewer.destroy)
+            # Finder may deliver the file after the former 200 ms picker timer.
+            viewer.after(
+                350,
+                lambda: viewer.tk.call("::tk::mac::OpenDocument", str(self.app.data.path)),
+            )
+            deadline = time.monotonic() + 5
+            while not viewer._viewer_ready and time.monotonic() < deadline:
+                viewer.update()
+                time.sleep(0.01)
+
+            self.assertTrue(viewer._viewer_ready)
+            self.assertEqual(viewer.data.path, self.app.data.path)
+            dialog.assert_not_called()
+
+    def test_macos_application_open_shows_file_chooser(self) -> None:
+        with (
+            mock.patch.object(gui.sys, "platform", "darwin"),
+            mock.patch.object(gui.filedialog, "askopenfilename", return_value="") as dialog,
+        ):
+            viewer = gui.RFMViewer(master=self.app._app_root)
+            self.addCleanup(viewer.destroy)
+            viewer.tk.call("::tk::mac::OpenApplication")
+            viewer.update()
+
+            dialog.assert_called_once()
+            self.assertFalse(viewer._viewer_ready)
+
+    def test_macos_application_open_during_tk_initialization_is_preserved(self) -> None:
+        loadtk = gui.tk.Tk.loadtk
+
+        def loadtk_with_application_event(root) -> None:
+            # A Python createcommand callback here aborts inside macOS Tk_Init.
+            self.assertEqual(
+                root.tk.call("info", "procs", "::tk::mac::OpenApplication"),
+                ("::tk::mac::OpenApplication",),
+            )
+            root.tk.call("::tk::mac::OpenApplication")
+            loadtk(root)
+
+        with (
+            mock.patch.object(gui.sys, "platform", "darwin"),
+            mock.patch.object(gui.tk.Tk, "loadtk", loadtk_with_application_event),
+            mock.patch.object(gui.filedialog, "askopenfilename", return_value="") as dialog,
+        ):
+            viewer = gui.RFMViewer()
+            self.addCleanup(viewer.destroy)
+            viewer.update()
+
+            dialog.assert_called_once()
+            self.assertFalse(viewer._viewer_ready)
+
+    def test_macos_application_open_does_not_interrupt_pending_document(self) -> None:
+        with (
+            mock.patch.object(gui.sys, "platform", "darwin"),
+            mock.patch.object(gui.filedialog, "askopenfilename", return_value="") as dialog,
+        ):
+            viewer = gui.RFMViewer(master=self.app._app_root)
+            self.addCleanup(viewer.destroy)
+            viewer.tk.call("::tk::mac::OpenDocument", str(self.app.data.path))
+            viewer.tk.call("::tk::mac::OpenApplication")
+            deadline = time.monotonic() + 5
+            while not viewer._viewer_ready and time.monotonic() < deadline:
+                viewer.update()
+                time.sleep(0.01)
+
+            self.assertTrue(viewer._viewer_ready)
+            dialog.assert_not_called()
+
     def test_rf_subtraction_shortcut_controls_and_display_toggle(self) -> None:
         self.app.settings = replace(self.app.settings, rf_difference_start_ms=8, rf_difference_end_ms=16)
         self.app._reset_rf_window_defaults()

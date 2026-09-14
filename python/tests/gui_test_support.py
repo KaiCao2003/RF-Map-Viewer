@@ -75,14 +75,7 @@ def current_rf_payload(
     payload.update(
         responseUnits="spike_count",
         responseNormalization="none",
-        spikeCountDefinition=(
-            "each_qualifying_trial_contributes_once_per_final_spatial_bin"
-        ),
         occupancyTimeSec=occupancy_time_s,
-        occupancyTimeSecSize=[n_y, n_x],
-        occupancyTimeDefinition=(
-            "sum_of_qualifying_trial_durations_per_final_spatial_bin"
-        ),
     )
     return payload
 

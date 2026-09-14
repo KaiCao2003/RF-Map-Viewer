@@ -22,13 +22,16 @@ results use a bounded cache, spatial display controls avoid redrawing companion
 panels, and waveform navigation keeps one active read plus the latest pending
 unit. The stable macOS package excludes the separate Free-Moving/HDF5 modules.
 
-The stable viewer opens the current JSON-text RF `.rfmap` contract and its
-tuning-curve, probe, and waveform companions. Since version 1.9.6 it requires raw non-negative
-integer `unitsSpikeCounts` together with the matching spatial
-`occupancyTimeSec` map and the current response-definition fields written by
-`RFmapping_core.m`. Older RF documents without occupancy metadata are rejected
-instead of being interpreted heuristically. At least one spatial cell must
-have positive occupancy.
+The stable viewer opens the current JSON-text RF `.rfmap` document and its
+tuning-curve, probe, and waveform companions. The reader loads the complete
+JSON with `json.load`, then directly reads `unitsSpikeCounts`,
+`unitsSpikeCountsSize`, `unitPool`, `xPositions`, `yPositions`, `timeBinEdges`,
+and `occupancyTimeSec`. Other fields remain metadata. Missing needed fields
+raise an error; the reader does not reconstruct an older layout.
+Counts are raw non-negative integers. Occupancy dimensions come from the
+y-by-x axes in `unitsSpikeCountsSize`. Each qualifying trial contributes once
+per final spatial bin, and occupancy sums the qualifying trial durations.
+At least one spatial cell must have positive occupancy.
 
 The default RF value is mean firing rate in Hz: counts in the selected response
 window are divided by spatial occupancy seconds. Spatial rebinning and

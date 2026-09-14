@@ -50,18 +50,10 @@ class RFMappingRateTests(unittest.TestCase):
         self.assertEqual(forward, reverse)
         self.assertAlmostEqual(data.time_span_seconds(2, 0), 0.3)
 
-    def test_legacy_json_without_occupancy_is_rejected(self) -> None:
+    def test_missing_occupancy_raises_key_error(self) -> None:
         payload = base_payload()
-        for key in (
-            "responseUnits",
-            "responseNormalization",
-            "spikeCountDefinition",
-            "occupancyTimeSec",
-            "occupancyTimeSecSize",
-            "occupancyTimeDefinition",
-        ):
-            payload.pop(key)
-        with self.assertRaisesRegex(ValueError, "Unsupported legacy RF map"):
+        del payload["occupancyTimeSec"]
+        with self.assertRaisesRegex(KeyError, "occupancyTimeSec"):
             self.load(payload)
 
     def test_zero_occupancy_with_zero_counts_is_no_data(self) -> None:
@@ -150,7 +142,6 @@ class RFMappingRateTests(unittest.TestCase):
             yPositions=[-1, 1],
             timeBinEdges=[-0.1, 0.0, 0.1, 0.2, 0.3],
             occupancyTimeSec=[[1.0, 2.0, 0.0], [0.5, 1.5, 2.5]],
-            occupancyTimeSecSize=[2, 3],
         )
         data = self.load(payload)
         time_groups = [(0, 0), (1, 2), (3, 3)]

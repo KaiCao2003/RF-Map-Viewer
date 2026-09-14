@@ -20,16 +20,7 @@ def _write_dataset(tmp_path: Path, **updates: object) -> Path:
         "xPositions": [-10, 10],
         "yPositions": [0],
         "timeBinEdges": [-0.1, 0.0, 0.1],
-        "responseUnits": "spike_count",
-        "responseNormalization": "none",
-        "spikeCountDefinition": (
-            "each_qualifying_trial_contributes_once_per_final_spatial_bin"
-        ),
         "occupancyTimeSec": [[0.2, 0.4]],
-        "occupancyTimeSecSize": [1, 2],
-        "occupancyTimeDefinition": (
-            "sum_of_qualifying_trial_durations_per_final_spatial_bin"
-        ),
         "metadataVersion": 3,
     }
     payload.update(updates)
@@ -130,7 +121,6 @@ def test_accepts_scalar_positions_for_singleton_spatial_axes(
             xPositions=0,
             yPositions=[-10, 10],
             occupancyTimeSec=[0.2, 0.4],
-            occupancyTimeSecSize=[2, 1],
         )
     )
     np.testing.assert_array_equal(horizontal[0].x_positions, [0.0])
@@ -215,7 +205,6 @@ def test_accepts_matlab_scalar_unit_and_occupancy(tmp_path: Path) -> None:
             xPositions=0,
             yPositions=0,
             occupancyTimeSec=0.25,
-            occupancyTimeSecSize=[1, 1],
         )
     )
 
@@ -223,47 +212,20 @@ def test_accepts_matlab_scalar_unit_and_occupancy(tmp_path: Path) -> None:
     np.testing.assert_array_equal(maps[0].occupancy_time_s, [[0.25]])
 
 
-def test_rejects_legacy_schema_without_occupancy(tmp_path: Path) -> None:
+def test_missing_occupancy_is_not_reconstructed(tmp_path: Path) -> None:
     path = _write_dataset(tmp_path)
     payload = json.loads(path.read_text(encoding="utf-8"))
-    for key in (
-        "responseUnits",
-        "responseNormalization",
-        "spikeCountDefinition",
-        "occupancyTimeSec",
-        "occupancyTimeSecSize",
-        "occupancyTimeDefinition",
-    ):
-        payload.pop(key)
+    del payload["occupancyTimeSec"]
     payload["stimulusPresentationCounts"] = [[2, 4]]
     path.write_text(json.dumps(payload), encoding="utf-8")
 
-    with pytest.raises(ValueError, match="Unsupported legacy RF map"):
+    with pytest.raises(KeyError, match="occupancyTimeSec"):
         load_rf_maps(path)
-
-
-@pytest.mark.parametrize(
-    ("key", "value"),
-    [
-        ("responseUnits", "mean_spikes_per_covering_trial_per_time_bin"),
-        ("responseNormalization", "per_native_pixel_trial_then_equal_pixel_mean"),
-        ("spikeCountDefinition", "other"),
-        ("occupancyTimeDefinition", "other"),
-    ],
-)
-def test_rejects_noncurrent_contract_values(
-    tmp_path: Path,
-    key: str,
-    value: str,
-) -> None:
-    with pytest.raises(ValueError, match=key):
-        load_rf_maps(_write_dataset(tmp_path, **{key: value}))
 
 
 @pytest.mark.parametrize(
     "updates",
     [
-        {"occupancyTimeSecSize": [1, 3]},
         {"occupancyTimeSec": [[0.2]]},
         {"occupancyTimeSec": [[-0.1, 0.4]]},
         {"occupancyTimeSec": [[float("nan"), 0.4]]},

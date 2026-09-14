@@ -1,9 +1,12 @@
 """Viewer-only RF JSON model.
 
-This module intentionally implements only the stable data contract needed by
-the desktop viewer: strict JSON validation, unit/index lookup, and half-open
-time-window sums. Scientific RF detection and raw-trial reconstruction remain
+The complete JSON document is loaded before extracting the arrays needed by
+the desktop viewer for unit/index lookup and half-open time-window sums.
+Scientific RF detection and raw-trial reconstruction remain
 in the separate ``rfmapping`` analysis repository.
+
+Each qualifying trial contributes once per final spatial bin. Occupancy is
+the sum of those trial durations, with the same y-by-x shape as the counts.
 """
 
 from __future__ import annotations
@@ -17,21 +20,13 @@ from dataclasses import dataclass
 from numbers import Real
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, TextIO, overload
+from typing import Any, overload
 
 import numpy as np
 from numpy.typing import NDArray
 
 
 _EDGE_ATOL_S = 1e-12
-_RESPONSE_UNITS = "spike_count"
-_RESPONSE_NORMALIZATION = "none"
-_SPIKE_COUNT_DEFINITION = (
-    "each_qualifying_trial_contributes_once_per_final_spatial_bin"
-)
-_OCCUPANCY_TIME_DEFINITION = (
-    "sum_of_qualifying_trial_durations_per_final_spatial_bin"
-)
 _STRUCTURAL_JSON_FIELDS = {
     "unitsSpikeCounts",
     "unitsSpikeCountsSize",
@@ -40,7 +35,6 @@ _STRUCTURAL_JSON_FIELDS = {
     "yPositions",
     "timeBinEdges",
     "occupancyTimeSec",
-    "occupancyTimeSecSize",
 }
 
 
@@ -133,11 +127,9 @@ def _compact_spike_counts(
 ) -> NDArray[np.unsignedinteger[Any]]:
     """Validate counts and copy them directly into the smallest safe dtype.
 
-    Only one unit's nested Python lists are materialized by the streaming
-    reader. This also avoids constructing an ``int64`` array before
-    down-casting it. MATLAB integer JSON normally takes the fast ``int`` row
-    path; uncommon floating-point JSON numbers retain the previous strict
-    finite, non-negative, integral validation.
+    This avoids constructing an ``int64`` array before down-casting it.
+    MATLAB integer JSON takes the fast ``int`` row path; floating-point
+    JSON numbers must also be finite, non-negative and integral.
     """
 
     maximum = 0
@@ -195,120 +187,6 @@ def _compact_spike_counts(
         raise ValueError(f"Unable to parse unitsSpikeCounts: {exc}") from exc
     result.setflags(write=False)
     return result
-
-
-class _RFJSONReader:
-    """Decode JSON values incrementally, retaining at most one raw unit.
-
-    The standard decoder still handles strings, escapes and number syntax.
-    Only the top-level object and the outer counts array are streamed here;
-    metadata may precede or follow the counts, as in MATLAB jsonencode output.
-    """
-
-    def __init__(self, handle: TextIO):
-        self.handle = handle
-        self.buffer = ""
-        self.position = 0
-        self.eof = False
-        self.decoder = json.JSONDecoder()
-        self.value_chars = 0
-
-    def _fill(self) -> None:
-        remaining = self.buffer[self.position :]
-        chunk = self.handle.read(max(64 * 1024, len(remaining)))
-        self.buffer = remaining + chunk
-        self.position = 0
-        self.eof = not chunk
-
-    def peek(self) -> str:
-        while True:
-            while (
-                self.position < len(self.buffer)
-                and self.buffer[self.position] in " \t\r\n"
-            ):
-                self.position += 1
-            if self.position < len(self.buffer):
-                return self.buffer[self.position]
-            if self.eof:
-                return ""
-            self._fill()
-
-    def take(self, token: str) -> None:
-        if self.peek() != token:
-            raise ValueError(f"Unable to parse RF mapping JSON: expected {token!r}")
-        self.position += 1
-
-    def value(self, *, minimum_chars: int = 0) -> Any:
-        self.peek()
-        # Successive units normally have comparable encoded sizes. Reading
-        # that much first avoids repeatedly decoding partial nested arrays.
-        while not self.eof and len(self.buffer) - self.position < minimum_chars:
-            self._fill()
-        while True:
-            try:
-                value, end = self.decoder.raw_decode(self.buffer, self.position)
-            except json.JSONDecodeError as exc:
-                if self.eof:
-                    raise ValueError(f"Unable to parse RF mapping JSON: {exc}") from exc
-            else:
-                # A number at the end of a chunk may still continue (12, 1e3).
-                if self.eof or (
-                    end < len(self.buffer) and self.buffer[end] in " \t\r\n,]}:"
-                ):
-                    self.value_chars = end - self.position
-                    self.position = end
-                    return value
-            self._fill()
-
-
-def _read_count_units(reader: _RFJSONReader) -> tuple[np.ndarray, ...]:
-    reader.take("[")
-    units: list[np.ndarray] = []
-    unit_chars = 0
-    if reader.peek() != "]":
-        while True:
-            unit = reader.value(minimum_chars=unit_chars)
-            unit_chars = max(unit_chars, reader.value_chars)
-            if not (
-                isinstance(unit, list) and unit
-                and isinstance(unit[0], list) and unit[0]
-                and isinstance(unit[0][0], list) and unit[0][0]
-            ):
-                raise ValueError("unitsSpikeCounts has an invalid shape")
-            shape = (1, len(unit), len(unit[0]), len(unit[0][0]))
-            units.append(_compact_spike_counts([unit], shape)[0])
-            del unit
-            if reader.peek() == "]":
-                break
-            reader.take(",")
-    reader.take("]")
-    return tuple(units)
-
-
-def _read_rf_json(handle: TextIO) -> dict[str, Any]:
-    reader = _RFJSONReader(handle)
-    if reader.peek() != "{":
-        raise ValueError("RF mapping JSON must contain an object at the top level")
-    reader.take("{")
-    raw: dict[str, Any] = {}
-    if reader.peek() != "}":
-        while True:
-            key = reader.value()
-            if not isinstance(key, str):
-                raise ValueError("Unable to parse RF mapping JSON: expected an object key")
-            reader.take(":")
-            raw[key] = (
-                _read_count_units(reader)
-                if key == "unitsSpikeCounts"
-                else reader.value()
-            )
-            if reader.peek() == "}":
-                break
-            reader.take(",")
-    reader.take("}")
-    if reader.peek():
-        raise ValueError("Unable to parse RF mapping JSON: trailing data")
-    return raw
 
 
 def _occupancy_matrix(value: Any, n_y: int, n_x: int) -> NDArray[np.float64]:
@@ -550,45 +428,11 @@ def _make_rf_map(
 
 
 def load_rf_maps(path: str | Path) -> RFMapList:
-    """Load and validate one RF mapping JSON document."""
+    """Load the full JSON document and extract the current RF arrays."""
 
     source_path = Path(path)
     with source_path.open("r", encoding="utf-8") as handle:
-        raw = _read_rf_json(handle)
-
-    required = {
-        "occupancyTimeDefinition",
-        "occupancyTimeSec",
-        "occupancyTimeSecSize",
-        "responseNormalization",
-        "responseUnits",
-        "spikeCountDefinition",
-        "unitsSpikeCounts",
-        "unitsSpikeCountsSize",
-        "unitPool",
-        "xPositions",
-        "yPositions",
-        "timeBinEdges",
-    }
-    missing = sorted(required.difference(raw))
-    if missing:
-        raise ValueError(
-            "Unsupported legacy RF map; missing current schema keys: "
-            + ", ".join(missing)
-        )
-
-    expected_contract = {
-        "responseUnits": _RESPONSE_UNITS,
-        "responseNormalization": _RESPONSE_NORMALIZATION,
-        "spikeCountDefinition": _SPIKE_COUNT_DEFINITION,
-        "occupancyTimeDefinition": _OCCUPANCY_TIME_DEFINITION,
-    }
-    for key, expected in expected_contract.items():
-        if raw[key] != expected:
-            raise ValueError(
-                f"Unsupported RF map schema: {key} must be {expected!r}; "
-                f"got {raw[key]!r}"
-            )
+        raw = json.load(handle)
 
     size_values = _flat_list(raw["unitsSpikeCountsSize"], "unitsSpikeCountsSize")
     if len(size_values) != 4:
@@ -600,14 +444,7 @@ def load_rf_maps(path: str | Path) -> RFMapList:
         raise ValueError("unitsSpikeCountsSize values must be positive")
     n_units, n_y, n_x, n_time_bins = shape
 
-    count_units = raw.pop("unitsSpikeCounts")
-    if len(count_units) != n_units or any(
-        unit.shape != shape[1:] for unit in count_units
-    ):
-        raise ValueError(f"unitsSpikeCounts has an invalid shape; expected {shape}")
-    spike_counts = np.stack(count_units)
-    spike_counts.setflags(write=False)
-    del count_units
+    spike_counts = _compact_spike_counts(raw.pop("unitsSpikeCounts"), shape)
 
     unit_pool = tuple(
         _integer(value, "unitPool value")
@@ -648,20 +485,6 @@ def load_rf_maps(path: str | Path) -> RFMapList:
     if not np.all(np.diff(time_edges) > 0):
         raise ValueError("timeBinEdges must be strictly increasing")
 
-    occupancy_size_values = _flat_list(
-        raw["occupancyTimeSecSize"], "occupancyTimeSecSize"
-    )
-    if len(occupancy_size_values) != 2:
-        raise ValueError("occupancyTimeSecSize must contain two values")
-    occupancy_shape = tuple(
-        _integer(value, "occupancyTimeSecSize value")
-        for value in occupancy_size_values
-    )
-    if occupancy_shape != (n_y, n_x):
-        raise ValueError(
-            "occupancyTimeSecSize must match the y-by-x dimensions in "
-            "unitsSpikeCountsSize"
-        )
     occupancy_time_s = _occupancy_matrix(raw["occupancyTimeSec"], n_y, n_x)
     if not np.any(occupancy_time_s > 0):
         raise ValueError("occupancyTimeSec must contain at least one positive value")

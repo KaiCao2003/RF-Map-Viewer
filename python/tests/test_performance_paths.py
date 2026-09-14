@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import io
-import json
 import multiprocessing
 import os
 import queue
@@ -21,7 +19,7 @@ import rfmapping_gui as gui
 import rfmapping_viewer.constants as constants_module
 import rfmapping_viewer.display as display_module
 import rfmapping_viewer.rf_model as rf_model_module
-from rfmapping_viewer.rf_dataset import _read_rf_json, load_rf_maps
+from rfmapping_viewer.rf_dataset import load_rf_maps
 from rfmapping_viewer.rf_loading import load_rf_maps_isolated
 from test_rf_dataset import _write_dataset
 from gui_test_support import Variable as Var
@@ -181,35 +179,6 @@ def test_local_queries_preserve_unavailable_cells_and_unsigned_window_sums(tmp_p
     assert data.spatial_group_response_values(0, (0, 0), (1, 1), [(0, 1)], constants_module.VALUE_MODE_COUNT) == [float(2**64 - 1)]
 
 
-@pytest.mark.parametrize("chunk_size", [1, 7, 61, 65536])
-def test_streaming_json_handles_chunk_boundaries_and_key_order(tmp_path, chunk_size):
-    path = _write_dataset(tmp_path, note='quotes " and slash \\ and 中文', value=12.5e-7)
-    raw = json.loads(path.read_text())
-    # Counts last as well as MATLAB's counts-first order.
-    for payload in (raw, {**{k: v for k, v in raw.items() if k != "unitsSpikeCounts"}, "unitsSpikeCounts": raw["unitsSpikeCounts"]}):
-        class SmallReads(io.StringIO):
-            def read(self, n=-1):
-                return super().read(min(n, chunk_size))
-
-        decoded = _read_rf_json(SmallReads(json.dumps(payload, ensure_ascii=False)))
-        assert decoded["note"] == raw["note"]
-        assert decoded["value"] == raw["value"]
-        np.testing.assert_array_equal(np.stack(decoded["unitsSpikeCounts"]), raw["unitsSpikeCounts"])
-
-
-@pytest.mark.parametrize("document", [
-    '{"unitsSpikeCounts":[[[[1,2]]]],}',
-    '{"unitsSpikeCounts":[[[[1,2]]],]}',
-    '{"unitsSpikeCounts":[[[[1,2,]]]]}',
-    '{"unitsSpikeCounts":[[[[1e,2]]]]}',
-    '{"unitsSpikeCounts":[[[[1,2]]]]',
-    '{} trailing', '{"value":12e}',
-])
-def test_streaming_json_rejects_malformed_documents(document):
-    with pytest.raises(ValueError):
-        _read_rf_json(io.StringIO(document))
-
-
 def test_isolated_load_preserves_arrays_metadata_and_read_only_contract(tmp_path):
     path = _write_dataset(tmp_path, nested={"list": [1, {"a": "b"}]})
     direct = load_rf_maps(path)
@@ -238,9 +207,9 @@ def test_isolated_load_cancellation_reaps_worker(tmp_path):
     assert {child.pid for child in multiprocessing.active_children()} == before
 
 
-def test_isolated_load_surfaces_schema_failure(tmp_path):
-    path = _write_dataset(tmp_path, responseUnits="wrong")
-    with pytest.raises(ValueError, match="responseUnits"):
+def test_isolated_load_surfaces_invalid_occupancy(tmp_path):
+    path = _write_dataset(tmp_path, occupancyTimeSec=[[-0.2, 0.4]])
+    with pytest.raises(ValueError, match="occupancyTimeSec"):
         load_rf_maps_isolated(path)
 
 
@@ -252,7 +221,7 @@ def test_isolated_load_transfers_arrays_across_binary_chunk_boundaries(tmp_path)
         unitsSpikeCountsSize=list(counts.shape), unitPool=[7],
         xPositions=list(range(64)), yPositions=list(range(32)),
         timeBinEdges=[i * 0.001 for i in range(514)],
-        occupancyTimeSec=np.ones((32, 64)).tolist(), occupancyTimeSecSize=[32, 64],
+        occupancyTimeSec=np.ones((32, 64)).tolist(),
     )
     actual = load_rf_maps_isolated(path)
     np.testing.assert_array_equal(actual[0].spike_counts, counts[0])
