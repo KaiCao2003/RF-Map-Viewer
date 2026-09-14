@@ -63,7 +63,7 @@ python3 release/verify_versions.py
 
 Pushing one exact component tag invokes only that component's release job.
 The Python stable 1.10.0 job builds and smoke-tests its macOS arm64 archive.
-Windows remains at its separately recorded 1.9.9 version and is skipped unless
+Windows remains at its separately recorded 1.9.6 version and is skipped unless
 its version matches the requested stable release.
 Manual workflow dispatch builds only the selected component candidate without
 publishing a tag or GitHub Release; selecting Python stable runs its macOS job, plus Windows only when the
