@@ -296,6 +296,9 @@ class TkViewerTests(unittest.TestCase):
 
     def test_rf_subtraction_normalizes_both_ranges_and_fits_minimum_window(self) -> None:
         self.app._select_tab(0)
+        # Aqua limits windows to the screen unless an explicit maximum is set;
+        # the CI desktop can be narrower than the viewer's minimum window.
+        self.app.maxsize(1120, 720)
         self.app.geometry("1120x720")
         self.app._toggle_rf_subtraction()
         self.app.range_start_ms_var.set("999")
@@ -305,6 +308,11 @@ class TkViewerTests(unittest.TestCase):
         self.app._on_range_changed()
         self.app._toggle_display_controls()
         self.app.update()
+        self.assertEqual(
+            (self.app.winfo_width(), self.app.winfo_height()), (1120, 720),
+            f"screen={self.app.winfo_screenwidth()}x{self.app.winfo_screenheight()}, "
+            f"maximum={self.app.maxsize()}",
+        )
         self.assertEqual(self.app._selected_time_bounds_ms(), (0.0, 30.0))
         self.assertEqual(self.app._source_bins_for_subtract_controls(), (8, 17))
         self.assertEqual(self.app.subtract_start_ms_var.get(), "8")
