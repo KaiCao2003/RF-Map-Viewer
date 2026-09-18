@@ -59,7 +59,7 @@ from .waveforms import (
 )
 
 
-WEB_VERSION = "1.9.6"
+WEB_VERSION = "1.10.0"
 
 
 class StrictRequest(BaseModel):
@@ -78,6 +78,9 @@ class DisplayedCsvExportRequest(StrictRequest):
     ]
     rfStartMs: float = Field(allow_inf_nan=False)
     rfEndMs: float = Field(allow_inf_nan=False)
+    rfWindowMode: Literal["sum", "difference"] = "sum"
+    rfBStartMs: float = Field(default=0, allow_inf_nan=False)
+    rfBEndMs: float = Field(default=80, allow_inf_nan=False)
     timeResolutionMs: float = Field(allow_inf_nan=False)
     xBins: int = Field(ge=1)
     yBins: int = Field(ge=1)
@@ -314,6 +317,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         record = _get_record(services, dataset_id)
         return services.datasets.response_metadata(record)
 
+    @application.get("/api/datasets/{dataset_id}/cache")
+    def dataset_cache(dataset_id: str) -> dict[str, Any]:
+        record = _get_record(services, dataset_id)
+        return services.datasets.response_metadata(record)["cacheProgress"]
+
+    @application.post("/api/datasets/{dataset_id}/cache/retry")
+    def retry_dataset_cache(dataset_id: str) -> dict[str, Any]:
+        record = _get_record(services, dataset_id)
+        if record.indexed is not None:
+            record.indexed.start(retry=True)
+        return services.datasets.response_metadata(record)["cacheProgress"]
+
+    @application.delete("/api/datasets/{dataset_id}")
+    def close_dataset(dataset_id: str) -> dict[str, bool]:
+        services.datasets.close(dataset_id)
+        return {"closed": True}
+
     @application.get("/api/datasets/{dataset_id}/unit-filter")
     def dataset_unit_filter(
         dataset_id: str,
@@ -404,6 +424,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             value_mode=request.valueMode,
             rf_start_ms=request.rfStartMs,
             rf_end_ms=request.rfEndMs,
+            rf_window_mode=request.rfWindowMode,
+            rf_b_start_ms=request.rfBStartMs,
+            rf_b_end_ms=request.rfBEndMs,
             time_resolution_ms=request.timeResolutionMs,
             x_bins=request.xBins,
             y_bins=request.yBins,
@@ -672,6 +695,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
 
     def _normalized_figure_pages(record, request: FigurePlanRequest):
+        if record.indexed is not None and not record.indexed.status()["complete"]:
+            raise FigureExportValidationError("Figure Composer requires the complete RF unit cache; wait or retry the cache error")
         if request.specVersion != FIGURE_SPEC_VERSION:
             raise FigureExportValidationError(
                 f"Unsupported specVersion {request.specVersion}; expected {FIGURE_SPEC_VERSION}"

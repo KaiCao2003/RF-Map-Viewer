@@ -1,7 +1,7 @@
 # RF Mapping File Contract
 
 All three stable viewers consume the read-only RF JSON document below.
-Python stable 1.10.0 additionally accepts the version-2 indexed archive.
+Python, Swift, and Web stable 1.10.0 additionally accept the version-2 indexed archive.
 The preferred extension is `.rfmap`; `.json` is also accepted because
 `RFmapping_core.m` can write the same current payload under either filename.
 The extension does not change the schema.
@@ -52,7 +52,7 @@ primary viewer documents; `.tc` and `.probe` are attached to an open RF map so
 their recorded unit IDs have a dataset context. Inputs are never modified by a
 viewer.
 
-## Indexed `.rfmap` version 2 (Python stable 1.10.0)
+## Indexed `.rfmap` version 2 (stable viewers 1.10.0)
 
 The file is a compressed NPZ (ZIP of NPY entries), keeping the `.rfmap`
 extension. Its ZIP directory indexes each `unit_<recorded ID>` entry; `unitPool`

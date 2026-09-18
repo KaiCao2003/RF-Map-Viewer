@@ -19,12 +19,27 @@ enum RFUnitUnavailableReason: Equatable, Sendable {
 @Observable
 final class RFMappingStore {
     private enum PreferenceKey {
+        static let timingDefaults = "rfmapping.timingDefaults"
         static let tuningSession = "rfmapping.tuningSession"
         static let showWaveform = "rfmapping.showWaveform"
         static let waveformChannelMode = "rfmapping.waveformChannelMode"
         static let rfFilterUnitsWithZeroBins = "rfmapping.rfFilterUnitsWithZeroBins"
         static let rfZeroBinThreshold = "rfmapping.rfZeroBinThreshold"
     }
+
+    struct TimingDefaults: Codable {
+        var subtract = false
+        var sumStart = 0.0
+        var sumEnd = 200.0
+        var aStart = 80.0
+        var aEnd = 160.0
+        var bStart = 0.0
+        var bEnd = 80.0
+    }
+
+    private var timingDefaults = TimingDefaults()
+    private var lastSumRange = (0.0, 200.0)
+    private var lastDifferenceRange = (80.0, 160.0)
 
     private enum SpatialPlotKind: Int, Equatable {
         case current
@@ -37,6 +52,7 @@ final class RFMappingStore {
         let valueMode: ResponseValueMode
         let sourceStart: Int
         let sourceEnd: Int
+        var subtractionRange: AxisGroup? = nil
     }
 
     private struct DelayCacheKey: Equatable {
@@ -59,6 +75,7 @@ final class RFMappingStore {
         let yBins: Int
         let flipY: Bool
         let smoothRadius: Int
+        var subtractionRange: AxisGroup? = nil
     }
 
     private struct RGBPlotCacheKey: Equatable {
@@ -116,6 +133,7 @@ final class RFMappingStore {
         let responseKey: GroupResponseCacheKey
         let selectedStart: Int
         let selectedEnd: Int
+        var subtractionRange: AxisGroup? = nil
     }
 
     private struct CellAnalysis {
@@ -153,6 +171,24 @@ final class RFMappingStore {
     @ObservationIgnored private var cellAnalysisCaches: [(key: CellAnalysisCacheKey, value: CellAnalysis)] = []
     @ObservationIgnored private var unitQualityFilterCache:
         (key: UnitQualityFilterCacheKey, unitIDs: [Int])?
+    @ObservationIgnored private var unitCacheTask: Task<Void, Never>?
+    @ObservationIgnored private var priorityUnitIndex: Int?
+    private(set) var cachedUnitCount = 0
+    private(set) var unitCacheError: String?
+    private(set) var isCachingUnits = false
+
+    private struct WaveformRequest {
+        let id = UUID()
+        let artifact: WaveformArtifactStore
+        let unitID: Int
+        let mode: WaveformChannelMode
+    }
+    @ObservationIgnored private var pendingWaveformRequest: WaveformRequest?
+    @ObservationIgnored private var waveformTask: Task<Void, Never>?
+    @ObservationIgnored private var waveformRequestID: UUID?
+
+    @ObservationIgnored private var qualityDecisionKey: UnitQualityFilterCacheKey?
+    @ObservationIgnored private var qualityDecisions: [Int: Bool] = [:]
     @ObservationIgnored private var loadRequestID: UUID?
     @ObservationIgnored private var activeDecodeTask: Task<RFMappingData, Error>?
     @ObservationIgnored var pairingDataDidChange: (() -> Void)?
@@ -176,6 +212,10 @@ final class RFMappingStore {
     var rangeEndMS = 1.0
     var plotRangeStartMS = 0.0
     var plotRangeEndMS = 200.0
+    private(set) var rfSubtractEnabled = false
+    var subtractRangeStartMS = 0.0
+    var subtractRangeEndMS = 80.0
+    var showDisplayOptions = true
     var flipY = false
     var palette: RFPalette = .gray
     var polarRadiusMode: PolarRadiusMode = .displayBottomInner
@@ -232,6 +272,15 @@ final class RFMappingStore {
     ) {
         self.preferences = preferences
         discoversCompanionsAutomatically = discoverCompanions
+        if let stored = preferences.data(forKey: PreferenceKey.timingDefaults),
+           let decoded = try? JSONDecoder().decode(TimingDefaults.self, from: stored) {
+            timingDefaults = decoded
+        }
+        rfSubtractEnabled = timingDefaults.subtract
+        lastSumRange = (timingDefaults.sumStart, timingDefaults.sumEnd)
+        lastDifferenceRange = (timingDefaults.aStart, timingDefaults.aEnd)
+        subtractRangeStartMS = timingDefaults.bStart
+        subtractRangeEndMS = timingDefaults.bEnd
         let storedSession = preferences.integer(forKey: PreferenceKey.tuningSession)
         tuningSessionIndex = max(1, storedSession == 0 ? 1 : storedSession)
         if preferences.object(forKey: PreferenceKey.showWaveform) != nil {
@@ -292,7 +341,9 @@ final class RFMappingStore {
 
     var hasSelectedUnit: Bool {
         guard let data, let selectedUnitID else { return false }
-        return data.unitIndex(forUnitID: selectedUnitID) == unitIndex && unitIndex >= 0
+        _ = cachedUnitCount
+        return data.unitIndex(forUnitID: selectedUnitID) == unitIndex
+            && unitIndex >= 0 && data.isUnitCached(unitIndex)
     }
 
     var selectedRFMap: RFMap? {
@@ -316,12 +367,23 @@ final class RFMappingStore {
         if let unitQualityFilterCache, unitQualityFilterCache.key == key {
             return unitQualityFilterCache.unitIDs
         }
+        _ = cachedUnitCount
+        if qualityDecisionKey != key {
+            qualityDecisionKey = key
+            qualityDecisions.removeAll(keepingCapacity: true)
+        }
         let unitIDs = data.unitPool.enumerated().compactMap { unitIndex, unitID in
-            data.zeroSpikeSpatialBinCount(
-                unitIndex: unitIndex,
-                start: source.start,
-                end: source.end
-            ) < rfZeroBinThreshold ? unitID : nil
+            guard data.isUnitCached(unitIndex) else { return unitID }
+            let visible: Bool
+            if let cached = qualityDecisions[unitIndex] {
+                visible = cached
+            } else {
+                visible = data.zeroSpikeSpatialBinCount(
+                    unitIndex: unitIndex, start: source.start, end: source.end
+                ) < rfZeroBinThreshold
+                qualityDecisions[unitIndex] = visible
+            }
+            return visible ? unitID : nil
         }
         unitQualityFilterCache = (key, unitIDs)
         return unitIDs
@@ -442,7 +504,10 @@ final class RFMappingStore {
             selectedTab: selectedTab,
             selectedCell: selectedCell,
             timelineRangeAnchorMS: timelineRangeAnchor.map(timeGroupCenterMS),
-            timelineScrollFraction: timelineScrollFraction
+            timelineScrollFraction: timelineScrollFraction,
+            rfSubtractEnabled: rfSubtractEnabled,
+            subtractRangeStartMS: subtractRangeStartMS,
+            subtractRangeEndMS: subtractRangeEndMS
         )
     }
 
@@ -548,6 +613,9 @@ final class RFMappingStore {
         if data == nil { isAwaitingStartupDocument = true }
 
         activeDecodeTask?.cancel()
+        unitCacheTask?.cancel()
+        unitCacheTask = nil
+        isCachingUnits = false
         let accessing = url.startAccessingSecurityScopedResource()
         let decodeTask = RFMappingData.makeDecodeTask(url: url)
         activeDecodeTask = decodeTask
@@ -607,8 +675,13 @@ final class RFMappingStore {
     private func adopt(_ loaded: RFMappingData, refreshChoices: Bool = true) {
         isAwaitingStartupDocument = false
         errorMessage = nil
+        unitCacheTask?.cancel()
+        unitCacheTask = nil
+        unitCacheError = nil
+        isCachingUnits = false
         clearDerivedCaches()
         data = loaded
+        cachedUnitCount = loaded.cachedUnitCount
         selectedJSONPath = loaded.url.path
         unitIndex = 0
         selectedUnitID = loaded.unitPool.first
@@ -633,6 +706,73 @@ final class RFMappingStore {
         }
         if refreshChoices { refreshJSONChoices() }
         pairingDataDidChange?()
+        retryUnitCaching()
+    }
+
+    var isUnitCacheComplete: Bool {
+        guard let data else { return false }
+        return cachedUnitCount == data.nUnits
+    }
+
+    var isSelectedUnitLoading: Bool {
+        guard let data, let selectedUnitID,
+              let index = data.unitIndex(forUnitID: selectedUnitID) else { return false }
+        _ = cachedUnitCount
+        return !data.isUnitCached(index)
+    }
+
+    /// One sequential worker caches immutable units. Navigation changes only
+    /// the next requested index, so repeated clicks cannot queue stale reads.
+    func retryUnitCaching() {
+        guard let source = data, source.isIndexed, !isUnitCacheComplete,
+              unitCacheTask == nil else { return }
+        unitCacheError = nil
+        isCachingUnits = true
+        unitCacheTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                if self.data === source {
+                    self.isCachingUnits = false
+                    self.unitCacheTask = nil
+                }
+            }
+            while !Task.isCancelled, self.data === source {
+                let next = self.priorityUnitIndex.flatMap {
+                    source.isUnitCached($0) ? nil : $0
+                } ?? source.unitPool.indices.first { !source.isUnitCached($0) }
+                self.priorityUnitIndex = nil
+                guard let index = next else { return }
+                do {
+                    let map = try await source.loadUnit(at: index)
+                    try Task.checkCancellation()
+                    guard self.data === source else { return }
+                    try source.cacheUnit(map)
+                    self.cachedUnitCount = source.cachedUnitCount
+                    self.unitQualityFilterCache = nil
+                    if self.unitIndex == index { self.clearDerivedCaches() }
+                    self.reconcileUnitSelection()
+                    self.ensureSelectedCell()
+                    self.pairingDataDidChange?()
+                    if self.unitIndex == index { self.refreshWaveformPayload() }
+                } catch is CancellationError {
+                    return
+                } catch {
+                    if self.data === source { self.unitCacheError = error.localizedDescription }
+                    return
+                }
+            }
+        }
+    }
+
+    func cancelPendingLoads() {
+        loadRequestID = nil
+        activeDecodeTask?.cancel()
+        unitCacheTask?.cancel()
+        unitCacheTask = nil
+        pendingWaveformRequest = nil
+        waveformRequestID = nil
+        waveformTask?.cancel()
+        waveformTask = nil
     }
 
     /// Applies paired-window state in one normalization pass. A target may use
@@ -662,6 +802,9 @@ final class RFMappingStore {
 
         rangeStartMS = finiteOr(state.rangeStartMS, fallback: timeAxisStartMS())
         rangeEndMS = finiteOr(state.rangeEndMS, fallback: timeAxisEndMS())
+        rfSubtractEnabled = state.rfSubtractEnabled
+        subtractRangeStartMS = finiteOr(state.subtractRangeStartMS, fallback: 0)
+        subtractRangeEndMS = finiteOr(state.subtractRangeEndMS, fallback: 80)
         plotRangeStartMS = finiteOr(state.plotRangeStartMS, fallback: timeAxisStartMS())
         plotRangeEndMS = finiteOr(state.plotRangeEndMS, fallback: timeAxisEndMS())
         binIndex = 0
@@ -756,6 +899,10 @@ final class RFMappingStore {
 
     func selectUnitID(_ unitID: Int, resetInteraction: Bool = true) {
         guard let data else { return }
+        if let index = data.unitIndex(forUnitID: unitID), !data.isUnitCached(index) {
+            priorityUnitIndex = index
+            retryUnitCaching()
+        }
         let locallyQualityVisible = qualityFilteredUnitIDs.contains(unitID)
         guard locallyQualityVisible || pairedUnitIDs?.contains(unitID) == true else { return }
         let localIndex = locallyNavigableUnitIDs.contains(unitID)
@@ -816,6 +963,8 @@ final class RFMappingStore {
             refreshWaveformPayload()
         } else {
             waveformPayload = nil
+            pendingWaveformRequest = nil
+            waveformRequestID = nil
             isWaveformZoomed = false
         }
     }
@@ -951,6 +1100,8 @@ final class RFMappingStore {
         probeGeometryError = nil
         waveformArtifact = nil
         waveformPayload = nil
+        pendingWaveformRequest = nil
+        waveformRequestID = nil
         waveformError = nil
         probeFilteredUnitIDs = nil
         isWaveformZoomed = false
@@ -978,21 +1129,40 @@ final class RFMappingStore {
 
     private func refreshWaveformPayload() {
         waveformPayload = nil
+        pendingWaveformRequest = nil
+        waveformRequestID = nil
         guard showWaveform, let selectedUnitID, hasSelectedUnit else { return }
-        guard let waveformArtifact else {
+        guard let artifact = waveformArtifact else {
             if waveformError == nil {
                 waveformError = "No companion data/waveform/Probe*/manifest.json was found."
             }
             return
         }
-        do {
-            waveformPayload = try waveformArtifact.payload(
-                for: selectedUnitID,
-                mode: waveformChannelMode
-            )
-            waveformError = nil
-        } catch {
-            waveformError = error.localizedDescription
+        let request = WaveformRequest(artifact: artifact, unitID: selectedUnitID, mode: waveformChannelMode)
+        pendingWaveformRequest = request
+        waveformRequestID = request.id
+        guard waveformTask == nil else { return }
+        waveformTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.waveformTask = nil }
+            while !Task.isCancelled, let request = self.pendingWaveformRequest {
+                self.pendingWaveformRequest = nil
+                let result = await Task.detached(priority: .userInitiated) {
+                    Result { try request.artifact.payload(for: request.unitID, mode: request.mode) }
+                }.value
+                guard !Task.isCancelled else { return }
+                guard self.waveformRequestID == request.id,
+                      self.showWaveform, self.hasSelectedUnit,
+                      self.selectedUnitID == request.unitID,
+                      self.waveformArtifact === request.artifact else { continue }
+                switch result {
+                case .success(let payload):
+                    self.waveformPayload = payload
+                    self.waveformError = nil
+                case .failure(let error):
+                    self.waveformError = error.localizedDescription
+                }
+            }
         }
     }
 
@@ -1003,7 +1173,7 @@ final class RFMappingStore {
     }
 
     func stepTimeResolution(_ deltaMS: Double) {
-        timeResolutionMS = max(baseBinMS(), min(totalTimeMS(), timeResolutionMS + deltaMS))
+        timeResolutionMS = max(baseBinMS(), min(totalTimeMS(), timeResolutionMS + deltaMS * baseBinMS()))
         timelineRangeAnchor = nil
         normalizeControls()
     }
@@ -1067,6 +1237,14 @@ final class RFMappingStore {
         let source = sourceBinsForPlotRange()
         plotRangeStartMS = data.timeBinEdges[source.start] * 1000.0
         plotRangeEndMS = data.timeBinEdges[source.end + 1] * 1000.0
+        let subtractSource = sourceBinsForSubtractRange()
+        subtractRangeStartMS = data.timeBinEdges[subtractSource.start] * 1000.0
+        subtractRangeEndMS = data.timeBinEdges[subtractSource.end + 1] * 1000.0
+        if rfSubtractEnabled {
+            lastDifferenceRange = (plotRangeStartMS, plotRangeEndMS)
+        } else {
+            lastSumRange = (plotRangeStartMS, plotRangeEndMS)
+        }
         unitQualityFilterCache = nil
         reconcileUnitSelection()
         if notifyUnitVisibility,
@@ -1075,13 +1253,59 @@ final class RFMappingStore {
         }
     }
 
+    func setRFSubtractEnabled(_ enabled: Bool) {
+        guard enabled != rfSubtractEnabled else { return }
+        if rfSubtractEnabled {
+            lastDifferenceRange = (plotRangeStartMS, plotRangeEndMS)
+        } else {
+            lastSumRange = (plotRangeStartMS, plotRangeEndMS)
+        }
+        rfSubtractEnabled = enabled
+        let restored = enabled ? lastDifferenceRange : lastSumRange
+        plotRangeStartMS = restored.0
+        plotRangeEndMS = restored.1
+        normalizePlotTimeRange()
+        clearHover()
+    }
+
+    func saveTimingDefaults() {
+        timingDefaults = TimingDefaults(
+            subtract: rfSubtractEnabled,
+            sumStart: lastSumRange.0, sumEnd: lastSumRange.1,
+            aStart: lastDifferenceRange.0, aEnd: lastDifferenceRange.1,
+            bStart: subtractRangeStartMS, bEnd: subtractRangeEndMS
+        )
+        if let encoded = try? JSONEncoder().encode(timingDefaults) {
+            preferences.set(encoded, forKey: PreferenceKey.timingDefaults)
+        }
+    }
+
     func resetPlotRangeToDefault(notifyUnitVisibility: Bool = true) {
         guard data != nil else { return }
-        let axisStart = timeAxisStartMS()
-        let axisEnd = timeAxisEndMS()
-        plotRangeStartMS = max(axisStart, min(axisEnd, 0.0))
-        plotRangeEndMS = max(axisStart, min(axisEnd, 200.0))
+        plotRangeStartMS = rfSubtractEnabled ? timingDefaults.aStart : timingDefaults.sumStart
+        plotRangeEndMS = rfSubtractEnabled ? timingDefaults.aEnd : timingDefaults.sumEnd
+        if rfSubtractEnabled {
+            subtractRangeStartMS = timingDefaults.bStart
+            subtractRangeEndMS = timingDefaults.bEnd
+        }
         normalizePlotTimeRange(notifyUnitVisibility: notifyUnitVisibility)
+    }
+
+    func sourceBinsForSubtractRange() -> AxisGroup {
+        guard let data else { return AxisGroup(start: 0, end: 0) }
+        return sourceBins(startMS: subtractRangeStartMS, endMS: subtractRangeEndMS, data: data)
+    }
+
+    /// Each independently pooled/smoothed window uses the selected metric.
+    /// Negative A − B is missing (gray); a genuine zero remains visible.
+    private func subtractMatrices(_ a: OptionalMatrix, _ b: OptionalMatrix) -> OptionalMatrix {
+        zip(a, b).map { rows in
+            zip(rows.0, rows.1).map { values -> Double? in
+                guard let left = values.0, let right = values.1 else { return nil }
+                let difference = left - right
+                return difference >= 0 ? difference : nil
+            }
+        }
     }
 
     func ensureSelectedCell() {
@@ -1422,17 +1646,25 @@ final class RFMappingStore {
             unitIndex: unitIndex,
             valueMode: valueMode,
             sourceStart: range.start,
-            sourceEnd: range.end
+            sourceEnd: range.end,
+            subtractionRange: rfSubtractEnabled ? sourceBinsForSubtractRange() : nil
         )
         if let currentMatrixCache, currentMatrixCache.key == key {
             return currentMatrixCache.value
         }
-        let matrix = (try? data.responseMatrix(
+        var matrix = (try? data.responseMatrix(
             unitIndex: unitIndex,
             start: range.start,
             end: range.end,
             valueMode: valueMode
         )) ?? []
+        if rfSubtractEnabled {
+            let b = sourceBinsForSubtractRange()
+            let baseline = (try? data.responseMatrix(
+                unitIndex: unitIndex, start: b.start, end: b.end, valueMode: valueMode
+            )) ?? []
+            matrix = subtractMatrices(matrix, baseline)
+        }
         currentMatrixCache = (key, matrix)
         return matrix
     }
@@ -1486,7 +1718,8 @@ final class RFMappingStore {
             xBins: xBins,
             yBins: yBins,
             flipY: flipY,
-            smoothRadius: smoothRadius
+            smoothRadius: smoothRadius,
+            subtractionRange: rfSubtractEnabled ? sourceBinsForSubtractRange() : nil
         )
         if let cached = spatialPlot(for: key) { return cached }
         let prepared = prepareResponsePlotMatrix(
@@ -1494,9 +1727,15 @@ final class RFMappingStore {
             sourceEnd: range.end,
             smooth: true
         )
-        let valueRange = finiteMinMax(prepared.0)
+        var matrix = prepared.0
+        if rfSubtractEnabled {
+            let b = sourceBinsForSubtractRange()
+            let baseline = prepareResponsePlotMatrix(sourceStart: b.start, sourceEnd: b.end, smooth: true)
+            matrix = subtractMatrices(matrix, baseline.0)
+        }
+        let valueRange = finiteMinMax(matrix)
         let plot = HeatmapPlot(
-            matrix: prepared.0,
+            matrix: matrix,
             xGroups: prepared.1,
             yGroups: prepared.2,
             low: valueRange.0,
@@ -1524,7 +1763,7 @@ final class RFMappingStore {
             smoothRadius: smoothRadius
         )
         if let cached = spatialPlot(for: key) { return cached }
-        let prepared = preparePlotMatrix(delayMatrixForTimeGroups(floor: safeFloor), smooth: true)
+        let prepared = (displayTemporalMetrics(floor: safeFloor).delay, xGroups(), displayYGroups())
         let range = timeAxisRangeMS()
         let plot = HeatmapPlot(
             matrix: prepared.0,
@@ -1569,8 +1808,9 @@ final class RFMappingStore {
             sourceEnd: data.nBins - 1,
             smooth: true
         )
-        let delayPrepared = preparePlotMatrix(delayMatrixForTimeGroups(floor: 0.0))
-        let entropyPrepared = preparePlotMatrix(optionalMatrix(data.metrics(for: unitIndex).entropy))
+        let temporal = displayTemporalMetrics(floor: 0)
+        let delayPrepared = temporal.delay
+        let entropyPrepared = temporal.entropy
         let responseRange = finiteMinMax(totalPrepared.0)
         let maxResponse = max(responseRange.1, 1.0)
         let reference = HeatmapPlot(
@@ -1583,8 +1823,8 @@ final class RFMappingStore {
         let timeRange = timeAxisRangeMS()
         let plot = RGBPlot(
             total: totalPrepared.0,
-            delay: delayPrepared.0,
-            entropy: entropyPrepared.0,
+            delay: delayPrepared,
+            entropy: entropyPrepared,
             reference: reference,
             maxTotal: maxResponse,
             minDelay: timeRange.0,
@@ -1592,6 +1832,49 @@ final class RFMappingStore {
         )
         rgbPlotCache = (key, plot)
         return plot
+    }
+
+    /// Smooth count histograms before finding peaks. Averaging delays after
+    /// peak selection changes their meaning and can move equal peaks later.
+    private func displayTemporalMetrics(floor: Double) -> (delay: OptionalMatrix, entropy: OptionalMatrix) {
+        guard let data, hasSelectedUnit else { return ([], []) }
+        let xs = xGroups()
+        let ys = displayYGroups()
+        let nativeGroups = (0..<data.nBins).map { AxisGroup(start: $0, end: $0) }
+        let native = data.spatialObservationFrames(
+            unitIndex: unitIndex, timeGroups: nativeGroups, yGroups: ys, xGroups: xs
+        ).map { observations in
+            smoothMatrix(observations.map { row in
+                row.map { value -> Double? in
+                    value.count / Double(max(1, value.sourcePixelCount))
+                }
+            }, radius: smoothRadius)
+        }
+        let grouping = timeGrouping()
+        var delay = Array(repeating: Array<Double?>(repeating: nil, count: xs.count), count: ys.count)
+        var entropy = Array(repeating: Array<Double?>(repeating: 0, count: xs.count), count: ys.count)
+        for y in ys.indices {
+            for x in xs.indices {
+                let histogram = native.map { $0[y][x] ?? 0 }
+                let total = compensatedSum(histogram)
+                guard total > 0 else { continue }
+                let grouped = grouping.groups.map {
+                    compensatedSum(histogram[$0.start...$0.end])
+                        / (data.timeBinEdges[$0.end + 1] - data.timeBinEdges[$0.start])
+                }
+                var peak = 0
+                for bin in grouped.indices.dropFirst() where grouped[bin] > grouped[peak] { peak = bin }
+                if total > floor { delay[y][x] = grouping.centers[peak] }
+                // Entropy retains the full source time axis, independent of display grouping.
+                if histogram.count > 1 {
+                    entropy[y][x] = -compensatedSum(histogram.filter { $0 > 0 }.map {
+                        let probability = $0 / total
+                        return probability * log(probability)
+                    }) / log(Double(histogram.count))
+                }
+            }
+        }
+        return (delay, entropy)
     }
 
     private func emptyHeatmapPlot() -> HeatmapPlot {
@@ -1888,7 +2171,11 @@ final class RFMappingStore {
 
     func currentMatrixLabel() -> String {
         let bounds = plotTimeBoundsMS()
-        return "\(valueMode.rawValue): \(formatMS(bounds.0)) to \(formatMS(bounds.1)) ms"
+        let window = "\(formatMS(bounds.0))–\(formatMS(bounds.1)) ms"
+        if rfSubtractEnabled {
+            return "\(valueMode.rawValue): (\(window)) − (\(formatMS(subtractRangeStartMS))–\(formatMS(subtractRangeEndMS)) ms)"
+        }
+        return "\(valueMode.rawValue): \(window)"
     }
 
     func cellMetricsText(_ cell: CellRef, displayBin: Int? = nil) -> String {
@@ -1956,7 +2243,8 @@ final class RFMappingStore {
         let key = CellAnalysisCacheKey(
             responseKey: responseKey,
             selectedStart: selected.start,
-            selectedEnd: selected.end
+            selectedEnd: selected.end,
+            subtractionRange: rfSubtractEnabled ? sourceBinsForSubtractRange() : nil
         )
         if let index = cellAnalysisCaches.firstIndex(where: { $0.key == key }) {
             let cached = cellAnalysisCaches.remove(at: index)
@@ -2016,14 +2304,21 @@ final class RFMappingStore {
             if countHist.count > 1 { entropy /= log(Double(countHist.count)) }
         }
 
+        var selectedValue = groupResponseValue(cell, sourceStart: selected.start, sourceEnd: selected.end)
+        if rfSubtractEnabled {
+            let b = sourceBinsForSubtractRange()
+            if let aValue = selectedValue,
+               let bValue = groupResponseValue(cell, sourceStart: b.start, sourceEnd: b.end),
+               aValue >= bValue {
+                selectedValue = aValue - bValue
+            } else {
+                selectedValue = nil
+            }
+        }
         let analysis = CellAnalysis(
             displayValues: displayValues,
             countHist: countHist,
-            selectedValue: groupResponseValue(
-                cell,
-                sourceStart: selected.start,
-                sourceEnd: selected.end
-            ),
+            selectedValue: selectedValue,
             totalValue: groupResponseValue(
                 cell,
                 sourceStart: 0,
@@ -2064,7 +2359,8 @@ final class RFMappingStore {
             "source_x_start_matlab", "source_x_end_matlab", "x_position_start", "x_position_end",
             "export_space", "time_resolution_ms", "rf_range_start_group_0based",
             "rf_range_end_group_0based", "rf_range_start_ms", "rf_range_end_ms",
-            "display_x_bins", "display_y_bins", "smooth_radius", "flip_y", "palette", "source_json"
+            "display_x_bins", "display_y_bins", "smooth_radius", "flip_y", "palette", "source_json",
+            "rf_subtract_enabled", "rf_subtract_start_ms", "rf_subtract_end_ms"
         ]
         var rows = [csvRow(header)]
         for (displayY, yGroup) in yGroups.enumerated() {
@@ -2103,7 +2399,8 @@ final class RFMappingStore {
                     "displayed", formatMS(Double(timeGroupSize()) * baseBinMS()),
                     String(displayRange.start), String(displayRange.end),
                     String(timeBounds.0), String(timeBounds.1), String(xBins), String(yBins),
-                    String(smoothRadius), flipY ? "True" : "False", palette.rawValue, data.url.path
+                    String(smoothRadius), flipY ? "True" : "False", palette.rawValue, data.url.path,
+                    rfSubtractEnabled ? "True" : "False", String(subtractRangeStartMS), String(subtractRangeEndMS)
                 ]
                 rows.append(csvRow(fields))
             }

@@ -18,8 +18,8 @@ through versioned file contracts, principally the RF formats described in
 
 ## Component versions
 
-The stable Python viewer is versioned `1.10.0`; Swift and Web remain at `1.9.6`
-in the previous stable feature generation.
+The stable Python, Swift, and Web viewers are versioned `1.10.0` and share
+the same stable feature generation.
 The separate Free-Moving Python viewer remains
 **`1.10.0-alpha.3`**. Component identity belongs in release tags and artifact
 names, not in a fourth version component. See
@@ -49,14 +49,22 @@ the legacy `30:7` visual footprint; the physical 3D sphere is unchanged. Drag
 the sphere to rotate the viewing direction or double-click to reset it. Legacy
 JSON, tuning-curve, head-direction, and probe companions are intentionally
 outside this alpha app. The stable Python viewer remains available separately
-at `1.10.0`; Swift and Web remain at `1.9.6`.
+at `1.10.0`, alongside Swift and Web `1.10.0`.
 
 ## Current RF format and filename aliases
 
-Python stable 1.10.0 also accepts the new version-2 indexed NPZ `.rfmap`
-format. It plots the first loaded unit and caches remaining units in the
-background, with progress in the bottom-right corner. Existing JSON inputs
-remain supported. Swift and Web retain their existing JSON contracts.
+Python, Swift, and Web 1.10.0 accept version-2 indexed NPZ `.rfmap` files
+alongside existing JSON inputs. They display the first loaded unit while
+caching remaining units in the background, expose progress and retry, and
+prioritize a selected uncached unit. Multi-unit figure export becomes available
+when the cache completes.
+
+All three support independent A − B RF windows with saved timing defaults,
+paired-window synchronization, and matching displayed-data and figure exports.
+Negative differences display as gray NaN; zero stays zero. RF windows continue
+to affect only the RF map, retaining the full Timeline and Delay / RGB axes.
+The Delay / RGB maps find the first equal peak after spatial smoothing and
+distinguish black zero responses from gray cells without occupancy.
 
 
 Since stable version 1.9.6, the viewers require the current raw-count plus
@@ -69,7 +77,7 @@ The current payload and companion documents retain these filename aliases:
 
 | Data | Preferred extension | Existing extension |
 | --- | --- | --- |
-| RF map (JSON, or indexed NPZ in Python 1.10.0) | `.rfmap` | `.json` |
+| RF map (JSON or indexed NPZ) | `.rfmap` | `.json` |
 | Tuning curve (JSON) | `.tc` | `.json` |
 | Spike positions (CSV) | `.probe` | `.csv` |
 

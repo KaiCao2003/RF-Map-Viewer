@@ -43,23 +43,23 @@
       "tag": "python-v1.10.0-alpha.3"
     },
     "swift": {
-      "release_version": "1.9.6",
-      "marketing_version": "1.9.6",
-      "build": "10908",
+      "release_version": "1.10.0",
+      "marketing_version": "1.10.0",
+      "build": "110000",
       "channel": "stable",
-      "feature_generation_offset": -1,
-      "artifact": "RF_Map_Viewer-1.9.6-swift-macos-arm64.zip",
-      "tag": "swift-v1.9.6"
+      "feature_generation_offset": 0,
+      "artifact": "RF_Map_Viewer-1.10.0-swift-macos-arm64.zip",
+      "tag": "swift-v1.10.0"
     },
     "web": {
-      "release_version": "1.9.6",
-      "package_version": "1.9.6",
+      "release_version": "1.10.0",
+      "package_version": "1.10.0",
       "channel": "stable",
-      "feature_generation_offset": -1,
+      "feature_generation_offset": 0,
       "artifact_flavor": "web",
-      "artifact": "RF_Map_Viewer-1.9.6-web.tar.gz",
-      "checksum": "SHA256SUMS-web-1.9.6.txt",
-      "tag": "web-v1.9.6"
+      "artifact": "RF_Map_Viewer-1.10.0-web.tar.gz",
+      "checksum": "SHA256SUMS-web-1.10.0.txt",
+      "tag": "web-v1.10.0"
     }
   }
 }

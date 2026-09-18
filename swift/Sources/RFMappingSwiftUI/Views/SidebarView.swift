@@ -21,7 +21,10 @@ struct SidebarView: View {
                 Divider()
                 WaveformSidebarSection(store: store)
                 Divider()
-                displaySection
+                Button(store.showDisplayOptions ? "Hide (D)" : "Display Options (D)") {
+                    store.showDisplayOptions.toggle()
+                }
+                if store.showDisplayOptions { displaySection }
                 Divider()
                 selectedCellSection
                 actionSection
@@ -173,6 +176,8 @@ struct SidebarView: View {
     private var displaySection: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Display").font(.headline)
+            Button("Save timing defaults") { store.saveTimingDefaults() }
+                .help("Save Sum, A − B windows and the active mode for new windows and Reset")
             Toggle("Invert Y (MATLAB flip)", isOn: $store.flipY)
 
             integerControl(
@@ -262,7 +267,7 @@ struct SidebarView: View {
     private var actionSection: some View {
         VStack(alignment: .leading, spacing: 7) {
             Button("Export Figures…", action: openFigureExporter)
-                .disabled(!store.hasData || store.qualityFilteredUnitIDs.isEmpty)
+                .disabled(!store.isUnitCacheComplete || store.qualityFilteredUnitIDs.isEmpty)
             HStack {
                 Button("Export displayed CSV") { store.prepareExport() }
                     .disabled(!store.hasSelectedUnit)

@@ -223,9 +223,9 @@ struct RFSpatialObservations: Sendable {
     let sourcePixelCount: Int
 }
 
-/// Instances are constructed completely on one worker and then transferred to
-/// the main actor. Mutable derived caches remain main-actor confined by the
-/// store; no instance is read concurrently while decoding.
+/// Header decoding and individual archive reads run on workers. Loaded RFMap
+/// values are immutable; publishing units and mutable derived caches remain
+/// main-actor confined by the store.
 final class RFMappingData: @unchecked Sendable {
     static let expectedResponseUnits = "spike_count"
     static let expectedResponseNormalization = "none"
@@ -265,7 +265,8 @@ final class RFMappingData: @unchecked Sendable {
     }
 
     let url: URL
-    let counts: [[[[Double]]]]
+    /// Source-indexed slots. An empty unit is unavailable, never a zero RF map.
+    private(set) var counts: [[[[Double]]]]
     let size: (Int, Int, Int, Int)
     let nUnits: Int
     let nY: Int
@@ -280,11 +281,16 @@ final class RFMappingData: @unchecked Sendable {
     let responseNormalization: String
     let spikeCountDefinition: String
     let occupancyTimeDefinition: String
-    /// Per-unit object model in the source `unitPool` order.
-    let rfMaps: RFMapList
+    /// Cached maps in source order; explicit original-index lookup is required
+    /// because priority loading can leave gaps between available units.
+    private(set) var rfMaps: RFMapList
+    private(set) var loadedUnitIndices: Set<Int>
+    private let indexedArchive: IndexedRFArchive?
+    var isIndexed: Bool { indexedArchive != nil }
+    var cachedUnitCount: Int { loadedUnitIndices.count }
     /// All non-structural top-level JSON fields.
     let metadata: [String: RFMapJSONValue]
-    /// SHA-256 and byte count of the exact JSON bytes decoded into this model.
+    /// SHA-256 and byte count of the exact JSON or NPZ bytes in this model.
     /// Figure exports use these values instead of re-reading a path that may
     /// have changed after the viewer loaded it.
     let sourceSHA256: String
@@ -323,19 +329,30 @@ final class RFMappingData: @unchecked Sendable {
 
     init(data jsonData: Data, url: URL) throws {
         self.url = url.standardizedFileURL
-        sourceSHA256 = SHA256.hash(data: jsonData).map {
+        var digest = SHA256()
+        for offset in stride(from: 0, to: jsonData.count, by: 1_048_576) {
+            try Task.checkCancellation()
+            digest.update(data: jsonData[offset..<min(jsonData.count, offset + 1_048_576)])
+        }
+        sourceSHA256 = digest.finalize().map {
             String(format: "%02x", $0)
         }.joined()
         sourceByteCount = jsonData.count
+        let archive = try IndexedRFArchive.isArchive(jsonData)
+            ? IndexedRFArchive(data: jsonData) : nil
+        indexedArchive = archive
         let payload: RFMappingPayload
         do {
-            payload = try JSONDecoder().decode(RFMappingPayload.self, from: jsonData)
+            payload = try JSONDecoder().decode(
+                RFMappingPayload.self,
+                from: archive?.headerJSON() ?? jsonData
+            )
         } catch is CancellationError {
             throw CancellationError()
         } catch let error as RFMappingError {
             throw error
         } catch {
-            throw RFMappingError.invalidData("Could not decode RF mapping JSON: \(error.localizedDescription)")
+            throw RFMappingError.invalidData("Could not decode RF mapping data: \(error.localizedDescription)")
         }
         try Task.checkCancellation()
 
@@ -353,7 +370,14 @@ final class RFMappingData: @unchecked Sendable {
         nY = size.1
         nX = size.2
         nBins = size.3
-        guard payload.unitsSpikeCounts.count == payload.unitPool.count else {
+        guard [nUnits, nY, nX, nBins].allSatisfy({ $0 > 0 }) else {
+            throw RFMappingError.invalidData("unitsSpikeCountsSize values must all be positive.")
+        }
+        guard payload.unitPool.count == nUnits,
+              Set(payload.unitPool).count == nUnits else {
+            throw RFMappingError.invalidData("unitPool must contain one unique ID per declared unit.")
+        }
+        guard archive != nil || payload.unitsSpikeCounts.count == payload.unitPool.count else {
             throw RFMappingError.invalidData(
                 "unitPool length does not match the decoded unit count."
             )
@@ -364,7 +388,13 @@ final class RFMappingData: @unchecked Sendable {
             nX: nX
         )
         let sourceMetadata = payload.metadata
-        let perUnitMaps = try payload.unitsSpikeCounts.enumerated().map { unitIndex, unitCounts in
+        let initialCounts: [[[[Double]]]]
+        if let archive {
+            initialCounts = [try archive.counts(unitID: payload.unitPool[0], shape: [nY, nX, nBins])]
+        } else {
+            initialCounts = payload.unitsSpikeCounts
+        }
+        let perUnitMaps = try initialCounts.enumerated().map { unitIndex, unitCounts in
             try Task.checkCancellation()
             return try RFMap(
                 unitIndex: unitIndex,
@@ -378,7 +408,7 @@ final class RFMappingData: @unchecked Sendable {
                 sourceURL: url
             )
         }
-        counts = payload.unitsSpikeCounts
+        counts = archive == nil ? initialCounts : initialCounts + Array(repeating: [], count: nUnits - 1)
         unitPool = payload.unitPool
         xPositions = payload.xPositions
         yPositions = payload.yPositions
@@ -389,6 +419,7 @@ final class RFMappingData: @unchecked Sendable {
         spikeCountDefinition = payload.spikeCountDefinition
         occupancyTimeDefinition = payload.occupancyTimeDefinition
         rfMaps = try RFMapList(perUnitMaps)
+        loadedUnitIndices = Set(perUnitMaps.map(\.unitIndex))
         metadata = sourceMetadata
 
         try validate(occupancyTimeSecSize: payload.occupancyTimeSecSize)
@@ -403,7 +434,74 @@ final class RFMappingData: @unchecked Sendable {
     }
 
     func unitIndex(forUnitID unitID: Int) -> Int? {
-        rfMaps.originalIndex(forUnitID: unitID)
+        unitPool.firstIndex(of: unitID)
+    }
+
+    func isUnitCached(_ index: Int) -> Bool {
+        loadedUnitIndices.contains(index)
+    }
+
+    /// Read on a worker, then let the store publish this value on the main
+    /// actor. Cancellation prevents obsolete document loads from continuing.
+    func loadUnit(at index: Int) async throws -> RFMap {
+        guard unitPool.indices.contains(index) else {
+            throw RFMapError.missingOriginalIndex(index, available: Array(unitPool.indices))
+        }
+        if isUnitCached(index) { return try rfMap(byOriginalIndex: index) }
+        guard let archive = indexedArchive else {
+            throw RFMapError.missingOriginalIndex(index, available: loadedUnitIndices.sorted())
+        }
+        let unitID = unitPool[index]
+        let shape = [nY, nX, nBins]
+        let x = xPositions
+        let y = yPositions
+        let edges = timeBinEdges
+        let occupancy = occupancyTimeSeconds
+        let sourceMetadata = metadata
+        let sourceURL = url
+        let task = Task.detached(priority: .utility) {
+            try Task.checkCancellation()
+            let counts = try archive.counts(unitID: unitID, shape: shape)
+            let map = try RFMap(
+                unitIndex: index,
+                unitID: unitID,
+                spikeCounts: counts,
+                xPositions: x,
+                yPositions: y,
+                timeBinEdgesSeconds: edges,
+                occupancyTimeSeconds: occupancy,
+                metadata: sourceMetadata,
+                sourceURL: sourceURL
+            )
+            try Task.checkCancellation()
+            return map
+        }
+        return try await withTaskCancellationHandler {
+            try await task.value
+        } onCancel: {
+            task.cancel()
+        }
+    }
+
+    /// Called only by the main-actor store. A unit is published after all
+    /// counts and occupancy constraints pass, so partial units stay invisible.
+    func cacheUnit(_ map: RFMap) throws {
+        guard unitPool.indices.contains(map.unitIndex),
+              unitPool[map.unitIndex] == map.unitID,
+              map.sourceURL == url,
+              map.nY == nY, map.nX == nX, map.nTimeBins == nBins else {
+            throw RFMappingError.invalidData("Cached RF unit does not belong to this dataset.")
+        }
+        guard !isUnitCached(map.unitIndex) else { return }
+        let updated = try RFMapList((Array(rfMaps) + [map]).sorted { $0.unitIndex < $1.unitIndex })
+        counts[map.unitIndex] = map.spikeCounts
+        rfMaps = updated
+        loadedUnitIndices.insert(map.unitIndex)
+    }
+
+    private func cachedCounts(for unitIndex: Int) -> [[[Double]]] {
+        precondition(isUnitCached(unitIndex), "RF unit must be cached before plotting.")
+        return counts[unitIndex]
     }
 
     func rfMap(byOriginalIndex unitIndex: Int) throws -> RFMap {
@@ -433,7 +531,7 @@ final class RFMappingData: @unchecked Sendable {
             return cached
         }
 
-        let unit = rfMaps[unitIndex].spikeCounts
+        let unit = cachedCounts(for: unitIndex)
         var total: [[Double]] = []
         var peak: [[Double]] = []
         var peakBin: [[Int?]] = []
@@ -544,7 +642,7 @@ final class RFMappingData: @unchecked Sendable {
         let high = max(0, min(nBins - 1, max(start, end)))
         let prefix = prefixValues(for: unitIndex)
         let stride = nBins + 1
-        let unit = rfMaps[unitIndex].spikeCounts
+        let unit = cachedCounts(for: unitIndex)
         return (0..<nY).map { yIndex in
             (0..<nX).map { xIndex in
                 let base = (yIndex * nX + xIndex) * stride
@@ -581,7 +679,7 @@ final class RFMappingData: @unchecked Sendable {
         // A single RF window needs no full-volume prefix allocation. Temporal
         // queries capture the prefix once instead of looking it up per pixel.
         let prefix = groups.count > 1 ? prefixValues(for: unitIndex) : nil
-        let unit = rfMaps[unitIndex].spikeCounts
+        let unit = cachedCounts(for: unitIndex)
         let stride = nBins + 1
         let matrices = groups.map { group in
             (0..<nY).map { yIndex in
@@ -713,7 +811,7 @@ final class RFMappingData: @unchecked Sendable {
             base: base,
             low: low,
             high: high,
-            hist: rfMaps[unitIndex].spikeCounts[yIndex][xIndex]
+            hist: cachedCounts(for: unitIndex)[yIndex][xIndex]
         )
     }
 
@@ -754,7 +852,7 @@ final class RFMappingData: @unchecked Sendable {
         let high = max(0, min(nBins - 1, max(start, end)))
         let prefix = prefixValues(for: unitIndex)
         let stride = nBins + 1
-        let unit = rfMaps[unitIndex].spikeCounts
+        let unit = cachedCounts(for: unitIndex)
         return (0..<nY).map { yIndex in
             (0..<nX).map { xIndex -> Double? in
                 let base = (yIndex * nX + xIndex) * stride
@@ -845,7 +943,7 @@ final class RFMappingData: @unchecked Sendable {
         let maximumExactInteger = 9_007_199_254_740_992.0
         var prefixValues = ContiguousArray(repeating: 0.0, count: valueCount)
         var safeCells = ContiguousArray(repeating: true, count: nY * nX)
-        let unit = rfMaps[unitIndex].spikeCounts
+        let unit = cachedCounts(for: unitIndex)
         for yIndex in 0..<nY {
             for xIndex in 0..<nX {
                 let base = (yIndex * nX + xIndex) * stride

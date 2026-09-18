@@ -11,11 +11,12 @@ let package = Package(
         .executable(name: "RFMappingSwiftUI", targets: ["RFMappingSwiftUI"])
     ],
     targets: [
-        .executableTarget(name: "RFMappingSwiftUI"),
+        .executableTarget(name: "RFMappingSwiftUI", linkerSettings: [.linkedLibrary("z")]),
         .testTarget(
             name: "RFMappingSwiftUITests",
             dependencies: ["RFMappingSwiftUI"],
-            path: "Tests/RFMappingSwiftUITests"
+            path: "Tests/RFMappingSwiftUITests",
+            resources: [.copy("Fixtures")]
         )
     ]
 )

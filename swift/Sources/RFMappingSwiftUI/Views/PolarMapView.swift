@@ -41,7 +41,7 @@ struct PolarMapView: View {
                 )
             }
         }
-        .background(Color(nsColor: .textBackgroundColor))
+        .background(Color.white)
     }
 
     private var cachedPlot: HeatmapPlot {
@@ -161,7 +161,7 @@ private func drawPolar(
     let innerRadius = CGFloat(innerBlankRows) * layout.scale
     context.fill(
         Path(ellipseIn: CGRect(x: layout.center.x - innerRadius, y: layout.center.y - innerRadius, width: innerRadius * 2, height: innerRadius * 2)),
-        with: .color(Color(nsColor: .controlBackgroundColor))
+        with: .color(Color.white)
     )
     context.stroke(
         Path(ellipseIn: CGRect(x: layout.center.x - innerRadius, y: layout.center.y - innerRadius, width: innerRadius * 2, height: innerRadius * 2)),

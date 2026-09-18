@@ -49,7 +49,7 @@ struct HeatmapView: View {
                 )
             }
         }
-        .background(Color(nsColor: .textBackgroundColor))
+        .background(Color.white)
     }
 
     private var cachedPlot: HeatmapPlot {

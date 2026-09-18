@@ -20,6 +20,7 @@ struct ContentView: View {
             Divider()
             mainContent
         }
+        .preferredColorScheme(.light)
         .overlay {
             if store.isWaveformZoomed {
                 WaveformZoomOverlay(store: store)
@@ -128,8 +129,25 @@ struct ContentView: View {
                 Divider()
                 if store.hasSelectedUnit {
                     PlotTabsView(store: store)
+                } else if store.isSelectedUnitLoading {
+                    ProgressView("Loading selected unit…")
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     unavailableUnitContent
+                }
+                if let data = store.data, data.isIndexed, !store.isUnitCacheComplete {
+                    HStack(spacing: 10) {
+                        Spacer()
+                        if let message = store.unitCacheError {
+                            Text(message).font(.caption).lineLimit(2)
+                            Button("Retry") { store.retryUnitCaching() }
+                        } else {
+                            Text("Cached \(store.cachedUnitCount) / \(data.nUnits) units").font(.caption)
+                            ProgressView(value: Double(store.cachedUnitCount), total: Double(data.nUnits))
+                                .frame(width: 120)
+                        }
+                    }
+                    .padding(8)
                 }
             }
         } else {
@@ -287,7 +305,11 @@ private struct PlotControlBar: View {
             switch store.selectedTab {
             case .rf:
                 HStack(spacing: 8) {
-                    Text("RF sum range (ms)")
+                    Toggle("A − B (-)", isOn: Binding(
+                        get: { store.rfSubtractEnabled }, set: store.setRFSubtractEnabled
+                    ))
+                    .toggleStyle(.button)
+                    Text(store.rfSubtractEnabled ? "A (ms)" : "RF sum (ms)")
                         .foregroundStyle(.secondary)
                     compactTimeControl(
                         title: "Start",
@@ -312,9 +334,27 @@ private struct PlotControlBar: View {
                         showTitle: false,
                         showUnit: false
                     )
-                    Button("Reset 0–200") { store.resetPlotRangeToDefault() }
-                        .help("Use 0–200 ms, clamped and snapped to the available source bins")
-                    Text("Timeline remains full and independent")
+                    if store.rfSubtractEnabled {
+                        Text("− B")
+                        compactTimeControl(
+                            title: "B start", normalizedValue: Binding(
+                                get: { store.subtractRangeStartMS },
+                                set: { store.subtractRangeStartMS = $0; store.normalizePlotTimeRange() }
+                            ), range: store.timeAxisStartMS()...store.timeAxisEndMS(),
+                            step: store.baseBinMS(), showTitle: false, showUnit: false
+                        )
+                        Text("to").foregroundStyle(.secondary)
+                        compactTimeControl(
+                            title: "B end", normalizedValue: Binding(
+                                get: { store.subtractRangeEndMS },
+                                set: { store.subtractRangeEndMS = $0; store.normalizePlotTimeRange() }
+                            ), range: store.timeAxisStartMS()...store.timeAxisEndMS(),
+                            step: store.baseBinMS(), showTitle: false, showUnit: false
+                        )
+                    }
+                    Button("Reset") { store.resetPlotRangeToDefault() }
+                        .help("Restore saved timing defaults for the active mode")
+                    Text("Timeline: full axis")
                         .font(.caption)
                         .foregroundStyle(.tertiary)
                     Spacer(minLength: 0)

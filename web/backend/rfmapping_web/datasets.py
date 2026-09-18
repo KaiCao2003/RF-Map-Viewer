@@ -626,6 +626,7 @@ class DatasetRecord:
     source_signature: dict[str, int | str]
     cache: CacheEntry
     companions: CompanionSet
+    indexed: Any = None
 
 
 class DatasetStore:
@@ -660,7 +661,16 @@ class DatasetStore:
             raise DatasetValidationError(
                 "RF dataset must be a non-AppleDouble .rfmap or .json file"
             )
-        cache = self.cache.get_or_build(source)
+        with source.open("rb") as handle:
+            indexed_format = handle.read(4) == b"PK\x03\x04"
+        indexed = None
+        if indexed_format:
+            from .indexed import IndexedUnits
+
+            indexed = IndexedUnits(source, self.cache.max_bytes)
+            cache = CacheEntry(_cache_key(indexed.signature), source, source, indexed.metadata)
+        else:
+            cache = self.cache.get_or_build(source)
         dataset_id = uuid.uuid4().hex
         record = DatasetRecord(
             dataset_id=dataset_id,
@@ -670,12 +680,21 @@ class DatasetStore:
             source_signature=cache.metadata["source"],
             cache=cache,
             companions=discover_companions(source, scope_root),
+            indexed=indexed,
         )
         with self._lock:
             if not cache.data_path.is_file() or not cache.metadata_path.is_file():
                 raise DatasetChangedError("Dataset cache was evicted while opening; retry")
             self._records[dataset_id] = record
+        if indexed is not None:
+            indexed.start()
         return record
+
+    def close(self, dataset_id: str) -> None:
+        with self._lock:
+            record = self._records.pop(dataset_id, None)
+        if record is not None and record.indexed is not None:
+            record.indexed.close()
 
     def get(self, dataset_id: str) -> DatasetRecord:
         with self._lock:
@@ -708,6 +727,10 @@ class DatasetStore:
             "occupancyTimeSec": metadata["occupancyTimeSec"],
             "responseUnits": metadata["responseUnits"],
             "responseNormalization": metadata["responseNormalization"],
+            "cacheProgress": record.indexed.status() if record.indexed is not None else {
+                "indexed": False, "cachedUnits": len(metadata["unitPool"]),
+                "totalUnits": len(metadata["unitPool"]), "complete": True, "error": None,
+            },
             "capabilities": {
                 "probe": record.companions.has_probe,
                 "hd": record.companions.has_hd,
@@ -720,6 +743,9 @@ class DatasetStore:
         return response
 
     def unit_bytes(self, record: DatasetRecord, cluster_id: int) -> tuple[bytes, list[int]]:
+        if record.indexed is not None:
+            values = record.indexed.unit(cluster_id)
+            return np.asarray(values, dtype="<f8").tobytes(order="C"), list(values.shape)
         with self._lock:
             if self._records.get(record.dataset_id) is not record:
                 raise DatasetChangedError("Dataset cache was evicted; reopen it")
@@ -751,6 +777,9 @@ class DatasetStore:
     def unit_array(self, record: DatasetRecord, cluster_id: int) -> tuple[int, np.ndarray]:
         """Return one validated unit as an in-memory y-by-x-by-time array."""
 
+        if record.indexed is not None:
+            values = record.indexed.unit(cluster_id)
+            return record.cache.metadata["unitPool"].index(cluster_id), np.asarray(values, dtype=np.float64)
         with self._lock:
             if self._records.get(record.dataset_id) is not record:
                 raise DatasetChangedError("Dataset cache was evicted; reopen it")
@@ -789,7 +818,7 @@ class DatasetStore:
 
         The inclusive source-bin range is summed on the original ``y*x`` RF
         grid.  Display rebinning and smoothing are intentionally absent from
-        this quality filter, matching the Python 1.9.6 viewer contract.
+        this quality filter, matching the Python 1.10.0 viewer contract.
         """
 
         with self._lock:
@@ -801,6 +830,16 @@ class DatasetStore:
             end = max(0, min(n_bins - 1, max(int(start_bin), int(end_bin))))
             if type(threshold) is not int or threshold < 1:
                 raise ValueError("Zero-spike spatial-bin threshold must be positive")
+            if record.indexed is not None:
+                cached = record.indexed.cached()
+                # Uncached units remain navigable so selecting one can prioritize
+                # its read. Apply the native filter once that unit is available.
+                result = [
+                    int(np.count_nonzero(~np.any(cached[uid][..., start:end + 1], axis=2)))
+                    if uid in cached else 0
+                    for uid in metadata["unitPool"]
+                ]
+                return [uid for uid, zero in zip(metadata["unitPool"], result) if zero < threshold], result
             try:
                 mapped = np.memmap(
                     record.cache.data_path,

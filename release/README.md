@@ -20,12 +20,17 @@ component tag and artifact name:
 | --- | --- | --- | --- |
 | Python stable | `1.10.0` | `python-v1.10.0` | stable |
 | Python Free-Moving | `1.10.0-alpha.3` | `python-v1.10.0-alpha.3` | alpha |
-| Swift | `1.9.6` | `swift-v1.9.6` | stable |
-| Web | `1.9.6` | `web-v1.9.6` | stable |
+| Swift | `1.10.0` | `swift-v1.10.0` | stable |
+| Web | `1.10.0` | `web-v1.10.0` | stable |
 
 Published downloads and checksums are available from the repository
 [Releases page](https://github.com/KaiCao2003/RF-Map-Viewer/releases). The root
 [`README.md`](../README.md#downloads) links directly to each component archive.
+
+Stable 1.10.0 aligns Python, Swift, and Web on indexed version-2 RF input,
+progressive unit caching, RF window subtraction, display shortcuts, and the
+shared Delay/RGB display and export semantics. The separate Free-Moving alpha
+and retained Windows release are unchanged.
 
 Python 1.9.9 separates viewer responsibilities into focused modules, removes
 internal fallback branches, consolidates historical tests, and adds a macOS
@@ -50,9 +55,9 @@ selection, the schema-v4 SpikeInterface waveform viewer/exporter, and matching
 rectangle/polar and palette keyboard shortcuts.
 
 Each active component records a `feature_generation_offset` from the Python
-stable reference. The current Swift/Web offset is `-1`; a viewer verified to be
-one complete generation behind would use offset `-1` and therefore the `1.9.x`
-series. Free-Moving uses offset `0`, producing the `1.10.x` alpha series.
+stable reference. The current Swift/Web offset is `0`, matching Python stable. A viewer verified
+to be one complete generation behind would use offset `-1` and therefore the
+`1.9.x` series. Free-Moving uses offset `0`, producing the `1.10.x` alpha series.
 
 `versions.json` is the canonical machine-readable manifest. Validate every
 runtime, package, and build declaration from the repository root with:

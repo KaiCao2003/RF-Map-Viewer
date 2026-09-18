@@ -60,6 +60,10 @@ struct ViewerSyncState: Equatable, Sendable {
     let timelineRangeAnchorMS: Double?
     let timelineScrollFraction: Double
 
+    var rfSubtractEnabled = false
+    var subtractRangeStartMS = 0.0
+    var subtractRangeEndMS = 80.0
+
     func changedFields(comparedTo baseline: ViewerSyncState) -> ViewerSyncFields {
         var fields: ViewerSyncFields = []
         if unitID != baseline.unitID { fields.insert(.unit) }
@@ -71,7 +75,10 @@ struct ViewerSyncState: Equatable, Sendable {
             fields.insert(.timelineSelection)
         }
         if plotRangeStartMS != baseline.plotRangeStartMS
-            || plotRangeEndMS != baseline.plotRangeEndMS {
+            || plotRangeEndMS != baseline.plotRangeEndMS
+            || rfSubtractEnabled != baseline.rfSubtractEnabled
+            || subtractRangeStartMS != baseline.subtractRangeStartMS
+            || subtractRangeEndMS != baseline.subtractRangeEndMS {
             fields.insert(.plotRange)
         }
         if timeResolutionMS != baseline.timeResolutionMS { fields.insert(.timeResolution) }
@@ -118,7 +125,10 @@ struct ViewerSyncState: Equatable, Sendable {
                 : timelineRangeAnchorMS,
             timelineScrollFraction: fields.contains(.timelineScroll)
                 ? incoming.timelineScrollFraction
-                : timelineScrollFraction
+                : timelineScrollFraction,
+            rfSubtractEnabled: fields.contains(.plotRange) ? incoming.rfSubtractEnabled : rfSubtractEnabled,
+            subtractRangeStartMS: fields.contains(.plotRange) ? incoming.subtractRangeStartMS : subtractRangeStartMS,
+            subtractRangeEndMS: fields.contains(.plotRange) ? incoming.subtractRangeEndMS : subtractRangeEndMS
         )
     }
 
@@ -144,7 +154,10 @@ struct ViewerSyncState: Equatable, Sendable {
             selectedTab: selectedTab,
             selectedCell: selectedCell,
             timelineRangeAnchorMS: timelineRangeAnchorMS,
-            timelineScrollFraction: timelineScrollFraction
+            timelineScrollFraction: timelineScrollFraction,
+            rfSubtractEnabled: rfSubtractEnabled,
+            subtractRangeStartMS: subtractRangeStartMS,
+            subtractRangeEndMS: subtractRangeEndMS
         )
     }
 

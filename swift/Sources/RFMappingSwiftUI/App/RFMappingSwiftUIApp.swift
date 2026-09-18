@@ -236,6 +236,9 @@ struct RFMappingCommandActions {
     let toggleFlipY: () -> Void
     let toggleSpatialFormat: () -> Void
     let cyclePalette: () -> Void
+    let toggleSubtract: () -> Void
+    let toggleDisplayOptions: () -> Void
+    let toggleFilteredUnits: () -> Void
 }
 
 /// Completes a document-less launch without consulting bundled or discovered
@@ -365,6 +368,7 @@ private struct RFMappingWindow: View {
         .focusedSceneValue(\.rfMappingCommands, commandActions)
         .background(WindowShortcutMonitor(actions: commandActions))
         .background(WindowCloseObserver {
+            store.cancelPendingLoads()
             pairingCoordinator.unregister(id: pairingWindowID)
             if isInitialWindow, !store.hasData {
                 WindowRouter.shared.expireColdInitialWindowClaim()
@@ -414,8 +418,8 @@ private struct RFMappingWindow: View {
             nextUnit: { store.stepUnit(1) },
             previousBin: { store.stepBin(-1) },
             nextBin: { store.stepBin(1) },
-            decreaseResolution: { store.stepTimeResolution(-1.0) },
-            increaseResolution: { store.stepTimeResolution(1.0) },
+            decreaseResolution: { store.stepTimeResolution(1.0) },
+            increaseResolution: { store.stepTimeResolution(-1.0) },
             showFullRange: {
                 if store.isWaveformZoomed {
                     store.isWaveformZoomed = false
@@ -430,13 +434,16 @@ private struct RFMappingWindow: View {
                     ? .polar
                     : .rectangular
             },
-            cyclePalette: store.cyclePalette
+            cyclePalette: store.cyclePalette,
+            toggleSubtract: { store.setRFSubtractEnabled(!store.rfSubtractEnabled) },
+            toggleDisplayOptions: { store.showDisplayOptions.toggle() },
+            toggleFilteredUnits: { store.setRFUnitQualityFilterEnabled(!store.rfFilterUnitsWithZeroBins) }
         )
     }
 
     private func openFigureExporter() {
         guard let request = FigureExportWindowRegistry.shared.prepare(from: store) else {
-            store.errorMessage = "Load an RF dataset before opening Figure Export."
+            store.errorMessage = "Load an RF dataset and wait for all units to cache before opening Figure Export."
             return
         }
         openWindow(value: request)
@@ -544,8 +551,8 @@ private struct RFMappingCommands: Commands {
 
             Button("Previous Timeline Bin (↑)") { actions?.previousBin() }
             Button("Next Timeline Bin (↓)") { actions?.nextBin() }
-            Button("Decrease Time Resolution 1 ms (Shift-,)") { actions?.decreaseResolution() }
-            Button("Increase Time Resolution 1 ms (Shift-.)") { actions?.increaseResolution() }
+            Button("Coarser Time Resolution (Shift-,)") { actions?.decreaseResolution() }
+            Button("Finer Time Resolution (Shift-.)") { actions?.increaseResolution() }
 
             Divider()
 
@@ -560,6 +567,10 @@ private struct RFMappingCommands: Commands {
             Button("Invert Y (F)") { actions?.toggleFlipY() }
             Button("Toggle Rectangle / Polar (P)") { actions?.toggleSpatialFormat() }
             Button("Cycle Palette (Shift-P)") { actions?.cyclePalette() }
+            Button("Subtract RF Windows (A − B) (-)") { actions?.toggleSubtract() }
+            Button("Show / Hide Display Options (D)") { actions?.toggleDisplayOptions() }
+            Button("Show / Hide Filtered Units") { actions?.toggleFilteredUnits() }
+                .keyboardShortcut(".", modifiers: [.command, .shift])
         }
 
         CommandGroup(after: .help) {
@@ -647,8 +658,7 @@ private struct WindowShortcutMonitor: NSViewRepresentable {
             if responder is NSTextView { return true }
             var view: NSView? = responder
             while let current = view {
-                if current is NSTextField || current is NSComboBox
-                    || current is NSPopUpButton || current is NSStepper {
+                if current is NSTextField || current is NSComboBox || current is NSStepper {
                     return true
                 }
                 view = current.superview
@@ -677,6 +687,8 @@ private struct WindowShortcutMonitor: NSViewRepresentable {
                 case "]": actions.nextUnit(); return true
                 case "f": actions.toggleFlipY(); return true
                 case "p": actions.toggleSpatialFormat(); return true
+                case "-": actions.toggleSubtract(); return true
+                case "d": actions.toggleDisplayOptions(); return true
                 case "?": showKeyboardShortcuts(); return true
                 case "1", "2", "3":
                     actions.selectTab(Int(character!)! - 1)
@@ -709,11 +721,14 @@ private func showKeyboardShortcuts() {
     alert.informativeText = """
     ← / →   Previous / next unit
     ↑ / ↓   Previous / next timeline bin
-    Shift+, / Shift+.   Time resolution −/+ 1 ms
+    Shift+, / Shift+.   Coarser / finer time resolution (one source bin)
     1–3   Switch plot tab
     F   Invert Y
     P   Toggle rectangular / polar layout
     Shift-P   Cycle palette
+    -   Subtract RF windows (A − B)
+    D   Show / hide display options
+    Command-Shift-.   Show / hide filtered units
     Esc   Close waveform zoom, otherwise show full time range
     [ / ]   Previous / next unit
     Command-O   Open RF map in a new window

@@ -1156,6 +1156,8 @@ struct FigureExportRenderer {
                 activeTimeMS: snapshot.activeTimeMS,
                 selectedRangeMS: [snapshot.rangeStartMS, snapshot.rangeEndMS],
                 plotRangeMS: [snapshot.plotRangeStartMS, snapshot.plotRangeEndMS],
+                rfSubtractEnabled: snapshot.rfSubtractEnabled,
+                subtractRangeMS: [snapshot.subtractRangeStartMS, snapshot.subtractRangeEndMS],
                 timeResolutionMS: snapshot.timeResolutionMS,
                 xBins: snapshot.xBins,
                 yBins: snapshot.yBins,
@@ -1285,7 +1287,7 @@ struct FigureExportRenderer {
               !version.isEmpty else {
             // `Bundle.main` belongs to xctest when the renderer is exercised
             // through SwiftPM, not to RF Map Viewer.
-            return "1.9.6"
+            return "1.10.0"
         }
         return version
     }
@@ -1722,10 +1724,11 @@ struct FigureExportRenderer {
             display.responseFloor,
             display.timelineScrollFraction,
             display.hdSmoothSigma,
-        ] + display.selectedRangeMS + display.plotRangeMS
+        ] + display.selectedRangeMS + display.plotRangeMS + (display.subtractRangeMS ?? [])
         guard displayNumbers.allSatisfy(\.isFinite),
               display.selectedRangeMS.count == 2,
               display.plotRangeMS.count == 2,
+              display.subtractRangeMS == nil || display.subtractRangeMS?.count == 2,
               display.timeResolutionMS > 0,
               display.xBins > 0,
               display.yBins > 0,
@@ -1999,6 +2002,8 @@ private struct FigureManifestDisplaySettings: Codable {
     let activeTimeMS: Double
     let selectedRangeMS: [Double]
     let plotRangeMS: [Double]
+    let rfSubtractEnabled: Bool?
+    let subtractRangeMS: [Double]?
     let timeResolutionMS: Double
     let xBins: Int
     let yBins: Int

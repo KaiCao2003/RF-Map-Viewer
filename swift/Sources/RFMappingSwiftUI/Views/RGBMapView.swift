@@ -45,7 +45,7 @@ struct RGBMapView: View {
                 .accessibilityRepresentation { accessibilityRepresentation(rgb: rgb) }
             }
         }
-        .background(Color(nsColor: .textBackgroundColor))
+        .background(Color.white)
     }
 
     private func accessibilityRepresentation(rgb: RGBPlot) -> some View {
@@ -98,19 +98,7 @@ private func drawRGB(
 
     for displayY in rgb.total.indices {
         for groupIndex in rgb.total[displayY].indices {
-            let totalValue = rgb.total[displayY][groupIndex] ?? 0.0
-            let fill: Color
-            if totalValue <= 0 {
-                fill = Color(red: 0.929, green: 0.941, blue: 0.953)
-            } else {
-                let delay = rgb.delay[displayY][groupIndex]
-                let entropy = rgb.entropy[displayY][groupIndex] ?? 0.0
-                fill = rgbColor(
-                    red: clamp(totalValue / rgb.maxTotal),
-                    green: delay.map { clamp(($0 - rgb.minDelay) / rgb.delaySpan) } ?? 0.0,
-                    blue: clamp(entropy)
-                )
-            }
+            let fill = rgbCellColor(rgb: rgb, displayY: displayY, displayX: groupIndex)
             let rect = CGRect(
                 x: layout.x0 + CGFloat(groupIndex) * layout.cellWidth,
                 y: layout.y0 + CGFloat(displayY) * layout.cellHeight,
@@ -162,7 +150,7 @@ private func drawPolarRGB(
         width: innerRadius * 2,
         height: innerRadius * 2
     ))
-    context.fill(innerCircle, with: .color(Color(nsColor: .controlBackgroundColor)))
+    context.fill(innerCircle, with: .color(Color.white))
     context.stroke(innerCircle, with: .color(.secondary), lineWidth: 0.5)
 
     let thetaEdges = (0...layout.xGroups.count).map {
@@ -217,10 +205,10 @@ private func drawPolarRGB(
 }
 
 private func rgbCellColor(rgb: RGBPlot, displayY: Int, displayX: Int) -> Color {
-    let totalValue = rgb.total[displayY][displayX] ?? 0.0
-    guard totalValue > 0 else {
+    guard let totalValue = rgb.total[displayY][displayX], totalValue.isFinite else {
         return Color(red: 0.929, green: 0.941, blue: 0.953)
     }
+    guard totalValue > 0 else { return .black }
     let delay = rgb.delay[displayY][displayX]
     let entropy = rgb.entropy[displayY][displayX] ?? 0.0
     return rgbColor(

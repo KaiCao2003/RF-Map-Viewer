@@ -12,7 +12,7 @@ final class FigureExportWindowRegistry {
     private var seeds: [UUID: FigureExportSeed] = [:]
 
     func prepare(from store: RFMappingStore) -> FigureExportRequest? {
-        guard let data = store.data,
+        guard let data = store.data, store.isUnitCacheComplete,
               !store.qualityFilteredUnitIDs.isEmpty else { return nil }
         let unitPool = store.qualityFilteredUnitIDs
         let currentUnitID = store.selectedUnitID.flatMap {

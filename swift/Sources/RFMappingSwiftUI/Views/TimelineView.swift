@@ -25,7 +25,7 @@ struct TimelineView: View {
                     TimelineAccessibilityRepresentation(store: store, layout: layout)
                 }
             }
-            .background(Color(nsColor: .textBackgroundColor))
+            .background(Color.white)
         }
     }
 }
@@ -48,7 +48,7 @@ struct TimelineExportView: View {
                 drawTimelineBase(context: &context, size: size, layout: layout)
                 drawTimelineSelection(context: &context, size: size, layout: layout)
             }
-            .background(Color(nsColor: .textBackgroundColor))
+            .background(Color.white)
         }
     }
 }
