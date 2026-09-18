@@ -1895,49 +1895,36 @@ class RFMViewer(tk.Toplevel):
         self.polar_radius_var.trace_add("write", lambda *_: self._on_control_changed())
         self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
         self.bind("<FocusIn>", self._on_window_focus, add="+")
-        self.bind("<Left>", lambda event: self._run_navigation_shortcut(event, self._step_unit, -1))
-        self.bind("<Right>", lambda event: self._run_navigation_shortcut(event, self._step_unit, 1))
-        self.bind("<bracketleft>", lambda event: self._run_navigation_shortcut(event, self._step_unit, -1))
-        self.bind("<bracketright>", lambda event: self._run_navigation_shortcut(event, self._step_unit, 1))
-        self.bind("<Up>", lambda event: self._run_navigation_shortcut(event, self._step_timeline_bin, -1))
-        self.bind("<Down>", lambda event: self._run_navigation_shortcut(event, self._step_timeline_bin, 1))
-        self.bind("<less>", lambda event: self._run_navigation_shortcut(event, self._step_time_resolution, -1.0))
-        self.bind("<greater>", lambda event: self._run_navigation_shortcut(event, self._step_time_resolution, 1.0))
-        self.bind("<Escape>", lambda event: self._run_navigation_shortcut(event, self._handle_escape))
-        self.bind("<KeyPress-f>", lambda event: self._run_navigation_shortcut(event, self._toggle_flip_y))
-        self.bind("<KeyPress-p>", lambda event: self._run_navigation_shortcut(event, self._toggle_polar_layout))
-        self.bind("<KeyPress-P>", lambda event: self._run_navigation_shortcut(event, self._cycle_palette))
-        for sequence, action in (
-            ("<KeyPress-minus>", self._toggle_rf_subtraction),
-            ("<KeyPress-d>", self._toggle_display_controls),
-        ):
-            callback = lambda event, action=action: self._run_navigation_shortcut(event, action)
-            self.bind(sequence, callback)
-            self.notebook.bind(sequence, callback, add="+")
-        # TNotebook handles letter traversal before a toplevel bindtag.  Own P
-        # on the notebook widget itself so Polar toggles before tab mnemonics.
-        self.notebook.bind(
-            "<KeyPress-p>",
-            lambda event: self._run_navigation_shortcut(
-                event,
-                self._toggle_polar_layout,
-            ),
-            add="+",
+        navigation_shortcuts = (
+            ("<Left>", self._step_unit, (-1,)),
+            ("<Right>", self._step_unit, (1,)),
+            ("<bracketleft>", self._step_unit, (-1,)),
+            ("<bracketright>", self._step_unit, (1,)),
+            ("<Up>", self._step_timeline_bin, (-1,)),
+            ("<Down>", self._step_timeline_bin, (1,)),
+            ("<less>", self._step_time_resolution, (1.0,)),
+            ("<Shift-comma>", self._step_time_resolution, (1.0,)),
+            ("<greater>", self._step_time_resolution, (-1.0,)),
+            ("<Shift-period>", self._step_time_resolution, (-1.0,)),
+            ("<Escape>", self._handle_escape, ()),
+            ("<KeyPress-f>", self._toggle_flip_y, ()),
+            ("<KeyPress-p>", self._toggle_polar_layout, ()),
+            ("<KeyPress-P>", self._cycle_palette, ()),
+            ("<KeyPress-minus>", self._toggle_rf_subtraction, ()),
+            ("<KeyPress-d>", self._toggle_display_controls, ()),
+            ("<question>", self._show_shortcuts, ()),
+        ) + tuple(
+            (f"<KeyPress-{index + 1}>", self._select_tab, (index,))
+            for index in range(3)
         )
-        self.notebook.bind(
-            "<KeyPress-P>",
-            lambda event: self._run_navigation_shortcut(
-                event,
-                self._cycle_palette,
-            ),
-            add="+",
-        )
-        self.bind("<question>", lambda event: self._run_navigation_shortcut(event, self._show_shortcuts))
-        for tab_index in range(3):
-            self.bind(
-                f"<KeyPress-{tab_index + 1}>",
-                lambda event, index=tab_index: self._run_navigation_shortcut(event, self._select_tab, index),
+        for sequence, action, args in navigation_shortcuts:
+            callback = lambda event, action=action, args=args: self._run_navigation_shortcut(
+                event, action, *args,
             )
+            self.bind(sequence, callback)
+            # TNotebook consumes arrows (and on Aqua, letter traversal) before
+            # the toplevel bindtag. Handle viewer shortcuts there first too.
+            self.notebook.bind(sequence, callback)
         self.bind("<Control-e>", lambda _event: self._open_figure_exporter())
         self.bind("<Control-Shift-E>", lambda _event: self._export_current_matrix())
         self.bind("<Control-w>", lambda _event: self._close_window())
@@ -2046,6 +2033,10 @@ class RFMViewer(tk.Toplevel):
 
     def _shortcut_uses_editing_widget(self, event: object) -> bool:
         widget = getattr(event, "widget", None)
+        if isinstance(widget, ttk.Combobox) and widget.instate(("readonly", "!pressed")):
+            # A closed picker cannot edit text, so view shortcuts still work
+            # after choosing a unit or metric. Keep its navigation keys native.
+            return getattr(event, "keysym", "") in {"Left", "Right", "Up", "Down", "Escape"}
         return isinstance(widget, (tk.Entry, tk.Text, ttk.Entry, ttk.Spinbox, ttk.Combobox))
 
     def _run_navigation_shortcut(
@@ -2055,6 +2046,15 @@ class RFMViewer(tk.Toplevel):
         *args: object,
     ) -> str | None:
         if self._shortcut_uses_editing_widget(event):
+            return None
+        # Tk also matches a plain-key binding when extra modifiers are held.
+        # Leave Command/Control/Alt chords to their own bindings; Shift and
+        # Caps Lock still select the intended keysym (notably P versus p).
+        command_modifiers = 0x0004 | 0x0008 | 0x0040 | 0x0080 | 0x20000
+        if self.tk.call("tk", "windowingsystem") == "aqua":
+            # Aqua maps Option to Mod2; X11 normally uses Mod2 for Num Lock.
+            command_modifiers |= 0x0010
+        if int(getattr(event, "state", 0) or 0) & command_modifiers:
             return None
         action(*args)
         return "break"

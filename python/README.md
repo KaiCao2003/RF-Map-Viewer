@@ -76,6 +76,15 @@ different session. The default is session `1`.
 
 Press **P** to switch the RF display between Rectangle and Polar layouts.
 Press **Shift+P** to cycle the color palette.
+These also work while the closed, read-only unit or value-mode picker has
+focus. Editable fields and open pickers keep their normal key handling.
+
+With a plot, plot tab, or toolbar button focused, **← / →** selects the
+previous / next unit, **↑ / ↓** selects the timeline bin, and **1–3** switches
+plot tabs. **Shift+,** makes the time resolution coarser and **Shift+.** makes
+it finer, one source bin at a time, matching the Navigate menu. Input fields
+keep their normal editing keys; Command, Control, and Option combinations do
+not trigger the plain-key viewer actions.
 
 Press **-** (or **View → Subtract RF Windows (A − B)**) to toggle between
 the usual RF window sum and the difference of two independently adjustable

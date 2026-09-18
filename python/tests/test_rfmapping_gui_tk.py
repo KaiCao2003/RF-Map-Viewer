@@ -1194,6 +1194,109 @@ class TkViewerTests(unittest.TestCase):
         )
         self.assertEqual(self.app._current_matrix(), initial_rf_matrix)
 
+    def test_navigation_keys_work_with_plot_tab_and_toolbar_focus(self) -> None:
+        for widget in (
+            self.app.canvases["timeline"], self.app.notebook, self.app.next_unit_button,
+        ):
+            with self.subTest(widget=widget.winfo_class()):
+                self.app._select_tab(2)
+                widget.focus_force()
+                self.app.update()
+                widget.event_generate("<KeyPress-Right>")
+                self.app.update()
+                self.assertEqual(self.app.unit_idx.get(), 1)
+                self.assertEqual(self.app._active_tab_key(), "timeline")
+                widget.event_generate("<KeyPress-Left>")
+                self.app.update()
+                self.assertEqual(self.app.unit_idx.get(), 0)
+                self.assertEqual(self.app._active_tab_key(), "timeline")
+
+                self.app.bin_var.set(5)
+                widget.event_generate("<KeyPress-Up>")
+                self.app.update()
+                self.assertEqual(self.app.bin_var.get(), 4)
+                widget.event_generate("<KeyPress-Down>")
+                self.app.update()
+                self.assertEqual(self.app.bin_var.get(), 5)
+
+        self.app.notebook.focus_force()
+        self.app.update()
+        for key, tab in (("1", "rf"), ("2", "delay"), ("3", "timeline")):
+            self.app.notebook.event_generate(f"<KeyPress-{key}>")
+            self.app.update()
+            self.assertEqual(self.app._active_tab_key(), tab)
+
+    def test_resolution_shortcuts_agree_with_navigate_menu(self) -> None:
+        for widget in (self.app.canvases["timeline"], self.app.notebook):
+            widget.focus_force()
+            self.app.update()
+            for sequence, label in (
+                ("<less>", "Decrease Time Resolution"),
+                ("<Shift-comma>", "Decrease Time Resolution"),
+                ("<greater>", "Increase Time Resolution"),
+                ("<Shift-period>", "Increase Time Resolution"),
+            ):
+                with self.subTest(widget=widget.winfo_class(), sequence=sequence):
+                    self.app.time_res_ms_var.set("5")
+                    self.app._navigate_menu.invoke(label)
+                    expected = self.app.time_res_ms_var.get()
+                    self.app.time_res_ms_var.set("5")
+                    widget.event_generate(sequence)
+                    self.app.update()
+                    self.assertEqual(self.app.time_res_ms_var.get(), expected)
+
+    def test_modified_keys_do_not_trigger_plain_view_shortcuts(self) -> None:
+        modifiers = ["Control", "Command", "Alt"]
+        if self.app.tk.call("tk", "windowingsystem") == "aqua":
+            modifiers.append("Option")
+        for widget in (self.app.canvases["timeline"], self.app.notebook):
+            widget.focus_force()
+            self.app.update()
+            for modifier in modifiers:
+                for key in ("f", "p", "P", "d", "minus", "3", "bracketright"):
+                    with self.subTest(widget=widget.winfo_class(), modifier=modifier, key=key):
+                        before = (
+                            self.app.flip_y_var.get(), self.app.polar_layout_var.get(),
+                            self.app.palette_var.get(), self.app.display_expanded_var.get(),
+                            self.app.rf_subtract_var.get(), self.app._active_tab_key(),
+                            self.app.unit_idx.get(),
+                        )
+                        widget.event_generate(f"<{modifier}-KeyPress-{key}>")
+                        self.app.update()
+                        after = (
+                            self.app.flip_y_var.get(), self.app.polar_layout_var.get(),
+                            self.app.palette_var.get(), self.app.display_expanded_var.get(),
+                            self.app.rf_subtract_var.get(), self.app._active_tab_key(),
+                            self.app.unit_idx.get(),
+                        )
+                        self.assertEqual(after, before)
+
+    def test_navigation_keys_preserve_entry_editing_and_window_scope(self) -> None:
+        self.app._select_tab(0)
+        entry = self.app.range_start_spin
+        entry.focus_force()
+        self.app.update()
+        entry.delete(0, "end")
+        for key in ("minus", "1", "0"):
+            entry.event_generate(f"<KeyPress-{key}>")
+        entry.icursor("end")
+        entry.event_generate("<KeyPress-Left>")
+        self.app.update()
+        self.assertEqual(entry.get(), "-10")
+        self.assertEqual(entry.index("insert"), 2)
+        self.assertEqual(self.app.unit_idx.get(), 0)
+        self.assertFalse(self.app.rf_subtract_var.get())
+
+        other = gui.RFMViewer(rf_model_module.RFMappingData(self.app.data.path), master=self.app._app_root)
+        self.addCleanup(other.destroy)
+        self.app.update()
+        other.notebook.focus_force()
+        self.app.update()
+        other.notebook.event_generate("<KeyPress-Right>")
+        self.app.update()
+        self.assertEqual(other.unit_idx.get(), 1)
+        self.assertEqual(self.app.unit_idx.get(), 0)
+
     def test_shift_comma_and_period_adjust_resolution_one_ms(self) -> None:
         event = SimpleNamespace(widget=self.app.canvases["timeline"])
         self.app.time_res_ms_var.set("5")
@@ -1242,6 +1345,70 @@ class TkViewerTests(unittest.TestCase):
         self.app.palette_var.set("Gray")
         self.app._run_navigation_shortcut(event, self.app._cycle_palette)
         self.assertEqual(self.app.palette_var.get(), "Viridis")
+
+    def test_p_shortcuts_work_after_using_plot_tabs_toolbar_and_unit_picker(self) -> None:
+        self.app._select_tab(0)
+        self.app.update()
+        for widget in (
+            self.app.canvases["rf"], self.app.notebook, self.app.next_unit_button,
+            self.app.unit_combo, self.app.value_mode_combo,
+        ):
+            with self.subTest(widget=str(widget)):
+                self.app.polar_layout_var.set(False)
+                self.app.palette_var.set("Gray")
+                widget.focus_force()
+                self.app.update()
+                widget.event_generate("<KeyPress-p>")
+                self.app.update()
+                self.assertTrue(self.app.polar_layout_var.get())
+                self.assertEqual(self.app._canvas_layouts["rf"]["geometry"], "polar")
+                self.assertEqual(self.app.palette_var.get(), "Gray")
+
+                widget.event_generate("<KeyPress-p>")
+                self.app.update()
+                self.assertFalse(self.app.polar_layout_var.get())
+                self.assertEqual(self.app._canvas_layouts["rf"]["geometry"], "rectangle")
+                for sequence in ("<Shift-KeyPress-p>", "<Shift-KeyPress-P>"):
+                    self.app.palette_var.set("Gray")
+                    widget.event_generate(sequence)
+                    self.app.update()
+                    self.assertEqual(self.app.palette_var.get(), "Viridis")
+                    self.assertFalse(self.app.polar_layout_var.get())
+                self.assertEqual(self.app._active_tab_key(), "rf")
+                self.assertEqual(self.app.unit_idx.get(), 0)
+
+    def test_p_shortcuts_preserve_text_entry_and_native_chooser_navigation(self) -> None:
+        self.app._select_tab(0)
+        editable_combo = tk_support_module.ttk.Combobox(self.app, state="normal")
+        editable_combo.place(x=0, y=0)
+        self.addCleanup(editable_combo.destroy)
+        for widget in (self.app.range_start_spin, editable_combo):
+            widget.focus_force()
+            self.app.update()
+            widget.delete(0, "end")
+            widget.event_generate("<KeyPress-p>")
+            widget.event_generate("<Shift-KeyPress-p>")
+            self.app.update()
+            self.assertEqual(widget.get(), "pP")
+            self.assertFalse(self.app.polar_layout_var.get())
+            self.assertEqual(self.app.palette_var.get(), "Gray")
+
+        self.app.unit_combo.focus_force()
+        self.app.update()
+        self.app.bin_var.set(5)
+        for key in ("Left", "Right", "Up", "Escape"):
+            self.app.unit_combo.event_generate(f"<KeyPress-{key}>")
+            self.app.update()
+            self.assertEqual(self.app.unit_idx.get(), 0)
+            self.assertEqual(self.app.bin_var.get(), 5)
+        # A posted chooser keeps its own key handling until it is dismissed.
+        self.app.unit_combo.state(["pressed"])
+        self.app.unit_combo.event_generate("<KeyPress-p>")
+        self.app.unit_combo.event_generate("<Shift-KeyPress-p>")
+        self.app.update()
+        self.assertFalse(self.app.polar_layout_var.get())
+        self.assertEqual(self.app.palette_var.get(), "Gray")
+        self.app.unit_combo.state(["!pressed"])
 
     def test_export_records_displayed_rate_and_units(self) -> None:
         destination = Path(self.directory.name) / "rate.csv"
