@@ -75,7 +75,9 @@ export class PairSession {
   }
 
   heartbeat() {
-    const expired = [...this.peers].filter(([, peer]) => this.now() - peer.seen > 60_000);
+    // Background tabs can throttle timers to once a minute. Allow missed
+    // heartbeats before removing a tab that did not send an explicit leave.
+    const expired = [...this.peers].filter(([, peer]) => this.now() - peer.seen > 180_000);
     expired.forEach(([id]) => this.peers.delete(id));
     if (expired.length) this.reportMembership();
     this.emit("presence");

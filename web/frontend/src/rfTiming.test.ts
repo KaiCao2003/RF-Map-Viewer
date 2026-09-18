@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { prepareRfResponse } from "./math";
-import { readRfTiming, timingFromState, timingPatch, toggleRfMode } from "./rfTiming";
+import { readRfTiming, resetRfTiming, timingFromState, timingPatch, toggleRfMode } from "./rfTiming";
 import type { DatasetMeta, ViewState } from "./types";
 
 const meta: DatasetMeta = {
@@ -28,5 +28,10 @@ describe("RF timing parity", () => {
     expect(prepareRfResponse(counts, meta, difference).matrix).toEqual([[2]]);
     expect(prepareRfResponse(counts, meta, { ...difference, rfStartMs: 0, rfEndMs: 100, rfBStartMs: 100, rfBEndMs: 200 }).matrix).toEqual([[null]]);
     expect(prepareRfResponse(counts, meta, { ...difference, rfBStartMs: 100, rfBEndMs: 200 }).matrix).toEqual([[0]]);
+  });
+  it("resets only the active mode while preserving the other mode's last window", () => {
+    const difference = { ...state, ...toggleRfMode(meta, state), rfStartMs: 0 };
+    const reset = { ...difference, ...resetRfTiming(meta, difference, { mode: "sum", sum: [0, 100], a: [100, 200], b: [0, 100] }) };
+    expect(timingFromState(reset)).toEqual({ mode: "difference", sum: [-100, 200], a: [100, 200], b: [0, 100] });
   });
 });

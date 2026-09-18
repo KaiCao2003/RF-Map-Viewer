@@ -51,7 +51,7 @@ import { nearestProbeUnitToRegionCenter, probeUnitsInRegion } from "./probeSelec
 import { resolutionChangePatch, timelineSelectionPatch } from "./viewStateMath";
 import { VIEWER_TABS } from "./viewTabs";
 import { usePairedWindows } from "./pairedWindows";
-import { RF_TIMING_KEY, readRfTiming, timingPatch, timingFromState, toggleRfMode } from "./rfTiming";
+import { RF_TIMING_KEY, readRfTiming, resetRfTiming, timingPatch, timingFromState, toggleRfMode } from "./rfTiming";
 import { LatestRequest, LatestSerialRead, UnitCountsCache } from "./requestLifecycle";
 import {
   navigationUnitIds,
@@ -572,7 +572,7 @@ export default function App() {
       || !qualityVisibleUnitIds.includes(viewState.clusterId)
     ) {
       setCounts(null);
-      setUnitStatus("unavailable");
+      setUnitStatus(unitFilterStatus === "loading" ? "loading" : "unavailable");
       return () => controller.abort();
     }
     const cached = datasetCache.get(viewState.clusterId);
@@ -798,7 +798,7 @@ export default function App() {
     const y = prepared.yGroups.findIndex(([start, end]) => start <= selectedCell[0] && end >= selectedCell[1]);
     const x = prepared.xGroups.findIndex(([start, end]) => start <= selectedCell[2] && end >= selectedCell[3]);
     return prepared.matrix[y]?.[x] ?? null;
-  }, [counts, meta, selectedCell, viewState]);
+  }, [counts, meta, selectedCell, viewState?.rfStartMs, viewState?.rfEndMs, viewState?.rfWindowMode, viewState?.rfBStartMs, viewState?.rfBEndMs, viewState?.valueMode, viewState?.xBins, viewState?.yBins, viewState?.flipY, viewState?.smoothRadius]);
 
   const selectedDetails = useMemo(() => {
     if (!selectedSeries) return null;
@@ -883,8 +883,6 @@ export default function App() {
       } : current);
     }
   }, [counts, exportDialog, meta, viewState]);
-
-
 
   const openChooser = useCallback(() => {
     setError("");
@@ -1020,7 +1018,8 @@ export default function App() {
       : noQualityMatches
         ? `Increase the zero-bin threshold, change the RF sum range, or disable the filter. Visible requires zero-bin count < ${zeroSpikeSpatialBinThreshold}.`
         : "Clear or redraw the Probe region to continue unit navigation.";
-  const unavailableUnit = unitStatus === "unavailable" && !noNavigationUnits;
+  const unavailableUnit = !noNavigationUnits && (localIndex < 0 || (unitFilterEnabled && !qualityVisibleUnitIds.includes(viewState.clusterId)));
+  const unitIsLoading = !unavailableUnit && (unitStatus === "loading" || unitStatus === "unavailable");
   const unavailableView = <div className="view-empty"><strong>Cluster {viewState.clusterId}: N/A in this dataset</strong><span>{localIndex < 0 ? "This recorded unit is present in a paired viewer, but absent from this RF file." : "This unit is hidden by this dataset's native RF-bin filter."}</span></div>;
   const unit = valueModeUnit(viewState.valueMode);
 
@@ -1168,7 +1167,7 @@ export default function App() {
                   const index = meta.unitPool.indexOf(clusterId);
                   return (
                     <option key={clusterId} value={clusterId}>
-                      {`${String(index).padStart(3, "0")}  cluster ${clusterId}`}
+                      {index < 0 ? `N/A · cluster ${clusterId}` : `${String(index).padStart(3, "0")}  cluster ${clusterId}`}
                     </option>
                   );
                 })}
@@ -1176,7 +1175,7 @@ export default function App() {
               <button type="button" aria-label="Next unit" onClick={() => stepUnit(1)} disabled={!navigationPool.length}>&gt;</button>
             </div>
             <div className="unit-stats">
-              {unitStatus === "loading" && <span>Loading cluster…</span>}
+              {unitIsLoading && <span>Loading cluster…</span>}
               {noNavigationUnits && <><strong>{emptyUnitTitle}</strong><span>{emptyUnitDetail}</span></>}
               {unitStatus === "error" && <span>Unit data failed to load.</span>}
               {metrics && !noNavigationUnits && <>
@@ -1270,7 +1269,7 @@ export default function App() {
               setHdLayout(layout);
               window.localStorage.setItem(HD_LAYOUT_KEY, layout);
             }}><option value="side-by-side">Side by side</option><option value="stacked">Stacked</option></select></label>}
-            <button className="reset-button" type="button" onClick={() => { const saved = readRfTiming(window.localStorage.getItem(RF_TIMING_KEY)); updateState(timingPatch(meta, { ...saved, mode: viewState.rfWindowMode ?? "sum" })); }}>Reset windows</button>
+            <button className="reset-button" type="button" onClick={() => { const saved = readRfTiming(window.localStorage.getItem(RF_TIMING_KEY)); updateState(resetRfTiming(meta, viewState, saved)); }}>Reset windows</button>
             <button type="button" onClick={() => { window.localStorage.setItem(RF_TIMING_KEY, JSON.stringify(timingFromState(viewState))); setMessageDialog({ title: "RF timing defaults saved", text: "New datasets use these Sum and A − B windows. Reset restores the saved windows for the active mode." }); }}>Save timing defaults</button>
           </div>
         </section>
@@ -1288,9 +1287,9 @@ export default function App() {
               <div className="rf-primary-pane">
                 {noNavigationUnits && <div className={`view-empty${unitFilterStatus === "error" ? " error-state" : ""}`}><strong>{emptyUnitTitle}</strong><span>{emptyUnitDetail}</span></div>}
                 {unavailableUnit && unavailableView}
-                {!noNavigationUnits && unitStatus === "loading" && <div className="view-empty"><span className="spinner" /> Loading cluster {viewState.clusterId}…</div>}
+                {!noNavigationUnits && unitIsLoading && <div className="view-empty"><span className="spinner" /> Loading cluster {viewState.clusterId}…</div>}
                 {!noNavigationUnits && unitStatus === "error" && <div className="view-empty error-state"><strong>Unit data could not be loaded</strong><span>{error}</span></div>}
-                {viewState.selectedTab === "rf" && !noNavigationUnits && counts && selectedCell && <SpatialPlot kind="rf" meta={meta} counts={counts} state={viewState} unitIndex={localIndex} selectedCell={selectedCell} onSelectCell={selectCell} />}
+                {viewState.selectedTab === "rf" && !noNavigationUnits && !unavailableUnit && counts && selectedCell && <SpatialPlot kind="rf" meta={meta} counts={counts} state={viewState} unitIndex={localIndex} selectedCell={selectedCell} onSelectCell={selectCell} />}
               </div>
               <HdPanel
                 artifact={hdArtifact}
@@ -1309,7 +1308,7 @@ export default function App() {
             {viewState.selectedTab === "delay" && (
               noNavigationUnits
                 ? <div className="view-empty"><strong>{emptyUnitTitle}</strong><span>{emptyUnitDetail}</span></div>
-                : unavailableUnit ? unavailableView : unitStatus === "loading"
+                : unavailableUnit ? unavailableView : unitIsLoading
                   ? <div className="view-empty"><span className="spinner" /> Loading cluster {viewState.clusterId}…</div>
                   : unitStatus === "error"
                     ? <div className="view-empty error-state"><strong>Unit data could not be loaded</strong><span>{error}</span></div>
@@ -1318,7 +1317,7 @@ export default function App() {
             {viewState.selectedTab === "timeline" && (
               noNavigationUnits
                 ? <div className="view-empty"><strong>{emptyUnitTitle}</strong><span>{emptyUnitDetail}</span></div>
-                : unavailableUnit ? unavailableView : unitStatus === "loading"
+                : unavailableUnit ? unavailableView : unitIsLoading
                   ? <div className="view-empty"><span className="spinner" /> Loading cluster {viewState.clusterId}…</div>
                   : unitStatus === "error"
                     ? <div className="view-empty error-state"><strong>Unit data could not be loaded</strong><span>{error}</span></div>

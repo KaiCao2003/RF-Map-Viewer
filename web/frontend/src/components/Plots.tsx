@@ -326,13 +326,13 @@ function tooltipLines(
   counts: Float64Array,
   state: ViewState,
   cell: CellRef,
-  displayBin?: number,
+  displayBin: number | undefined,
+  rfPrepared: ReturnType<typeof prepareRfResponse>,
 ): string[] {
   const groups = timeGroups(meta, state.timeResolutionMs);
   const activeIndex = displayBin ?? timeGroupForMs(meta, groups, state.activeTimeCenterMs);
   const index = Math.max(0, activeIndex);
   const active = groupResponseValue(counts, meta, cell, groups[index], state.valueMode);
-  const rfPrepared = prepareRfResponse(counts, meta, state);
   const rfY = rfPrepared.yGroups.findIndex(([start, end]) => start <= cell[0] && end >= cell[1]);
   const rfX = rfPrepared.xGroups.findIndex(([start, end]) => start <= cell[2] && end >= cell[3]);
   const rfValue = rfPrepared.matrix[rfY]?.[rfX] ?? null;
@@ -370,7 +370,6 @@ const SpatialPlotContent = memo(function SpatialPlotContent({
   const [tooltip, setTooltip] = useState<TooltipState | null>(null);
   const groups = useMemo(() => timeGroups(meta, state.timeResolutionMs), [meta, state.timeResolutionMs]);
   const response = useMemo(() => {
-    if (kind !== "rf") return null;
     return prepareRfResponse(counts, meta, state);
   }, [counts, kind, meta, state.rfStartMs, state.rfEndMs, state.rfWindowMode, state.rfBStartMs, state.rfBEndMs, state.valueMode, state.xBins, state.yBins, state.flipY, state.smoothRadius]);
   const temporal = useMemo(() => kind === "delay" ? prepareTemporalMetricMatrices(
@@ -587,7 +586,7 @@ const SpatialPlotContent = memo(function SpatialPlotContent({
           setTooltip(cell ? {
             x: event.clientX - bounds.left + 14,
             y: event.clientY - bounds.top + 14,
-            lines: tooltipLines(meta, counts, state, cell),
+            lines: tooltipLines(meta, counts, state, cell, undefined, response),
           } : null);
         }}
         onPointerLeave={() => setTooltip(null)}
@@ -972,8 +971,12 @@ const TimelinePlotContent = memo(function TimelinePlotContent({
     if (node) setScrollRoot((current) => current === node ? current : node);
   }, []);
 
+  const rfTooltipResponse = useMemo(() => prepareRfResponse(counts, meta, state),
+    [counts, meta, state.rfStartMs, state.rfEndMs, state.rfWindowMode, state.rfBStartMs, state.rfBEndMs, state.valueMode, state.xBins, state.yBins, state.flipY, state.smoothRadius]);
+
   const tooltipFor = useCallback((cell: CellRef, binIndex: number) =>
-    tooltipLines(meta, counts, state, cell, binIndex), [
+    tooltipLines(meta, counts, state, cell, binIndex, rfTooltipResponse), [
+    rfTooltipResponse,
     counts,
     meta,
     state.activeTimeCenterMs,

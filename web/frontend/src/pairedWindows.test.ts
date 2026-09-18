@@ -59,7 +59,9 @@ describe("paired browser windows", () => {
     a.session.receive({ version: 1, sender: "peer", revision: 2, kind: "leave", units: [] });
     expect(a.membership.at(-1)).toEqual({ ids: [42], peers: 0 });
     a.session.receive({ version: 1, sender: "gone", revision: 1, kind: "presence", units: [101] });
-    a.advance(60_001); a.session.heartbeat();
+    a.advance(90_000); a.session.heartbeat();
+    expect(a.membership.at(-1)?.ids).toEqual([42, 101]);
+    a.advance(90_001); a.session.heartbeat();
     expect(a.membership.at(-1)).toEqual({ ids: [42], peers: 0 });
   });
 

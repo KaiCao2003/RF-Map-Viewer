@@ -41,3 +41,10 @@ export function toggleRfMode(meta: DatasetMeta, state: ViewState): Partial<ViewS
   timing.mode = timing.mode === "sum" ? "difference" : "sum";
   return timingPatch(meta, timing);
 }
+
+export function resetRfTiming(meta: DatasetMeta, state: ViewState, saved: RfTiming): Partial<ViewState> {
+  const current = timingFromState(state);
+  return timingPatch(meta, current.mode === "sum"
+    ? { ...current, sum: saved.sum }
+    : { ...current, a: saved.a, b: saved.b });
+}
