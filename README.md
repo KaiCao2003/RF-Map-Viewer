@@ -28,12 +28,16 @@ policy.
 
 ## Downloads
 
-This repository was recreated from a reviewed source snapshot on 2026-09-07.
-Previous release attachments were not imported. Source and build instructions
-are available in the implementation directories; new downloads will appear on
-the [Releases page](https://github.com/KaiCao2003/RF-Map-Viewer/releases) after a
-separate privacy review. See [PRIVACY.md](PRIVACY.md) before migrating an old clone
-or publishing a package.
+GitHub Actions builds the stable 1.10.0 packages published on the
+[Releases page](https://github.com/KaiCao2003/RF-Map-Viewer/releases):
+
+- [Python: macOS app, Windows installer, and Windows portable ZIP](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/python-v1.10.0)
+- [Swift macOS app](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/swift-v1.10.0)
+- [Web package](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/web-v1.10.0)
+
+This repository was recreated from a reviewed source snapshot on 2026-09-07;
+previous release attachments were not imported. See [PRIVACY.md](PRIVACY.md)
+before migrating an old clone or publishing a package.
 
 ## Python free-moving alpha
 

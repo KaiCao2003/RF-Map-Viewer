@@ -11,8 +11,9 @@ $ProgressPreference = "SilentlyContinue"
 
 $AppName = "RF Map Viewer"
 $ExecutableName = "RF Map Viewer.exe"
-$AppVersion = "1.9.6"
-$AppBuild = "10908"
+$AppVersion = "1.10.0"
+# Windows VERSIONINFO components are 16-bit; macOS uses build 110000.
+$AppBuild = "11000"
 $ReleaseEdition = "Full"
 $ReleaseFlavor = "full"
 $Architecture = "x64"
@@ -284,8 +285,8 @@ Assert-NativeSuccess "stable Python metadata verification"
 
 $Manifest = Get-Content -LiteralPath $VersionManifest -Raw | ConvertFrom-Json
 $StableManifest = $Manifest.components.python_stable
-Assert-Equal $StableManifest.release_version $AppVersion "manifest Python stable release"
-Assert-Equal $StableManifest.build $AppBuild "manifest Python stable build"
+Assert-Equal $StableManifest.windows_release_version $AppVersion "manifest Python stable Windows release"
+Assert-Equal $StableManifest.windows_build $AppBuild "manifest Python stable Windows build"
 Assert-Equal $StableManifest.edition $ReleaseEdition "manifest Python stable edition"
 Assert-Equal $StableManifest.artifact_flavor $ReleaseFlavor "manifest Python stable flavor"
 
@@ -359,8 +360,8 @@ $VersionFile = Join-Path $BuildRoot "RFMapViewer-version-info.txt"
 $VersionResource = @"
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 9, 6, 10908),
-    prodvers=(1, 9, 6, 0),
+    filevers=(1, 10, 0, 11000),
+    prodvers=(1, 10, 0, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,

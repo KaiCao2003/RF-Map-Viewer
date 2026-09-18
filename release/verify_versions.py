@@ -161,6 +161,9 @@ def verify_manifest(manifest: dict[str, Any]) -> None:
     stable_flavor = python_stable["artifact_flavor"]
     windows_release = python_stable["windows_release_version"]
     semver_core(windows_release)
+    windows_build = python_stable["windows_build"]
+    if not str(windows_build).isdigit() or not 0 <= int(windows_build) <= 65535:
+        raise ValueError("Python stable Windows build must fit a 16-bit VERSIONINFO component")
     expect(
         python_stable.get("package_version"),
         stable_release,

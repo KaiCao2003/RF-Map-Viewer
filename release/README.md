@@ -29,8 +29,8 @@ Published downloads and checksums are available from the repository
 
 Stable 1.10.0 aligns Python, Swift, and Web on indexed version-2 RF input,
 progressive unit caching, RF window subtraction, display shortcuts, and the
-shared Delay/RGB display and export semantics. The separate Free-Moving alpha
-and retained Windows release are unchanged.
+shared Delay/RGB display and export semantics. Python ships macOS arm64 and
+Windows x64 packages. The separate Free-Moving alpha is unchanged.
 
 Python 1.9.9 separates viewer responsibilities into focused modules, removes
 internal fallback branches, consolidates historical tests, and adds a macOS
@@ -67,9 +67,10 @@ python3 release/verify_versions.py
 ```
 
 Pushing one exact component tag invokes only that component's release job.
-The Python stable 1.10.0 job builds and smoke-tests its macOS arm64 archive.
-Windows remains at its separately recorded 1.9.6 version and is skipped unless
-its version matches the requested stable release.
+The Python stable 1.10.0 job builds and smoke-tests its macOS arm64 archive,
+Windows x64 portable ZIP, and Windows installer. Windows uses build 11000
+because each numeric VERSIONINFO component is limited to 16 bits; macOS uses
+build 110000. Both identify the same Python 1.10.0 source release.
 Manual workflow dispatch builds only the selected component candidate without
 publishing a tag or GitHub Release; selecting Python stable runs its macOS job, plus Windows only when the
 recorded versions match. Python alpha releases are marked as GitHub prereleases.

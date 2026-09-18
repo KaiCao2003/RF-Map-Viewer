@@ -1,12 +1,14 @@
 ## Python 1.10.0 stable: indexed RF files and progressive loading
 
-Internal Python build: **110000**. Target: macOS Apple Silicon.
+Version **1.10.0**. Targets: macOS Apple Silicon (build **110000**) and
+Windows x64 (build **11000**).
 
 - Open both legacy JSON `.rfmap`/`.json` and version-2 compressed NPZ `.rfmap` files, detected by their contents. Recorded unit IDs, spatial coordinates, raw counts, occupancy normalization, and the complete timeline are preserved.
 - Display the first loaded unit, then cache remaining units in a background reader. A small bottom-right progress bar shows loaded units; navigation gives the latest uncached selection priority.
 - Reuse cached arrays without reading or decompressing them again. Compact integral counts losslessly using the existing unsigned count representation.
 - Cancel pending reads when closing or replacing a document, preserve loaded units after errors, and offer Retry. Multi-unit Figure Composer becomes available once all units are cached.
-- Keep Free-Moving alpha separate. Other platform releases are unchanged.
+- Includes a Windows installer and portable ZIP, built and smoke-tested by GitHub Actions.
+- Keep Free-Moving alpha separate.
 
 ## Python 1.9.9 maintainability and regression coverage
 
@@ -41,4 +43,4 @@ Internal Python build: **10909**.
 ### Distribution notes
 
 - The macOS archive is ad-hoc signed and is not Apple-notarized.
-- A SHA-256 checksum file is included for the macOS archive.
+- SHA-256 checksum files are included for the macOS archive and Windows packages.

@@ -64,6 +64,7 @@ class ComponentVersionTests(unittest.TestCase):
                 for line in output_path.read_text(encoding="utf-8").splitlines()
             )
         python_stable = MANIFEST["components"]["python_stable"]
+        self.assertEqual(outputs["python_stable_build_windows"], "true")
         self.assertEqual(
             outputs["python_stable_windows_portable_artifact"],
             python_stable["windows_portable_artifact"],
@@ -76,6 +77,14 @@ class ComponentVersionTests(unittest.TestCase):
             outputs["python_stable_windows_checksum"],
             python_stable["windows_checksum"],
         )
+
+    def test_windows_build_must_fit_version_resource(self) -> None:
+        for build in ("-1", "65536", "110000", "invalid"):
+            with self.subTest(build=build):
+                candidate = copy.deepcopy(MANIFEST)
+                candidate["components"]["python_stable"]["windows_build"] = build
+                with self.assertRaisesRegex(ValueError, "16-bit VERSIONINFO"):
+                    verify_manifest(candidate)
 
     def test_only_exact_component_tags_are_accepted(self) -> None:
         verifier = ROOT / "release/verify_versions.py"

@@ -130,8 +130,8 @@ Its macOS identity is `RF Map Viewer.app`, bundle ID
 script/build_python_stable_macos_app.sh
 ```
 
-The previous stable 1.9.6 release is packaged for Windows x64 as a portable ZIP and an
-Inno Setup installer. On a Windows build host with Python 3.14, PyInstaller,
+Stable 1.10.0 is also packaged for Windows x64 as a portable ZIP and an
+Inno Setup installer (Windows build 11000). On a Windows build host with Python 3.14, PyInstaller,
 and Inno Setup 6 installed, build and smoke-test both artifacts with:
 
 ```powershell
