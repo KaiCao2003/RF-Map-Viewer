@@ -235,6 +235,7 @@ class TkViewerTests(unittest.TestCase):
         original = self.app._current_matrix()
         for widget in (self.app.canvases["rf"], self.app.notebook):
             widget.focus_force()
+            self.app.update()
             widget.event_generate("<KeyPress-minus>")
             self.app.update()
             self.assertTrue(self.app.rf_subtract_var.get())
@@ -246,6 +247,7 @@ class TkViewerTests(unittest.TestCase):
             self.app._toggle_rf_subtraction()
             self.assertEqual(self.app._current_matrix(), original)
         self.app.notebook.focus_force()
+        self.app.update()
         self.app.notebook.event_generate("<KeyPress-d>")
         self.app.update()
         self.assertTrue(self.app.display_expanded_var.get())
@@ -256,6 +258,8 @@ class TkViewerTests(unittest.TestCase):
         self.assertFalse(self.app.display_expanded_var.get())
         self.assertEqual(self.app.display_toggle_button.cget("text"), "Display Options (D)")
         self.app.range_start_spin.focus_force()
+        self.app.update()
+        self.assertIs(self.app.focus_get(), self.app.range_start_spin)
         self.app.range_start_spin.delete(0, "end")
         self.app.range_start_spin.event_generate("<KeyPress-minus>")
         self.app.update()
@@ -1273,9 +1277,12 @@ class TkViewerTests(unittest.TestCase):
 
     def test_navigation_keys_preserve_entry_editing_and_window_scope(self) -> None:
         self.app._select_tab(0)
+        # Map the RF controls before requesting native keyboard focus.
+        self.app.update()
         entry = self.app.range_start_spin
         entry.focus_force()
         self.app.update()
+        self.assertIs(self.app.focus_get(), entry)
         entry.delete(0, "end")
         for key in ("minus", "1", "0"):
             entry.event_generate(f"<KeyPress-{key}>")
