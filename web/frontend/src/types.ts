@@ -31,12 +31,21 @@ export interface DatasetMeta {
   isVerticalBar?: boolean;
   responseUnits: "spike_count";
   responseNormalization: "none";
+  cacheProgress?: CacheProgress;
   capabilities: {
     probe: boolean;
     hd: boolean;
     waveform: boolean;
     occupancy: boolean;
   };
+}
+
+export interface CacheProgress {
+  indexed: boolean;
+  cachedUnits: number;
+  totalUnits: number;
+  complete: boolean;
+  error: string | null;
 }
 
 export interface UnitFilterResult {
@@ -157,6 +166,13 @@ export interface ViewState {
   timelineAnchorMs: number | null;
   rfStartMs: number;
   rfEndMs: number;
+  rfWindowMode?: "sum" | "difference";
+  rfBStartMs?: number;
+  rfBEndMs?: number;
+  rfSumStartMs?: number;
+  rfSumEndMs?: number;
+  rfAStartMs?: number;
+  rfAEndMs?: number;
   timeResolutionMs: number;
   xBins: number;
   yBins: number;

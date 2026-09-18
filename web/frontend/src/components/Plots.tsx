@@ -12,8 +12,9 @@ import {
   halfOpenRangesOverlap,
   inferTotalDegrees,
   prepareResponseMatrix,
+  prepareRfResponse,
+  rfWindowLabel,
   prepareTemporalMetricMatrices,
-  snapTimeRange,
   timeBounds,
   timeGroupForMs,
   timeGroups,
@@ -67,6 +68,16 @@ interface TooltipState {
 type RectLayout = RectSpatialLayout;
 type PolarLayout = PolarSpatialLayout;
 type PlotLayout = SpatialLayout;
+
+function missingMarker(context: CanvasRenderingContext2D, x: number, y: number, size: number): void {
+  const radius = Math.max(2, Math.min(7, size * 0.18));
+  context.strokeStyle = "#64748b";
+  context.lineWidth = 1;
+  context.beginPath();
+  context.moveTo(x - radius, y - radius); context.lineTo(x + radius, y + radius);
+  context.moveTo(x - radius, y + radius); context.lineTo(x + radius, y - radius);
+  context.stroke();
+}
 
 function useContainerSize(
   ref: React.RefObject<HTMLElement | null>,
@@ -321,9 +332,10 @@ function tooltipLines(
   const activeIndex = displayBin ?? timeGroupForMs(meta, groups, state.activeTimeCenterMs);
   const index = Math.max(0, activeIndex);
   const active = groupResponseValue(counts, meta, cell, groups[index], state.valueMode);
-  const rfRange = snapTimeRange(meta, state.rfStartMs, state.rfEndMs);
-  const rfBounds = timeBounds(meta, rfRange);
-  const rfValue = groupResponseValue(counts, meta, cell, rfRange, state.valueMode);
+  const rfPrepared = prepareRfResponse(counts, meta, state);
+  const rfY = rfPrepared.yGroups.findIndex(([start, end]) => start <= cell[0] && end >= cell[1]);
+  const rfX = rfPrepared.xGroups.findIndex(([start, end]) => start <= cell[2] && end >= cell[3]);
+  const rfValue = rfPrepared.matrix[rfY]?.[rfX] ?? null;
   const total = groupResponseValue(counts, meta, cell, [0, meta.shape[3] - 1], state.valueMode);
   const temporal = groupTemporalMetrics(counts, meta, cell, groups);
   const [activeStart, activeEnd] = timeBounds(meta, groups[index]);
@@ -331,7 +343,7 @@ function tooltipLines(
     groupLabel("y", [cell[0], cell[1]], meta.yPositions),
     groupLabel("x", [cell[2], cell[3]], meta.xPositions),
     `bin ${index + 1} (${formatNumber(activeStart)}–${formatNumber(activeEnd)} ms): ${formatResponse(active, state.valueMode)} ${valueModeUnit(state.valueMode)}`,
-    `RF sum ${formatNumber(rfBounds[0])}–${formatNumber(rfBounds[1])} ms: ${formatResponse(rfValue, state.valueMode)} ${valueModeUnit(state.valueMode)}`,
+    `RF ${rfWindowLabel(state)}: ${formatResponse(rfValue, state.valueMode)} ${valueModeUnit(state.valueMode)}`,
     `full window: ${formatResponse(total, state.valueMode)} ${valueModeUnit(state.valueMode)}`,
     temporal.delayMs == null ? "count-rate peak delay n/a" : `count-rate peak delay ${formatNumber(temporal.delayMs, 1)} ms`,
   ];
@@ -359,18 +371,8 @@ const SpatialPlotContent = memo(function SpatialPlotContent({
   const groups = useMemo(() => timeGroups(meta, state.timeResolutionMs), [meta, state.timeResolutionMs]);
   const response = useMemo(() => {
     if (kind !== "rf") return null;
-    const range = snapTimeRange(meta, state.rfStartMs, state.rfEndMs);
-    return prepareResponseMatrix(
-      counts,
-      meta,
-      range,
-      state.valueMode,
-      state.xBins,
-      state.yBins,
-      state.flipY,
-      state.smoothRadius,
-    );
-  }, [counts, kind, meta, state.rfStartMs, state.rfEndMs, state.valueMode, state.xBins, state.yBins, state.flipY, state.smoothRadius]);
+    return prepareRfResponse(counts, meta, state);
+  }, [counts, kind, meta, state.rfStartMs, state.rfEndMs, state.rfWindowMode, state.rfBStartMs, state.rfBEndMs, state.valueMode, state.xBins, state.yBins, state.flipY, state.smoothRadius]);
   const temporal = useMemo(() => kind === "delay" ? prepareTemporalMetricMatrices(
       counts,
       meta,
@@ -398,7 +400,7 @@ const SpatialPlotContent = memo(function SpatialPlotContent({
     const low = kind === "delay" && !state.rgbMode ? meta.timeBinEdges[0] * 1000 : autoLow;
     const high = kind === "delay" && !state.rgbMode ? meta.timeBinEdges.at(-1)! * 1000 : autoHigh;
     const title = kind === "rf"
-      ? `RF map - ${state.valueMode}: ${formatNumber(state.rfStartMs)} to ${formatNumber(state.rfEndMs)} ms`
+      ? `RF map - ${state.valueMode}: ${rfWindowLabel(state)}`
       : state.rgbMode ? "RGB composite" : "Delay map - peak count-rate interval center";
     const totalDegrees = inferTotalDegrees(meta.xPositions);
     const subtitle = state.polarLayout
@@ -454,6 +456,10 @@ const SpatialPlotContent = memo(function SpatialPlotContent({
           Math.ceil(cellWidth),
           Math.ceil(cellHeight),
         );
+        if (kind === "delay" && state.rgbMode && responsePrepared?.[rowIndex]?.[column] == null) {
+          missingMarker(context, nextLayout.x + (column + 0.5) * cellWidth,
+            nextLayout.y + (rowIndex + 0.5) * cellHeight, Math.min(cellWidth, cellHeight));
+        }
       }));
       drawSelection(context, nextLayout, selectedCell);
       drawAxes(context, nextLayout, meta);
@@ -521,6 +527,12 @@ const SpatialPlotContent = memo(function SpatialPlotContent({
             );
             context.fillStyle = color(value, displayRow, column);
             context.fill();
+            if (responsePrepared?.[displayRow]?.[column] == null) {
+              const theta = (thetaEdges[column] + thetaEdges[column + 1]) / 2;
+              const radius = (INNER_BLANK_ROWS + (ring + 0.5) * ringSpan) * scale;
+              missingMarker(context, nextLayout.cx + Math.cos(theta) * radius,
+                nextLayout.cy - Math.sin(theta) * radius, Math.min(ringSpan * scale, radius * Math.abs(thetaEdges[column] - thetaEdges[column + 1])));
+            }
           });
         });
       } else {

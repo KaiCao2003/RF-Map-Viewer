@@ -58,3 +58,25 @@ describe("unit response cache", () => {
     expect(cache.has(3)).toBe(true);
   });
 });
+
+it("serializes waveform reads and keeps only the latest queued unit", async () => {
+  const { LatestSerialRead } = await import("./requestLifecycle");
+  const queue = new LatestSerialRead();
+  let resolveFirst: (value: number) => void = () => undefined;
+  const first = new Promise<number>((resolve) => { resolveFirst = resolve; });
+  const calls: number[] = [];
+  const results: number[] = [];
+  const failed = vi.fn();
+  const done = vi.fn();
+  queue.submit(() => { calls.push(1); return first; }, (v) => results.push(v), failed, done);
+  queue.submit(async () => { calls.push(2); return 2; }, (v) => results.push(v), failed, done);
+  queue.submit(async () => { calls.push(3); return 3; }, (v) => results.push(v), failed, done);
+  expect(calls).toEqual([1]);
+  resolveFirst(1);
+  await first;
+  await Promise.resolve();
+  expect(calls).toEqual([1, 3]);
+  expect(results).toEqual([3]);
+  expect(done).toHaveBeenCalledTimes(1);
+  expect(failed).not.toHaveBeenCalled();
+});

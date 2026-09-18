@@ -325,6 +325,9 @@ function spatialSettings(view: ViewState): Record<string, unknown> {
   return {
     rfStartMs: view.rfStartMs,
     rfEndMs: view.rfEndMs,
+    rfWindowMode: view.rfWindowMode ?? "sum",
+    rfBStartMs: view.rfBStartMs ?? 0,
+    rfBEndMs: view.rfBEndMs ?? 80,
     valueMode: view.valueMode,
     xBins: view.xBins,
     yBins: view.yBins,

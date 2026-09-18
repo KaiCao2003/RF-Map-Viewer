@@ -361,3 +361,22 @@ select, input[type="number"], input[type="text"], input[type="search"] { padding
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; }
 }
+
+.cache-progress {
+  position: fixed;
+  right: 16px;
+  bottom: 12px;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: min(680px, 85vw);
+  padding: 8px 12px;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: #fff;
+  color: #172033;
+  box-shadow: 0 2px 10px #0002;
+  font-size: 12px;
+}
+.cache-progress progress { width: 100px; }

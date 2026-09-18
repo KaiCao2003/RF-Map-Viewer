@@ -148,7 +148,7 @@ struct SidebarView: View {
                     set: store.setRFUnitQualityFilterEnabled
                 )
             )
-            .help("Uses native spatial bins summed over the current RF sum range before display rebinning or smoothing")
+            .help("Uses native spatial bins summed over the current RF window A before display rebinning or smoothing")
 
             integerControl(
                 title: "Zero-bin threshold",

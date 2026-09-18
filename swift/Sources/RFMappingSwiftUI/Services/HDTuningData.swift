@@ -99,7 +99,7 @@ private enum HDTuningContractValidator {
 
         if payload["schema_version"] != nil {
             throw HDTuningError.invalidData(
-                "Tuning-curve schema_version is obsolete; the current 1.9.6 columnar contract has exactly eight unversioned top-level keys."
+                "Tuning-curve schema_version is obsolete; the current columnar contract has exactly eight unversioned top-level keys."
             )
         }
         let missing = topLevelKeys.filter { payload[$0] == nil }

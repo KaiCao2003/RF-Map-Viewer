@@ -64,6 +64,9 @@ CSV_HEADERS = (
     "flip_y",
     "palette",
     "source_json",
+    "rf_window_operation",
+    "rf_subtract_start_ms",
+    "rf_subtract_end_ms",
 )
 
 
@@ -89,6 +92,9 @@ class DisplayedCsvOptions:
     palette: str
     output_path: str | None = None
     overwrite: bool = False
+    rf_window_mode: str = "sum"
+    rf_b_start_ms: float = 0
+    rf_b_end_ms: float = 80
 
 
 def _format_ms(value: float) -> str:
@@ -355,12 +361,16 @@ def _displayed_csv_rows(
     for label, value in (
         ("rfStartMs", options.rf_start_ms),
         ("rfEndMs", options.rf_end_ms),
+        ("rfBStartMs", options.rf_b_start_ms),
+        ("rfBEndMs", options.rf_b_end_ms),
         ("timeResolutionMs", options.time_resolution_ms),
     ):
         if not math.isfinite(value):
             raise ExportValidationError(f"{label} must be finite")
     if options.palette not in PALETTES:
         raise ExportValidationError(f"Unknown palette: {options.palette}")
+    if options.rf_window_mode not in {"sum", "difference"}:
+        raise ExportValidationError("Unknown RF window mode")
 
     edges_ms = [float(edge) * 1000.0 for edge in metadata["timeBinEdges"]]
     source_start, source_end = _snap_time_range(
@@ -385,6 +395,12 @@ def _displayed_csv_rows(
         x_groups,
         smooth_radius,
     )
+    b_start, b_end = _snap_time_range(edges_ms, options.rf_b_start_ms, options.rf_b_end_ms)
+    if options.rf_window_mode == "difference":
+        background = _prepared_response_matrix(counts, metadata, b_start, b_end,
+            options.value_mode, y_groups, x_groups, smooth_radius)
+        matrix = [[None if a is None or b is None or a < b else a - b
+                   for a, b in zip(row, background[y])] for y, row in enumerate(matrix)]
 
     display_time_groups, time_group_size, base_bin_ms = _time_groups(
         metadata["timeBinEdges"], n_bins, options.time_resolution_ms
@@ -409,6 +425,8 @@ def _displayed_csv_rows(
         f"{options.value_mode}: {_format_ms(range_start_ms)} "
         f"to {_format_ms(range_end_ms)} ms"
     )
+    if options.rf_window_mode == "difference":
+        mode += f" − ({_format_ms(edges_ms[b_start])} to {_format_ms(edges_ms[b_end + 1])} ms)"
     occupancy = metadata["occupancyTimeSec"]
     rows: list[list[Any]] = []
     for display_y, (y_start, y_end) in enumerate(y_groups):
@@ -462,6 +480,9 @@ def _displayed_csv_rows(
                     options.flip_y,
                     options.palette,
                     record.source,
+                    "A - B" if options.rf_window_mode == "difference" else "sum",
+                    edges_ms[b_start] if options.rf_window_mode == "difference" else "",
+                    edges_ms[b_end + 1] if options.rf_window_mode == "difference" else "",
                 ]
             )
 

@@ -5,6 +5,7 @@ import type {
   Matrix,
   UnitMetrics,
   ValueMode,
+  ViewState,
 } from "./types";
 
 export function clamp(value: number, low: number, high: number): number {
@@ -409,6 +410,27 @@ export function prepareResponseMatrix(
     return count / exposure;
   }));
   return { matrix, xGroups, yGroups };
+}
+
+export function prepareRfResponse(counts: Float64Array, meta: DatasetMeta, state: ViewState): PreparedSpatialResponse {
+  const prepare = (start: number, end: number) => prepareResponseMatrix(counts, meta,
+    snapTimeRange(meta, start, end), state.valueMode, state.xBins, state.yBins, state.flipY, state.smoothRadius);
+  const result = prepare(state.rfStartMs, state.rfEndMs);
+  if (state.rfWindowMode === "difference") {
+    const background = prepare(state.rfBStartMs ?? 0, state.rfBEndMs ?? 80);
+    result.matrix = result.matrix.map((row, y) => row.map((a, x) => {
+      const b = background.matrix[y][x];
+      return a == null || b == null || a < b ? null : a - b;
+    }));
+  }
+  return result;
+}
+
+export function rfWindowLabel(state: ViewState): string {
+  const a = `${formatNumber(state.rfStartMs)}–${formatNumber(state.rfEndMs)}`;
+  return state.rfWindowMode === "difference"
+    ? `(${a}) − (${formatNumber(state.rfBStartMs ?? 0)}–${formatNumber(state.rfBEndMs ?? 80)}) ms`
+    : `${a} ms`;
 }
 
 export function unitMetrics(counts: Float64Array, meta: DatasetMeta): UnitMetrics {

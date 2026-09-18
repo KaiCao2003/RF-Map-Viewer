@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import threading
+import zipfile
 from pathlib import Path
 
 import numpy as np
@@ -15,7 +16,10 @@ class IndexedUnits:
     def __init__(self, source: Path, max_bytes: int):
         self.source = source
         self.signature = _source_signature(source)
-        self._archive = np.load(source, allow_pickle=False)
+        try:
+            self._archive = np.load(source, allow_pickle=False)
+        except (OSError, ValueError, EOFError, zipfile.BadZipFile) as exc:
+            raise DatasetValidationError(f"Invalid indexed RF archive: {exc}") from exc
         self._condition = threading.Condition()
         self._read_lock = threading.Lock()
         self._values: dict[int, np.ndarray] = {}

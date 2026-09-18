@@ -1,13 +1,44 @@
-# Web Viewer 1.9.6
+# Web Viewer 1.10.0
 
 The Web implementation contains a FastAPI backend in `backend/` and a
 React/Vite frontend in `frontend/`. The backend owns its figure renderer and
 does not import the analysis repository or the Python/Tk implementation.
-Its `1.9.6` version places it in the same stable feature generation as the
-Python `1.9.x` reference; `web` remains an artifact/tag identity rather than a
+Its `1.10.0` version places it in the same stable feature generation as the
+Python `1.10.0` reference; `web` remains an artifact/tag identity rather than a
 version suffix.
 
-Version 1.9.6 implements the occupancy-aware RF contract. Mean firing rate is
+Version 1.10.0 adds version-2 indexed NPZ `.rfmap` input and a progressive
+unit cache. The first unit opens immediately; one background reader caches the
+remaining units, prioritizing the latest selected unit. The bottom-right status
+shows progress and Retry on an error. Loaded units remain available after a
+failure, and closing or replacing a document cancels pending reads. Figure
+Composer becomes available when all units are cached. Legacy JSON retains its
+whole-document loading path.
+
+**Pair Windows** links opted-in viewer tabs on the same origin. Unit navigation
+uses the union of their quality-visible recorded IDs; a unit absent or filtered
+in one dataset displays an explicit N/A there. Display settings, selected
+cells, timeline selection, and RF Sum/A − B windows synchronize without
+changing either input file.
+
+Press `-` or select **RF A − B** to subtract two half-open, edge-snapped RF
+windows. Each window applies the selected count/rate metric and spatial
+pooling/smoothing before subtraction. Negative results are unavailable gray
+cells; zero remains zero. Defaults are A = 80–160 ms and B = 0–80 ms. Switching
+modes preserves each mode's last range. **Save timing defaults** persists the
+mode and all windows for new datasets, and **Reset windows** restores the
+saved defaults for the active mode. The CSV and Figure Composer include both
+windows; the native zero-bin filter continues to use A. Delay/RGB and timelines
+retain the full source time axis.
+
+Press `D` to show/hide Display Options and `Command/Ctrl+Shift+.` to show/hide
+filtered units. `Shift+,` makes time resolution coarser and `Shift+.` finer by
+one source bin. Plain viewer keys preserve editable fields and modifier chords.
+Waveform navigation keeps one active read plus the latest pending unit. Live
+and exported RGB plots share full-time delay bounds, preserve the first equal
+peak, show zero response in black, and mark unavailable occupancy in gray.
+
+The viewer retains the occupancy-aware RF contract. Mean firing rate is
 the default display and export value: selected raw counts are divided by
 `occupancyTimeSec` in seconds. Count remains available. Spatial reduction and
 smoothing combine count and occupancy separately before dividing, and the
@@ -46,14 +77,17 @@ SVG explicitly recording its lossless embedded-PNG rendering contract.
 
 ## Input files
 
-The viewer opens current RF mapping JSON payloads saved as `.rfmap` or `.json`.
-The filename extension does not change the RF schema. HD tuning-curve JSON can be attached as `.tc` or as
+The viewer opens current RF JSON and version-2 indexed NPZ archives saved as
+`.rfmap` or `.json`, detecting the ZIP signature rather than the extension.
+Indexed archives contain a UTF-8 uint8 `metadata` entry, shared numeric axes
+and occupancy, and exact `(y, x, time)` `unit_<ID>` arrays. The filename
+extension does not change the RF schema. HD tuning-curve JSON can be attached as `.tc` or as
 the legacy `tuning_curves.json`; automatic discovery prefers
 `tuning_curves.tc`. Spike-position CSV can be attached as `.probe` or as the
 legacy `positions.csv`; automatic discovery prefers `positions.probe`.
 RF maps are primary documents; use the HD and Probe companion choosers after an
 RF map is open.
-RF payloads must include raw finite non-negative integer `unitsSpikeCounts`,
+RF JSON payloads must include raw finite non-negative integer `unitsSpikeCounts`,
 the fixed count-semantics markers, and a finite non-negative
 `occupancyTimeSec` matrix whose declared size matches the spatial axes. A
 zero-occupancy cell must contain only zero counts, and at least one cell must

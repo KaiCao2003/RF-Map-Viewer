@@ -809,6 +809,11 @@ def _draw_cartesian_map(
             x0 = round(grid_left + cell_width * x_index)
             x1 = round(grid_left + cell_width * (x_index + 1))
             draw.rectangle((x0, y0, x1, y1), fill=color)
+            if rgb and matrix[y_index][x_index] is None:
+                radius = max(2, min(7, min(cell_width, cell_height) * 0.18))
+                cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+                draw.line((cx - radius, cy - radius, cx + radius, cy + radius), fill="#64748b", width=1)
+                draw.line((cx - radius, cy + radius, cx + radius, cy - radius), fill="#64748b", width=1)
     draw.rectangle(
         (
             round(grid_left),
@@ -1277,6 +1282,13 @@ def _draw_polar_map(
                 start = arc_end - fraction_end * total_degrees
                 end = arc_end - fraction_start * total_degrees
             draw.pieslice(ring_box, start=start, end=end, fill=color)
+            if rgb and matrix[ring_index][angle_index] is None:
+                mid_radius = outer_radius * (inner_blank_rows + (ring_index + 0.5) * ring_span) / radial_units
+                angle = math.radians((start + end) / 2)
+                cx, cy = center_x + math.cos(angle) * mid_radius, center_y + math.sin(angle) * mid_radius
+                marker = max(2, min(7, outer_radius * ring_span / radial_units * 0.18))
+                draw.line((cx - marker, cy - marker, cx + marker, cy + marker), fill="#64748b", width=1)
+                draw.line((cx - marker, cy + marker, cx + marker, cy - marker), fill="#64748b", width=1)
     if inner_blank_rows > 0.0:
         inner_radius = outer_radius * inner_blank_rows / radial_units
         inner_color = _color(

@@ -1,5 +1,6 @@
 import type {
   DatasetMeta,
+  CacheProgress,
   FsPage,
   HdDatasetArtifact,
   HdUnitArtifact,
@@ -177,6 +178,7 @@ function normalizeMeta(payload: unknown): DatasetMeta {
     isVerticalBar: typeof source.isVerticalBar === "boolean" ? source.isVerticalBar : undefined,
     responseUnits: source.responseUnits as "spike_count",
     responseNormalization: source.responseNormalization as "none",
+    cacheProgress: source.cacheProgress as CacheProgress | undefined,
     capabilities: {
       probe: capabilitiesSource.probe === true,
       hd: capabilitiesSource.hd === true,
@@ -201,6 +203,18 @@ function normalizeMeta(payload: unknown): DatasetMeta {
     throw new ApiError("Dataset metadata does not match the required occupancy-normalized RF contract.");
   }
   return meta;
+}
+
+export async function getCacheProgress(datasetId: string, signal?: AbortSignal): Promise<CacheProgress> {
+  return (await checked(await protectedFetch(new URL(`datasets/${datasetId}/cache`, apiBase), { signal }))).json();
+}
+
+export async function retryCache(datasetId: string): Promise<CacheProgress> {
+  return (await checked(await protectedFetch(new URL(`datasets/${datasetId}/cache/retry`, apiBase), { method: "POST" }))).json();
+}
+
+export async function closeDataset(datasetId: string): Promise<void> {
+  await checked(await protectedFetch(new URL(`datasets/${datasetId}`, apiBase), { method: "DELETE", keepalive: true }));
 }
 
 export async function listRemoteFiles(
@@ -381,6 +395,9 @@ export interface DisplayedCsvRequest {
   valueMode: string;
   rfStartMs: number;
   rfEndMs: number;
+  rfWindowMode?: "sum" | "difference";
+  rfBStartMs?: number;
+  rfBEndMs?: number;
   timeResolutionMs: number;
   xBins: number;
   yBins: number;

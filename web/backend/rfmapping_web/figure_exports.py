@@ -337,6 +337,9 @@ def _setting(
 
 
 _SPATIAL_SETTINGS = {
+    "rfWindowMode": _setting("string", "sum", choices=("sum", "difference"), description="Sum one window or subtract window B from A."),
+    "rfBStartMs": _setting("number", 0.0, description="Left edge of RF subtraction window B."),
+    "rfBEndMs": _setting("number", 80.0, description="Right edge of RF subtraction window B."),
     "rfStartMs": _setting(
         "number", None, description="Left edge of the displayed half-open RF interval."
     ),
@@ -913,6 +916,14 @@ def _group_response_value(
 def _prepared_response(
     counts: np.ndarray, metadata: Mapping[str, Any], settings: Mapping[str, Any]
 ) -> tuple[np.ndarray, list[tuple[int, int]], list[tuple[int, int]], tuple[float, float]]:
+    if settings.get("rfWindowMode") == "difference":
+        first, x_groups, y_groups, bounds = _prepared_response(counts, metadata, {**settings, "rfWindowMode": "sum"})
+        second, _x, _y, _bounds = _prepared_response(counts, metadata, {
+            **settings, "rfWindowMode": "sum", "rfStartMs": settings["rfBStartMs"], "rfEndMs": settings["rfBEndMs"],
+        })
+        result = first - second
+        result[result < 0] = np.nan
+        return result, x_groups, y_groups, bounds
     edges_ms = [float(edge) * 1000.0 for edge in metadata["timeBinEdges"]]
     requested_start = edges_ms[0] if settings["rfStartMs"] is None else settings["rfStartMs"]
     requested_end = edges_ms[-1] if settings["rfEndMs"] is None else settings["rfEndMs"]
@@ -1155,11 +1166,11 @@ def _prepared_temporal(
     for display_y in range(len(y_groups)):
         for display_x in range(len(x_groups)):
             histogram = histograms[display_y, display_x, :]
-            total = float(histogram.sum())
+            total = sum(float(value) for value in histogram)
             if total > safe_floor:
                 rates = [
-                    float(histogram[start : end + 1].sum())
-                    / ((edges_ms[end + 1] - edges_ms[start]) / 1000.0)
+                    sum(float(value) for value in histogram[start : end + 1])
+                    / (metadata["timeBinEdges"][end + 1] - metadata["timeBinEdges"][start])
                     if edges_ms[end + 1] > edges_ms[start]
                     else 0.0
                     for start, end in groups
@@ -1191,21 +1202,20 @@ def _prepared_temporal(
     return delays, entropy, response, x_groups, y_groups
 
 
-def _rgb_values(response: np.ndarray, delays: np.ndarray, entropy: np.ndarray) -> np.ndarray:
+def _rgb_values(response: np.ndarray, delays: np.ndarray, entropy: np.ndarray,
+                delay_low: float, delay_high: float) -> np.ndarray:
     rgba = np.zeros((*response.shape, 4), dtype=np.float64)
     response_values = response[np.isfinite(response)]
     response_high = float(np.max(response_values)) if response_values.size else 1.0
-    delay_values = delays[np.isfinite(delays)]
-    delay_low = float(np.min(delay_values)) if delay_values.size else 0.0
-    delay_high = float(np.max(delay_values)) if delay_values.size else delay_low + 1.0
-    rgba[..., 0] = np.nan_to_num(response / max(response_high, np.finfo(float).eps), nan=0.0)
+    rgba[..., 0] = np.nan_to_num(response / max(response_high, 1.0), nan=0.0)
     rgba[..., 1] = np.nan_to_num(
-        (delays - delay_low) / max(delay_high - delay_low, np.finfo(float).eps), nan=0.0
+        (delays - delay_low) / max(delay_high - delay_low, 1.0), nan=0.0
     )
     rgba[..., 2] = np.nan_to_num(entropy, nan=0.0)
     rgba[..., :3] = np.clip(rgba[..., :3], 0.0, 1.0)
     rgba[..., 3] = 1.0
-    missing = ~np.isfinite(response) & ~np.isfinite(delays)
+    rgba[response <= 0, :3] = 0.0
+    missing = ~np.isfinite(response)
     rgba[missing, :3] = 0.9
     return rgba
 
@@ -1518,6 +1528,10 @@ class FigurePageRenderer:
                     f"{settings['valueMode']} ({value_unit})"
                 ),
             )
+            if settings.get("rfWindowMode") == "difference":
+                edges = [edge * 1000 for edge in self.metadata["timeBinEdges"]]
+                b_start, b_end = _snap_time_range(edges, settings["rfBStartMs"], settings["rfBEndMs"])
+                options["subtitle"] += f"; subtract B {edges[b_start]:g} to {edges[b_end + 1]:g} ms"
             return SharedPlotSpec(
                 plot.type_id,
                 matrix.tolist(),
@@ -1548,14 +1562,12 @@ class FigurePageRenderer:
                     title="Peak count-rate interval center (ms)",
                     options=options,
                 )
-            colors = _rgb_values(response, delays, entropy)
+            colors = _rgb_values(response, delays, entropy, float(edges_ms[0]), float(edges_ms[-1]))
             rgb_data: list[list[list[float] | None]] = []
             for y_index, row in enumerate(colors):
                 rgb_row: list[list[float] | None] = []
                 for x_index, color in enumerate(row):
-                    if not np.isfinite(response[y_index, x_index]) and not np.isfinite(
-                        delays[y_index, x_index]
-                    ):
+                    if not np.isfinite(response[y_index, x_index]):
                         rgb_row.append(None)
                     else:
                         rgb_row.append(color[:3].tolist())

@@ -368,7 +368,7 @@ def test_health_and_lazy_browse_are_root_confined(
         ]
         assert health.json() == {
             "status": "ok",
-            "version": "1.9.6",
+            "version": "1.10.0",
             "rfRoot": str(settings.rf_root),
             "rfRootAvailable": True,
             "outputRoot": str(settings.output_root),
@@ -557,6 +557,7 @@ def test_open_metadata_binary_probe_and_hd(app, settings: Settings) -> None:
     with authenticated_client(app) as client:
         metadata = _open(client, source)
         assert metadata == {
+            "cacheProgress": {"indexed": False, "cachedUnits": 2, "totalUnits": 2, "complete": True, "error": None},
             "id": metadata["id"],
             "name": "rf.json",
             "sourcePath": str(source.resolve()),
@@ -1560,6 +1561,7 @@ def test_displayed_csv_is_written_on_linux_with_exact_tk_schema(
             "flip_y": "False",
             "palette": "Gray",
             "source_json": str(source.resolve()),
+            "rf_window_operation": "sum", "rf_subtract_start_ms": "", "rf_subtract_end_ms": "",
         }
 
         conflict = client.post(endpoint, json=_csv_export_payload())
@@ -3074,7 +3076,7 @@ def test_figure_manifest_records_hashed_frozen_source_and_companions(
     assert provenance["provenanceVersion"] == 1
     assert provenance["application"] == {
         "name": "RF Map Viewer",
-        "version": "1.9.6",
+        "version": "1.10.0",
         "edition": "Web",
     }
     assert provenance["snapshot"] == {
@@ -4148,3 +4150,205 @@ def test_compact_cache_validates_decimal_counts_without_float_rounding(
     record = app.state.services.datasets.get(response.json()["id"])
     stored = np.fromfile(record.cache.data_path, dtype=record.cache.metadata["countsDtype"])
     assert int(stored[0]) == int(count_token.split(".")[0])
+
+
+def write_indexed(path: Path, payload: dict | None = None, **entries) -> Path:
+    payload = dict(payload or sample_payload())
+    counts = np.asarray(payload.pop("unitsSpikeCounts"))
+    arrays = {key: np.asarray(payload.pop(key)) for key in (
+        "unitPool", "xPositions", "yPositions", "timeBinEdges", "occupancyTimeSec"
+    )}
+    payload["formatVersion"] = 2
+    arrays["metadata"] = np.frombuffer(json.dumps(payload).encode(), dtype=np.uint8)
+    arrays.update({f"unit_{uid}": counts[index] for index, uid in enumerate(arrays["unitPool"])})
+    arrays.update(entries)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as handle:
+        np.savez_compressed(handle, **arrays)
+    return path
+
+
+def test_indexed_open_first_unit_then_progress_retry_and_close(app, settings, monkeypatch):
+    import threading
+    from rfmapping_web.indexed import IndexedUnits
+
+    active = threading.Event()
+    release = threading.Event()
+    original = IndexedUnits._read
+    attempted = []
+
+    def paused_read(self, uid):
+        attempted.append(uid)
+        if uid == 22:
+            active.set()
+            assert release.wait(5)
+        return original(self, uid)
+
+    monkeypatch.setattr(IndexedUnits, "_read", paused_read)
+    source = write_indexed(settings.rf_root / "indexed.rfmap")
+    original_bytes = source.read_bytes()
+    with authenticated_client(app) as client:
+        meta = _open(client, source)
+        dataset_id = meta["id"]
+        assert active.wait(5)
+        try:
+            progress = client.get(f"/api/datasets/{dataset_id}/cache").json()
+            assert progress == {"indexed": True, "cachedUnits": 1, "totalUnits": 2, "complete": False, "error": None}
+            first = client.get(f"/api/datasets/{dataset_id}/units/11")
+            np.testing.assert_array_equal(np.frombuffer(first.content, dtype="<f8"), np.arange(12))
+            visible = client.get(f"/api/datasets/{dataset_id}/unit-filter", params={"rfStartMs": -100, "rfEndMs": 200}).json()
+            assert visible["visibleUnitIds"] == [11, 22]
+        finally:
+            release.set()
+        record = app.state.services.datasets.get(dataset_id)
+        record.indexed._worker.join(5)
+        assert client.get(f"/api/datasets/{dataset_id}/cache").json()["complete"]
+        assert record.indexed.cached()[11].dtype == np.uint8
+        assert not record.indexed.cached()[11].flags.writeable
+        assert source.read_bytes() == original_bytes
+        assert client.delete(f"/api/datasets/{dataset_id}").json() == {"closed": True}
+        assert client.get(f"/api/datasets/{dataset_id}/meta").status_code == 404
+
+
+def test_indexed_retry_retains_loaded_units(tmp_path, monkeypatch):
+    from rfmapping_web.indexed import IndexedUnits
+
+    archive = IndexedUnits(write_indexed(tmp_path / "retry.rfmap"), 1_000_000)
+    original = archive._read
+    failed = False
+
+    def fail_once(uid):
+        nonlocal failed
+        if uid == 22 and not failed:
+            failed = True
+            raise OSError("temporary read failure")
+        return original(uid)
+
+    monkeypatch.setattr(archive, "_read", fail_once)
+    archive.start()
+    archive._worker.join(5)
+    assert archive.status()["error"] == "temporary read failure"
+    assert archive.unit(11) is archive.cached()[11]
+    with pytest.raises(datasets_module.DatasetChangedError, match="temporary"):
+        archive.unit(22)
+    archive.start(retry=True)
+    archive._worker.join(5)
+    assert archive.status()["complete"]
+    assert archive.status()["error"] is None
+    archive.close()
+
+
+@pytest.mark.parametrize("change, message", [
+    ({"metadata": np.array([1.0])}, "metadata must"),
+    ({"unit_11": np.zeros((4, 3))}, "shape"),
+    ({"unit_11": np.full((2, 2, 3), 0.5)}, "integers"),
+    ({"occupancyTimeSec": np.array([[0.0, 0.3], [0.4, 0.5]])}, "zero where"),
+    ({"unitPool": np.array([11.0, 22.0])}, "integer unit IDs"),
+])
+def test_indexed_rejects_invalid_units_and_metadata(tmp_path, change, message):
+    from rfmapping_web.indexed import IndexedUnits
+    with pytest.raises(DatasetValidationError, match=message):
+        IndexedUnits(write_indexed(tmp_path / "invalid.rfmap", **change), 1_000_000)
+
+
+def test_indexed_preserves_singleton_axes_uint64_and_complete_timeline(tmp_path):
+    from rfmapping_web.indexed import IndexedUnits
+    payload = sample_payload()
+    payload.update(unitsSpikeCounts=[[[[0, 2**64 - 1, 1]]]], unitsSpikeCountsSize=[1, 1, 1, 3],
+                   unitPool=[17], xPositions=[0], yPositions=[0],
+                   occupancyTimeSec=[[2]], occupancyTimeSecSize=[1, 1])
+    archive = IndexedUnits(write_indexed(tmp_path / "singleton.rfmap", payload,
+        unit_17=np.array([[[0, 2**64 - 1, 1]]], dtype=np.uint64)), 1_000_000)
+    values = archive.unit(17)
+    assert values.shape == (1, 1, 3)
+    assert values.dtype == np.uint64
+    assert int(values[0, 0, 1]) == 2**64 - 1
+    assert archive.metadata["timeBinEdges"] == [-0.1, 0.0, 0.1, 0.2]
+    archive.close()
+
+
+def test_subtracted_csv_and_composer_share_pooled_smoothed_values(app, settings):
+    source = write_json(settings.rf_root / "difference.rfmap")
+    with authenticated_client(app) as client:
+        meta = _open(client, source)
+        request = {**_csv_export_payload(), "rfStartMs": 100, "rfEndMs": 200,
+                   "rfWindowMode": "difference", "rfBStartMs": 0, "rfBEndMs": 100,
+                   "smoothRadius": 1, "valueMode": "Mean firing rate (Hz)"}
+        result = client.post(f"/api/datasets/{meta['id']}/exports/displayed-csv", json=request)
+        assert result.status_code == 200, result.text
+        with Path(result.json()["path"]).open() as handle:
+            row = next(csv.DictReader(handle))
+        assert float(row["value"]) == pytest.approx(4 / 1.4)
+        assert row["rf_window_operation"] == "A - B"
+        assert row["rf_subtract_start_ms"] == "0.0"
+        assert row["rf_subtract_end_ms"] == "100.0"
+        record = app.state.services.datasets.get(meta["id"])
+        _, counts = app.state.services.datasets.unit_array(record, 22)
+        recipe = {key: request[key] for key in ("rfStartMs", "rfEndMs", "rfWindowMode", "rfBStartMs", "rfBEndMs", "smoothRadius", "valueMode", "xBins", "yBins", "flipY")}
+        matrix, _, _, bounds = figure_exports_module._prepared_response(counts, record.cache.metadata, recipe)
+        assert bounds == (100.0, 200.0)
+        assert matrix[0, 0] == float(row["value"])
+        recipe.update(rfStartMs=0, rfEndMs=100, rfBStartMs=100, rfBEndMs=200)
+        negative, *_ = figure_exports_module._prepared_response(counts, record.cache.metadata, recipe)
+        assert np.isnan(negative).all()
+        recipe.update(rfStartMs=100, rfEndMs=200)
+        zero, *_ = figure_exports_module._prepared_response(counts, record.cache.metadata, recipe)
+        assert (zero == 0).all()
+
+
+def test_rgb_uses_full_timeline_and_keeps_missing_occupancy_distinct():
+    response = np.array([[2.0, 0.0, np.nan]])
+    delays = np.array([[0.0, np.nan, 50.0]])
+    entropy = np.array([[0.5, 0.0, 0.6]])
+    rgba = figure_exports_module._rgb_values(response, delays, entropy, -100, 200)
+    np.testing.assert_allclose(rgba[0, 0, :3], [1, 1 / 3, 0.5])
+    np.testing.assert_array_equal(rgba[0, 1, :3], [0, 0, 0])
+    np.testing.assert_allclose(rgba[0, 2, :3], [0.9, 0.9, 0.9])
+
+
+def test_indexed_priority_skips_background_order_and_cancel_stops_next_read(tmp_path, monkeypatch):
+    import threading
+    from rfmapping_web.indexed import IndexedUnits
+
+    payload = sample_payload()
+    payload["unitsSpikeCounts"] = np.arange(48).reshape(4, 2, 2, 3).tolist()
+    payload["unitsSpikeCountsSize"] = [4, 2, 2, 3]
+    payload["unitPool"] = [11, 22, 33, 44]
+    archive = IndexedUnits(write_indexed(tmp_path / "priority.rfmap", payload), 1_000_000)
+    active = threading.Event()
+    release = threading.Event()
+    visited = []
+    original = archive._read
+
+    def delayed(uid):
+        visited.append(uid)
+        if uid == 22:
+            active.set()
+            assert release.wait(5)
+        return original(uid)
+
+    monkeypatch.setattr(archive, "_read", delayed)
+    archive.start()
+    assert active.wait(5)
+    with archive._condition:
+        archive._priority = 44
+    release.set()
+    archive._worker.join(5)
+    assert visited == [22, 44, 33]
+    archive.close()
+
+    cancelled = IndexedUnits(write_indexed(tmp_path / "cancel.rfmap", payload), 1_000_000)
+    cancelled.close()
+    cancelled.start()
+    assert cancelled.status()["cachedUnits"] == 1
+    with pytest.raises(datasets_module.DatasetChangedError, match="cancelled"):
+        cancelled.unit(22)
+
+
+def test_invalid_zip_signature_returns_validation_error(app, settings):
+    source = settings.rf_root / "truncated.rfmap"
+    source.write_bytes(b"PK\x03\x04broken")
+    with authenticated_client(app) as client:
+        result = client.post("/api/datasets/open", json={"path": str(source)})
+        assert result.status_code == 422
+        assert "Invalid indexed" in result.json()["detail"]

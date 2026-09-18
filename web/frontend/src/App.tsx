@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ApiError,
+  getCacheProgress,
+  retryCache,
+  closeDataset,
   exportDisplayedCsv,
   getHdDataset,
   getProbeGeometry,
@@ -10,6 +13,7 @@ import {
   listRemoteFiles,
   openRemoteDataset,
 } from "./api";
+import RfWindowInput from "./components/RfWindowInput";
 import HdPanel from "./components/HdPanel";
 import FigureExportComposer from "./components/FigureExportComposer";
 import { SpatialPlot, TimelinePlot } from "./components/Plots";
@@ -32,6 +36,8 @@ import {
   groupResponseValue,
   groupResponseValues,
   groupTemporalMetrics,
+  prepareRfResponse,
+  rfWindowLabel,
   snapTimeRange,
   timeBounds,
   timeGroupForMs,
@@ -44,7 +50,9 @@ import { exportShortcutAction, steppedTimeResolutionMs } from "./appShortcuts";
 import { nearestProbeUnitToRegionCenter, probeUnitsInRegion } from "./probeSelection";
 import { resolutionChangePatch, timelineSelectionPatch } from "./viewStateMath";
 import { VIEWER_TABS } from "./viewTabs";
-import { LatestRequest, UnitCountsCache } from "./requestLifecycle";
+import { usePairedWindows } from "./pairedWindows";
+import { RF_TIMING_KEY, readRfTiming, timingPatch, timingFromState, toggleRfMode } from "./rfTiming";
+import { LatestRequest, LatestSerialRead, UnitCountsCache } from "./requestLifecycle";
 import {
   navigationUnitIds,
   orderedQualityVisibleUnitIds,
@@ -53,6 +61,7 @@ import {
 } from "./unitFilter";
 import type {
   CellRef,
+  CacheProgress,
   DatasetMeta,
   FsEntry,
   HdDatasetArtifact,
@@ -170,6 +179,7 @@ function initialViewState(meta: DatasetMeta): ViewState {
     timelineAnchorMs: null,
     rfStartMs: rfBounds[0],
     rfEndMs: rfBounds[1],
+    ...timingPatch(meta, readRfTiming(window.localStorage.getItem(RF_TIMING_KEY))),
     timeResolutionMs: resolution,
     xBins: meta.shape[2],
     yBins: meta.shape[1],
@@ -247,6 +257,10 @@ export default function App() {
   const [meta, setMeta] = useState<DatasetMeta | null>(null);
   const [viewState, setViewState] = useState<ViewState | null>(null);
   const [counts, setCounts] = useState<Float64Array | null>(null);
+  const [cacheProgress, setCacheProgress] = useState<CacheProgress | null>(null);
+  const [displayOptions, setDisplayOptions] = useState(true);
+  const waveformReads = useRef(new LatestSerialRead());
+  const unitFilterSignature = useRef("");
   const countsCache = useRef(new Map<string, UnitCountsCache>());
   const sourceRequest = useRef(new LatestRequest());
   const probeRequest = useRef(new LatestRequest());
@@ -300,12 +314,25 @@ export default function App() {
     setViewState((current) => current ? { ...current, ...(typeof patch === "function" ? patch(current) : patch) } : current);
   }, []);
 
+  const applyPairedPatch = useCallback((patch: Partial<ViewState>) => {
+    if (!meta) return;
+    updateState((current) => {
+      const next = { ...current, ...patch };
+      const a = timeBounds(meta, snapTimeRange(meta, next.rfStartMs, next.rfEndMs));
+      const b = timeBounds(meta, snapTimeRange(meta, next.rfBStartMs ?? 0, next.rfBEndMs ?? 80));
+      return { ...patch, rfStartMs: a[0], rfEndMs: a[1], rfBStartMs: b[0], rfBEndMs: b[1],
+        xBins: clamp(next.xBins, 1, meta.shape[2]), yBins: clamp(next.yBins, 1, meta.shape[1]) };
+    });
+  }, [meta, updateState]);
+  const paired = usePairedWindows(meta, viewState, qualityVisibleUnitIds, applyPairedPatch);
+
   const commitDataset = useCallback((next: DatasetMeta) => {
     probeRequest.current.cancel();
     setProbeBusy(false);
     countsCache.current.clear();
     setCounts(null);
     setMeta(next);
+    setCacheProgress(next.cacheProgress ?? null);
     setJsonChoices([{ path: next.sourcePath, mtime: null }]);
     lastLocalCluster.current = next.unitPool[0];
     setViewState((current) => {
@@ -357,7 +384,7 @@ export default function App() {
     setError("");
     try {
       const next = await openRemoteDataset(path, signal);
-      if (!sourceRequest.current.isCurrent(signal)) return;
+      if (!sourceRequest.current.isCurrent(signal)) { void closeDataset(next.id).catch(() => undefined); return; }
       commitDataset(next);
       window.history.replaceState(null, "", urlForJsonSource(window.location.href, next.sourcePath));
     } catch (caught) {
@@ -377,6 +404,31 @@ export default function App() {
     sourceRequest.current.cancel();
     probeRequest.current.cancel();
   }, []);
+
+  useEffect(() => {
+    if (!meta) return;
+    const close = () => { void closeDataset(meta.id).catch(() => undefined); };
+    window.addEventListener("pagehide", close);
+    return () => { window.removeEventListener("pagehide", close); close(); };
+  }, [meta?.id]);
+
+  useEffect(() => {
+    if (!meta || !cacheProgress?.indexed || cacheProgress.complete) return;
+    const controller = new AbortController();
+    let timer: number;
+    const poll = async () => {
+      try {
+        const progress = await getCacheProgress(meta.id, controller.signal);
+        if (controller.signal.aborted) return;
+        setCacheProgress(progress);
+        if (!progress.complete) timer = window.setTimeout(poll, 500);
+      } catch (caught) {
+        if (!controller.signal.aborted) setError(caught instanceof Error ? caught.message : "Could not read cache progress.");
+      }
+    };
+    timer = window.setTimeout(poll, 200);
+    return () => { controller.abort(); window.clearTimeout(timer); };
+  }, [meta, cacheProgress?.indexed, cacheProgress?.complete]);
 
   useEffect(() => {
     document.title = meta ? `${meta.name} — RF Map Viewer` : "RF Map Viewer";
@@ -445,6 +497,12 @@ export default function App() {
       setZeroSpikeSpatialBinThreshold(threshold);
       return;
     }
+    const signature = [meta.id, unitFilterEnabled, viewState.rfStartMs, viewState.rfEndMs, threshold].join(":");
+    if (signature !== unitFilterSignature.current) {
+      unitFilterSignature.current = signature;
+      setQualityVisibleUnitIds([]);
+      setUnitFilterStatus("loading");
+    }
     if (!unitFilterEnabled) {
       setQualityVisibleUnitIds([...meta.unitPool]);
       setUnitFilterStatus("ready");
@@ -458,8 +516,6 @@ export default function App() {
       return;
     }
     const controller = new AbortController();
-    setQualityVisibleUnitIds([]);
-    setUnitFilterStatus("loading");
     setUnitFilterError("");
     const timer = window.setTimeout(() => {
       getUnitFilter(
@@ -497,6 +553,7 @@ export default function App() {
     viewState?.rfEndMs,
     viewState?.rfStartMs,
     zeroSpikeSpatialBinThreshold,
+    cacheProgress?.cachedUnits,
   ]);
 
   useEffect(() => {
@@ -543,7 +600,7 @@ export default function App() {
     const neighbors = [qualityIndex - 1, qualityIndex + 1]
       .filter((index) => 0 <= index && index < qualityVisibleUnitIds.length)
       .map((index) => qualityVisibleUnitIds[index]);
-    neighbors.forEach((clusterId) => {
+    if (!cacheProgress?.indexed || cacheProgress.complete) neighbors.forEach((clusterId) => {
       if (!datasetCache.has(clusterId)) {
         void getUnitCounts(meta, clusterId, controller.signal).then((values) => {
           if (!controller.signal.aborted && countsCache.current.get(datasetId) === datasetCache) {
@@ -553,7 +610,7 @@ export default function App() {
       }
     });
     return () => controller.abort();
-  }, [meta, qualityVisibleUnitIds, unitFilterStatus, viewState?.clusterId]);
+  }, [meta, qualityVisibleUnitIds, unitFilterStatus, viewState?.clusterId, cacheProgress?.indexed, cacheProgress?.complete]);
 
   useEffect(() => {
     if (!meta?.capabilities.probe || probePositionsPath) return;
@@ -591,6 +648,7 @@ export default function App() {
   }, [hdPath, hdRefresh, meta, tuningSession]);
 
   useEffect(() => {
+    waveformReads.current.cancel();
     if (!meta || !viewState || !showWaveform) {
       setWaveformArtifact(null);
       setWaveformError("");
@@ -606,31 +664,16 @@ export default function App() {
       setWaveformLoading(false);
       return;
     }
-    const controller = new AbortController();
     setWaveformArtifact(null);
     setWaveformError("");
     setWaveformLoading(true);
-    getWaveformArtifact(
-      meta.id,
-      viewState.clusterId,
-      waveformChannelMode,
-      controller.signal,
-    )
-      .then((artifact) => {
-        if (!controller.signal.aborted) setWaveformArtifact(artifact);
-      })
-      .catch((caught) => {
-        if (!controller.signal.aborted) {
-          setWaveformArtifact(null);
-          setWaveformError(
-            caught instanceof Error ? caught.message : "Could not load the local average waveform.",
-          );
-        }
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setWaveformLoading(false);
-      });
-    return () => controller.abort();
+    waveformReads.current.submit(
+      () => getWaveformArtifact(meta.id, viewState.clusterId, waveformChannelMode),
+      setWaveformArtifact,
+      (caught) => setWaveformError(caught instanceof Error ? caught.message : "Could not load the local average waveform."),
+      () => setWaveformLoading(false),
+    );
+    return () => waveformReads.current.cancel();
   }, [meta, showWaveform, viewState?.clusterId, waveformChannelMode]);
 
   const probeFilter = useMemo(() => {
@@ -639,8 +682,8 @@ export default function App() {
   }, [probe, probeSelection, qualityVisibleUnitIds]);
 
   const navigationPool = useMemo(() => {
-    return navigationUnitIds(qualityVisibleUnitIds, probeFilter);
-  }, [probeFilter, qualityVisibleUnitIds]);
+    return navigationUnitIds(paired.unitIDs ?? qualityVisibleUnitIds, probeFilter);
+  }, [probeFilter, qualityVisibleUnitIds, paired.unitIDs]);
 
   useEffect(() => {
     if (!viewState || unitFilterStatus !== "ready") return;
@@ -751,14 +794,11 @@ export default function App() {
 
   const selectedRfValue = useMemo(() => {
     if (!meta || !viewState || !counts || !selectedCell) return null;
-    return groupResponseValue(
-      counts,
-      meta,
-      selectedCell,
-      snapTimeRange(meta, viewState.rfStartMs, viewState.rfEndMs),
-      viewState.valueMode,
-    );
-  }, [counts, meta, selectedCell, viewState?.rfStartMs, viewState?.rfEndMs, viewState?.valueMode]);
+    const prepared = prepareRfResponse(counts, meta, viewState);
+    const y = prepared.yGroups.findIndex(([start, end]) => start <= selectedCell[0] && end >= selectedCell[1]);
+    const x = prepared.xGroups.findIndex(([start, end]) => start <= selectedCell[2] && end >= selectedCell[3]);
+    return prepared.matrix[y]?.[x] ?? null;
+  }, [counts, meta, selectedCell, viewState]);
 
   const selectedDetails = useMemo(() => {
     if (!selectedSeries) return null;
@@ -791,6 +831,10 @@ export default function App() {
 
   const openFigureComposer = useCallback(() => {
     if (!meta || !viewState) return;
+    if (cacheProgress && !cacheProgress.complete) {
+      setMessageDialog({ title: "RF cache is loading", text: "Figure Composer is available after all units have been cached. Retry any cache error first." });
+      return;
+    }
     if (unitFilterStatus !== "ready" || !qualityVisibleUnitIds.length) {
       setMessageDialog({
         title: "No visible units",
@@ -803,7 +847,7 @@ export default function App() {
       return;
     }
     setFigureComposerOpen(true);
-  }, [meta, qualityVisibleUnitIds, unitFilterError, unitFilterStatus, viewState]);
+  }, [meta, qualityVisibleUnitIds, unitFilterError, unitFilterStatus, viewState, cacheProgress]);
 
   const exportCsv = useCallback(async (overwrite: boolean) => {
     if (!meta || !viewState || !counts || !exportDialog) return;
@@ -815,6 +859,9 @@ export default function App() {
         valueMode: viewState.valueMode,
         rfStartMs: viewState.rfStartMs,
         rfEndMs: viewState.rfEndMs,
+        rfWindowMode: viewState.rfWindowMode ?? "sum",
+        rfBStartMs: viewState.rfBStartMs ?? 0,
+        rfBEndMs: viewState.rfBEndMs ?? 80,
         timeResolutionMs: viewState.timeResolutionMs,
         xBins: viewState.xBins,
         yBins: viewState.yBins,
@@ -837,14 +884,7 @@ export default function App() {
     }
   }, [counts, exportDialog, meta, viewState]);
 
-  const normalizeRfRange = useCallback(() => {
-    if (!meta) return;
-    updateState((current) => {
-      const range = snapTimeRange(meta, current.rfStartMs, current.rfEndMs);
-      const bounds = timeBounds(meta, range);
-      return { rfStartMs: bounds[0], rfEndMs: bounds[1] };
-    });
-  }, [meta, updateState]);
+
 
   const openChooser = useCallback(() => {
     setError("");
@@ -892,7 +932,8 @@ export default function App() {
     const handler = (event: KeyboardEvent) => {
       if (figureComposerOpen) return;
       const target = event.target as HTMLElement | null;
-      const editing = target?.matches("input, select, textarea, [contenteditable='true']");
+      const editing = target?.closest("input, textarea, [contenteditable='true']");
+      const picker = target?.tagName === "SELECT";
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "o") {
         event.preventDefault();
         openChooser();
@@ -905,18 +946,26 @@ export default function App() {
         else openFigureComposer();
         return;
       }
-      if (editing || !meta || !viewState) return;
+      if ((event.metaKey || event.ctrlKey) && event.shiftKey && (event.key === "." || event.key === ">") && !event.altKey) {
+        if (editing) return;
+        event.preventDefault(); setUnitFilterEnabled((enabled) => !enabled); return;
+      }
+      if (editing || event.metaKey || event.ctrlKey || event.altKey || !meta || !viewState) return;
+      if (picker && (target?.matches(":open") || event.key.toLowerCase() !== "p")) return;
+      if (event.key === "-") { event.preventDefault(); updateState(toggleRfMode(meta, viewState)); return; }
+      if (event.key.toLowerCase() === "d") { event.preventDefault(); setDisplayOptions((value) => !value); return; }
       if (event.key === "ArrowLeft" || event.key === "[") { event.preventDefault(); stepUnit(-1); }
       else if (event.key === "ArrowRight" || event.key === "]") { event.preventDefault(); stepUnit(1); }
       else if (event.key === "ArrowUp") { event.preventDefault(); stepTimeline(-1); }
       else if (event.key === "ArrowDown") { event.preventDefault(); stepTimeline(1); }
-      else if (event.key === "<") stepResolution(-1);
-      else if (event.key === ">") stepResolution(1);
+      else if (event.shiftKey && (event.key === "<" || event.key === ",")) { event.preventDefault(); stepResolution(1); }
+      else if (event.shiftKey && (event.key === ">" || event.key === ".")) { event.preventDefault(); stepResolution(-1); }
       else if (event.key.toLowerCase() === "f") updateState({ flipY: !viewState.flipY });
       else if (event.key.toLowerCase() === "p" && event.shiftKey) {
+        event.preventDefault();
         updateState({ palette: PALETTES[(PALETTES.indexOf(viewState.palette) + 1) % PALETTES.length] });
       }
-      else if (event.key.toLowerCase() === "p") updateState({ polarLayout: !viewState.polarLayout });
+      else if (event.key.toLowerCase() === "p") { event.preventDefault(); updateState({ polarLayout: !viewState.polarLayout }); }
       else if (event.key === "Escape") {
         if (probeSelection) {
           setProbeSelection(null);
@@ -971,12 +1020,17 @@ export default function App() {
       : noQualityMatches
         ? `Increase the zero-bin threshold, change the RF sum range, or disable the filter. Visible requires zero-bin count < ${zeroSpikeSpatialBinThreshold}.`
         : "Clear or redraw the Probe region to continue unit navigation.";
+  const unavailableUnit = unitStatus === "unavailable" && !noNavigationUnits;
+  const unavailableView = <div className="view-empty"><strong>Cluster {viewState.clusterId}: N/A in this dataset</strong><span>{localIndex < 0 ? "This recorded unit is present in a paired viewer, but absent from this RF file." : "This unit is hidden by this dataset's native RF-bin filter."}</span></div>;
   const unit = valueModeUnit(viewState.valueMode);
-  const selectionRange = snapTimeRange(meta, viewState.rfStartMs, viewState.rfEndMs);
-  const selectionBounds = timeBounds(meta, selectionRange);
 
   return (
     <div className={`app-shell ${probeCollapsed ? "probe-collapsed" : ""}`}>
+      {cacheProgress?.indexed && !cacheProgress.complete && <div className="cache-progress" role="status">
+        <progress value={cacheProgress.cachedUnits} max={cacheProgress.totalUnits} />
+        <span>Caching {cacheProgress.cachedUnits} / {cacheProgress.totalUnits} units</span>
+        {cacheProgress.error && <><span>{cacheProgress.error}</span><button type="button" onClick={() => { void retryCache(meta.id).then(setCacheProgress).catch((caught) => setError(String(caught))); }}>Retry</button></>}
+      </div>}
       {probeCollapsed && <aside className="sidebar-rail"><button type="button" onClick={() => setProbeCollapsed(false)}>Show Probe & controls</button></aside>}
       {!probeCollapsed && <aside className="sidebar">
         <div className="sidebar-inner">
@@ -1061,6 +1115,8 @@ export default function App() {
           <hr />
           <section className="sidebar-block">
             <h2>Unit</h2>
+            <label className="check-row"><input type="checkbox" checked={paired.enabled} disabled={!paired.supported} onChange={(event) => paired.setEnabled(event.target.checked)} /><span>Pair Windows</span></label>
+            {paired.enabled && <p className="muted-copy">{paired.peerCount ? `Paired with ${paired.peerCount} other tab${paired.peerCount === 1 ? "" : "s"}` : "Enable Pair Windows in another viewer tab."}</p>}
             <label className="check-row">
               <input
                 type="checkbox"
@@ -1146,13 +1202,15 @@ export default function App() {
 
           <hr />
           <section className="sidebar-block display-block">
-            <h2>Display</h2>
+            <h2><button type="button" onClick={() => setDisplayOptions((value) => !value)}>{displayOptions ? "Hide (D)" : "Display Options (D)"}</button></h2>
+            <div hidden={!displayOptions}>
             <label className="check-row"><input type="checkbox" checked={viewState.flipY} onChange={(event) => updateState({ flipY: event.target.checked })} /><span>Invert Y (MATLAB flip)</span></label>
             <label className="display-row"><span>X bins</span><input type="number" min={1} max={meta.shape[2]} step={1} value={viewState.xBins} onChange={(event) => updateState({ xBins: clamp(Math.round(Number(event.target.value)), 1, meta.shape[2]) })} /></label>
             <label className="display-row"><span>Y bins</span><input type="number" min={1} max={meta.shape[1]} step={1} value={viewState.yBins} onChange={(event) => updateState({ yBins: clamp(Math.round(Number(event.target.value)), 1, meta.shape[1]) })} /></label>
             <label className="display-row"><span>Smooth</span><input type="number" min={0} max={3} step={1} value={viewState.smoothRadius} onChange={(event) => updateState({ smoothRadius: clamp(Math.round(Number(event.target.value)), 0, 3) })} /></label>
             <label className="display-row"><span>Palette</span><select value={viewState.palette} onChange={(event) => updateState({ palette: event.target.value as Palette })}>{PALETTES.map((palette) => <option key={palette}>{palette}</option>)}</select></label>
             <label className="display-row"><span>Polar radius</span><select value={viewState.polarRadius} onChange={(event) => updateState({ polarRadius: event.target.value as PolarRadius })}>{POLAR_RADIUS_MODES.map((mode) => <option key={mode}>{mode}</option>)}</select></label>
+            </div>
           </section>
 
           <hr />
@@ -1165,7 +1223,7 @@ export default function App() {
                 <span>xIdx {selectedCell[2] + 1}{selectedCell[3] !== selectedCell[2] ? `-${selectedCell[3] + 1}` : ""}; x {formatNumber(meta.xPositions[selectedCell[2]], 3)}{selectedCell[3] !== selectedCell[2] ? `..${formatNumber(meta.xPositions[selectedCell[3]], 3)}` : ""}</span>
                 {(selectedCell[1] !== selectedCell[0] || selectedCell[3] !== selectedCell[2]) && <span>{viewState.valueMode === "Spike count" ? "mean" : "pooled"} over exposed source pixels</span>}
                 <span>bin {formatResponse(selectedDetails.activeValue, viewState.valueMode)} {unit} ({formatNumber(timeBounds(meta, groups[activeGroup])[0])}–{formatNumber(timeBounds(meta, groups[activeGroup])[1])} ms)</span>
-                <span>RF sum range {formatNumber(selectionBounds[0])}–{formatNumber(selectionBounds[1])} ms: {formatResponse(selectedDetails.rfValue, viewState.valueMode)} {unit}</span>
+                <span>RF {rfWindowLabel(viewState)}: {formatResponse(selectedDetails.rfValue, viewState.valueMode)} {unit}</span>
                 <span>full window {formatResponse(selectedDetails.totalValue, viewState.valueMode)} {unit}</span>
                 <span>peak {formatResponse(selectedDetails.peakValue, viewState.valueMode)} {unit}</span>
                 <span>peak bin {selectedDetails.peakIndex < 0 ? "n/a" : `${selectedDetails.peakIndex + 1} (${formatNumber(timeBounds(meta, groups[selectedDetails.peakIndex])[0])}–${formatNumber(timeBounds(meta, groups[selectedDetails.peakIndex])[1])} ms)`}</span>
@@ -1173,7 +1231,7 @@ export default function App() {
               </div>
             ) : <span className="muted-copy">N/A for this session</span>}
             <div className="export-button-stack">
-              <button className="export-button figure-button" type="button" onClick={openFigureComposer} disabled={unitFilterStatus !== "ready" || !qualityVisibleUnitIds.length}>Compose figures…</button>
+              <button className="export-button figure-button" type="button" onClick={openFigureComposer} disabled={unitFilterStatus !== "ready" || !qualityVisibleUnitIds.length || Boolean(cacheProgress && !cacheProgress.complete)}>Compose figures…</button>
               <button className="export-button" type="button" onClick={openExportDialog} disabled={!counts || noNavigationUnits}>Export displayed data…</button>
             </div>
           </section>
@@ -1184,7 +1242,7 @@ export default function App() {
 
       <main className="workspace">
         <header className="workspace-heading">
-          <h1>{noNavigationUnits ? emptyUnitTitle : `Unit ${String(localIndex).padStart(3, "0")} / cluster ${viewState.clusterId}`}</h1>
+          <h1>{noNavigationUnits ? emptyUnitTitle : unavailableUnit ? `Cluster ${viewState.clusterId} / N/A in this dataset` : `Unit ${String(localIndex).padStart(3, "0")} / cluster ${viewState.clusterId}`}</h1>
           <p>
             {noNavigationUnits
               ? emptyUnitDetail
@@ -1198,10 +1256,13 @@ export default function App() {
             <label><span>Time resolution (ms)</span><input type="number" min={baseBinMs(meta)} max={axisEndMs - axisStartMs} step={baseBinMs(meta)} value={formatNumber(viewState.timeResolutionMs, 6)} onChange={(event) => changeResolution(Number(event.target.value))} /></label>
           </div>
           <div className="plot-control-row bottom-row">
-            <span className="range-title">RF sum range (ms)</span>
-            <input type="number" min={axisStartMs} max={axisEndMs} step={baseBinMs(meta)} value={formatNumber(viewState.rfStartMs, 6)} onChange={(event) => updateState({ rfStartMs: Number(event.target.value) })} onBlur={normalizeRfRange} aria-label="RF range start" />
+            <label className="range-title"><select aria-label="RF window mode" value={viewState.rfWindowMode ?? "sum"} onChange={() => updateState(toggleRfMode(meta, viewState))}><option value="sum">RF sum (ms)</option><option value="difference">RF A − B (ms)</option></select></label>
+            <RfWindowInput value={viewState.rfStartMs} label="RF range start" onCommit={(value) => { const bounds = timeBounds(meta, snapTimeRange(meta, value, viewState.rfEndMs)); updateState({ rfStartMs: bounds[0], rfEndMs: bounds[1] }); }} />
             <span>to</span>
-            <input type="number" min={axisStartMs} max={axisEndMs} step={baseBinMs(meta)} value={formatNumber(viewState.rfEndMs, 6)} onChange={(event) => updateState({ rfEndMs: Number(event.target.value) })} onBlur={normalizeRfRange} aria-label="RF range end" />
+            <RfWindowInput value={viewState.rfEndMs} label="RF range end" onCommit={(value) => { const bounds = timeBounds(meta, snapTimeRange(meta, viewState.rfStartMs, value)); updateState({ rfStartMs: bounds[0], rfEndMs: bounds[1] }); }} />
+            {viewState.rfWindowMode === "difference" && <><span>− (</span>
+              <RfWindowInput value={viewState.rfBStartMs ?? 0} label="RF window B start" onCommit={(value) => { const bounds = timeBounds(meta, snapTimeRange(meta, value, viewState.rfBEndMs ?? 80)); updateState({ rfBStartMs: bounds[0], rfBEndMs: bounds[1] }); }} />
+              <span>to</span><RfWindowInput value={viewState.rfBEndMs ?? 80} label="RF window B end" onCommit={(value) => { const bounds = timeBounds(meta, snapTimeRange(meta, viewState.rfBStartMs ?? 0, value)); updateState({ rfBStartMs: bounds[0], rfBEndMs: bounds[1] }); }} /><span>)</span></>}
             <label className="check-row"><input type="checkbox" checked={viewState.polarLayout} onChange={(event) => updateState({ polarLayout: event.target.checked })} /><span>Polar layout</span></label>
             <label className="check-row"><input type="checkbox" checked={viewState.rgbMode} disabled={viewState.selectedTab !== "delay"} onChange={(event) => updateState({ rgbMode: event.target.checked })} /><span>RGB composite</span></label>
             {viewState.selectedTab === "rf" && <label className="hd-layout-control"><span>RF + HD</span><select value={hdLayout} onChange={(event) => {
@@ -1209,7 +1270,8 @@ export default function App() {
               setHdLayout(layout);
               window.localStorage.setItem(HD_LAYOUT_KEY, layout);
             }}><option value="side-by-side">Side by side</option><option value="stacked">Stacked</option></select></label>}
-            <button className="reset-button" type="button" onClick={() => { const range = snapTimeRange(meta, 0, 200); const bounds = timeBounds(meta, range); updateState({ rfStartMs: bounds[0], rfEndMs: bounds[1] }); }}>Reset 0–200</button>
+            <button className="reset-button" type="button" onClick={() => { const saved = readRfTiming(window.localStorage.getItem(RF_TIMING_KEY)); updateState(timingPatch(meta, { ...saved, mode: viewState.rfWindowMode ?? "sum" })); }}>Reset windows</button>
+            <button type="button" onClick={() => { window.localStorage.setItem(RF_TIMING_KEY, JSON.stringify(timingFromState(viewState))); setMessageDialog({ title: "RF timing defaults saved", text: "New datasets use these Sum and A − B windows. Reset restores the saved windows for the active mode." }); }}>Save timing defaults</button>
           </div>
         </section>
 
@@ -1225,6 +1287,7 @@ export default function App() {
             <div className={`rf-hd-layout hd-layout-${hdLayout} ${hdCollapsed ? "hd-is-collapsed" : ""}`} hidden={viewState.selectedTab !== "rf"}>
               <div className="rf-primary-pane">
                 {noNavigationUnits && <div className={`view-empty${unitFilterStatus === "error" ? " error-state" : ""}`}><strong>{emptyUnitTitle}</strong><span>{emptyUnitDetail}</span></div>}
+                {unavailableUnit && unavailableView}
                 {!noNavigationUnits && unitStatus === "loading" && <div className="view-empty"><span className="spinner" /> Loading cluster {viewState.clusterId}…</div>}
                 {!noNavigationUnits && unitStatus === "error" && <div className="view-empty error-state"><strong>Unit data could not be loaded</strong><span>{error}</span></div>}
                 {viewState.selectedTab === "rf" && !noNavigationUnits && counts && selectedCell && <SpatialPlot kind="rf" meta={meta} counts={counts} state={viewState} unitIndex={localIndex} selectedCell={selectedCell} onSelectCell={selectCell} />}
@@ -1235,7 +1298,7 @@ export default function App() {
                 loading={hdLoading}
                 error={hdError}
                 rfPolarLayout={viewState.polarLayout}
-                blocked={noNavigationUnits}
+                blocked={noNavigationUnits || unavailableUnit}
                 collapsed={hdCollapsed}
                 settings={hdSettings}
                 onSettingsChange={setHdSettings}
@@ -1246,7 +1309,7 @@ export default function App() {
             {viewState.selectedTab === "delay" && (
               noNavigationUnits
                 ? <div className="view-empty"><strong>{emptyUnitTitle}</strong><span>{emptyUnitDetail}</span></div>
-                : unitStatus === "loading"
+                : unavailableUnit ? unavailableView : unitStatus === "loading"
                   ? <div className="view-empty"><span className="spinner" /> Loading cluster {viewState.clusterId}…</div>
                   : unitStatus === "error"
                     ? <div className="view-empty error-state"><strong>Unit data could not be loaded</strong><span>{error}</span></div>
@@ -1255,7 +1318,7 @@ export default function App() {
             {viewState.selectedTab === "timeline" && (
               noNavigationUnits
                 ? <div className="view-empty"><strong>{emptyUnitTitle}</strong><span>{emptyUnitDetail}</span></div>
-                : unitStatus === "loading"
+                : unavailableUnit ? unavailableView : unitStatus === "loading"
                   ? <div className="view-empty"><span className="spinner" /> Loading cluster {viewState.clusterId}…</div>
                   : unitStatus === "error"
                     ? <div className="view-empty error-state"><strong>Unit data could not be loaded</strong><span>{error}</span></div>
@@ -1351,7 +1414,7 @@ export default function App() {
         <div className="modal-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) setHelpOpen(false); }}>
           <div className="info-dialog" role="dialog" aria-modal="true" aria-label="Keyboard Shortcuts">
             <header><strong>Keyboard Shortcuts</strong><button type="button" aria-label="Close" onClick={() => setHelpOpen(false)}>×</button></header>
-            <pre>← / → or [ / ]   Previous / next unit{"\n"}↑ / ↓   Previous / next timeline bin{"\n"}Shift+, / Shift+.   Time resolution −/+ one source bin{"\n"}1–3   Switch RF / Delay-RGB / Timeline{"\n"}F   Invert Y{"\n"}P   Toggle rectangular / polar layout{"\n"}Shift+P   Cycle palette{"\n"}Double-click waveform   Enlarge local waveform{"\n"}Esc   Close waveform zoom; clear Probe region; otherwise show full Timeline{"\n"}Command/Ctrl-O   Open an RF mapping file in this viewer{"\n"}Command/Ctrl-E   Open Figure Export Composer{"\n"}Command/Ctrl-Shift-E   Export displayed data CSV</pre>
+            <pre>← / → or [ / ]   Previous / next unit{"\n"}↑ / ↓   Previous / next timeline bin{"\n"}Shift+, / Shift+.   Coarser / finer by one source bin{"\n"}−   Toggle RF Sum / A − B windows{"\n"}D   Show / hide Display Options{"\n"}Command/Ctrl-Shift+.   Show / hide filtered units{"\n"}1–3   Switch RF / Delay-RGB / Timeline{"\n"}F   Invert Y{"\n"}P   Toggle rectangular / polar layout{"\n"}Shift+P   Cycle palette{"\n"}Double-click waveform   Enlarge local waveform{"\n"}Esc   Close waveform zoom; clear Probe region; otherwise show full Timeline{"\n"}Command/Ctrl-O   Open an RF mapping file in this viewer{"\n"}Command/Ctrl-E   Open Figure Export Composer{"\n"}Command/Ctrl-Shift-E   Export displayed data CSV</pre>
             <footer><button type="button" onClick={() => setHelpOpen(false)}>OK</button></footer>
           </div>
         </div>

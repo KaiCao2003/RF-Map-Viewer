@@ -133,4 +133,68 @@ final class StableParityTests: XCTestCase {
         viewer.stepTimeResolution(-1)
         XCTAssertEqual(viewer.timeResolutionMS, 80)
     }
+    func testIndexedStoreCachesRequestedUnitAndClosingCancelsPendingReads() async throws {
+        let fixture = try XCTUnwrap(Bundle.module.url(
+            forResource: "indexed-v2-numpy", withExtension: "base64", subdirectory: "Fixtures"
+        ))
+        let encoded = try String(contentsOf: fixture, encoding: .utf8)
+        let bytes = try XCTUnwrap(Data(base64Encoded: encoded, options: .ignoreUnknownCharacters))
+        let source = try RFMappingData(data: bytes, url: URL(fileURLWithPath: "/tmp/indexed-store.rfmap"))
+        let viewer = store(source)
+        XCTAssertEqual(viewer.cachedUnitCount, 1)
+        XCTAssertFalse(viewer.isUnitCacheComplete)
+        XCTAssertNil(FigureExportWindowRegistry.shared.prepare(from: viewer))
+        viewer.selectUnitID(902)
+        XCTAssertTrue(viewer.isSelectedUnitLoading)
+        let deadline = Date().addingTimeInterval(5)
+        while !viewer.isUnitCacheComplete && viewer.unitCacheError == nil && Date() < deadline {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertNil(viewer.unitCacheError)
+        XCTAssertTrue(viewer.isUnitCacheComplete)
+        XCTAssertEqual(viewer.cachedUnitCount, 3)
+        XCTAssertEqual(viewer.selectedUnitID, 902)
+        XCTAssertEqual(viewer.unitIndex, 2)
+        XCTAssertTrue(viewer.hasSelectedUnit)
+        if let request = FigureExportWindowRegistry.shared.prepare(from: viewer) {
+            FigureExportWindowRegistry.shared.release(request)
+        } else {
+            XCTFail("Composer should become available after the cache completes")
+        }
+        viewer.cancelPendingLoads()
+
+        let closingSource = try RFMappingData(data: bytes, url: URL(fileURLWithPath: "/tmp/closing-indexed.rfmap"))
+        let closing = store(closingSource)
+        closing.cancelPendingLoads()
+        await Task.yield()
+        XCTAssertEqual(closing.cachedUnitCount, 1)
+        XCTAssertFalse(closing.isCachingUnits)
+        // Restart before the cancelled task's defer runs; it must not clear the new worker.
+        closing.retryUnitCaching()
+        closing.cancelPendingLoads()
+        closing.retryUnitCaching()
+        let retryDeadline = Date().addingTimeInterval(5)
+        while !closing.isUnitCacheComplete && closing.unitCacheError == nil && Date() < retryDeadline {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertTrue(closing.isUnitCacheComplete)
+        XCTAssertFalse(closing.isCachingUnits)
+    }
+
+    func testFilterShortcutPreferenceUpdatesOtherWindowsWithoutResettingControls() throws {
+        let source = try data([[0, 5, 1]], edges: [0, 0.08, 0.16, 0.24])
+        let preferences = UserDefaults(suiteName: UUID().uuidString)!
+        let first = store(source, preferences: preferences)
+        let second = store(source, preferences: preferences)
+        second.setRFSubtractEnabled(true)
+        second.palette = .gray
+        let before = second.viewerSyncState
+        first.setRFUnitQualityFilterEnabled(true)
+        XCTAssertTrue(second.rfFilterUnitsWithZeroBins)
+        XCTAssertEqual(second.viewerSyncState, before)
+        first.setRFUnitQualityFilterEnabled(false)
+        XCTAssertFalse(second.rfFilterUnitsWithZeroBins)
+        XCTAssertEqual(second.viewerSyncState, before)
+    }
+
 }

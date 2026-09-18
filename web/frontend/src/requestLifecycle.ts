@@ -18,6 +18,40 @@ export class LatestRequest {
   }
 }
 
+/** Keep one read active and replace queued navigation with the newest unit. */
+export class LatestSerialRead {
+  private active = false;
+  private revision = 0;
+  private pending: (() => Promise<void>) | null = null;
+
+  submit<T>(read: () => Promise<T>, result: (value: T) => void, failure: (error: unknown) => void, done: () => void): void {
+    const revision = ++this.revision;
+    this.pending = async () => {
+      this.active = true;
+      try {
+        const value = await read();
+        if (revision === this.revision) result(value);
+      } catch (error) {
+        if (revision === this.revision) failure(error);
+      } finally {
+        if (revision === this.revision) done();
+        this.active = false;
+        this.run();
+      }
+    };
+    this.run();
+  }
+
+  cancel(): void { this.revision += 1; this.pending = null; }
+
+  private run(): void {
+    if (this.active || !this.pending) return;
+    const read = this.pending;
+    this.pending = null;
+    void read();
+  }
+}
+
 /** Preserve the scheduled deadline while replacing work with the latest state. */
 export function createFrameScheduler(
   request: (callback: () => void) => number,

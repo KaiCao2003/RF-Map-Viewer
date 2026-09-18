@@ -290,9 +290,8 @@ final class RFMappingData: @unchecked Sendable {
     var cachedUnitCount: Int { loadedUnitIndices.count }
     /// All non-structural top-level JSON fields.
     let metadata: [String: RFMapJSONValue]
-    /// SHA-256 and byte count of the exact JSON or NPZ bytes in this model.
-    /// Figure exports use these values instead of re-reading a path that may
-    /// have changed after the viewer loaded it.
+    /// JSON provenance is frozen during decoding. Indexed provenance is
+    /// prepared for export after verifying that the source file is unchanged.
     private(set) var sourceSHA256: String
     let sourceByteCount: Int
 
@@ -504,6 +503,7 @@ final class RFMappingData: @unchecked Sendable {
                 metadata: sourceMetadata,
                 sourceURL: sourceURL
             )
+            try archive.verifySource()
             try Task.checkCancellation()
             return map
         }

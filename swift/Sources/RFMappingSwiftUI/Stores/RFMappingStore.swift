@@ -175,6 +175,7 @@ final class RFMappingStore {
     @ObservationIgnored private var unitQualityFilterCache:
         (key: UnitQualityFilterCacheKey, unitIDs: [Int])?
     @ObservationIgnored private var unitCacheTask: Task<Void, Never>?
+    @ObservationIgnored private var unitCacheRequestID: UUID?
     @ObservationIgnored private var priorityUnitIndex: Int?
     private(set) var cachedUnitCount = 0
     private(set) var unitCacheError: String?
@@ -380,10 +381,10 @@ final class RFMappingStore {
             sourceEnd: source.end,
             threshold: rfZeroBinThreshold
         )
+        _ = cachedUnitCount
         if let unitQualityFilterCache, unitQualityFilterCache.key == key {
             return unitQualityFilterCache.unitIDs
         }
-        _ = cachedUnitCount
         if qualityDecisionKey != key {
             qualityDecisionKey = key
             qualityDecisions.removeAll(keepingCapacity: true)
@@ -541,6 +542,9 @@ final class RFMappingStore {
         if qualityFilteredUnitIDs.isEmpty {
             return "No visible units — zero-spike RF-bin filter"
         }
+        if isSelectedUnitLoading, let selectedUnitID {
+            return "Loading cluster \(selectedUnitID)…"
+        }
         guard hasSelectedUnit, let selectedUnitID else {
             let missingID = selectedUnitID.map { String($0) } ?? "unknown"
             if let selectedUnitID,
@@ -571,6 +575,7 @@ final class RFMappingStore {
     }
 
     var unitStatsText: String {
+        if isSelectedUnitLoading, let selectedUnitID { return "Cluster \(selectedUnitID): loading…" }
         guard let data, hasSelectedUnit else {
             if self.data != nil, qualityFilteredUnitIDs.isEmpty {
                 return unitQualityFilterStatusText
@@ -631,6 +636,8 @@ final class RFMappingStore {
         activeDecodeTask?.cancel()
         unitCacheTask?.cancel()
         unitCacheTask = nil
+        unitCacheRequestID = nil
+        priorityUnitIndex = nil
         isCachingUnits = false
         let accessing = url.startAccessingSecurityScopedResource()
         let decodeTask = RFMappingData.makeDecodeTask(url: url)
@@ -693,6 +700,8 @@ final class RFMappingStore {
         errorMessage = nil
         unitCacheTask?.cancel()
         unitCacheTask = nil
+        unitCacheRequestID = nil
+        priorityUnitIndex = nil
         unitCacheError = nil
         isCachingUnits = false
         clearDerivedCaches()
@@ -744,24 +753,27 @@ final class RFMappingStore {
               unitCacheTask == nil else { return }
         unitCacheError = nil
         isCachingUnits = true
+        let requestID = UUID()
+        unitCacheRequestID = requestID
         unitCacheTask = Task { @MainActor [weak self] in
             guard let self else { return }
             defer {
-                if self.data === source {
+                if self.unitCacheRequestID == requestID {
                     self.isCachingUnits = false
                     self.unitCacheTask = nil
+                    self.unitCacheRequestID = nil
                 }
             }
-            while !Task.isCancelled, self.data === source {
+            while !Task.isCancelled, self.data === source, self.unitCacheRequestID == requestID {
                 let next = self.priorityUnitIndex.flatMap {
-                    source.isUnitCached($0) ? nil : $0
+                    source.unitPool.indices.contains($0) && !source.isUnitCached($0) ? $0 : nil
                 } ?? source.unitPool.indices.first { !source.isUnitCached($0) }
                 self.priorityUnitIndex = nil
                 guard let index = next else { return }
                 do {
                     let map = try await source.loadUnit(at: index)
                     try Task.checkCancellation()
-                    guard self.data === source else { return }
+                    guard self.data === source, self.unitCacheRequestID == requestID else { return }
                     try source.cacheUnit(map)
                     self.cachedUnitCount = source.cachedUnitCount
                     self.unitQualityFilterCache = nil
@@ -773,7 +785,9 @@ final class RFMappingStore {
                 } catch is CancellationError {
                     return
                 } catch {
-                    if self.data === source { self.unitCacheError = error.localizedDescription }
+                    if self.data === source, self.unitCacheRequestID == requestID {
+                        self.unitCacheError = error.localizedDescription
+                    }
                     return
                 }
             }
@@ -785,6 +799,9 @@ final class RFMappingStore {
         activeDecodeTask?.cancel()
         unitCacheTask?.cancel()
         unitCacheTask = nil
+        unitCacheRequestID = nil
+        priorityUnitIndex = nil
+        isCachingUnits = false
         pendingWaveformRequest = nil
         waveformRequestID = nil
         waveformTask?.cancel()
