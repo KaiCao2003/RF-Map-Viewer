@@ -8,6 +8,7 @@ Windows x64 (build **11000**).
 - Reuse cached arrays without reading or decompressing them again. Compact integral counts losslessly using the existing unsigned count representation.
 - Cancel pending reads when closing or replacing a document, preserve loaded units after errors, and offer Retry. Multi-unit Figure Composer becomes available once all units are cached.
 - Includes a Windows installer and portable ZIP, built and smoke-tested by GitHub Actions.
+- Preserve unfinished RF time-field edits during background plot redraws; normalize ranges when edits are committed.
 - Keep Free-Moving alpha separate.
 
 ## Python 1.9.9 maintainability and regression coverage

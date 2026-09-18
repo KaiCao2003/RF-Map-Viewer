@@ -4997,8 +4997,13 @@ class RFMViewer(tk.Toplevel):
             except (tk.TclError, ValueError):
                 value = 0
             var.set(max(0, min(max_bin, value)))
-        self._source_bins_for_time_controls()
-        self._source_bins_for_subtract_controls()
+        for start_var, end_var in (
+            (self.range_start_ms_var, self.range_end_ms_var),
+            (self.subtract_start_ms_var, self.subtract_end_ms_var),
+        ):
+            start, end = self._source_bins_for_time_controls(start_var, end_var)
+            start_var.set(format_ms(self.data.time_bin_edges[start] * 1000.0))
+            end_var.set(format_ms(self.data.time_bin_edges[end + 1] * 1000.0))
         if self._timeline_range_anchor is not None:
             self._timeline_range_anchor = max(0, min(max_bin, self._timeline_range_anchor))
         self._x_target_bins()
@@ -5063,17 +5068,15 @@ class RFMViewer(tk.Toplevel):
         start_var: tk.StringVar | None = None,
         end_var: tk.StringVar | None = None,
     ) -> AxisGroup:
+        # Rendering and filtering read this range while a user may be typing.
+        # Only _normalize_control_values commits snapped values to the fields.
         start_var = self.range_start_ms_var if start_var is None else start_var
         end_var = self.range_end_ms_var if end_var is None else end_var
         edges_ms = [edge * 1000.0 for edge in self.data.time_bin_edges]
         axis_start, axis_end = edges_ms[0], edges_ms[-1]
         requested_start = self._parse_time_control(start_var, axis_start)
         requested_end = self._parse_time_control(end_var, axis_end)
-        start, end = self._snap_time_range_to_bins(requested_start, requested_end)
-        start_edge, end_edge = start, end + 1
-        start_var.set(format_ms(edges_ms[start_edge]))
-        end_var.set(format_ms(edges_ms[end_edge]))
-        return start, end
+        return self._snap_time_range_to_bins(requested_start, requested_end)
 
     def _source_bins_for_subtract_controls(self) -> AxisGroup:
         return self._source_bins_for_time_controls(

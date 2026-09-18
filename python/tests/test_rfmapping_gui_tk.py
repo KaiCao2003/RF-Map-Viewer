@@ -1283,22 +1283,14 @@ class TkViewerTests(unittest.TestCase):
         entry.focus_force()
         self.app.update()
         self.assertIs(self.app.focus_get(), entry)
-        import traceback
-        typing_events = []
-        entry.bind("<KeyPress>", lambda event: typing_events.append(
-            ("key", event.keysym, event.char, event.state, str(self.app.focus_get()))
-        ), add="+")
-        self.app.range_start_ms_var.trace_add("write", lambda *_: typing_events.append(
-            ("value", self.app.range_start_ms_var.get(),
-             [frame.name for frame in traceback.extract_stack(limit=12)])
-        ))
         entry.delete(0, "end")
         for key in ("minus", "1", "0"):
             entry.event_generate(f"<KeyPress-{key}>")
         entry.icursor("end")
         entry.event_generate("<KeyPress-Left>")
+        self.app._draw_active_tab()
         self.app.update()
-        self.assertEqual(entry.get(), "-10", repr(typing_events))
+        self.assertEqual(entry.get(), "-10")
         self.assertEqual(entry.index("insert"), 2)
         self.assertEqual(self.app.unit_idx.get(), 0)
         self.assertFalse(self.app.rf_subtract_var.get())
@@ -1312,6 +1304,22 @@ class TkViewerTests(unittest.TestCase):
         self.app.update()
         self.assertEqual(other.unit_idx.get(), 1)
         self.assertEqual(self.app.unit_idx.get(), 0)
+
+    def test_rf_redraw_preserves_uncommitted_time_fields(self) -> None:
+        self.app._select_tab(0)
+        self.app._toggle_rf_subtraction()
+        self.app.update()
+        variables = (
+            self.app.range_start_ms_var, self.app.range_end_ms_var,
+            self.app.subtract_start_ms_var, self.app.subtract_end_ms_var,
+        )
+        typed = ("-", "31.2", "-10", "17.")
+        for variable, value in zip(variables, typed):
+            variable.set(value)
+        self.app._draw_active_tab()
+        self.assertEqual(tuple(variable.get() for variable in variables), typed)
+        self.app._on_range_changed()
+        self.assertEqual(tuple(variable.get() for variable in variables), ("0", "30", "0", "17"))
 
     def test_shift_comma_and_period_adjust_resolution_one_ms(self) -> None:
         event = SimpleNamespace(widget=self.app.canvases["timeline"])
