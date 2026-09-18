@@ -220,6 +220,7 @@ struct FigureExportRenderer {
                 .init(code: .missingDestination, message: "Choose an export destination.", pageID: nil)
             ])
         }
+        try data.prepareSourceHash()
         let sourceInput = try captureRFSource(data, fileManager: fileManager)
         let frozenCompanions = companions.isFrozen
             ? companions
@@ -2159,7 +2160,7 @@ struct FigureRenderedPageView: View {
             .padding(.horizontal, 10)
             .padding(.bottom, 10)
         }
-        .background(Color(nsColor: .textBackgroundColor))
+        .background(Color.white)
         .environment(\.colorScheme, .light)
     }
 
@@ -2331,7 +2332,7 @@ private struct SharedRFExportPlotView: View {
                 }
             }
         }
-        .background(Color(nsColor: .textBackgroundColor))
+        .background(Color.white)
     }
 
     private var unitSubtitle: String {
@@ -2361,7 +2362,7 @@ private struct SharedRFExportPlotView: View {
             width: innerRadius * 2,
             height: innerRadius * 2
         ))
-        context.fill(innerCircle, with: .color(Color(nsColor: .controlBackgroundColor)))
+        context.fill(innerCircle, with: .color(Color.white))
         context.stroke(innerCircle, with: .color(.secondary), lineWidth: 0.5)
 
         let thetaEdges = (0...layout.xGroups.count).map {
@@ -2452,7 +2453,7 @@ private struct FigureExportPlaceholderView: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(nsColor: .controlBackgroundColor))
+        .background(Color.white)
         .overlay(RoundedRectangle(cornerRadius: 6).stroke(.secondary.opacity(0.45)))
     }
 }
@@ -2477,7 +2478,7 @@ private struct HDCurveExportView: View {
                 drawLineCurve(context: &context, size: size)
             }
         }
-        .background(Color(nsColor: .textBackgroundColor))
+        .background(Color.white)
     }
 
     private func drawLineCurve(context: inout GraphicsContext, size: CGSize) {
@@ -2570,7 +2571,7 @@ private struct WaveformExportView: View {
             )
             drawHeatmap(context: &context, size: size)
         }
-        .background(Color(nsColor: .textBackgroundColor))
+        .background(Color.white)
     }
 
     private func drawHeatmap(context: inout GraphicsContext, size: CGSize) {
@@ -2738,7 +2739,7 @@ private struct ProbeGeometryExportView: View {
             )
             drawGeometry(context: &context, size: size)
         }
-        .background(Color(nsColor: .textBackgroundColor))
+        .background(Color.white)
     }
 
     private func drawGeometry(context: inout GraphicsContext, size: CGSize) {

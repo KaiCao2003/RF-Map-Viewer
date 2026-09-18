@@ -1,17 +1,16 @@
-# SwiftUI Viewer 1.9.6
+# SwiftUI Viewer 1.10.0
 
 This is the native SwiftUI implementation for macOS 15 on Apple silicon. It
 parses RF/HD/probe files itself and has no Python dependency. RF mapping files
-use `.rfmap` (JSON schema), tuning curves use `.tc` (JSON schema), and spike
+use `.rfmap` (legacy JSON or indexed NPZ), tuning curves use `.tc` (JSON schema), and spike
 positions use `.probe` (CSV schema). `.json` and `.csv` remain filename aliases,
 but an RF map's extension never enables an older schema. RF maps are primary
 documents; tuning and probe files are attached
 to a loaded RF map in the figure composer so recorded unit IDs can be matched.
-Its `1.9.6` version places it in the same stable feature generation as the
-Python `1.9.x` reference; `swift` remains an artifact/tag identity rather than
-a version suffix.
+Its `1.10.0` version matches the stable Python macOS reference; `swift` remains
+an artifact/tag identity rather than a version suffix.
 
-Version 1.9.6 requires the current raw-count/occupancy RF schema. In addition to
+Version 1.10.0 requires the current raw-count/occupancy RF schema. In addition to
 the RF tensor, axes, and time edges, every RF map must contain:
 
 - `occupancyTimeSec` with declared shape `occupancyTimeSecSize == [nY, nX]`;
@@ -26,6 +25,33 @@ is accepted only for a declared singleton `unitPool`, spatial axis, or 1-by-1
 occupancy map. Its one-dimensional encoding
 is accepted for 1-by-N and N-by-1 occupancy maps, disambiguated by the declared
 shape.
+
+Version 1.10.0 also opens indexed version-2 NPZ `.rfmap` files, detected by
+signature. The native ZIP/NPY reader validates shared metadata and the first
+unit before displaying the map; remaining units are cached on a worker. The
+bottom-right progress bar reports cached units, navigation prioritizes the
+latest uncached selection, and failed reads preserve loaded units with a Retry
+button. Closing or replacing a document cancels pending work. Figure Composer
+becomes available after the complete unit cache is ready. No Python runtime is
+used for indexed input.
+
+Press `-` or use **View → Subtract RF Windows (A − B)** to subtract two
+independent, half-open response windows. The initial A/B windows are 80–160 ms
+and 0–80 ms. Each window pools counts and occupancy and applies smoothing before
+subtraction; negative differences are gray/missing, while zero stays zero.
+Sum and difference modes restore their own last-used windows. **Save timing
+defaults** under Display saves both modes and B for new windows and Reset.
+Pair Windows, displayed CSV, and Figure Composer preserve the mode and both
+windows. The zero-bin filter uses A; timeline and Delay/RGB retain their full
+independent axes.
+
+`D` shows/hides Display Options. `Command+Shift+.` shows/hides quality-filtered
+units without resetting other controls. `Shift+,` makes time resolution
+coarser and `Shift+.` finer by one source bin. Plain keys preserve text editing
+and modified shortcuts. Delay/RGB derives peaks from spatially pooled and
+smoothed count histograms, accounts for bin duration, and retains the first
+equal peak. RGB distinguishes black zero response from gray missing occupancy.
+Waveform navigation maintains one active read plus the latest pending unit.
 
 Mean firing rate is the default response display and is computed as pooled raw
 count divided by pooled occupancy seconds. Spatial reduction and smoothing pool

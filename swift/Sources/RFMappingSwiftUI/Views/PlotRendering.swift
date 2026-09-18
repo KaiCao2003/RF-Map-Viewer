@@ -385,3 +385,13 @@ struct PlotTooltip: View {
         return CGPoint(x: x, y: y)
     }
 }
+
+/// A small cross keeps missing occupancy distinct from genuine zero response.
+func drawMissingCellMarker(context: inout GraphicsContext, center: CGPoint) {
+    var marker = Path()
+    marker.move(to: CGPoint(x: center.x - 3, y: center.y - 3))
+    marker.addLine(to: CGPoint(x: center.x + 3, y: center.y + 3))
+    marker.move(to: CGPoint(x: center.x - 3, y: center.y + 3))
+    marker.addLine(to: CGPoint(x: center.x + 3, y: center.y - 3))
+    context.stroke(marker, with: .color(.gray), lineWidth: 1)
+}

@@ -1,5 +1,6 @@
 import Foundation
 import CoreFoundation
+import CryptoKit
 import zlib
 
 /// A read-only NPZ directory. Each request inflates just one NPY entry; no
@@ -13,16 +14,40 @@ struct IndexedRFArchive: Sendable {
         let offset: Int
     }
 
-    private let data: Data
+    private let source: RFArchiveSource
     private let entries: [String: Entry]
+    var byteCount: Int { source.count }
 
     static func isArchive(_ data: Data) -> Bool {
         data.count >= 4 && data.prefix(4) == Data([0x50, 0x4b, 0x03, 0x04])
     }
 
     init(data: Data) throws {
-        self.data = data
-        entries = try Self.readDirectory(data)
+        let source = RFArchiveSource(data: data)
+        self.source = source
+        entries = try Self.readDirectory(source)
+    }
+
+    init(url: URL) throws {
+        let source = try RFArchiveSource(url: url)
+        self.source = source
+        entries = try Self.readDirectory(source)
+        try source.verify()
+    }
+
+    func verifySource() throws {
+        try source.verify()
+    }
+
+    func sourceHash() throws -> String {
+        try source.verify()
+        var digest = SHA256()
+        for offset in stride(from: 0, to: byteCount, by: 1_048_576) {
+            try Task.checkCancellation()
+            digest.update(data: try source.read(offset: offset, count: min(1_048_576, byteCount - offset)))
+        }
+        try source.verify()
+        return digest.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
     /// The existing JSON header decoder remains the single schema authority.
@@ -72,6 +97,7 @@ struct IndexedRFArchive: Sendable {
 
     func counts(unitID: Int, shape: [Int]) throws -> [[[Double]]] {
         try Task.checkCancellation()
+        try source.verify()
         let unit = try array(named: "unit_\(unitID)")
         guard unit.shape == shape else {
             throw invalid("Unit \(unitID) has shape \(unit.shape); expected \(shape).")
@@ -82,28 +108,30 @@ struct IndexedRFArchive: Sendable {
             && $0 == $0.rounded() }) else {
             throw invalid("Unit \(unitID) counts must be non-negative integers representable as uint64.")
         }
-        return (0..<shape[0]).map { y in
+        let counts = (0..<shape[0]).map { y in
             (0..<shape[1]).map { x in
                 let start = (y * shape[1] + x) * shape[2]
                 return Array(values[start..<(start + shape[2])])
             }
         }
+        try source.verify()
+        return counts
     }
 
     private func array(named name: String) throws -> RFNPYArray {
         guard let entry = entries[name] else { throw invalid("Missing NPZ entry \(name).") }
-        let local = entry.offset
-        guard try data.integer(at: local, width: 4) == 0x04034b50,
-              try data.integer(at: local + 8, width: 2) == entry.method,
-              try data.integer(at: local + 6, width: 2) & 1 == 0 else {
+        let local = try source.read(offset: entry.offset, count: 30)
+        guard try local.integer(at: 0, width: 4) == 0x04034b50,
+              try local.integer(at: 8, width: 2) == entry.method,
+              try local.integer(at: 6, width: 2) & 1 == 0 else {
             throw invalid("Invalid or encrypted ZIP header for \(name).")
         }
-        let nameLength = try data.int(at: local + 26, width: 2)
-        let extraLength = try data.int(at: local + 28, width: 2)
-        let start = try checkedSum(local, 30, nameLength, extraLength)
+        let nameLength = try local.int(at: 26, width: 2)
+        let extraLength = try local.int(at: 28, width: 2)
+        let start = try checkedSum(entry.offset, 30, nameLength, extraLength)
         let end = try checkedSum(start, entry.compressedSize)
-        guard end <= data.count else { throw invalid("Truncated ZIP entry \(name).") }
-        let compressed = data.subdata(in: start..<end)
+        guard end <= source.count else { throw invalid("Truncated ZIP entry \(name).") }
+        let compressed = try source.read(offset: start, count: entry.compressedSize)
         let unpacked: Data
         switch entry.method {
         case 0:
@@ -177,47 +205,53 @@ struct IndexedRFArchive: Sendable {
         return output
     }
 
-    private static func readDirectory(_ data: Data) throws -> [String: Entry] {
-        guard data.count >= 22 else { throw invalid("Truncated ZIP archive.") }
+    private static func readDirectory(_ source: RFArchiveSource) throws -> [String: Entry] {
+        guard source.count >= 22 else { throw invalid("Truncated ZIP archive.") }
+        let tailOffset = max(0, source.count - 65_557)
+        let tail = try source.read(offset: tailOffset, count: source.count - tailOffset)
         var end: Int?
-        for offset in stride(from: data.count - 22, through: max(0, data.count - 65_557), by: -1) {
-            if try data.integer(at: offset, width: 4) == 0x06054b50,
-               try checkedSum(offset, 22, data.int(at: offset + 20, width: 2)) == data.count {
+        for offset in stride(from: tail.count - 22, through: 0, by: -1) {
+            if try tail.integer(at: offset, width: 4) == 0x06054b50,
+               try checkedSum(offset, 22, tail.int(at: offset + 20, width: 2)) == tail.count {
                 end = offset
                 break
             }
         }
         guard let end else { throw invalid("ZIP directory was not found.") }
-        guard try data.int(at: end + 4, width: 2) == 0,
-              try data.int(at: end + 6, width: 2) == 0,
-              try data.int(at: end + 8, width: 2) == data.int(at: end + 10, width: 2) else {
+        guard try tail.int(at: end + 4, width: 2) == 0,
+              try tail.int(at: end + 6, width: 2) == 0,
+              try tail.int(at: end + 8, width: 2) == tail.int(at: end + 10, width: 2) else {
             throw invalid("Multi-disk ZIP archives are unsupported.")
         }
-        var count = try data.int(at: end + 10, width: 2)
-        var size = try data.int(at: end + 12, width: 4)
-        var offset = try data.int(at: end + 16, width: 4)
-        if count == 0xffff || size == 0xffffffff || offset == 0xffffffff {
-            guard end >= 20, try data.integer(at: end - 20, width: 4) == 0x07064b50,
-                  try data.integer(at: end - 16, width: 4) == 0,
-                  try data.integer(at: end - 4, width: 4) == 1 else {
+        var count = try tail.int(at: end + 10, width: 2)
+        var size = try tail.int(at: end + 12, width: 4)
+        var directoryOffset = try tail.int(at: end + 16, width: 4)
+        if count == 0xffff || size == 0xffffffff || directoryOffset == 0xffffffff {
+            let locator = try source.read(offset: tailOffset + end - 20, count: 20)
+            guard try locator.integer(at: 0, width: 4) == 0x07064b50,
+                  try locator.integer(at: 4, width: 4) == 0,
+                  try locator.integer(at: 16, width: 4) == 1 else {
                 throw invalid("Missing ZIP64 directory locator.")
             }
-            let zip64 = try data.int(at: end - 12, width: 8)
-            guard try data.integer(at: zip64, width: 4) == 0x06064b50,
-                  try data.integer(at: zip64 + 16, width: 4) == 0,
-                  try data.integer(at: zip64 + 20, width: 4) == 0,
-                  try data.integer(at: zip64 + 24, width: 8)
-                    == data.integer(at: zip64 + 32, width: 8) else {
+            let zip64Offset = try locator.int(at: 8, width: 8)
+            let zip64 = try source.read(offset: zip64Offset, count: 56)
+            guard try zip64.integer(at: 0, width: 4) == 0x06064b50,
+                  try zip64.integer(at: 16, width: 4) == 0,
+                  try zip64.integer(at: 20, width: 4) == 0,
+                  try zip64.integer(at: 24, width: 8)
+                    == zip64.integer(at: 32, width: 8) else {
                 throw invalid("Invalid ZIP64 directory.")
             }
-            count = try data.int(at: zip64 + 32, width: 8)
-            size = try data.int(at: zip64 + 40, width: 8)
-            offset = try data.int(at: zip64 + 48, width: 8)
+            count = try zip64.int(at: 32, width: 8)
+            size = try zip64.int(at: 40, width: 8)
+            directoryOffset = try zip64.int(at: 48, width: 8)
         }
-        let directoryEnd = try checkedSum(offset, size)
-        guard directoryEnd <= end, count <= size / 46 else {
+        guard try checkedSum(directoryOffset, size) <= tailOffset + end, count <= size / 46 else {
             throw invalid("Invalid ZIP directory bounds.")
         }
+        let data = try source.read(offset: directoryOffset, count: size)
+        let directoryEnd = data.count
+        var offset = 0
         var result: [String: Entry] = [:]
         for _ in 0..<count {
             try Task.checkCancellation()
@@ -266,7 +300,7 @@ struct IndexedRFArchive: Sendable {
                 }
                 guard found else { throw invalid("Missing ZIP64 entry sizes.") }
             }
-            guard disk == 0, local < offset else { throw invalid("Invalid ZIP entry location.") }
+            guard disk == 0, local < directoryOffset else { throw invalid("Invalid ZIP entry location.") }
             let key = name.hasSuffix(".npy") ? String(name.dropLast(4)) : name
             guard result[key] == nil else { throw invalid("Duplicate NPZ entry \(key).") }
             result[key] = Entry(
@@ -279,6 +313,82 @@ struct IndexedRFArchive: Sendable {
             offset = next
         }
         guard offset == directoryEnd else { throw invalid("Unexpected data in ZIP directory.") }
+        return result
+    }
+}
+
+/// URL-backed archives retain a file identity, not a whole-file memory map.
+/// Small directory/member reads keep first-unit startup independent of the
+/// total archive size and detect replacement before publishing later units.
+private struct RFArchiveSource: Sendable {
+    private struct Identity: Equatable, Sendable {
+        let size: Int
+        let modified: Date
+        let inode: UInt64
+        let device: UInt64
+
+        init(url: URL) throws {
+            let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+            guard let size = (attributes[.size] as? NSNumber)?.intValue,
+                  let modified = attributes[.modificationDate] as? Date,
+                  let inode = (attributes[.systemFileNumber] as? NSNumber)?.uint64Value,
+                  let device = (attributes[.systemNumber] as? NSNumber)?.uint64Value else {
+                throw invalid("Could not capture source file identity.")
+            }
+            self.size = size
+            self.modified = modified
+            self.inode = inode
+            self.device = device
+        }
+    }
+
+    private let data: Data?
+    private let url: URL?
+    private let identity: Identity?
+    let count: Int
+
+    init(data: Data) {
+        self.data = data
+        url = nil
+        identity = nil
+        count = data.count
+    }
+
+    init(url: URL) throws {
+        let identity = try Identity(url: url)
+        data = nil
+        self.url = url
+        self.identity = identity
+        count = identity.size
+    }
+
+    func verify() throws {
+        guard let url, let identity else { return }
+        guard (try? Identity(url: url)) == identity else {
+            throw invalid("Source file changed after opening. Reopen the RF map to load more units or export.")
+        }
+    }
+
+    func read(offset: Int, count length: Int) throws -> Data {
+        guard offset >= 0, length >= 0, offset <= count, length <= count - offset else {
+            throw invalid("Truncated archive data.")
+        }
+        try Task.checkCancellation()
+        if let data { return data.subdata(in: offset..<(offset + length)) }
+        guard let url else { throw invalid("Missing archive source.") }
+        try verify()
+        let file = try FileHandle(forReadingFrom: url)
+        defer { try? file.close() }
+        try file.seek(toOffset: UInt64(offset))
+        var result = Data()
+        result.reserveCapacity(length)
+        while result.count < length {
+            try Task.checkCancellation()
+            let block = try file.read(upToCount: min(1_048_576, length - result.count)) ?? Data()
+            guard !block.isEmpty else { throw invalid("Truncated archive data.") }
+            result.append(block)
+        }
+        try verify()
         return result
     }
 }

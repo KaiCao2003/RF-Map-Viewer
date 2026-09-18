@@ -106,6 +106,9 @@ private func drawRGB(
                 height: layout.cellHeight
             )
             context.fill(Path(rect), with: .color(fill))
+            if rgb.total[displayY][groupIndex] == nil {
+                drawMissingCellMarker(context: &context, center: CGPoint(x: rect.midX, y: rect.midY))
+            }
         }
     }
 
@@ -171,6 +174,14 @@ private func drawPolarRGB(
                 thetaEnd: thetaEdges[col + 1]
             )
             context.fill(path, with: .color(rgbCellColor(rgb: rgb, displayY: displayRow, displayX: col)))
+            if rgb.total[displayRow][col] == nil {
+                let angle = (thetaEdges[col] + thetaEdges[col + 1]) / 2
+                let radius = (rInner + rOuter) / 2 * layout.scale
+                drawMissingCellMarker(context: &context, center: CGPoint(
+                    x: layout.center.x + radius * CGFloat(cos(angle)),
+                    y: layout.center.y - radius * CGFloat(sin(angle))
+                ))
+            }
         }
     }
 

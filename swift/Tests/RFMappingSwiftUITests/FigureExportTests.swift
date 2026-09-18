@@ -1157,7 +1157,7 @@ final class FigureExportTests: XCTestCase {
         XCTAssertEqual(provenance["provenanceVersion"] as? Int, 1)
         let application = try XCTUnwrap(provenance["application"] as? [String: Any])
         XCTAssertEqual(application["name"] as? String, "RF Map Viewer")
-        XCTAssertEqual(application["version"] as? String, "1.9.6")
+        XCTAssertEqual(application["version"] as? String, "1.10.0")
         XCTAssertEqual(application["edition"] as? String, "SwiftUI")
         let source = try XCTUnwrap(provenance["source"] as? [String: Any])
         XCTAssertEqual(source["path"] as? String, data.url.path)

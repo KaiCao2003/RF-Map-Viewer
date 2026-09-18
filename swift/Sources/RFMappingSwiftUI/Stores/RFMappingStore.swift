@@ -18,6 +18,9 @@ enum RFUnitUnavailableReason: Equatable, Sendable {
 
 @Observable
 final class RFMappingStore {
+    private static let filterPreferenceChanged = Notification.Name("rfmapping.filterPreferenceChanged")
+    @ObservationIgnored private var filterPreferenceObserver: NSObjectProtocol?
+
     private enum PreferenceKey {
         static let timingDefaults = "rfmapping.timingDefaults"
         static let tuningSession = "rfmapping.tuningSession"
@@ -306,6 +309,12 @@ final class RFMappingStore {
                 min(100_000, storedThreshold == 0 ? 1 : storedThreshold)
             )
         }
+        filterPreferenceObserver = NotificationCenter.default.addObserver(
+            forName: Self.filterPreferenceChanged, object: preferences, queue: .main
+        ) { [weak self] notification in
+            guard let enabled = notification.userInfo?["enabled"] as? Bool else { return }
+            self?.applyRFUnitQualityFilterEnabled(enabled)
+        }
         isAwaitingStartupDocument = initialURL == nil && initialData == nil && !loadDefault
         if discoverJSONChoices { refreshJSONChoices() }
         if let initialData {
@@ -315,6 +324,13 @@ final class RFMappingStore {
         } else if loadDefault {
             loadLatestJSON()
         }
+    }
+
+    deinit {
+        if let observer = filterPreferenceObserver { NotificationCenter.default.removeObserver(observer) }
+        activeDecodeTask?.cancel()
+        unitCacheTask?.cancel()
+        waveformTask?.cancel()
     }
 
     func loadLatestJSON() {
@@ -923,6 +939,13 @@ final class RFMappingStore {
     }
 
     func setRFUnitQualityFilterEnabled(_ enabled: Bool) {
+        applyRFUnitQualityFilterEnabled(enabled)
+        NotificationCenter.default.post(
+            name: Self.filterPreferenceChanged, object: preferences, userInfo: ["enabled": enabled]
+        )
+    }
+
+    private func applyRFUnitQualityFilterEnabled(_ enabled: Bool) {
         guard enabled != rfFilterUnitsWithZeroBins else { return }
         let previous = qualityFilteredUnitIDs
         rfFilterUnitsWithZeroBins = enabled
@@ -2189,12 +2212,11 @@ final class RFMappingStore {
         let groupNote = grouped ? "avg over source pixels\n" : ""
         let peakText = analysis.peakBin.map { "\($0 + 1) (\(timeGroupLabel($0)))" } ?? "n/a"
         let delayText = analysis.delayMS.map { String(format: "%.1f ms", $0) } ?? "n/a"
-        let plotBounds = plotTimeBoundsMS()
         return """
         cluster \(data.clusterID(for: unitIndex))
         \(yGroupText(cell.yStart, cell.yEnd)), \(xGroupText(cell.xStart, cell.xEnd))
         \(groupNote)bin \(valueMode.format(displayValues[bin])) \(valueMode.unit) (\(timeGroupLabel(bin)))
-        RF sum range \(formatMS(plotBounds.0))–\(formatMS(plotBounds.1)) ms: \(valueMode.format(analysis.selectedValue)) \(valueMode.unit)
+        \(currentMatrixLabel()): \(valueMode.format(analysis.selectedValue)) \(valueMode.unit)
         full window \(valueMode.format(analysis.totalValue)) \(valueMode.unit)
         peak \(valueMode.format(analysis.peakValue)) \(valueMode.unit)
         peak bin \(peakText)
@@ -2208,12 +2230,11 @@ final class RFMappingStore {
         let values = analysis.displayValues
         guard !values.isEmpty else { return "" }
         let bin = max(0, min(values.count - 1, displayBin ?? binIndex))
-        let plotBounds = plotTimeBoundsMS()
         return [
             yGroupText(cell.yStart, cell.yEnd),
             xGroupText(cell.xStart, cell.xEnd),
             "bin \(bin + 1): \(valueMode.format(values[bin])) \(valueMode.unit)",
-            "RF sum range \(formatMS(plotBounds.0))–\(formatMS(plotBounds.1)) ms: \(valueMode.format(analysis.selectedValue)) \(valueMode.unit)",
+            "\(currentMatrixLabel()): \(valueMode.format(analysis.selectedValue)) \(valueMode.unit)",
             "full window: \(valueMode.format(analysis.totalValue)) \(valueMode.unit)",
             analysis.delayMS.map { String(format: "delay %.1f ms", $0) } ?? "delay n/a"
         ].joined(separator: "\n")

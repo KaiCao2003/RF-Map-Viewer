@@ -293,7 +293,7 @@ final class RFMappingData: @unchecked Sendable {
     /// SHA-256 and byte count of the exact JSON or NPZ bytes in this model.
     /// Figure exports use these values instead of re-reading a path that may
     /// have changed after the viewer loaded it.
-    let sourceSHA256: String
+    private(set) var sourceSHA256: String
     let sourceByteCount: Int
 
     private var metricsCache: [Int: UnitMetrics] = [:]
@@ -302,7 +302,20 @@ final class RFMappingData: @unchecked Sendable {
     private var spatialExposureCaches: [SpatialExposureCache] = []
 
     convenience init(url: URL) throws {
-        try self.init(data: Data(contentsOf: url, options: .mappedIfSafe), url: url)
+        let file = try FileHandle(forReadingFrom: url)
+        let magic: Data
+        do {
+            magic = try file.read(upToCount: 4) ?? Data()
+            try file.close()
+        } catch {
+            try? file.close()
+            throw error
+        }
+        if IndexedRFArchive.isArchive(magic) {
+            try self.init(jsonData: Data(), archive: IndexedRFArchive(url: url), url: url)
+        } else {
+            try self.init(data: Data(contentsOf: url, options: .mappedIfSafe), url: url)
+        }
     }
 
     static func makeDecodeTask(url: URL) -> Task<RFMappingData, Error> {
@@ -327,19 +340,27 @@ final class RFMappingData: @unchecked Sendable {
         }
     }
 
-    init(data jsonData: Data, url: URL) throws {
-        self.url = url.standardizedFileURL
-        var digest = SHA256()
-        for offset in stride(from: 0, to: jsonData.count, by: 1_048_576) {
-            try Task.checkCancellation()
-            digest.update(data: jsonData[offset..<min(jsonData.count, offset + 1_048_576)])
-        }
-        sourceSHA256 = digest.finalize().map {
-            String(format: "%02x", $0)
-        }.joined()
-        sourceByteCount = jsonData.count
+    convenience init(data jsonData: Data, url: URL) throws {
         let archive = try IndexedRFArchive.isArchive(jsonData)
             ? IndexedRFArchive(data: jsonData) : nil
+        try self.init(jsonData: jsonData, archive: archive, url: url)
+    }
+
+    private init(jsonData: Data, archive: IndexedRFArchive?, url: URL) throws {
+        self.url = url.standardizedFileURL
+        if archive == nil {
+            var digest = SHA256()
+            for offset in stride(from: 0, to: jsonData.count, by: 1_048_576) {
+                try Task.checkCancellation()
+                digest.update(data: jsonData[offset..<min(jsonData.count, offset + 1_048_576)])
+            }
+            sourceSHA256 = digest.finalize().map { String(format: "%02x", $0) }.joined()
+        } else {
+            // Indexed startup touches only the directory, header, and first
+            // unit. Export explicitly freezes a digest before provenance.
+            sourceSHA256 = ""
+        }
+        sourceByteCount = archive?.byteCount ?? jsonData.count
         indexedArchive = archive
         let payload: RFMappingPayload
         do {
@@ -423,6 +444,7 @@ final class RFMappingData: @unchecked Sendable {
         metadata = sourceMetadata
 
         try validate(occupancyTimeSecSize: payload.occupancyTimeSecSize)
+        try archive?.verifySource()
     }
 
     func displayYIndices(flipY: Bool) -> [Int] {
@@ -439,6 +461,15 @@ final class RFMappingData: @unchecked Sendable {
 
     func isUnitCached(_ index: Int) -> Bool {
         loadedUnitIndices.contains(index)
+    }
+
+    /// Freeze source provenance only when needed for an export. Cached RF
+    /// units remain usable if the source changes, but a changed source cannot
+    /// produce a new export claiming the original file identity.
+    func prepareSourceHash() throws {
+        guard let archive = indexedArchive else { return }
+        try archive.verifySource()
+        if sourceSHA256.isEmpty { sourceSHA256 = try archive.sourceHash() }
     }
 
     /// Read on a worker, then let the store publish this value on the main

@@ -698,8 +698,8 @@ private struct WindowShortcutMonitor: NSViewRepresentable {
             }
 
             if modifiers == [.shift] {
-                if character == "," { actions.decreaseResolution(); return true }
-                if character == "." { actions.increaseResolution(); return true }
+                if character == "," || character == "<" { actions.decreaseResolution(); return true }
+                if character == "." || character == ">" { actions.increaseResolution(); return true }
                 if character == "p" { actions.cyclePalette(); return true }
                 if event.characters == "?" { showKeyboardShortcuts(); return true }
             }
