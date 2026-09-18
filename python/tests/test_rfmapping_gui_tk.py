@@ -1283,13 +1283,22 @@ class TkViewerTests(unittest.TestCase):
         entry.focus_force()
         self.app.update()
         self.assertIs(self.app.focus_get(), entry)
+        import traceback
+        typing_events = []
+        entry.bind("<KeyPress>", lambda event: typing_events.append(
+            ("key", event.keysym, event.char, event.state, str(self.app.focus_get()))
+        ), add="+")
+        self.app.range_start_ms_var.trace_add("write", lambda *_: typing_events.append(
+            ("value", self.app.range_start_ms_var.get(),
+             [frame.name for frame in traceback.extract_stack(limit=12)])
+        ))
         entry.delete(0, "end")
         for key in ("minus", "1", "0"):
             entry.event_generate(f"<KeyPress-{key}>")
         entry.icursor("end")
         entry.event_generate("<KeyPress-Left>")
         self.app.update()
-        self.assertEqual(entry.get(), "-10")
+        self.assertEqual(entry.get(), "-10", repr(typing_events))
         self.assertEqual(entry.index("insert"), 2)
         self.assertEqual(self.app.unit_idx.get(), 0)
         self.assertFalse(self.app.rf_subtract_var.get())
