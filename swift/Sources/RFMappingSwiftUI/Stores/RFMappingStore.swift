@@ -634,11 +634,8 @@ final class RFMappingStore {
         if data == nil { isAwaitingStartupDocument = true }
 
         activeDecodeTask?.cancel()
-        unitCacheTask?.cancel()
-        unitCacheTask = nil
-        unitCacheRequestID = nil
-        priorityUnitIndex = nil
-        isCachingUnits = false
+        // Keep the current document caching if its replacement fails.
+        // A successful adoption cancels that worker before installing new data.
         let accessing = url.startAccessingSecurityScopedResource()
         let decodeTask = RFMappingData.makeDecodeTask(url: url)
         activeDecodeTask = decodeTask
@@ -1896,25 +1893,40 @@ final class RFMappingStore {
         for y in ys.indices {
             for x in xs.indices {
                 let histogram = native.map { $0[y][x] ?? 0 }
-                let total = compensatedSum(histogram)
-                guard total > 0 else { continue }
-                let grouped = grouping.groups.map {
-                    compensatedSum(histogram[$0.start...$0.end])
-                        / (data.timeBinEdges[$0.end + 1] - data.timeBinEdges[$0.start])
+                let metrics = temporalMetrics(histogram: histogram, groups: grouping.groups)
+                if metrics.total > floor, let peak = metrics.peakBin {
+                    delay[y][x] = grouping.centers[peak]
                 }
-                var peak = 0
-                for bin in grouped.indices.dropFirst() where grouped[bin] > grouped[peak] { peak = bin }
-                if total > floor { delay[y][x] = grouping.centers[peak] }
-                // Entropy retains the full source time axis, independent of display grouping.
-                if histogram.count > 1 {
-                    entropy[y][x] = -compensatedSum(histogram.filter { $0 > 0 }.map {
-                        let probability = $0 / total
-                        return probability * log(probability)
-                    }) / log(Double(histogram.count))
-                }
+                entropy[y][x] = metrics.entropy
             }
         }
         return (delay, entropy)
+    }
+
+    /// Compare count rates for unequal intervals, while entropy always uses
+    /// the full native histogram. Equal rates retain the first interval.
+    private func temporalMetrics(
+        histogram: [Double],
+        groups: [AxisGroup]
+    ) -> (total: Double, peakBin: Int?, entropy: Double) {
+        let total = compensatedSum(histogram)
+        guard let data, total > 0, !groups.isEmpty else { return (total, nil, 0) }
+        let rates = groups.map {
+            compensatedSum(histogram[$0.start...$0.end])
+                / (data.timeBinEdges[$0.end + 1] - data.timeBinEdges[$0.start])
+        }
+        var peak = 0
+        for bin in rates.indices.dropFirst() where rates[bin] > rates[peak] { peak = bin }
+        let entropy: Double
+        if histogram.count > 1 {
+            entropy = -compensatedSum(histogram.filter { $0 > 0 }.map {
+                let probability = $0 / total
+                return probability * log(probability)
+            }) / log(Double(histogram.count))
+        } else {
+            entropy = 0
+        }
+        return (total, peak, entropy)
     }
 
     private func emptyHeatmapPlot() -> HeatmapPlot {
@@ -2292,55 +2304,10 @@ final class RFMappingStore {
 
         let displayValues = groupResponseValues(cell)
         let groups = timeGrouping().groups
-        let pixelCount = Double(max(1, (cell.yEnd - cell.yStart + 1) * (cell.xEnd - cell.xStart + 1)))
-        let countHist: [Double]
-        if valueMode == .spikeCount {
-            countHist = displayValues.map { $0 ?? 0.0 }
-        } else {
-            var values: [Double] = []
-            values.reserveCapacity(groups.count)
-            for group in groups {
-                var counts: [Double] = []
-                counts.reserveCapacity(Int(pixelCount))
-                for yIndex in cell.yStart...cell.yEnd {
-                    for xIndex in cell.xStart...cell.xEnd {
-                        counts.append(data.rangeCount(
-                            unitIndex: unitIndex,
-                            yIndex: yIndex,
-                            xIndex: xIndex,
-                            start: group.start,
-                            end: group.end
-                        ))
-                    }
-                }
-                values.append(compensatedSum(counts) / pixelCount)
-            }
-            countHist = values
-        }
-
-        var peakBin: Int?
-        var peakValue: Double?
-        for (index, value) in displayValues.enumerated() {
-            guard let value, value.isFinite else { continue }
-            if peakValue == nil || value > (peakValue ?? -.infinity) {
-                peakBin = index
-                peakValue = value
-            }
-        }
-        if (peakValue ?? 0) <= 0 {
-            peakBin = nil
-            peakValue = nil
-        }
-
-        let countTotal = compensatedSum(countHist)
-        var entropy = 0.0
-        if countTotal > 0 {
-            for count in countHist where count > 0 {
-                let probability = count / countTotal
-                entropy -= probability * log(probability)
-            }
-            if countHist.count > 1 { entropy /= log(Double(countHist.count)) }
-        }
+        let countHist = groupHist(cell)
+        let temporal = temporalMetrics(histogram: countHist, groups: groups)
+        let peakBin = temporal.peakBin
+        let peakValue = peakBin.flatMap { displayValues[$0] }
 
         var selectedValue = groupResponseValue(cell, sourceStart: selected.start, sourceEnd: selected.end)
         if rfSubtractEnabled {
@@ -2365,7 +2332,7 @@ final class RFMappingStore {
             peakBin: peakBin,
             peakValue: peakValue,
             delayMS: peakBin.map { timeGrouping().centers[$0] },
-            entropy: entropy
+            entropy: temporal.entropy
         )
         cellAnalysisCaches.insert((key, analysis), at: 0)
         if cellAnalysisCaches.count > 12 { cellAnalysisCaches.removeLast() }

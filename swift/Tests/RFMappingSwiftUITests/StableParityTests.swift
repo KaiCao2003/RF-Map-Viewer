@@ -117,6 +117,48 @@ final class StableParityTests: XCTestCase {
         XCTAssertEqual(irregular.delayHeatmapPlot(floor: 0).matrix, [[5]])
     }
 
+    func testInspectorUsesCountRatePeakAndNativeEntropyInBothValueModes() throws {
+        let viewer = store(try data([[5, 5, 8]], edges: [0, 0.01, 0.02, 0.03], occupancy: [2]))
+        let cell = CellRef(yStart: 0, yEnd: 0, xStart: 0, xEnd: 0)
+        for mode in ResponseValueMode.allCases {
+            viewer.setValueMode(mode)
+            viewer.timeResolutionMS = 10
+            viewer.normalizeControls()
+            XCTAssertTrue(viewer.cellMetricsText(cell).contains("count entropy 0.976"))
+
+            viewer.timeResolutionMS = 20
+            viewer.normalizeControls()
+            // The last interval has fewer counts (8 versus 10), but the
+            // higher rate (800 versus 500 counts/s) because it is half as long.
+            let inspector = viewer.cellMetricsText(cell)
+            XCTAssertTrue(inspector.contains("peak bin 2 ("), inspector)
+            XCTAssertTrue(inspector.contains("delay 25.0 ms, count entropy 0.976"), inspector)
+            let peakValue = mode == .spikeCount ? 8.0 : 4.0
+            XCTAssertTrue(inspector.contains("peak \(mode.format(peakValue)) \(mode.unit)\n"), inspector)
+            XCTAssertTrue(viewer.tooltipText(cell).contains("delay 25.0 ms"))
+            XCTAssertEqual(viewer.delayHeatmapPlot(floor: 0).matrix, [[25]])
+            XCTAssertEqual(try XCTUnwrap(viewer.cachedRGBPlot().entropy[0][0]),
+                           0.9758159039662212, accuracy: 1e-12)
+        }
+    }
+
+    func testInspectorNormalizesIrregularNativeBinsAndKeepsSilentCellsMissing() throws {
+        let viewer = store(try data([[5, 8], [0, 0]], edges: [0, 0.01, 0.03]))
+        let active = CellRef(yStart: 0, yEnd: 0, xStart: 0, xEnd: 0)
+        let silent = CellRef(yStart: 0, yEnd: 0, xStart: 1, xEnd: 1)
+        for mode in ResponseValueMode.allCases {
+            viewer.setValueMode(mode)
+            let inspector = viewer.cellMetricsText(active)
+            XCTAssertTrue(inspector.contains("peak bin 1 ("), inspector)
+            XCTAssertTrue(inspector.contains("delay 5.0 ms"), inspector)
+            XCTAssertTrue(viewer.tooltipText(active).contains("delay 5.0 ms"))
+            XCTAssertEqual(viewer.delayHeatmapPlot(floor: 0).matrix, [[5, nil]])
+            let silentInspector = viewer.cellMetricsText(silent)
+            XCTAssertTrue(silentInspector.contains("peak bin n/a"), silentInspector)
+            XCTAssertTrue(silentInspector.contains("delay n/a, count entropy 0.000"), silentInspector)
+        }
+    }
+
     func testMissingExposureContributesZeroToSmoothedTemporalCounts() throws {
         let viewer = store(try data([[0, 0], [9, 0], [0, 9]], edges: [0, 0.01, 0.02], occupancy: [0, 1, 1]))
         viewer.smoothRadius = 1
@@ -195,6 +237,35 @@ final class StableParityTests: XCTestCase {
         first.setRFUnitQualityFilterEnabled(false)
         XCTAssertFalse(second.rfFilterUnitsWithZeroBins)
         XCTAssertEqual(second.viewerSyncState, before)
+    }
+
+    func testFailedReplacementKeepsCachingCurrentIndexedDocument() async throws {
+        let fixture = try XCTUnwrap(Bundle.module.url(
+            forResource: "indexed-v2-numpy", withExtension: "base64", subdirectory: "Fixtures"
+        ))
+        let encoded = try String(contentsOf: fixture, encoding: .utf8)
+        let bytes = try XCTUnwrap(Data(base64Encoded: encoded, options: .ignoreUnknownCharacters))
+        let source = try RFMappingData(data: bytes, url: URL(fileURLWithPath: "/tmp/retained-indexed.rfmap"))
+        let viewer = store(source)
+        defer { viewer.cancelPendingLoads() }
+        XCTAssertEqual(viewer.cachedUnitCount, 1)
+        XCTAssertTrue(viewer.isCachingUnits)
+
+        let missing = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString + ".rfmap")
+        let replaced = await viewer.loadJSONAsync(missing)
+        XCTAssertFalse(replaced)
+        XCTAssertTrue(viewer.data === source)
+        XCTAssertNotNil(viewer.errorMessage)
+        let deadline = Date().addingTimeInterval(5)
+        while !viewer.isUnitCacheComplete && viewer.unitCacheError == nil && Date() < deadline {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertNil(viewer.unitCacheError)
+        XCTAssertTrue(viewer.isUnitCacheComplete)
+        XCTAssertEqual(viewer.cachedUnitCount, 3)
+        let request = try XCTUnwrap(FigureExportWindowRegistry.shared.prepare(from: viewer))
+        FigureExportWindowRegistry.shared.release(request)
     }
 
 }
