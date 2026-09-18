@@ -4352,3 +4352,154 @@ def test_invalid_zip_signature_returns_validation_error(app, settings):
         result = client.post("/api/datasets/open", json={"path": str(source)})
         assert result.status_code == 422
         assert "Invalid indexed" in result.json()["detail"]
+
+
+@pytest.mark.parametrize("phase", ["before_registration", "after_registration"])
+def test_cancelled_indexed_open_disposes_worker_result(app, settings, monkeypatch, phase):
+    import asyncio
+    import threading
+
+    import httpx
+    from rfmapping_web.indexed import IndexedUnits
+
+    source = write_indexed(settings.rf_root / "cancel-open.rfmap")
+    entered = threading.Event()
+    release = threading.Event()
+    closed = threading.Event()
+    archives = []
+    store = app.state.services.datasets
+    original_close = store.close
+
+    def close(dataset_id):
+        original_close(dataset_id)
+        closed.set()
+
+    monkeypatch.setattr(store, "close", close)
+    if phase == "before_registration":
+        original_read = IndexedUnits._read
+
+        def paused_read(self, unit_id):
+            if unit_id == 11:
+                archives.append(self)
+                entered.set()
+                assert release.wait(5)
+            return original_read(self, unit_id)
+
+        monkeypatch.setattr(IndexedUnits, "_read", paused_read)
+    else:
+        original_metadata = store.response_metadata
+
+        def paused_metadata(record):
+            archives.append(record.indexed)
+            entered.set()
+            assert release.wait(5)
+            return original_metadata(record)
+
+        monkeypatch.setattr(store, "response_metadata", paused_metadata)
+
+    async def cancel_open():
+        token, csrf = app.state.access_gate.issue_session()
+        transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 50000))
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+            headers={
+                "Cookie": f"rfmapping_session={token}",
+                "X-CSRF-Token": csrf,
+                "Sec-Fetch-Site": "same-origin",
+            },
+        ) as client:
+            pending = asyncio.create_task(
+                client.post("/api/datasets/open", json={"path": str(source)})
+            )
+            try:
+                assert await asyncio.to_thread(entered.wait, 5)
+                assert bool(store._records) == (phase == "after_registration")
+                pending.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await pending
+            finally:
+                release.set()
+            assert await asyncio.to_thread(closed.wait, 5)
+
+    asyncio.run(cancel_open())
+    assert not store._records
+    assert not store._unclaimed
+    assert archives[0]._cancelled
+
+
+def test_disconnected_indexed_open_disposes_record(app, settings, monkeypatch):
+    from starlette.requests import Request
+
+    async def disconnected(_request):
+        return True
+
+    monkeypatch.setattr(Request, "is_disconnected", disconnected)
+    source = write_indexed(settings.rf_root / "disconnect.rfmap")
+    with authenticated_client(app) as client:
+        response = client.post("/api/datasets/open", json={"path": str(source)})
+    assert response.status_code == 499
+    assert not app.state.services.datasets._records
+    assert not app.state.services.datasets._unclaimed
+
+
+def test_failed_open_metadata_disposes_indexed_record(app, settings, monkeypatch):
+    source = write_indexed(settings.rf_root / "metadata-error.rfmap")
+    store = app.state.services.datasets
+    archives = []
+
+    def failed_metadata(record):
+        archives.append(record.indexed)
+        raise RuntimeError("metadata failure")
+
+    monkeypatch.setattr(store, "response_metadata", failed_metadata)
+    with authenticated_client(app) as client:
+        with pytest.raises(RuntimeError, match="metadata failure"):
+            client.post("/api/datasets/open", json={"path": str(source)})
+    assert not store._records
+    assert not store._unclaimed
+    assert archives[0]._cancelled
+
+
+def test_unclaimed_indexed_open_expires_but_first_use_keeps_it_alive(app, settings, monkeypatch):
+    timers = []
+
+    class PendingTimer:
+        def __init__(self, interval, function, args):
+            self.interval = interval
+            self.function = function
+            self.args = args
+            self.cancelled = False
+            timers.append(self)
+
+        def start(self):
+            pass
+
+        def cancel(self):
+            self.cancelled = True
+
+        def fire(self):
+            self.function(*self.args)
+
+    monkeypatch.setattr(datasets_module.threading, "Timer", PendingTimer)
+    source = write_indexed(settings.rf_root / "unclaimed.rfmap")
+    store = app.state.services.datasets
+    with authenticated_client(app) as client:
+        abandoned = _open(client, source)
+        record = store._records[abandoned["id"]]
+        assert timers[-1].interval == 60
+        timers[-1].fire()
+        assert abandoned["id"] not in store._records
+        assert record.indexed._cancelled
+
+        active = _open(client, source)
+        timer = timers[-1]
+        response = client.get(f"/api/datasets/{active['id']}/units/11")
+        assert response.status_code == 200
+        assert timer.cancelled
+        timer.fire()
+        assert active["id"] in store._records
+        assert client.get(f"/api/datasets/{active['id']}/cache").status_code == 200
+        client.delete(f"/api/datasets/{active['id']}")
+    assert not store._records
+    assert not store._unclaimed

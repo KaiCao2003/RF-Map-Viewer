@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ApiError,
   getCacheProgress,
+  getServerPaths,
   retryCache,
   closeDataset,
   exportDisplayedCsv,
@@ -24,6 +25,7 @@ import WaveformPanel from "./components/WaveformPanel";
 import {
   jsonChoiceLabel,
   mergeJsonChoices,
+  parentDirectory,
   type JsonChoice,
   urlForJsonSource,
 } from "./jsonChoices";
@@ -53,10 +55,12 @@ import { VIEWER_TABS } from "./viewTabs";
 import { usePairedWindows } from "./pairedWindows";
 import { RF_TIMING_KEY, readRfTiming, resetRfTiming, timingPatch, timingFromState, toggleRfMode } from "./rfTiming";
 import { LatestRequest, LatestSerialRead, UnitCountsCache } from "./requestLifecycle";
+import { startCacheProgressPolling } from "./cacheProgress";
 import {
   navigationUnitIds,
   orderedQualityVisibleUnitIds,
   reconciledClusterId,
+  retainUnitIds,
   userEnteredZeroSpikeSpatialBinThreshold,
 } from "./unitFilter";
 import type {
@@ -205,12 +209,6 @@ function loadRecentJsonPaths(): string[] {
   }
 }
 
-function parentDirectory(path: string): string {
-  const trimmed = path.replace(/\/+$/, "");
-  const parent = trimmed.replace(/\/[^/]+$/, "");
-  return parent.startsWith("/data/rfmapping") ? parent : "/data/rfmapping";
-}
-
 function SourceChooser({
   overlay,
   busy,
@@ -258,6 +256,8 @@ export default function App() {
   const [viewState, setViewState] = useState<ViewState | null>(null);
   const [counts, setCounts] = useState<Float64Array | null>(null);
   const [cacheProgress, setCacheProgress] = useState<CacheProgress | null>(null);
+  const [cacheProgressError, setCacheProgressError] = useState("");
+  const [serverPaths, setServerPaths] = useState<Awaited<ReturnType<typeof getServerPaths>> | null>(null);
   const [displayOptions, setDisplayOptions] = useState(true);
   const waveformReads = useRef(new LatestSerialRead());
   const unitFilterSignature = useRef("");
@@ -266,6 +266,8 @@ export default function App() {
   const probeRequest = useRef(new LatestRequest());
   const lastLocalCluster = useRef<number | null>(null);
   const [unitStatus, setUnitStatus] = useState<"loading" | "ready" | "unavailable" | "error">("loading");
+  const [unitRequestRetry, setUnitRequestRetry] = useState(0);
+  const lastCountRetryProgress = useRef("");
   const [unitFilterEnabled, setUnitFilterEnabled] = useState(
     () => loadUnitFilterPreferences().enabled,
   );
@@ -333,6 +335,7 @@ export default function App() {
     setCounts(null);
     setMeta(next);
     setCacheProgress(next.cacheProgress ?? null);
+    setCacheProgressError("");
     setJsonChoices([{ path: next.sourcePath, mtime: null }]);
     lastLocalCluster.current = next.unitPool[0];
     setViewState((current) => {
@@ -414,21 +417,23 @@ export default function App() {
 
   useEffect(() => {
     if (!meta || !cacheProgress?.indexed || cacheProgress.complete) return;
-    const controller = new AbortController();
-    let timer: number;
-    const poll = async () => {
-      try {
-        const progress = await getCacheProgress(meta.id, controller.signal);
-        if (controller.signal.aborted) return;
+    return startCacheProgressPolling(
+      (signal) => getCacheProgress(meta.id, signal),
+      (progress) => {
         setCacheProgress(progress);
-        if (!progress.complete) timer = window.setTimeout(poll, 500);
-      } catch (caught) {
-        if (!controller.signal.aborted) setError(caught instanceof Error ? caught.message : "Could not read cache progress.");
-      }
-    };
-    timer = window.setTimeout(poll, 200);
-    return () => { controller.abort(); window.clearTimeout(timer); };
+        setCacheProgressError("");
+      },
+      (caught) => setCacheProgressError(caught instanceof Error ? caught.message : "Could not read cache progress."),
+    );
   }, [meta, cacheProgress?.indexed, cacheProgress?.complete]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void getServerPaths(controller.signal).then((paths) => {
+      if (!controller.signal.aborted) setServerPaths(paths);
+    }).catch(() => undefined);
+    return () => controller.abort();
+  }, []);
 
   useEffect(() => {
     document.title = meta ? `${meta.name} — RF Map Viewer` : "RF Map Viewer";
@@ -504,7 +509,7 @@ export default function App() {
       setUnitFilterStatus("loading");
     }
     if (!unitFilterEnabled) {
-      setQualityVisibleUnitIds([...meta.unitPool]);
+      setQualityVisibleUnitIds((current) => retainUnitIds(current, [...meta.unitPool]));
       setUnitFilterStatus("ready");
       setUnitFilterError("");
       return;
@@ -527,11 +532,11 @@ export default function App() {
       )
         .then((result) => {
           if (controller.signal.aborted) return;
-          setQualityVisibleUnitIds(orderedQualityVisibleUnitIds(
+          setQualityVisibleUnitIds((current) => retainUnitIds(current, orderedQualityVisibleUnitIds(
             meta.unitPool,
             result.visibleUnitIds,
             true,
-          ));
+          )));
           setUnitFilterStatus("ready");
         })
         .catch((caught) => {
@@ -556,6 +561,17 @@ export default function App() {
     cacheProgress?.cachedUnits,
   ]);
 
+  const selectedUnitVisible = viewState != null && qualityVisibleUnitIds.includes(viewState.clusterId);
+
+  useEffect(() => {
+    const progressKey = `${meta?.id}:${cacheProgress?.cachedUnits}:${cacheProgress?.complete}`;
+    const advanced = lastCountRetryProgress.current !== progressKey;
+    lastCountRetryProgress.current = progressKey;
+    // Retry an earlier failure once new cache data is available. A loading
+    // request is left intact, and failure alone never starts a retry loop.
+    if (advanced && unitStatus === "error") setUnitRequestRetry((revision) => revision + 1);
+  }, [meta?.id, cacheProgress?.cachedUnits, cacheProgress?.complete, unitStatus]);
+
   useEffect(() => {
     if (!meta || !viewState) return;
     const controller = new AbortController();
@@ -569,7 +585,7 @@ export default function App() {
     if (
       localIndex < 0
       || unitFilterStatus !== "ready"
-      || !qualityVisibleUnitIds.includes(viewState.clusterId)
+      || !selectedUnitVisible
     ) {
       setCounts(null);
       setUnitStatus(unitFilterStatus === "loading" ? "loading" : "unavailable");
@@ -596,11 +612,23 @@ export default function App() {
           }
         });
     }
+    return () => controller.abort();
+  }, [meta, selectedUnitVisible, unitFilterStatus, viewState?.clusterId, unitRequestRetry]);
+
+  // Neighbor prefetching follows the visible list independently. Progress on
+  // other units must never cancel the selected unit's in-flight transfer.
+  useEffect(() => {
+    if (!meta || !viewState || unitFilterStatus !== "ready" || !selectedUnitVisible
+      || (cacheProgress?.indexed && !cacheProgress.complete)) return;
+    const controller = new AbortController();
+    const datasetId = meta.id;
+    const datasetCache = countsCache.current.get(datasetId);
+    if (!datasetCache) return;
     const qualityIndex = qualityVisibleUnitIds.indexOf(viewState.clusterId);
     const neighbors = [qualityIndex - 1, qualityIndex + 1]
       .filter((index) => 0 <= index && index < qualityVisibleUnitIds.length)
       .map((index) => qualityVisibleUnitIds[index]);
-    if (!cacheProgress?.indexed || cacheProgress.complete) neighbors.forEach((clusterId) => {
+    neighbors.forEach((clusterId) => {
       if (!datasetCache.has(clusterId)) {
         void getUnitCounts(meta, clusterId, controller.signal).then((values) => {
           if (!controller.signal.aborted && countsCache.current.get(datasetId) === datasetCache) {
@@ -610,7 +638,7 @@ export default function App() {
       }
     });
     return () => controller.abort();
-  }, [meta, qualityVisibleUnitIds, unitFilterStatus, viewState?.clusterId, cacheProgress?.indexed, cacheProgress?.complete]);
+  }, [meta, qualityVisibleUnitIds, selectedUnitVisible, unitFilterStatus, viewState?.clusterId, cacheProgress?.indexed, cacheProgress?.complete]);
 
   useEffect(() => {
     if (!meta?.capabilities.probe || probePositionsPath) return;
@@ -987,7 +1015,7 @@ export default function App() {
         overlay={false}
         busy={sourceBusy}
         error={error}
-        initialPath="/data/rfmapping"
+        initialPath=""
         onCancel={cancelSourceLoad}
         onClose={() => undefined}
         onRemote={handleRemoteChoice}
@@ -1028,6 +1056,7 @@ export default function App() {
       {cacheProgress?.indexed && !cacheProgress.complete && <div className="cache-progress" role="status">
         <progress value={cacheProgress.cachedUnits} max={cacheProgress.totalUnits} />
         <span>Caching {cacheProgress.cachedUnits} / {cacheProgress.totalUnits} units</span>
+        {cacheProgressError && <span>{cacheProgressError} Retrying…</span>}
         {cacheProgress.error && <><span>{cacheProgress.error}</span><button type="button" onClick={() => { void retryCache(meta.id).then(setCacheProgress).catch((caught) => setError(String(caught))); }}>Retry</button></>}
       </div>}
       {probeCollapsed && <aside className="sidebar-rail"><button type="button" onClick={() => setProbeCollapsed(false)}>Show Probe & controls</button></aside>}
@@ -1049,7 +1078,7 @@ export default function App() {
             <div className="current-json-row">
               <select value={meta.sourcePath} title={meta.sourcePath} onChange={(event) => void openRemote(event.target.value)} aria-label="Current RF map">
                 {(jsonChoices.length ? jsonChoices : mergeJsonChoices([], meta.sourcePath, recentPaths)).map((choice) => (
-                  <option key={choice.path} value={choice.path}>{jsonChoiceLabel(choice, parentDirectory(meta.sourcePath))}</option>
+                  <option key={choice.path} value={choice.path}>{jsonChoiceLabel(choice, parentDirectory(meta.sourcePath), serverPaths?.rfRoot)}</option>
                 ))}
               </select>
               <button type="button" onClick={openChooser}>Open…</button>
@@ -1177,7 +1206,7 @@ export default function App() {
             <div className="unit-stats">
               {unitIsLoading && <span>Loading cluster…</span>}
               {noNavigationUnits && <><strong>{emptyUnitTitle}</strong><span>{emptyUnitDetail}</span></>}
-              {unitStatus === "error" && <span>Unit data failed to load.</span>}
+              {unitStatus === "error" && <><span>Unit data failed to load.</span><button type="button" onClick={() => setUnitRequestRetry((revision) => revision + 1)}>Retry unit</button></>}
               {metrics && !noNavigationUnits && <>
                 <span>Summed RF counts: {metrics.totalSpikes.toFixed(0)}</span>
                 <span>Strongest rate cell: yIdx {metrics.bestY + 1}, xIdx {metrics.bestX + 1} ({formatResponse(metrics.bestRateHz, "Mean firing rate (Hz)")} Hz)</span>
@@ -1367,6 +1396,7 @@ export default function App() {
       {exportDialog && (
         <SaveArtifactDialog
           title="Export Displayed"
+          exportRoot={serverPaths?.exportRoot ?? null}
           value={exportDialog.path}
           extension=".csv"
           busy={exportDialog.busy}
@@ -1385,6 +1415,7 @@ export default function App() {
       {figureComposerOpen && (
         <FigureExportComposer
           meta={meta}
+          exportRoot={serverPaths?.figureExportRoot ?? null}
           visibleUnitIds={qualityVisibleUnitIds}
           unitFilter={{
             enabled: unitFilterEnabled,

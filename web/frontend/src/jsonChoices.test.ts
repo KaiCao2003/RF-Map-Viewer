@@ -3,11 +3,24 @@ import {
   formatJsonTimestamp,
   jsonChoiceLabel,
   mergeJsonChoices,
+  parentDirectory,
   urlForJsonSource,
 } from "./jsonChoices";
 import type { FsEntry } from "./types";
 
 describe("Current JSON choices", () => {
+  it("keeps RF and companion browsing beside sources under the configured data root", () => {
+    const root = "/mnt/lab recordings/#SessionData";
+    expect(parentDirectory(`${root}/session/results.rfmap`)).toBe(`${root}/session`);
+    expect(parentDirectory(`${root}/session/tuning_curves.tc`)).toBe(`${root}/session`);
+    expect(parentDirectory(`${root}/session/positions.probe`)).toBe(`${root}/session`);
+    expect(parentDirectory("/results.rfmap")).toBe("/");
+    expect(jsonChoiceLabel({ path: `${root}/other/results.rfmap`, mtime: null }, `${root}/session`, root))
+      .toBe("other/results.rfmap");
+    expect(jsonChoiceLabel({ path: `${root}/other/results.rfmap`, mtime: null }, `${root}/session`))
+      .toBe(`${root}/other/results.rfmap`);
+  });
+
   it("filters RF files, deduplicates fallbacks, and sorts by mtime descending", () => {
     const discovered: FsEntry[] = [
       { name: "old.json", path: "/data/rfmapping/session/old.json", type: "file", size: 1, mtime: 100 },

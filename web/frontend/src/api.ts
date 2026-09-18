@@ -217,8 +217,22 @@ export async function closeDataset(datasetId: string): Promise<void> {
   await checked(await protectedFetch(new URL(`datasets/${datasetId}`, apiBase), { method: "DELETE", keepalive: true }));
 }
 
+export async function getServerPaths(signal?: AbortSignal): Promise<{
+  rfRoot: string;
+  exportRoot: string;
+  figureExportRoot: string;
+}> {
+  const response = await checked(await protectedFetch(new URL("health", apiBase), { signal }));
+  const payload: { rfRoot: string; outputRoot: string; figureExportRoot: string } = await response.json();
+  return {
+    rfRoot: payload.rfRoot,
+    exportRoot: payload.outputRoot,
+    figureExportRoot: payload.figureExportRoot,
+  };
+}
+
 export async function listRemoteFiles(
-  path = "/data/rfmapping",
+  path = "",
   cursor?: string,
   signal?: AbortSignal,
   kind: RemoteFileKind = "rf-json",
@@ -232,7 +246,7 @@ export async function listRemoteFiles(
   const payload = record(await response.json());
   const entriesRaw = Array.isArray(payload.entries) ? payload.entries : [];
   return {
-    root: String(first(payload, "root") ?? "/data/rfmapping"),
+    root: String(first(payload, "root") ?? ""),
     path: String(first(payload, "path") ?? path),
     entries: entriesRaw.map((raw) => {
       const entry = record(raw);

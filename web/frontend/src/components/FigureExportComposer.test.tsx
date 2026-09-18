@@ -81,6 +81,7 @@ describe("FigureExportComposer", () => {
     const html = renderToStaticMarkup(
       <FigureExportComposer
         meta={meta}
+        exportRoot="/mnt/reports/figures"
         visibleUnitIds={[7, 88]}
         unitFilter={{ enabled: true, rfStartMs: 0, rfEndMs: 200, zeroSpikeSpatialBinThreshold: 1, visibleUnitIds: [7, 88] }}
         viewState={view}
@@ -112,7 +113,8 @@ describe("FigureExportComposer", () => {
     expect(html).toContain("Same renderer as final export");
     expect(html).toContain("Native zero-bin count &lt; 1");
     expect(html).toContain('<option value="svg">SVG</option>');
-    expect(html).toContain("/data/rfmapping");
+    expect(html).toContain("/mnt/reports/figures");
+    expect(html).not.toContain("Server-side under /data/rfmapping");
     expect(html).toContain("Replace existing output");
     for (const id of FIGURE_TYPE_IDS) expect(html).toContain(`value="${id}"`);
     expect(html).toContain("hd.line — unavailable");
@@ -123,6 +125,7 @@ describe("FigureExportComposer", () => {
     const html = renderToStaticMarkup(
       <FigureExportComposer
         meta={meta}
+        exportRoot="/mnt/reports/figures"
         visibleUnitIds={meta.unitPool}
         unitFilter={{ enabled: false, rfStartMs: 0, rfEndMs: 200, zeroSpikeSpatialBinThreshold: 1, visibleUnitIds: meta.unitPool }}
         viewState={view}

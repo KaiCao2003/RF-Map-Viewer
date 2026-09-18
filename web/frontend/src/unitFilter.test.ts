@@ -3,10 +3,18 @@ import {
   navigationUnitIds,
   orderedQualityVisibleUnitIds,
   reconciledClusterId,
+  retainUnitIds,
   userEnteredZeroSpikeSpatialBinThreshold,
 } from "./unitFilter";
 
 describe("zero-spike spatial-bin unit filtering", () => {
+  it("retains list identity when cache progress does not change visible units", () => {
+    const current = [41, 7, 88];
+    expect(retainUnitIds(current, [41, 7, 88])).toBe(current);
+    expect(retainUnitIds(current, [41, 88])).toEqual([41, 88]);
+    expect(retainUnitIds(current, [7, 41, 88])).not.toBe(current);
+  });
+
   it("preserves dataset order and intersects the Probe region", () => {
     const quality = orderedQualityVisibleUnitIds([41, 7, 88, 3], [88, 41], true);
     expect(quality).toEqual([41, 88]);

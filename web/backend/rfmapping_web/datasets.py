@@ -67,6 +67,7 @@ REQUIRED_TOP_LEVEL = {
 }
 CACHE_SCHEMA_VERSION = 3
 COUNT_DTYPES = ("|u1", "<u2", "<u4", "<u8")
+UNCLAIMED_DATASET_TIMEOUT_SECONDS = 60.0
 
 EXPECTED_RESPONSE_UNITS = "spike_count"
 EXPECTED_RESPONSE_NORMALIZATION = "none"
@@ -633,6 +634,7 @@ class DatasetStore:
     def __init__(self, cache_root: Path, cache_max_bytes: int):
         self._lock = threading.RLock()
         self._records: dict[str, DatasetRecord] = {}
+        self._unclaimed: dict[str, threading.Timer] = {}
         self.cache = MemmapCache(
             cache_root,
             cache_max_bytes,
@@ -672,26 +674,50 @@ class DatasetStore:
         else:
             cache = self.cache.get_or_build(source)
         dataset_id = uuid.uuid4().hex
-        record = DatasetRecord(
-            dataset_id=dataset_id,
-            source=source,
-            public_source_path=public_source_path,
-            scope_root=scope_root,
-            source_signature=cache.metadata["source"],
-            cache=cache,
-            companions=discover_companions(source, scope_root),
-            indexed=indexed,
-        )
-        with self._lock:
-            if not cache.data_path.is_file() or not cache.metadata_path.is_file():
-                raise DatasetChangedError("Dataset cache was evicted while opening; retry")
-            self._records[dataset_id] = record
-        if indexed is not None:
-            indexed.start()
+        try:
+            record = DatasetRecord(
+                dataset_id=dataset_id,
+                source=source,
+                public_source_path=public_source_path,
+                scope_root=scope_root,
+                source_signature=cache.metadata["source"],
+                cache=cache,
+                companions=discover_companions(source, scope_root),
+                indexed=indexed,
+            )
+            with self._lock:
+                if not cache.data_path.is_file() or not cache.metadata_path.is_file():
+                    raise DatasetChangedError("Dataset cache was evicted while opening; retry")
+                self._records[dataset_id] = record
+                if indexed is not None:
+                    # A response can be lost after the HTTP disconnect check.
+                    # Keep unclaimed RAM caches only until the client first uses them.
+                    timer = threading.Timer(
+                        UNCLAIMED_DATASET_TIMEOUT_SECONDS,
+                        self._expire_unclaimed,
+                        args=(dataset_id,),
+                    )
+                    timer.daemon = True
+                    self._unclaimed[dataset_id] = timer
+                    timer.start()
+                    indexed.start()
+        except BaseException:
+            self.close(dataset_id)
+            if indexed is not None:
+                indexed.close()
+            raise
         return record
+
+    def _expire_unclaimed(self, dataset_id: str) -> None:
+        with self._lock:
+            if dataset_id in self._unclaimed:
+                self.close(dataset_id)
 
     def close(self, dataset_id: str) -> None:
         with self._lock:
+            timer = self._unclaimed.pop(dataset_id, None)
+            if timer is not None:
+                timer.cancel()
             record = self._records.pop(dataset_id, None)
         if record is not None and record.indexed is not None:
             record.indexed.close()
@@ -710,6 +736,9 @@ class DatasetStore:
             if not record.cache.data_path.is_file():
                 self._records.pop(dataset_id, None)
                 raise DatasetChangedError("Dataset cache was evicted; reopen it")
+            timer = self._unclaimed.pop(dataset_id, None)
+            if timer is not None:
+                timer.cancel()
             return record
 
     @staticmethod

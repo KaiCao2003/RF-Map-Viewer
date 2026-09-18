@@ -43,6 +43,7 @@ import type {
 
 interface FigureExportComposerProps {
   meta: DatasetMeta;
+  exportRoot: string | null;
   visibleUnitIds: ReadonlyArray<number>;
   unitFilter: FigureUnitFilterSnapshot;
   viewState: ViewState;
@@ -398,12 +399,14 @@ function PageComposer({
 }
 
 function DestinationBrowser({
+  exportRoot,
   draft,
   listing,
   busy,
   error,
   dispatch,
 }: {
+  exportRoot: string | null;
   draft: FigureComposerState;
   listing: Awaited<ReturnType<typeof listFigureExportDirectories>> | null;
   busy: boolean;
@@ -411,6 +414,8 @@ function DestinationBrowser({
   dispatch: React.Dispatch<Parameters<typeof figureComposerReducer>[1]>;
 }) {
   const current = draft.destinationDirectory;
+  const destinationRoot = exportRoot ?? "Configured server export folder";
+  const destination = current ? `${destinationRoot.replace(/\/+$/, "")}/${current}` : destinationRoot;
   return (
     <section className="figure-destination-browser" aria-label="Export destination directory">
       <div className="figure-directory-path">
@@ -420,9 +425,7 @@ function DestinationBrowser({
           aria-label="Parent export directory"
           onClick={() => dispatch({ type: "set-destination", directory: parentFigureDirectory(current) })}
         >↑</button>
-        <code title={`/data/rfmapping${current ? `/${current}` : ""}`}>
-          /data/rfmapping{current ? `/${current}` : ""}
-        </code>
+        <code title={destination}>{destination}</code>
         {listing?.path === current && (
           <span className={listing.writable ? "writable" : "not-writable"}>
             {listing.writable ? "writable" : "read only"}
@@ -443,13 +446,14 @@ function DestinationBrowser({
         ))}
         {!busy && !error && listing?.entries.length === 0 && <div className="figure-empty-list">No subdirectories</div>}
       </div>
-      <p>Navigate to a folder to select it. Files are confined to the configured /data/rfmapping export root.</p>
+      <p>Navigate to a folder to select it. Files are saved within this server export folder.</p>
     </section>
   );
 }
 
 export default function FigureExportComposer({
   meta,
+  exportRoot,
   visibleUnitIds,
   unitFilter,
   viewState,
@@ -747,13 +751,13 @@ export default function FigureExportComposer({
           </section>
 
           <section className="figure-output-section">
-            <div className="figure-section-heading"><div><strong>Output</strong><span>Server-side under /data/rfmapping</span></div></div>
+            <div className="figure-section-heading"><div><strong>Output</strong><span>{exportRoot ? `Server-side under ${exportRoot}` : "Server-side in the configured export folder"}</span></div></div>
             <div className="figure-output-grid">
               <label><span>Format</span><select value={draft.format} onChange={(event) => dispatch({ type: "set-format", format: event.target.value as FigureComposerState["format"] })}>{spec.formats.map((format) => <option key={format} value={format}>{format.toUpperCase()}</option>)}</select></label>
               <label><span>Page order</span><select value={draft.order} onChange={(event) => dispatch({ type: "set-order", order: event.target.value as FigureComposerState["order"] })}>{spec.pageOrders.map((order) => <option key={order} value={order}>{order === "unit-major" ? "Unit, then page" : "Page, then unit"}</option>)}</select></label>
               <label className="figure-base-name"><span>{draft.format === "pdf" ? "PDF name" : "Folder name"}</span><input type="text" maxLength={128} value={draft.baseName} onChange={(event) => dispatch({ type: "set-base-name", value: event.target.value })} /><small>{draft.format === "pdf" ? ".pdf is added automatically" : `${draft.format.toUpperCase()} pages plus manifest.json`}</small></label>
             </div>
-            <DestinationBrowser draft={draft} listing={directoryListing} busy={directoryBusy} error={directoryError} dispatch={dispatch} />
+            <DestinationBrowser exportRoot={exportRoot} draft={draft} listing={directoryListing} busy={directoryBusy} error={directoryError} dispatch={dispatch} />
             <label className="check-row figure-overwrite"><input type="checkbox" checked={draft.overwrite} onChange={(event) => dispatch({ type: "set-overwrite", value: event.target.checked })} /><span>Replace existing output with this exact name</span></label>
             {validationError && <p className="figure-validation-message">{validationError}</p>}
             {exportError && <p className="figure-inline-error" role="alert">{exportError}</p>}

@@ -6,6 +6,10 @@ export interface JsonChoice {
   mtime: number | null;
 }
 
+export function parentDirectory(path: string): string {
+  return path.replace(/\/+$/, "").replace(/\/[^/]+$/, "") || "/";
+}
+
 export function sortJsonChoices(choices: JsonChoice[]): JsonChoice[] {
   const byPath = new Map<string, JsonChoice>();
   choices.forEach((choice) => {
@@ -45,13 +49,13 @@ export function formatJsonTimestamp(seconds: number | null): string {
 export function jsonChoiceLabel(
   choice: JsonChoice,
   currentFolder: string,
-  root = "/data/rfmapping",
+  root = "",
 ): string {
   const folderPrefix = `${currentFolder.replace(/\/+$/, "")}/`;
   const rootPrefix = `${root.replace(/\/+$/, "")}/`;
   const relative = choice.path.startsWith(folderPrefix)
     ? choice.path.slice(folderPrefix.length)
-    : choice.path.startsWith(rootPrefix) ? choice.path.slice(rootPrefix.length) : choice.path;
+    : root && choice.path.startsWith(rootPrefix) ? choice.path.slice(rootPrefix.length) : choice.path;
   const timestamp = formatJsonTimestamp(choice.mtime);
   return timestamp ? `${relative}  ${timestamp}` : relative;
 }

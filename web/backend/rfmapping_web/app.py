@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import math
 import os
+import threading
 from pathlib import Path
 from typing import Any, Literal, Mapping
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
+from starlette.concurrency import run_in_threadpool
 
 from .asgi_access_gate import install_access_gate
 from .companions import (
@@ -196,7 +198,11 @@ def _open_dataset(
         raise HTTPException(
             status_code=500, detail=f"Unable to cache dataset: {exc}"
         ) from exc
-    return services.datasets.response_metadata(record)
+    try:
+        return services.datasets.response_metadata(record)
+    except BaseException:
+        services.datasets.close(record.dataset_id)
+        raise
 
 
 def _output_root_available(path: Path) -> bool:
@@ -309,8 +315,37 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise _http_from_path_error(exc) from exc
 
     @application.post("/api/datasets/open")
-    def open_dataset(request: OpenDatasetRequest) -> dict[str, Any]:
-        return _open_dataset(services, request)
+    async def open_dataset(
+        request: OpenDatasetRequest, http_request: Request
+    ) -> dict[str, Any]:
+        ownership_lock = threading.Lock()
+        cancelled = False
+        opened_id: str | None = None
+
+        def load() -> dict[str, Any]:
+            nonlocal opened_id
+            result = _open_dataset(services, request)
+            with ownership_lock:
+                opened_id = result["id"]
+                if cancelled:
+                    services.datasets.close(opened_id)
+            return result
+
+        delivered = False
+        try:
+            result = await run_in_threadpool(load)
+            if await http_request.is_disconnected():
+                raise HTTPException(status_code=499, detail="Dataset open cancelled")
+            delivered = True
+            return result
+        finally:
+            if not delivered:
+                # Cancelling the HTTP task cannot stop its blocking archive read.
+                # The worker must dispose the result if it finishes afterwards.
+                with ownership_lock:
+                    cancelled = True
+                    if opened_id is not None:
+                        services.datasets.close(opened_id)
 
     @application.get("/api/datasets/{dataset_id}/meta")
     def dataset_metadata(dataset_id: str) -> dict[str, Any]:

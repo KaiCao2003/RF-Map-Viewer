@@ -1,9 +1,8 @@
 import { useEffect, useRef } from "react";
 
-export const LINUX_EXPORT_ROOT = "/srv/rfmapping/exports/";
-
 interface SaveArtifactDialogProps {
   title: string;
+  exportRoot: string | null;
   value: string;
   extension: ".csv" | ".png";
   busy: boolean;
@@ -16,6 +15,7 @@ interface SaveArtifactDialogProps {
 
 export default function SaveArtifactDialog({
   title,
+  exportRoot,
   value,
   extension,
   busy,
@@ -46,7 +46,7 @@ export default function SaveArtifactDialog({
         </header>
         <div className="save-dialog-body">
           <label htmlFor="artifact-relative-path">Save under</label>
-          <code>{LINUX_EXPORT_ROOT}</code>
+          <code>{exportRoot ?? "Configured server export folder"}</code>
           <label htmlFor="artifact-relative-path">Relative path</label>
           <input
             id="artifact-relative-path"

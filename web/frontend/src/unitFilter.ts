@@ -1,3 +1,9 @@
+/** Keep cache-progress refreshes from invalidating unchanged unit lists. */
+export function retainUnitIds(current: number[], next: number[]): number[] {
+  return current.length === next.length && current.every((unitID, index) => unitID === next[index])
+    ? current : next;
+}
+
 export function orderedQualityVisibleUnitIds(
   unitPool: ReadonlyArray<number>,
   reportedVisibleUnitIds: ReadonlyArray<number>,

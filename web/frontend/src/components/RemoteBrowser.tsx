@@ -14,7 +14,7 @@ interface RemoteBrowserProps {
 function parentPath(path: string, root: string): string {
   if (path === root) return root;
   const parent = path.replace(/\/+$/, "").replace(/\/[^/]+$/, "");
-  return parent.startsWith(root) ? parent : root;
+  return parent === root || parent.startsWith(`${root.replace(/\/+$/, "")}/`) ? parent : root;
 }
 
 function humanSize(bytes: number | null): string {
@@ -38,12 +38,12 @@ function modifiedLabel(seconds: number | null): string {
 
 export default function RemoteBrowser({
   busy = false,
-  initialPath = "/data/rfmapping",
+  initialPath = "",
   kind = "rf-json",
   title = "Remote RF mapping browser",
   onOpen,
 }: RemoteBrowserProps) {
-  const [root, setRoot] = useState("/data/rfmapping");
+  const [root, setRoot] = useState("");
   const [path, setPath] = useState(initialPath);
   const [entries, setEntries] = useState<FsEntry[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
@@ -89,7 +89,7 @@ export default function RemoteBrowser({
 
   const breadcrumbs = useMemo(() => {
     const relative = path.slice(root.length).split("/").filter(Boolean);
-    const crumbs = [{ name: "senzailab", path: root }];
+    const crumbs = [{ name: root.split("/").filter(Boolean).at(-1) ?? "RF data", path: root }];
     for (let index = 0; index < relative.length; index += 1) {
       crumbs.push({ name: relative[index], path: `${root}/${relative.slice(0, index + 1).join("/")}` });
     }
