@@ -2,13 +2,19 @@
 
 This directory contains two separately versioned applications:
 
-- `rfmapping_gui.py`: the stable RF Map Viewer `1.10.0`;
+- `rfmapping_gui.py`: the stable RF Map Viewer `1.10.1`;
 - `rfmapping_fm_gui.py`: the Free-Moving RF Viewer `1.10.0-alpha.3`.
 
 They have distinct app names, bundle identifiers, release artifacts, and tags,
 so the alpha can be installed and released without replacing the stable app.
 
-## Stable viewer 1.10.0
+## Stable viewer 1.10.1
+
+Version 1.10.1 restores macOS keyboard navigation, gives newly opened documents
+focus on their visible plot, and returns keyboard focus to clicked viewer
+controls after editing a field. Caps Lock preserves F/D/P actions; Shift+P
+selects palette cycling. Native arrow-key keypad/Fn flags do not suppress
+navigation. Scientific input and display calculations are unchanged.
 
 Version 1.10.0 adds indexed RF input and progressive caching.
 
@@ -124,7 +130,7 @@ Opening the app without a path shows the native file chooser. Release packages
 do not contain or auto-load sample RF data.
 
 Its macOS identity is `RF Map Viewer.app`, bundle ID
-`org.local.rfmapping.viewer`, and version/build `1.10.0` / `110000`. Build it with:
+`org.local.rfmapping.viewer`, and version/build `1.10.1` / `110001`. Build it with:
 
 ```sh
 script/build_python_stable_macos_app.sh

@@ -18,8 +18,8 @@ through versioned file contracts, principally the RF formats described in
 
 ## Component versions
 
-The stable Python, Swift, and Web viewers are versioned `1.10.0` and share
-the same stable feature generation.
+The stable Python macOS viewer is versioned `1.10.1`; Swift, Web, and the
+Python Windows packages remain at `1.10.0` in the same stable feature generation.
 The separate Free-Moving Python viewer remains
 **`1.10.0-alpha.3`**. Component identity belongs in release tags and artifact
 names, not in a fourth version component. See
@@ -28,10 +28,11 @@ policy.
 
 ## Downloads
 
-GitHub Actions builds the stable 1.10.0 packages published on the
+GitHub Actions builds the stable packages published on the
 [Releases page](https://github.com/KaiCao2003/RF-Map-Viewer/releases):
 
-- [Python: macOS app, Windows installer, and Windows portable ZIP](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/python-v1.10.0)
+- [Python 1.10.1 macOS app](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/python-v1.10.1)
+- [Python 1.10.0 Windows installer and portable ZIP](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/python-v1.10.0)
 - [Swift macOS app](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/swift-v1.10.0)
 - [Web package](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/web-v1.10.0)
 
@@ -53,7 +54,7 @@ the legacy `30:7` visual footprint; the physical 3D sphere is unchanged. Drag
 the sphere to rotate the viewing direction or double-click to reset it. Legacy
 JSON, tuning-curve, head-direction, and probe companions are intentionally
 outside this alpha app. The stable Python viewer remains available separately
-at `1.10.0`, alongside Swift and Web `1.10.0`.
+at `1.10.1` on macOS, alongside Swift and Web `1.10.0`.
 
 ## Current RF format and filename aliases
 

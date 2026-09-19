@@ -1,6 +1,7 @@
 import csv
 import gc
 import json
+import sys
 import tempfile
 import threading
 import time
@@ -723,7 +724,7 @@ class TkViewerTests(unittest.TestCase):
         root.report_callback_exception = lambda *exc: callback_errors.append(exc)
         child = self.app
         child._schedule_redraw()
-        child._focus_after = child.after_idle(child._focus_rf_canvas)
+        child._focus_after = child.after_idle(child._focus_active_canvas)
         self.assertIsNotNone(child._redraw_after)
         self.assertIsNotNone(child._focus_after)
 
@@ -1248,6 +1249,104 @@ class TkViewerTests(unittest.TestCase):
                     widget.event_generate(sequence)
                     self.app.update()
                     self.assertEqual(self.app.time_res_ms_var.get(), expected)
+
+    def test_caps_lock_preserves_letter_shortcuts_and_shift_selects_palette(self) -> None:
+        self.app.notebook.focus_force()
+        self.app.update()
+        for key, variable in (
+            ("f", self.app.flip_y_var),
+            ("d", self.app.display_expanded_var),
+            ("p", self.app.polar_layout_var),
+        ):
+            with self.subTest(key=key):
+                before = variable.get()
+                self.app.notebook.event_generate("<KeyPress>", keysym=key, state=0x0002)
+                self.app.update()
+                self.assertNotEqual(variable.get(), before)
+        self.assertEqual(self.app.palette_var.get(), "Gray")
+        for state in (0x0001, 0x0003):
+            with self.subTest(state=state):
+                self.app.palette_var.set("Gray")
+                before = self.app.polar_layout_var.get()
+                self.app.notebook.event_generate("<KeyPress-p>", state=state)
+                self.app.update()
+                self.assertEqual(self.app.palette_var.get(), "Viridis")
+                self.assertEqual(self.app.polar_layout_var.get(), before)
+
+    def test_native_arrow_flags_work_through_tk_bindings(self) -> None:
+        # Cocoa marks arrows as keypad/function keys even without a held Fn key.
+        state = 0x0060 if self.app.tk.call("tk", "windowingsystem") == "aqua" else 0x0010
+        self.app.notebook.focus_force()
+        self.app.update()
+        self.app.notebook.event_generate("<KeyPress-Right>", state=state)
+        self.app.update()
+        self.assertEqual(self.app.unit_idx.get(), 1)
+        self.app.bin_var.set(5)
+        self.app.notebook.event_generate("<KeyPress-Up>", state=state)
+        self.app.update()
+        self.assertEqual(self.app.bin_var.get(), 4)
+
+    @unittest.skipUnless(sys.platform == "darwin", "requires Cocoa key events")
+    def test_native_macos_keys_reach_the_document_after_opening(self) -> None:
+        from macos_key_events import send_key
+
+        child = gui.RFMViewer(
+            rf_model_module.RFMappingData(self.app.data.path), master=self.app._app_root,
+        )
+        self.addCleanup(child.destroy)
+        self.app.update()
+        # Do not force focus here: opening the document must establish it.
+        send_key("p", 35)
+        child.update()
+        self.assertTrue(child.polar_layout_var.get())
+        send_key("d", 2)
+        child.update()
+        self.assertTrue(child.display_expanded_var.get())
+        send_key("\uf703", 124, (1 << 21) | (1 << 23))
+        child.update()
+        self.assertEqual(child.unit_idx.get(), 1)
+        with mock.patch.object(child, "_open_figure_exporter") as export:
+            send_key("e", 14, 1 << 20)
+            child.update()
+            export.assert_called_once_with()
+
+    def test_new_document_focuses_its_visible_plot_and_accepts_shortcuts(self) -> None:
+        for tab in ("rf", "delay", "timeline"):
+            with self.subTest(tab=tab):
+                self.app._app_root._rfm_settings = replace(self.app.settings, default_viewer_tab=tab)
+                child = gui.RFMViewer(
+                    rf_model_module.RFMappingData(self.app.data.path), master=self.app._app_root,
+                )
+                try:
+                    self.app.update()
+                    self.assertIs(child.focus_get(), child.canvases[tab])
+                    self.assertTrue(child.focus_get().winfo_ismapped())
+                    child.event_generate("<KeyPress-p>")
+                    child.update()
+                    self.assertTrue(child.polar_layout_var.get())
+                    primary = "Command" if child.tk.call("tk", "windowingsystem") == "aqua" else "Control"
+                    with mock.patch.object(child, "_open_figure_exporter") as export:
+                        child.event_generate(f"<{primary}-e>")
+                        child.update()
+                        export.assert_called_once_with()
+                finally:
+                    child.destroy()
+
+    def test_clicking_viewer_controls_leaves_text_editing_focus(self) -> None:
+        self.app._select_tab(0)
+        self.app.update()
+        for widget in (self.app.next_unit_button, self.app.canvases["rf"], self.app.waveform_canvas):
+            with self.subTest(widget=widget.winfo_class()):
+                self.app.range_start_spin.focus_force()
+                self.app.update()
+                widget.event_generate("<Button-1>", x=3, y=3)
+                widget.event_generate("<ButtonRelease-1>", x=3, y=3)
+                self.app.update()
+                self.assertIs(self.app.focus_get(), widget)
+                self.app.polar_layout_var.set(False)
+                widget.event_generate("<KeyPress-p>")
+                self.app.update()
+                self.assertTrue(self.app.polar_layout_var.get())
 
     def test_modified_keys_do_not_trigger_plain_view_shortcuts(self) -> None:
         modifiers = ["Control", "Command", "Alt"]

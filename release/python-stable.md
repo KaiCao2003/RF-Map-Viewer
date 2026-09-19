@@ -1,3 +1,16 @@
+## Python 1.10.1: macOS keyboard shortcuts
+
+Version **1.10.1**. Target: macOS Apple Silicon (build **110001**).
+
+- Focus the visible plot when a document opens, including saved Delay/Timeline startup tabs. Clicking a viewer control leaves text-entry focus so shortcuts resume.
+- Accept the keypad/Fn flags macOS attaches to native arrow-key events, while preserving Command, Control, and Option chords.
+- Keep F, D, and P working with Caps Lock. Only Shift+P cycles the palette.
+- Preserve input-field editing, open-picker navigation, and window-scoped actions.
+- Add native Cocoa keyboard regression coverage alongside Tk interaction tests.
+
+Scientific calculations and input contracts are unchanged. Windows remains
+available from the Python 1.10.0 release; Free-Moving alpha is unchanged.
+
 ## Python 1.10.0 stable: indexed RF files and progressive loading
 
 Version **1.10.0**. Targets: macOS Apple Silicon (build **110000**) and

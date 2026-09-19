@@ -64,7 +64,10 @@ class ComponentVersionTests(unittest.TestCase):
                 for line in output_path.read_text(encoding="utf-8").splitlines()
             )
         python_stable = MANIFEST["components"]["python_stable"]
-        self.assertEqual(outputs["python_stable_build_windows"], "true")
+        self.assertEqual(
+            outputs["python_stable_build_windows"],
+            str(python_stable["windows_release_version"] == python_stable["release_version"]).lower(),
+        )
         self.assertEqual(
             outputs["python_stable_windows_portable_artifact"],
             python_stable["windows_portable_artifact"],

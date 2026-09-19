@@ -362,7 +362,7 @@ class RFMViewer(tk.Toplevel):
         self.deiconify()
         allow_macos_fullscreen_resize(self)
         self.lift()
-        self._focus_after = self.after_idle(self._focus_rf_canvas)
+        self._focus_after = self.after_idle(self._focus_active_canvas)
         self._schedule_optional_autoload()
         pending_documents = tuple(self._pending_open_documents)
         self._pending_open_documents.clear()
@@ -453,11 +453,13 @@ class RFMViewer(tk.Toplevel):
         self._unit_cache_after = None
         self.unit_cache_frame.grid_remove()
 
-    def _focus_rf_canvas(self) -> None:
+    def _focus_active_canvas(self) -> None:
         self._focus_after = None
         try:
-            if self.winfo_exists() and self.canvases["rf"].winfo_exists():
-                self.canvases["rf"].focus_set()
+            if self.winfo_exists():
+                # The withdrawn Tk root or native file chooser can still own
+                # keyboard focus when the document's first plot appears.
+                self.canvases[self._active_tab_key()].focus_force()
         except tk.TclError:
             pass
 
@@ -1895,6 +1897,7 @@ class RFMViewer(tk.Toplevel):
         self.polar_radius_var.trace_add("write", lambda *_: self._on_control_changed())
         self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
         self.bind("<FocusIn>", self._on_window_focus, add="+")
+        self.bind("<Button-1>", self._focus_clicked_viewer_control, add="+")
         navigation_shortcuts = (
             ("<Left>", self._step_unit, (-1,)),
             ("<Right>", self._step_unit, (1,)),
@@ -1908,10 +1911,14 @@ class RFMViewer(tk.Toplevel):
             ("<Shift-period>", self._step_time_resolution, (-1.0,)),
             ("<Escape>", self._handle_escape, ()),
             ("<KeyPress-f>", self._toggle_flip_y, ()),
+            ("<KeyPress-F>", self._toggle_flip_y, ()),
             ("<KeyPress-p>", self._toggle_polar_layout, ()),
-            ("<KeyPress-P>", self._cycle_palette, ()),
+            ("<KeyPress-P>", self._toggle_polar_layout, ()),
+            ("<Shift-KeyPress-p>", self._cycle_palette, ()),
+            ("<Shift-KeyPress-P>", self._cycle_palette, ()),
             ("<KeyPress-minus>", self._toggle_rf_subtraction, ()),
             ("<KeyPress-d>", self._toggle_display_controls, ()),
+            ("<KeyPress-D>", self._toggle_display_controls, ()),
             ("<question>", self._show_shortcuts, ()),
         ) + tuple(
             (f"<KeyPress-{index + 1}>", self._select_tab, (index,))
@@ -2031,6 +2038,13 @@ class RFMViewer(tk.Toplevel):
     def _on_window_focus(self, _event: object | None = None) -> None:
         self._app_root._rfm_active_viewer = self
 
+    def _focus_clicked_viewer_control(self, event: tk.Event) -> None:
+        # Aqua controls need not take keyboard focus on click. Once the user
+        # returns to a plot or button, stop treating keys as input-field edits.
+        widget = event.widget
+        if isinstance(widget, (tk.Canvas, ttk.Notebook, ttk.Button, ttk.Checkbutton, ttk.Radiobutton)):
+            widget.focus_set()
+
     def _shortcut_uses_editing_widget(self, event: object) -> bool:
         widget = getattr(event, "widget", None)
         if isinstance(widget, ttk.Combobox) and widget.instate(("readonly", "!pressed")):
@@ -2048,12 +2062,13 @@ class RFMViewer(tk.Toplevel):
         if self._shortcut_uses_editing_widget(event):
             return None
         # Tk also matches a plain-key binding when extra modifiers are held.
-        # Leave Command/Control/Alt chords to their own bindings; Shift and
-        # Caps Lock still select the intended keysym (notably P versus p).
-        command_modifiers = 0x0004 | 0x0008 | 0x0040 | 0x0080 | 0x20000
+        # Leave Command/Control/Alt chords to their own bindings.
         if self.tk.call("tk", "windowingsystem") == "aqua":
-            # Aqua maps Option to Mod2; X11 normally uses Mod2 for Num Lock.
-            command_modifiers |= 0x0010
+            # Aqua: Control, Command (Mod1), Option (Mod2). Mod3/Mod4 are
+            # keypad/Fn flags carried by ordinary native arrow-key events.
+            command_modifiers = 0x0004 | 0x0008 | 0x0010
+        else:
+            command_modifiers = 0x0004 | 0x0008 | 0x0040 | 0x0080 | 0x20000
         if int(getattr(event, "state", 0) or 0) & command_modifiers:
             return None
         action(*args)

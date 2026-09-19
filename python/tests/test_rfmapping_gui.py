@@ -18,6 +18,36 @@ class AppIdentityTests(unittest.TestCase):
         self.assertNotIn(constants_module.APP_EDITION, constants_module.APP_DISPLAY_VERSION)
 
 
+class ShortcutModifierTests(unittest.TestCase):
+    def test_aqua_navigation_accepts_native_function_and_keypad_flags(self) -> None:
+        viewer = SimpleNamespace(
+            tk=mock.Mock(), _shortcut_uses_editing_widget=lambda _event: False,
+        )
+        viewer.tk.call.return_value = "aqua"
+        for state in (0, 0x0020, 0x0040, 0x0060, 0x0062):
+            with self.subTest(state=hex(state)):
+                action = mock.Mock()
+                event = SimpleNamespace(keysym="Right", state=state)
+                self.assertEqual(gui.RFMViewer._run_navigation_shortcut(viewer, event, action), "break")
+                action.assert_called_once_with()
+
+    def test_command_modifiers_remain_platform_specific(self) -> None:
+        viewer = SimpleNamespace(
+            tk=mock.Mock(), _shortcut_uses_editing_widget=lambda _event: False,
+        )
+        for platform, states in (
+            ("aqua", (0x0004, 0x0008, 0x0010)),
+            ("x11", (0x0004, 0x0008, 0x0040, 0x0080, 0x20000)),
+        ):
+            viewer.tk.call.return_value = platform
+            for state in states:
+                with self.subTest(platform=platform, state=hex(state)):
+                    action = mock.Mock()
+                    event = SimpleNamespace(keysym="p", state=state)
+                    self.assertIsNone(gui.RFMViewer._run_navigation_shortcut(viewer, event, action))
+                    action.assert_not_called()
+
+
 class MacOSLifecycleTests(unittest.TestCase):
     def test_no_argument_main_opens_file_chooser_viewer_without_sample_data(self) -> None:
         viewer = mock.Mock()
