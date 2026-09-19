@@ -40,4 +40,6 @@ def send_key(characters: str, keycode: int, modifiers: int = 0) -> None:
             event_type, NSPoint(0, 0), modifiers, 0.0, number, None, string, string, False, keycode,
         )
         assert event, "Cocoa did not create the keyboard event"
-        send(application, b"sendEvent:", None, (ctypes.c_void_p,), event)
+        # Tk translates native events while draining the application queue;
+        # calling sendEvent: directly bypasses tkProcessKeyEvent entirely.
+        send(application, b"postEvent:atStart:", None, (ctypes.c_void_p, ctypes.c_bool), event, False)

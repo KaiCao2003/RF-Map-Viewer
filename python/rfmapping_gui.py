@@ -2066,7 +2066,7 @@ class RFMViewer(tk.Toplevel):
         if self.tk.call("tk", "windowingsystem") == "aqua":
             # Aqua: Control, Command (Mod1), Option (Mod2). Mod3/Mod4 are
             # keypad/Fn flags carried by ordinary native arrow-key events.
-            command_modifiers = 0x0004 | 0x0008 | 0x0010
+            command_modifiers = 0x0004 | 0x0008 | 0x0010 | 0x20000
         else:
             command_modifiers = 0x0004 | 0x0008 | 0x0040 | 0x0080 | 0x20000
         if int(getattr(event, "state", 0) or 0) & command_modifiers:

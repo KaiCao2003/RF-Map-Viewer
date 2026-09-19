@@ -36,7 +36,7 @@ class ShortcutModifierTests(unittest.TestCase):
             tk=mock.Mock(), _shortcut_uses_editing_widget=lambda _event: False,
         )
         for platform, states in (
-            ("aqua", (0x0004, 0x0008, 0x0010)),
+            ("aqua", (0x0004, 0x0008, 0x0010, 0x20000)),
             ("x11", (0x0004, 0x0008, 0x0040, 0x0080, 0x20000)),
         ):
             viewer.tk.call.return_value = platform
