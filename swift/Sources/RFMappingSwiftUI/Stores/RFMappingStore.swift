@@ -1263,7 +1263,7 @@ final class RFMappingStore {
 
         let base = baseBinMS()
         let requested = max(base, min(totalTimeMS(), timeResolutionMS))
-        let groupSize = max(1, min(data.nBins, Int((requested / base).rounded(.toNearestOrEven))))
+        let groupSize = max(1, Int((requested / base).rounded(.toNearestOrEven)))
         timeResolutionMS = Double(groupSize) * base
 
         let maximum = max(0, timeGroupCount() - 1)
@@ -1474,10 +1474,12 @@ final class RFMappingStore {
     }
 
     func timeGroupSize() -> Int {
-        guard let data else { return 1 }
+        guard data != nil else { return 1 }
         let base = baseBinMS()
         let requested = max(base, min(totalTimeMS(), timeResolutionMS))
-        return max(1, min(data.nBins, Int((requested / base).rounded(.toNearestOrEven))))
+        // This counts base-duration steps, not native bins. For irregular
+        // edges, the full physical duration can require more than nBins steps.
+        return max(1, Int((requested / base).rounded(.toNearestOrEven)))
     }
 
     func timeGroups() -> [AxisGroup] {

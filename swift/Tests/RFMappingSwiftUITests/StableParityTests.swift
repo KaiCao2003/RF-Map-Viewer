@@ -135,6 +135,15 @@ final class StableParityTests: XCTestCase {
         XCTAssertEqual(viewer.delayHeatmapPlot(floor: 0).matrix, [[15]])
         XCTAssertEqual(viewer.cachedRGBPlot().delay, [[15]])
 
+        viewer.timeResolutionMS = 40
+        viewer.normalizeControls()
+        XCTAssertEqual(viewer.timeResolutionMS, 40)
+        XCTAssertEqual(viewer.timeGroupSize(), 4, "Duration steps are not capped by the native bin count")
+        XCTAssertEqual(viewer.timeGroups(), [AxisGroup(start: 0, end: 2)])
+        XCTAssertEqual(viewer.timelineSnapshot().matrices, [[[16]]])
+        XCTAssertEqual(viewer.delayHeatmapPlot(floor: 0).matrix, [[20]])
+        XCTAssertEqual(viewer.cachedRGBPlot().delay, [[20]])
+
         viewer.timeResolutionMS = 20
         viewer.normalizeControls()
         XCTAssertEqual(viewer.timeGroups(), nativeGroups)

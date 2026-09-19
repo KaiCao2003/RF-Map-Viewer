@@ -9,6 +9,7 @@ Version **1.10.1**. Target: macOS Apple Silicon (build **110001**).
 - Add native Cocoa keyboard regression coverage alongside Tk interaction tests.
 - Keep missing-exposure cells missing through temporal smoothing, without excluding sampled zero responses. This corrects Delay/RGB values near holes in the sampling grid.
 - Match colored RF exports to the screen's zero-based color scale; Gray keeps its data range.
+- Allow nonuniform time bins to be grouped across their full physical duration; the resolution is no longer incorrectly capped by the number of source bins.
 - Validate raw-count normalization/definition markers and occupancy dimensions for both JSON and indexed RF files. Preserve large integer IDs and prevent unsigned count-sum overflow.
 - Refresh probe filtering, paired selections after background caching, and Auto tuning orientation immediately when their controls change.
 - Reuse visible-unit results while rebuilding the picker. A synthetic 512-unit, 1000-bin refresh fell from 54.492 ms to 0.762 ms (remote Linux validation; median).

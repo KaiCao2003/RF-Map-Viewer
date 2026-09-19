@@ -1290,6 +1290,30 @@ class TkViewerTests(unittest.TestCase):
                     self.app.update()
                     self.assertEqual(self.app.time_res_ms_var.get(), expected)
 
+    def test_irregular_time_resolution_can_cover_the_full_physical_axis(self) -> None:
+        path = Path(self.directory.name) / "irregular-time.json"
+        path.write_text(json.dumps(current_rf_payload({
+            "unitsSpikeCounts": [[[[5, 8, 3]]]],
+            "unitsSpikeCountsSize": [1, 1, 1, 3],
+            "unitPool": [7],
+            "xPositions": [0],
+            "yPositions": [0],
+            "timeBinEdges": [0.0, 0.01, 0.03, 0.04],
+        })), encoding="utf-8")
+        self.app._load_json_path(path)
+        for requested in ("40", "100"):
+            self.app.time_res_ms_var.set(requested)
+            self.app._on_time_resolution_changed()
+            self.assertEqual(self.app.time_res_ms_var.get(), "40")
+            self.assertEqual(self.app._time_groups(), ((0, 2),))
+            self.assertEqual(self.app._time_group_bounds_ms(0), (0.0, 40.0))
+        self.app.time_res_ms_var.set("30")
+        self.app._on_time_resolution_changed()
+        self.assertEqual(self.app._time_groups(), ((0, 1), (2, 2)))
+        self.app._step_time_resolution(1.0)
+        self.assertEqual(self.app.time_res_ms_var.get(), "40")
+        self.assertEqual(self.app._time_groups(), ((0, 2),))
+
     def test_caps_lock_preserves_letter_shortcuts_and_shift_selects_palette(self) -> None:
         self.app.notebook.focus_force()
         self.app.update()

@@ -9,7 +9,7 @@ sibling `rfmapping` repository.
 
 | Area | Previous behavior | 1.10.1 behavior |
 | --- | --- | --- |
-| Nonuniform time bins | Swift grouped a fixed number of source bins; Python selected the nearest measured boundary. | Both choose the nearest measured edge to the quantized target duration, preferring the earlier edge on an exact tie. |
+| Nonuniform time bins | Swift grouped a fixed number of source bins; Python selected the nearest measured boundary. Both capped duration steps by the number of source bins, preventing full-axis grouping for some irregular axes. | Both choose the nearest measured edge to the quantized target duration, preferring the earlier edge on an exact tie. The requested duration is bounded by physical span, independently of the source-bin count. |
 | Repeated RF smoothing | Swift filled missing centers temporarily and masked them only after smoothing; later passes could propagate responses through unsampled positions. | Missing centers remain missing on every pass, for count and occupancy-normalized response matrices and timeline frames. |
 | Temporal smoothing | Both viewers treated unsampled positions as zero-response observations; this diluted neighbors and could create delay values at unsampled positions. | Delay/entropy smoothing preserves the exposure mask. A sampled silent position remains a valid zero-response observation; an unsampled position has no delay or entropy. |
 | RF color scale | Python's color palettes started at zero; Swift used the displayed minimum. Both figure composers used minimum/maximum scales. | Viridis/Inferno use zero/maximum in the viewers and shared figure-export scales, with a `0–1` scale when all values are zero or missing. Gray retains its existing contrast stretch and exact shared export bounds. |
@@ -25,8 +25,10 @@ occupancy interpretation must not be silently accepted.
 - Edges `[0, 10, 30, 40]` ms, requested duration `20` ms: source groups are
   `[(0, 0), (1, 1), (2, 2)]`, not `[(0, 1), (2, 2)]`. With counts `[5, 8, 3]`,
   the first group's rate is highest and its delay is `5` ms. Changing to
-  `30` ms yields `[(0, 1), (2, 2)]` and delay `15` ms; changing back restores
-  the original result, including the cached timeline and RGB views.
+  `30` ms yields `[(0, 1), (2, 2)]` and delay `15` ms. A `40` ms duration merges
+  all three native bins into `[(0, 2)]` and yields delay `20` ms; its four
+  base-duration steps must not be capped at the three native bins. Changing
+  back restores the original result, including the cached timeline and RGB views.
 - Counts `[4, 0, 16]`, occupancy `[1, 0, 1]`: Smooth 1–3 leaves the response
   `[4, missing, 16]`. Swift previously produced `[6, missing, 14]` at Smooth 2.
   The regression covers count/rate modes, timeline frames, and export scales.

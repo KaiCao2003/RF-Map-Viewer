@@ -5698,7 +5698,9 @@ class RFMViewer(tk.Toplevel):
         except (tk.TclError, ValueError):
             requested = base
         requested = max(base, min(total, requested))
-        group_size = max(1, min(self.data.n_bins, int(round(requested / base))))
+        # This is a duration multiplier, not a count of source bins. Unequal
+        # bins can make the full time span wider than n_bins * base.
+        group_size = max(1, int(round(requested / base)))
         self.time_res_ms_var.set(format_ms(group_size * base))
         return group_size
 
