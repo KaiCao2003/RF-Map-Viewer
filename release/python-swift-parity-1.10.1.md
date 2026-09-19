@@ -73,6 +73,13 @@ handling. Experimental files were not changed.
 Swift regressions are in `StableParityTests.swift` and `FigureExportTests.swift`.
 They check physical grouping/cache invalidation, repeated missing-data masks,
 sampled zero versus missing exposure, palette changes, shared preview/export
-scales, and Escape priority. Swift runtime validation requires the macOS CI
-job; the configured project execution host is Linux and cannot run SwiftUI.
-The 1.10.1 release validation records the final CI result.
+scales, and Escape priority. The final macOS arm64 candidate checks passed on
+source `3d3461c`:
+
+- [Python candidate](https://github.com/KaiCao2003/RF-Map-Viewer/actions/runs/35462081529):
+  564 tests and 136 subtests passed, including native Cocoa keyboard events;
+  release metadata, JSON/indexed loading, TkDND, and figure-export bundle smoke
+  checks passed. The stable macOS archive was built successfully.
+- [Swift candidate](https://github.com/KaiCao2003/RF-Map-Viewer/actions/runs/35462082887):
+  149 tests passed with zero failures; the native arm64 application was built
+  and its signature verified.
