@@ -12,9 +12,9 @@ sibling `rfmapping` repository.
 | Nonuniform time bins | Swift grouped a fixed number of source bins; Python selected the nearest measured boundary. | Both choose the nearest measured edge to the quantized target duration, preferring the earlier edge on an exact tie. |
 | Repeated RF smoothing | Swift filled missing centers temporarily and masked them only after smoothing; later passes could propagate responses through unsampled positions. | Missing centers remain missing on every pass, for count and occupancy-normalized response matrices and timeline frames. |
 | Temporal smoothing | Both viewers treated unsampled positions as zero-response observations; this diluted neighbors and could create delay values at unsampled positions. | Delay/entropy smoothing preserves the exposure mask. A sampled silent position remains a valid zero-response observation; an unsampled position has no delay or entropy. |
-| RF color scale | Python's color palettes started at zero; Swift used the displayed minimum. Both figure composers used minimum/maximum scales. | Viridis/Inferno use zero/maximum in the viewers and shared figure-export scales. Gray retains its existing contrast stretch and exact shared export bounds. |
+| RF color scale | Python's color palettes started at zero; Swift used the displayed minimum. Both figure composers used minimum/maximum scales. | Viridis/Inferno use zero/maximum in the viewers and shared figure-export scales, with a `0–1` scale when all values are zero or missing. Gray retains its existing contrast stretch and exact shared export bounds. |
 | RGB constant response | Swift used the Gray range helper, which added one to the upper bound of a constant matrix. | RGB uses the true response maximum, subject to its existing minimum scale of one, matching Python. |
-| Escape | Swift cleared the timeline even when a waveform zoom or probe filter was active. | Close waveform zoom first, otherwise clear the probe filter, otherwise clear the timeline selection. The RF plot interval remains independent. |
+| Escape | Swift cleared the timeline while a probe filter remained active. | Close waveform zoom first, otherwise clear the probe filter, otherwise clear the timeline selection. The RF plot interval remains independent. |
 
 Python input-contract validation is addressed by the accompanying 1.10.1
 data-loader changes: metadata that explicitly contradicts the spike-count and
@@ -47,7 +47,15 @@ occupancy interpretation must not be silently accepted.
   quantized resolution, spatial grouping, orientation, and smoothing radius.
 - Swift's finite range calculations scan values directly. Shared export ranges
   retain only running minima/maxima instead of collecting every selected
-  unit's pixels into a second array.
+  unit's pixels into a second array, and reuse one viewer store across selected
+  units instead of constructing a store for each unit.
+- Swift inserts progressively loaded units into the existing ordered cache,
+  updating only positions shifted by a priority load. Sequential loads no longer
+  sort and rebuild the full list; unit-ID lookup uses a precomputed dictionary.
+- Python reuses the visible-unit set when populating the unit picker. A synthetic
+  512-unit, 1000-bin refresh measured 54.492 ms before and 0.762 ms after
+  (remote Linux, median). Ordinary compact-count sum/prefix paths remain NumPy
+  operations; the exact-integer fallback is limited to counts that may overflow.
 
 These are reductions in repeated work and temporary allocation; no macOS
 wall-clock speedup is claimed without a macOS benchmark.
