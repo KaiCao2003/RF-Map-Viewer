@@ -20,16 +20,19 @@ component tag and artifact name:
 | --- | --- | --- | --- |
 | Python stable (macOS) | `1.10.1` | `python-v1.10.1` | stable |
 | Python Free-Moving | `1.10.0-alpha.3` | `python-v1.10.0-alpha.3` | alpha |
-| Swift | `1.10.0` | `swift-v1.10.0` | stable |
+| Swift | `1.10.1` | `swift-v1.10.1` | stable |
 | Web | `1.10.0` | `web-v1.10.0` | stable |
 
 Published downloads and checksums are available from the repository
 [Releases page](https://github.com/KaiCao2003/RF-Map-Viewer/releases). The root
 [`README.md`](../README.md#downloads) links directly to each component archive.
 
-Python 1.10.1 repairs macOS keyboard focus, native arrow-key modifiers, and
-Caps Lock handling. Windows remains at 1.10.0; the patch releases only the
-macOS arm64 package. Swift and Web remain at 1.10.0 in the same feature generation.
+Python and Swift 1.10.1 repair keyboard behavior, RF color scales, missing
+exposure during smoothing, and progressive-loading consistency and performance.
+Swift time grouping now uses physical bin edges as Python does. Python validates
+the shared raw-count contract and preserves large integer counts. See the
+[parity report](python-swift-parity-1.10.1.md) for reproducible cases and impact.
+Windows and Web remain at 1.10.0; these patch releases target macOS arm64.
 
 Stable 1.10.0 aligns Python, Swift, and Web on indexed version-2 RF input,
 progressive unit caching, RF window subtraction, display shortcuts, and the

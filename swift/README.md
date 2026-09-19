@@ -1,4 +1,4 @@
-# SwiftUI Viewer 1.10.0
+# SwiftUI Viewer 1.10.1
 
 This is the native SwiftUI implementation for macOS 15 on Apple silicon. It
 parses RF/HD/probe files itself and has no Python dependency. RF mapping files
@@ -7,8 +7,16 @@ positions use `.probe` (CSV schema). `.json` and `.csv` remain filename aliases,
 but an RF map's extension never enables an older schema. RF maps are primary
 documents; tuning and probe files are attached
 to a loaded RF map in the figure composer so recorded unit IDs can be matched.
-Its `1.10.0` version matches the stable Python macOS reference; `swift` remains
+Its `1.10.1` version matches the stable Python macOS reference; `swift` remains
 an artifact/tag identity rather than a version suffix.
+
+Version 1.10.1 fixes nonuniform time-bin grouping, preserves missing exposure
+through every smoothing pass, and aligns colored RF ranges and RGB intensity
+with Python in the viewer and exported figures. Escape closes waveform zoom,
+then clears probe filtering, then restores the full timeline. Temporal results
+are reused across Delay/RGB and floor changes; progressive unit loading updates
+the cached list incrementally and resolves unit IDs through a lookup table.
+See the [parity report](../release/python-swift-parity-1.10.1.md) for cases and impact.
 
 Version 1.10.0 requires the current raw-count/occupancy RF schema. In addition to
 the RF tensor, axes, and time edges, every RF map must contain:

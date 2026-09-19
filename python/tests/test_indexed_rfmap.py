@@ -28,6 +28,9 @@ def write_pair(directory: Path, shape=(4, 2, 3, 5)):
         occupancyTimeSec=np.full((y, x), 0.75).tolist(),
         responseUnits="spike_count",
         responseNormalization="none",
+        spikeCountDefinition="each_qualifying_trial_contributes_once_per_final_spatial_bin",
+        occupancyTimeDefinition="sum_of_qualifying_trial_durations_per_final_spatial_bin",
+        occupancyTimeSecSize=[y, x],
         stimulusGeometry="vertical_bar_full_height" if y == 1 else "square",
     )
     old = directory / "old.rfmap"
@@ -164,6 +167,22 @@ def test_rejects_invalid_indexed_contract(tmp_path, change):
     with new.open("wb") as f:
         np.savez_compressed(f, **arrays)
     with pytest.raises(ValueError):
+        IndexedRFMapList(new)
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["responseUnits", "responseNormalization", "spikeCountDefinition",
+     "occupancyTimeDefinition", "occupancyTimeSecSize"],
+)
+def test_indexed_metadata_requires_same_contract_as_json(tmp_path, field):
+    _, new, arrays = write_pair(tmp_path)
+    meta = json.loads(arrays["metadata"].tobytes())
+    del meta[field]
+    arrays["metadata"] = np.frombuffer(json.dumps(meta).encode(), dtype=np.uint8)
+    with new.open("wb") as handle:
+        np.savez_compressed(handle, **arrays)
+    with pytest.raises((ValueError, KeyError), match=field):
         IndexedRFMapList(new)
 
 

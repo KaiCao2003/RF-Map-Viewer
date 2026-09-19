@@ -21,9 +21,14 @@ def _write_dataset(tmp_path: Path, **updates: object) -> Path:
         "yPositions": [0],
         "timeBinEdges": [-0.1, 0.0, 0.1],
         "occupancyTimeSec": [[0.2, 0.4]],
+        "responseUnits": "spike_count",
+        "responseNormalization": "none",
+        "spikeCountDefinition": "each_qualifying_trial_contributes_once_per_final_spatial_bin",
+        "occupancyTimeDefinition": "sum_of_qualifying_trial_durations_per_final_spatial_bin",
         "metadataVersion": 3,
     }
     payload.update(updates)
+    payload.setdefault("occupancyTimeSecSize", payload["unitsSpikeCountsSize"][1:3])
     path = tmp_path / "rf.json"
     path.write_text(json.dumps(payload), encoding="utf-8")
     return path
@@ -250,3 +255,41 @@ def test_rejects_fractional_raw_spike_counts(tmp_path: Path) -> None:
                 ],
             )
         )
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["responseUnits", "responseNormalization", "spikeCountDefinition",
+     "occupancyTimeDefinition", "occupancyTimeSecSize"],
+)
+@pytest.mark.parametrize("missing", [False, True])
+def test_requires_declared_raw_count_and_occupancy_contract(
+    tmp_path: Path, field: str, missing: bool,
+) -> None:
+    path = _write_dataset(tmp_path)
+    payload = json.loads(path.read_text())
+    if missing:
+        del payload[field]
+    else:
+        payload[field] = [2, 1] if field == "occupancyTimeSecSize" else "normalized"
+    path.write_text(json.dumps(payload))
+    with pytest.raises((ValueError, KeyError), match=field):
+        load_rf_maps(path)
+
+
+def test_integer_unit_ids_preserve_values_above_float_precision(tmp_path: Path) -> None:
+    ids = [2**53, 2**53 + 1]
+    maps = load_rf_maps(_write_dataset(tmp_path, unitPool=ids))
+    assert maps.unit_ids == ids
+    assert maps.by_unit_id(ids[1]).unit_index == 1
+
+
+def test_large_mixed_numeric_counts_and_sums_remain_lossless(tmp_path: Path) -> None:
+    maximum = 2**64 - 1
+    maps = load_rf_maps(_write_dataset(
+        tmp_path,
+        unitsSpikeCounts=[[[[maximum, 1.0], [0, 0]]], [[[0, 0], [0, 0]]]],
+    ))
+    assert int(maps[0].spike_counts[0, 0, 0]) == maximum
+    assert maps[0].sum(-0.1, 0.1).spike_counts[0, 0, 0] == 2**64
+    assert maps[0].zero_spike_spatial_bin_count(-0.1, 0.1) == 1

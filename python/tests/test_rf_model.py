@@ -142,6 +142,7 @@ class RFMappingRateTests(unittest.TestCase):
             yPositions=[-1, 1],
             timeBinEdges=[-0.1, 0.0, 0.1, 0.2, 0.3],
             occupancyTimeSec=[[1.0, 2.0, 0.0], [0.5, 1.5, 2.5]],
+            occupancyTimeSecSize=[2, 3],
         )
         data = self.load(payload)
         time_groups = [(0, 0), (1, 2), (3, 3)]
@@ -223,6 +224,36 @@ class RFMappingRateTests(unittest.TestCase):
             ]
         )
         np.testing.assert_allclose(frames, expected, equal_nan=True)
+
+    def test_large_counts_do_not_wrap_in_windows_or_spatial_pooling(self) -> None:
+        payload = base_payload()
+        payload["unitsSpikeCounts"] = [[[[2**63, 2**63, 1], [2**63, 0, 0]]]]
+        payload["occupancyTimeSec"] = [[1.0, 1.0]]
+        data = self.load(payload)
+        groups = [(0, 2), (2, 2)]
+        windows = data.count_windows_array(0, groups)
+        self.assertEqual(windows[0, 0, 0], 2**64 + 1)
+        self.assertEqual(windows[1, 0, 0], 1)
+        self.assertEqual(data.best_cell(0), (0, 0))
+        mode = constants_module.VALUE_MODE_COUNT
+        self.assertEqual(data.response_value(0, 0, 0, 0, 2, mode), float(2**64 + 1))
+        self.assertEqual(data.response_matrix(0, 0, 2, mode)[0][0], float(2**64 + 1))
+        self.assertEqual(
+            data.all_positions_timeline_values(0, groups, mode),
+            [float(3 * 2**63 + 1), 1.0],
+        )
+        self.assertEqual(
+            data.spatial_group_response_values(0, (0, 0), (0, 0), groups, mode),
+            [float(2**64 + 1), 1.0],
+        )
+        self.assertEqual(
+            data.spatial_group_observations(0, (0, 0), (0, 1), 0, 2).count,
+            float(3 * 2**63 + 1),
+        )
+        self.assertEqual(
+            data.spatial_group_count_histogram(0, (0, 0), (0, 1)),
+            [float(2**64), float(2**63), 1.0],
+        )
 
     def test_batched_temporal_metrics_match_scalar_reference(self) -> None:
         data = self.load(base_payload())
@@ -471,6 +502,29 @@ class RFMappingRateTests(unittest.TestCase):
             display_module.smooth_matrix([[60.0, None, 30.0]], 2),
             [[60.0, None, 30.0]],
         )
+
+    def test_missing_occupancy_is_excluded_from_temporal_smoothing_and_floor(self) -> None:
+        payload = base_payload()
+        payload["unitsSpikeCounts"][0][0][1] = [0, 0, 0]
+        payload["occupancyTimeSec"][0][1] = 0
+        data = self.load(payload)
+        groups = [(0, 0), (1, 1), (2, 2)]
+        expected = data.temporal_metrics_from_histogram([10, 20, 30], groups)
+        for radius in (0, 1, 2):
+            with self.subTest(radius=radius):
+                histogram = data.spatial_group_histograms_array(
+                    0, [(0, 0)], [(0, 0), (1, 1)], smooth_radius=radius,
+                )
+                np.testing.assert_allclose(histogram[0, 0], [10, 20, 30])
+                self.assertTrue(np.isnan(histogram[0, 1]).all())
+                delay, entropy = data.spatial_group_temporal_arrays(
+                    0, [(0, 0)], [(0, 0), (1, 1)], groups,
+                    smooth_radius=radius, count_floor=50,
+                )
+                self.assertEqual(delay[0, 0], expected.delay_ms)
+                self.assertAlmostEqual(entropy[0, 0], expected.entropy)
+                self.assertTrue(np.isnan(delay[0, 1]))
+                self.assertTrue(np.isnan(entropy[0, 1]))
 
 
 class VectorizedSpatialHelpersTests(unittest.TestCase):

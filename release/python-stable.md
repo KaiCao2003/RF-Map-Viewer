@@ -1,4 +1,4 @@
-## Python 1.10.1: macOS keyboard shortcuts
+## Python 1.10.1: keyboard, data, display, and performance fixes
 
 Version **1.10.1**. Target: macOS Apple Silicon (build **110001**).
 
@@ -7,9 +7,16 @@ Version **1.10.1**. Target: macOS Apple Silicon (build **110001**).
 - Keep F, D, and P working with Caps Lock. Only Shift+P cycles the palette.
 - Preserve input-field editing, open-picker navigation, and window-scoped actions.
 - Add native Cocoa keyboard regression coverage alongside Tk interaction tests.
+- Keep missing-exposure cells missing through temporal smoothing, without excluding sampled zero responses. This corrects Delay/RGB values near holes in the sampling grid.
+- Match colored RF exports to the screen's zero-based color scale; Gray keeps its data range.
+- Validate raw-count normalization/definition markers and occupancy dimensions for both JSON and indexed RF files. Preserve large integer IDs and prevent unsigned count-sum overflow.
+- Refresh probe filtering, paired selections after background caching, and Auto tuning orientation immediately when their controls change.
+- Reuse visible-unit results while rebuilding the picker. A synthetic 512-unit, 1000-bin refresh fell from 54.492 ms to 0.762 ms (remote Linux validation; median).
 
-Scientific calculations and input contracts are unchanged. Windows remains
-available from the Python 1.10.0 release; Free-Moving alpha is unchanged.
+These fixes correct viewer calculations and contract enforcement; they do not
+change RF analysis or experimental inputs. Swift receives the corresponding
+fixes in its own 1.10.1 release. Windows remains available from the Python
+1.10.0 release; Free-Moving alpha is unchanged.
 
 ## Python 1.10.0 stable: indexed RF files and progressive loading
 

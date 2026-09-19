@@ -44,6 +44,26 @@ final class RFMapTests: XCTestCase {
         XCTAssertThrowsError(try maps.byUnitID(9))
     }
 
+    func testProgressiveInsertionKeepsSourceOrderLookupsAndSnapshots() throws {
+        var maps = try RFMapList([makeMap(unitIndex: 0, unitID: 41)])
+        let frozen = maps
+        for index in [4, 2, 1, 3, 5] {
+            try maps.insertInOriginalOrder(makeMap(unitIndex: index, unitID: 41 + index))
+        }
+        XCTAssertEqual(maps.originalIndices, Array(0...5))
+        XCTAssertEqual(maps.unitIDs, Array(41...46))
+        for index in 0...5 {
+            XCTAssertEqual(try maps.byOriginalIndex(index).unitID, 41 + index)
+            XCTAssertEqual(try maps.byUnitID(41 + index).unitIndex, index)
+            XCTAssertEqual(maps.originalIndex(forUnitID: 41 + index), index)
+        }
+        XCTAssertEqual(frozen.originalIndices, [0])
+        XCTAssertThrowsError(try maps.insertInOriginalOrder(makeMap(unitIndex: 1, unitID: 99)))
+        XCTAssertThrowsError(try maps.insertInOriginalOrder(makeMap(unitIndex: 6, unitID: 41)))
+        XCTAssertEqual(maps.originalIndices, Array(0...5))
+        XCTAssertNil(maps.originalIndex(forUnitID: 99))
+    }
+
     func testSumBetweenSecondsIsHalfOpenAndKeepsSingletonTimeAxis() throws {
         let result = try makeMap().sumBetweenSeconds(0.0, 0.2)
 

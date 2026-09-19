@@ -347,7 +347,13 @@ class GUIFigureDataProvider:
             unit_idx = self.data.rf_map_by_unit_id(int(unit_id)).unit_index
             matrices.append(self._rf_matrix(unit_idx, polar=False))
         bounds = shared_scalar_scale(matrices)
-        return float(bounds["vmin"]), float(bounds["vmax"])
+        low, high = float(bounds["vmin"]), float(bounds["vmax"])
+        # Colored RF plots use a zero baseline on screen as well as in exports.
+        if self.snapshot.palette != "Gray":
+            low = 0.0
+            if high <= 0.0:
+                high = 1.0
+        return low, high
 
     def shared_waveform_amplitude_limit(
         self,

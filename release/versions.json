@@ -43,13 +43,13 @@
       "tag": "python-v1.10.0-alpha.3"
     },
     "swift": {
-      "release_version": "1.10.0",
-      "marketing_version": "1.10.0",
-      "build": "110000",
+      "release_version": "1.10.1",
+      "marketing_version": "1.10.1",
+      "build": "110001",
       "channel": "stable",
       "feature_generation_offset": 0,
-      "artifact": "RF_Map_Viewer-1.10.0-swift-macos-arm64.zip",
-      "tag": "swift-v1.10.0"
+      "artifact": "RF_Map_Viewer-1.10.1-swift-macos-arm64.zip",
+      "tag": "swift-v1.10.1"
     },
     "web": {
       "release_version": "1.10.0",

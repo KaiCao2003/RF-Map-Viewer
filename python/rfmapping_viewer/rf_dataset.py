@@ -53,10 +53,29 @@ def _number(value: Any, label: str) -> float:
 
 
 def _integer(value: Any, label: str) -> int:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
     parsed = _number(value, label)
     if not parsed.is_integer():
         raise ValueError(f"{label} must be an integer")
     return int(parsed)
+
+
+def _count_sum_dtype(values: NDArray[Any], terms: int) -> Any:
+    """Keep ordinary counts fast and avoid wrapping valid uint64 inputs.
+
+    A dtype bound proves that compact arrays can be accumulated in uint64
+    without scanning their values. Python integers are needed only when the
+    source range can overflow that accumulator.
+    """
+
+    if values.dtype.kind == "O":
+        return object
+    limit = np.iinfo(np.uint64).max
+    if np.iinfo(values.dtype).max * terms <= limit:
+        return np.uint64
+    maximum = int(values.max()) if values.size else 0
+    return np.uint64 if maximum * terms <= limit else object
 
 
 def _flat_list(value: Any, label: str) -> list[Any]:
@@ -143,18 +162,18 @@ def _compact_spike_counts(
             )
         if float in scalar_types:
             for item in histogram:
-                parsed = float(item)
                 if (
-                    not math.isfinite(parsed)
-                    or parsed < 0.0
-                    or not parsed.is_integer()
-                    or parsed >= 2**64
+                    (isinstance(item, float) and (
+                        not math.isfinite(item) or not item.is_integer()
+                    ))
+                    or item < 0
+                    or item >= 2**64
                 ):
                     raise ValueError(
                         "unitsSpikeCounts values must be finite non-negative "
                         "integer spike counts"
                     )
-            row_maximum = max(float(item) for item in histogram)
+            row_maximum = max(histogram)
             maximum = max(maximum, int(row_maximum))
             continue
 
@@ -305,7 +324,10 @@ class RFMap:
         stop = self._edge_index(later, "later_s")
         if stop < start:
             raise ValueError("later_s must resolve at or after earlier_s")
-        counts = self.spike_counts[..., start:stop].sum(axis=-1, keepdims=True)
+        source = self.spike_counts[..., start:stop]
+        counts = source.sum(
+            axis=-1, keepdims=True, dtype=_count_sum_dtype(source, stop - start)
+        )
         edges = _readonly_array(
             [self.time_bin_edges_s[start], self.time_bin_edges_s[stop]],
             dtype=float,
@@ -345,9 +367,9 @@ class RFMap:
         stop = self._edge_index(later, "later_s")
         if stop < start:
             raise ValueError("later_s must resolve at or after earlier_s")
-        counts = self.spike_counts[..., start:stop].sum(axis=-1)
+        has_spikes = np.any(self.spike_counts[..., start:stop] != 0, axis=-1)
         unavailable = self.occupancy_time_s <= 0
-        return int(np.count_nonzero((counts == 0) | unavailable))
+        return int(np.count_nonzero(~has_spikes | unavailable))
 
 
 class RFMapList(Sequence[RFMap]):
@@ -497,6 +519,27 @@ def _parse_rf_header(raw: Mapping[str, Any]) -> RFHeader:
     if not np.all(np.diff(time_edges) > 0):
         raise ValueError("timeBinEdges must be strictly increasing")
 
+    required_semantics = {
+        "responseUnits": "spike_count",
+        "responseNormalization": "none",
+        "spikeCountDefinition": (
+            "each_qualifying_trial_contributes_once_per_final_spatial_bin"
+        ),
+        "occupancyTimeDefinition": (
+            "sum_of_qualifying_trial_durations_per_final_spatial_bin"
+        ),
+    }
+    for field, expected in required_semantics.items():
+        if raw.get(field) != expected:
+            raise ValueError(f"{field} must be {expected!r}")
+    occupancy_size = tuple(
+        _integer(value, "occupancyTimeSecSize value")
+        for value in _flat_list(raw["occupancyTimeSecSize"], "occupancyTimeSecSize")
+    )
+    if occupancy_size != (n_y, n_x):
+        raise ValueError(
+            "occupancyTimeSecSize must match the y-by-x unitsSpikeCountsSize"
+        )
     occupancy_time_s = _occupancy_matrix(raw["occupancyTimeSec"], n_y, n_x)
     if not np.any(occupancy_time_s > 0):
         raise ValueError("occupancyTimeSec must contain at least one positive value")

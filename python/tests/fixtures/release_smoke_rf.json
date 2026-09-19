@@ -14,6 +14,9 @@
   "timeBinEdges": [-0.1, 0.0, 0.1, 0.2],
   "responseUnits": "spike_count",
   "responseNormalization": "none",
+  "spikeCountDefinition": "each_qualifying_trial_contributes_once_per_final_spatial_bin",
+  "occupancyTimeDefinition": "sum_of_qualifying_trial_durations_per_final_spatial_bin",
+  "occupancyTimeSecSize": [1, 2],
   "occupancyTimeSec": [0.2, 0.4],
   "fixture": "synthetic release smoke test; no experimental data"
 }

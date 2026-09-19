@@ -14,7 +14,12 @@ Version 1.10.1 restores macOS keyboard navigation, gives newly opened documents
 focus on their visible plot, and returns keyboard focus to clicked viewer
 controls after editing a field. Caps Lock preserves F/D/P actions; Shift+P
 selects palette cycling. Native arrow-key keypad/Fn flags do not suppress
-navigation. Scientific input and display calculations are unchanged.
+navigation. Colored RF exports retain the live view's zero-based color scale.
+Missing-occupancy cells stay missing during temporal smoothing; sampled zero
+responses still contribute normally. Raw-count schema markers are validated,
+and large integral IDs and count sums retain their precision. Unit-picker
+refreshes reuse visibility results; probe filtering, paired selections after
+background loading, and Auto tuning orientation remain synchronized.
 
 Version 1.10.0 adds indexed RF input and progressive caching.
 

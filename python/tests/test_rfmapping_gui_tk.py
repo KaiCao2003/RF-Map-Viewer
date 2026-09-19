@@ -583,6 +583,46 @@ class TkViewerTests(unittest.TestCase):
         )
         self.assertEqual(self.app._unit_navigation_ids(), [10, 20])
 
+    def test_unit_picker_snaps_filter_window_once_per_list_not_per_unit(self) -> None:
+        with mock.patch.object(
+            self.app, "_snap_time_range_to_bins", wraps=self.app._snap_time_range_to_bins,
+        ) as snap:
+            self.app._sync_unit_combo()
+        self.assertEqual(self.app._unit_combo_unit_ids, [7, 8])
+        # One local list and one navigation list may each resolve the range.
+        self.assertLessEqual(snap.call_count, 2)
+
+    def test_cached_unit_filter_updates_the_paired_selection_and_picker(self) -> None:
+        other = gui.RFMViewer(
+            rf_model_module.RFMappingData(self.app.data.path), master=self.app._app_root,
+        )
+        self.addCleanup(other.destroy)
+        self.app.update()
+        cached = {0}
+        archive = SimpleNamespace(
+            cache_count=1, error=None, is_cached=lambda index: index in cached,
+            request=lambda _index: None,
+        )
+        # Unit 8 is still provisionally visible in the first window, while the
+        # other window already knows that it fails the zero-bin filter.
+        with (
+            mock.patch.object(self.app.data, "unit_archive", archive),
+            mock.patch.object(self.app.data, "zero_spike_spatial_bin_count", side_effect=lambda index, *_: index),
+            mock.patch.object(other.data, "zero_spike_spatial_bin_count", side_effect=lambda index, *_: index),
+        ):
+            self.app._set_selected_unit_id(8)
+            self.app.pair_windows_var.set(True)
+            self.app._on_pair_windows_toggled()
+            self.app._update_all()
+            self.assertEqual(other._selected_unit_id_value(), 8)
+            cached.add(1)
+            archive.cache_count = 2
+            self.app._poll_unit_cache()
+            self.assertEqual(self.app._selected_unit_id_value(), 7)
+            self.assertEqual(other._selected_unit_id_value(), 7)
+            self.assertEqual(self.app._app_root._rfm_pairing_state.unit_id, 7)
+            self.assertEqual(other._unit_combo_unit_ids, [7])
+
     def test_all_filtered_is_nonfatal_and_blocks_empty_figure_composer(self) -> None:
         payload = current_rf_payload({
             "unitsSpikeCounts": [[[[0], [0]]], [[[0], [0]]]],
@@ -1822,6 +1862,28 @@ class TkViewerTests(unittest.TestCase):
         self.app.polar_layout_var.set(True)
         self.assertEqual(self.app._effective_tuning_plot_mode(), "Polar")
 
+    def test_polar_shortcut_updates_auto_tuning_plot_immediately(self) -> None:
+        self.app._select_tab(0)
+        self.app.update()
+        self.app.tuning_curve_data = companions_module.TuningCurveData(
+            Path(self.directory.name) / "tuning_curves.json",
+            {7: tuple(2.0 for _ in range(constants_module.HD_RAW_BIN_COUNT))},
+        )
+        self.app.tuning_plot_mode_var.set("Auto")
+        self.app.tuning_smoothing_var.set(False)
+        for mode in ("Polar", "Line"):
+            self.app._toggle_polar_layout()
+            text = "\n".join(
+                self.app.tuning_curve_canvas.itemcget(item, "text")
+                for item in self.app.tuning_curve_canvas.find_all()
+                if self.app.tuning_curve_canvas.type(item) == "text"
+            )
+            self.assertIn("0°" if mode == "Polar" else "Head direction (deg)", text)
+        self.app.tuning_plot_mode_var.set("Line")
+        with mock.patch.object(self.app, "_draw_tuning_curve") as draw:
+            self.app._toggle_polar_layout()
+        draw.assert_not_called()
+
     def test_hd_class_label_tracks_selected_unit_and_hides_zero(self) -> None:
         tuning_path = Path(self.directory.name) / "tuning_curves.json"
         curve = tuple(float((index % 24) + 1) for index in range(constants_module.HD_RAW_BIN_COUNT))
@@ -2235,6 +2297,17 @@ class TkViewerTests(unittest.TestCase):
         self.app._draw_probe_canvas()
         static_after = tuple(self.app.probe_canvas.find_withtag("probe-static"))
         self.assertEqual(static_after, static_before)
+
+        # RF-bin filtering changes the plotted population even with unchanged
+        # geometry, dimensions and probe-region selection.
+        for end_ms, expected_units in (("1", 0), ("30", 2)):
+            self.app.range_end_ms_var.set(end_ms)
+            self.app._on_range_changed()
+            unit_dots = [
+                item for item in self.app.probe_canvas.find_withtag("probe-static")
+                if self.app.probe_canvas.type(item) == "oval"
+            ]
+            self.assertEqual(len(unit_dots), expected_units)
 
     def test_nan_probe_selection_overlay_and_spatial_filter_parity(self) -> None:
         base = Path(self.directory.name)

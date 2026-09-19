@@ -273,6 +273,7 @@ final class RFMappingData: @unchecked Sendable {
     let nX: Int
     let nBins: Int
     let unitPool: [Int]
+    private let unitIndexLookup: [Int: Int]
     let xPositions: [Double]
     let yPositions: [Double]
     let timeBinEdges: [Double]
@@ -430,6 +431,7 @@ final class RFMappingData: @unchecked Sendable {
         }
         counts = archive == nil ? initialCounts : initialCounts + Array(repeating: [], count: nUnits - 1)
         unitPool = payload.unitPool
+        unitIndexLookup = Dictionary(uniqueKeysWithValues: payload.unitPool.enumerated().map { ($0.element, $0.offset) })
         xPositions = payload.xPositions
         yPositions = payload.yPositions
         timeBinEdges = payload.timeBinEdges
@@ -455,7 +457,7 @@ final class RFMappingData: @unchecked Sendable {
     }
 
     func unitIndex(forUnitID unitID: Int) -> Int? {
-        unitPool.firstIndex(of: unitID)
+        unitIndexLookup[unitID]
     }
 
     func isUnitCached(_ index: Int) -> Bool {
@@ -524,9 +526,8 @@ final class RFMappingData: @unchecked Sendable {
             throw RFMappingError.invalidData("Cached RF unit does not belong to this dataset.")
         }
         guard !isUnitCached(map.unitIndex) else { return }
-        let updated = try RFMapList((Array(rfMaps) + [map]).sorted { $0.unitIndex < $1.unitIndex })
+        try rfMaps.insertInOriginalOrder(map)
         counts[map.unitIndex] = map.spikeCounts
-        rfMaps = updated
         loadedUnitIndices.insert(map.unitIndex)
     }
 

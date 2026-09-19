@@ -93,6 +93,12 @@ func smoothMatrix(_ matrix: OptionalMatrix, radius: Int) -> OptionalMatrix {
         var output = current
         for y in 0..<rows {
             for x in 0..<cols {
+                // Missing exposure must remain a barrier on every pass, or
+                // later passes spread responses through unsampled positions.
+                guard let center = current[y][x], center.isFinite else {
+                    output[y][x] = nil
+                    continue
+                }
                 var total = 0.0
                 var weightTotal = 0.0
                 for dy in -1...1 {
@@ -116,14 +122,24 @@ func smoothMatrix(_ matrix: OptionalMatrix, radius: Int) -> OptionalMatrix {
     return current
 }
 
-func finiteMinMax(_ matrix: OptionalMatrix) -> (Double, Double) {
-    let values = matrix.flatMap { $0 }.compactMap { value -> Double? in
-        guard let value, value.isFinite else { return nil }
-        return value
+func finiteBounds(_ matrix: OptionalMatrix) -> (low: Double, high: Double)? {
+    var low = Double.infinity
+    var high = -Double.infinity
+    for row in matrix {
+        for case let value? in row where value.isFinite {
+            low = min(low, value)
+            high = max(high, value)
+        }
     }
-    guard let low = values.min(), var high = values.max() else {
+    return low.isFinite ? (low, high) : nil
+}
+
+func finiteMinMax(_ matrix: OptionalMatrix) -> (Double, Double) {
+    guard let bounds = finiteBounds(matrix) else {
         return (0.0, 1.0)
     }
+    let low = bounds.low
+    var high = bounds.high
     if abs(high - low) < 1e-12 {
         high = low + 1.0
     }

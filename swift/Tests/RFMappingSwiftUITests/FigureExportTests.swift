@@ -33,7 +33,8 @@ final class FigureExportTests: XCTestCase {
 
     private func snapshot(
         unitID: Int = 22,
-        timeResolutionMS: Double = 100
+        timeResolutionMS: Double = 100,
+        palette: RFPalette = .gray
     ) -> ViewerSyncState {
         ViewerSyncState(
             unitID: unitID,
@@ -48,7 +49,7 @@ final class FigureExportTests: XCTestCase {
             yBins: 1,
             smoothRadius: 0,
             flipY: false,
-            palette: .gray,
+            palette: palette,
             polarRadiusMode: .displayBottomInner,
             spatialPlotFormat: .rectangular,
             delayRGBMode: .delay,
@@ -461,6 +462,92 @@ final class FigureExportTests: XCTestCase {
             companions: FigureExportCompanions()
         ))
         XCTAssertEqual(preview, descriptor)
+    }
+
+    func testColorRFPlotsAndPreviewUseZeroBaselineForSharedAndConstantScales() throws {
+        let data = try makeData(unitIDs: [22, 11])
+        let page = FigurePageTemplate(
+            name: "Color RF",
+            plots: [FigurePlotPlacement(kind: .rfCartesian), FigurePlotPlacement(kind: .rfPolar)]
+        )
+        let renderer = FigureExportRenderer()
+        for palette in [RFPalette.viridis, .inferno] {
+            for unitIDs in [[22, 11], [22]] {
+                var value = configuration(unitIDs: unitIDs, pages: [page])
+                value.viewerSnapshot = snapshot(palette: palette)
+                let expected = FigureScalarRange(vmin: 0, vmax: unitIDs.count == 1 ? 3 : 5)
+                let descriptors = renderer.descriptors(
+                    configuration: value, data: data, companions: FigureExportCompanions()
+                )
+                let ranges = descriptors.flatMap(\.plots).compactMap(\.rfValueRange)
+                XCTAssertEqual(ranges.count, unitIDs.count * 2)
+                XCTAssertTrue(ranges.allSatisfy { $0 == expected })
+                let preview = try XCTUnwrap(renderer.previewDescriptor(
+                    unitID: 22, pageIndex: 0, configuration: value,
+                    data: data, companions: FigureExportCompanions()
+                ))
+                XCTAssertEqual(preview.plots.compactMap(\.rfValueRange), [expected, expected])
+            }
+        }
+    }
+
+    func testExportScaleUsesResponseSmoothingWithoutBridgingMissingOccupancy() throws {
+        let payload = currentRFSchemaPayload([
+            "unitsSpikeCounts": [[[[4], [0], [16]]]],
+            "unitsSpikeCountsSize": [1, 1, 3, 1],
+            "unitPool": [17],
+            "xPositions": [-1, 0, 1],
+            "yPositions": [0],
+            "timeBinEdges": [0, 0.01],
+        ], occupancyTimeSec: [[1, 0, 1]], occupancyTimeSecSize: [1, 3])
+        let data = try RFMappingData(
+            data: JSONSerialization.data(withJSONObject: payload),
+            url: URL(fileURLWithPath: "/tmp/export-missing-occupancy.rfmap")
+        )
+        let store = RFMappingStore(
+            initialData: data, loadDefault: false, discoverJSONChoices: false,
+            discoverCompanions: false, unitQualityFilterEnabled: false,
+            preferences: UserDefaults(suiteName: UUID().uuidString)!
+        )
+        store.smoothRadius = 2
+        store.palette = .viridis
+        let page = FigurePageTemplate(name: "Missing", plots: [FigurePlotPlacement(kind: .rfCartesian)])
+        var value = configuration(unitIDs: [17], pages: [page])
+        value.viewerSnapshot = store.viewerSyncState
+        let descriptors = FigureExportRenderer().descriptors(
+            configuration: value, data: data, companions: FigureExportCompanions()
+        )
+        XCTAssertEqual(descriptors.flatMap(\.plots).compactMap(\.rfValueRange),
+                       [FigureScalarRange(vmin: 0, vmax: 16)])
+    }
+
+    func testColorExportScaleRemainsNondegenerateForZeroAndMissingResponses() throws {
+        let data = try makeData(unitIDs: [22])
+        let store = RFMappingStore(
+            initialData: data, loadDefault: false, discoverJSONChoices: false,
+            discoverCompanions: false, unitQualityFilterEnabled: false,
+            preferences: UserDefaults(suiteName: UUID().uuidString)!
+        )
+        store.setRFSubtractEnabled(true)
+        store.plotRangeStartMS = 0
+        store.plotRangeEndMS = 100
+        let page = FigurePageTemplate(name: "Empty response", plots: [FigurePlotPlacement(kind: .rfCartesian)])
+        for palette in [RFPalette.viridis, .inferno] {
+            store.palette = palette
+            for start in [0.0, 100.0] {
+                store.subtractRangeStartMS = start
+                store.subtractRangeEndMS = start + 100
+                store.normalizePlotTimeRange()
+                XCTAssertEqual(store.currentHeatmapPlot().matrix, start == 0 ? [[0]] : [[nil]])
+                var value = configuration(unitIDs: [22], pages: [page])
+                value.viewerSnapshot = store.viewerSyncState
+                let descriptors = FigureExportRenderer().descriptors(
+                    configuration: value, data: data, companions: FigureExportCompanions()
+                )
+                XCTAssertEqual(descriptors.flatMap(\.plots).compactMap(\.rfValueRange),
+                               [FigureScalarRange(vmin: 0, vmax: 1)])
+            }
+        }
     }
 
     func testMissingCompanionCapabilitiesBecomeExplicitPlaceholders() throws {
@@ -1157,7 +1244,7 @@ final class FigureExportTests: XCTestCase {
         XCTAssertEqual(provenance["provenanceVersion"] as? Int, 1)
         let application = try XCTUnwrap(provenance["application"] as? [String: Any])
         XCTAssertEqual(application["name"] as? String, "RF Map Viewer")
-        XCTAssertEqual(application["version"] as? String, "1.10.0")
+        XCTAssertEqual(application["version"] as? String, "1.10.1")
         XCTAssertEqual(application["edition"] as? String, "SwiftUI")
         let source = try XCTUnwrap(provenance["source"] as? [String: Any])
         XCTAssertEqual(source["path"] as? String, data.url.path)

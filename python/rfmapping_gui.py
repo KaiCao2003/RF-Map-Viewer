@@ -435,11 +435,16 @@ class RFMViewer(tk.Toplevel):
         if count != self._unit_cache_count:
             self._unit_cache_count = count
             selected = self._selected_unit_id_value()
-            self._sync_unit_combo()
+            if self._app_root._rfm_pairing_enabled and self.settings.rf_filter_units_with_zero_bins:
+                # Newly read units can leave the provisional visible union.
+                # Reconcile the shared selection before local navigation.
+                self._pair_ready_viewer_set_changed()
             self._reconcile_unit_filter_selection()
             if selected != self._selected_unit_id_value() or self._unit_cache_waiting:
                 self._unit_cache_waiting = False
                 self._update_all()
+            else:
+                self._draw_probe_canvas()
         if error is not None:
             self.status_label.configure(text=error[1])
             return
@@ -4456,7 +4461,7 @@ class RFMViewer(tk.Toplevel):
         )
         if not points:
             self._probe_canvas_transform = None
-            signature = ("no-matches", id(geometry), width, height)
+            signature = ("no-matches", id(geometry), width, height, frozenset(available))
             if signature != self._probe_static_signature:
                 canvas.delete("all")
                 canvas.create_text(
@@ -4501,6 +4506,7 @@ class RFMViewer(tk.Toplevel):
             id(self.data),
             width,
             height,
+            frozenset(available),
             self.spatial_region,
             frozenset(region_ids),
         )
@@ -4706,12 +4712,14 @@ class RFMViewer(tk.Toplevel):
     def _sync_unit_combo(self) -> None:
         unit_ids = self._unit_navigation_ids()
         self._unit_combo_unit_ids = unit_ids
+        local_indices = {int(unit_id): index for index, unit_id in enumerate(self.data.unit_pool)}
+        local_visible = set(self._local_quality_visible_unit_ids())
         values: list[str] = []
         for unit_id in unit_ids:
-            local_index = self._local_unit_index(unit_id)
+            local_index = local_indices.get(unit_id)
             if local_index is None:
                 values.append(f"N/A  cluster {unit_id} — not in this session")
-            elif not self._local_unit_passes_quality_filter(unit_id):
+            elif unit_id not in local_visible:
                 values.append(f"N/A  cluster {unit_id} — hidden by RF-bin filter")
             else:
                 values.append(f"{local_index:03d}  cluster {unit_id}")
@@ -4855,6 +4863,8 @@ class RFMViewer(tk.Toplevel):
         self._timeline_preview_cache_key = None
         self._timeline_preview_images = {}
         self._on_control_changed()
+        if self._active_tab_key() == "rf" and self.tuning_plot_mode_var.get() == "Auto":
+            self._draw_tuning_curve()
 
     def _on_tab_changed(self, _event: object | None = None) -> None:
         if not self._pair_apply_in_progress:

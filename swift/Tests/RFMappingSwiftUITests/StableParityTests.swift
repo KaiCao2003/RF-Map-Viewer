@@ -117,6 +117,119 @@ final class StableParityTests: XCTestCase {
         XCTAssertEqual(irregular.delayHeatmapPlot(floor: 0).matrix, [[5]])
     }
 
+    func testIrregularTimeGroupingUsesNearestPhysicalEdgesAndRefreshesCaches() throws {
+        let viewer = store(try data([[5, 8, 3]], edges: [0, 0.01, 0.03, 0.04]))
+        viewer.timeResolutionMS = 20
+        viewer.normalizeControls()
+        let nativeGroups = (0..<3).map { AxisGroup(start: $0, end: $0) }
+        XCTAssertEqual(viewer.timeGroups(), nativeGroups, "An exact tie chooses the earlier edge")
+        XCTAssertEqual(viewer.timelineSnapshot().matrices, [[[5]], [[8]], [[3]]])
+        XCTAssertEqual(viewer.delayHeatmapPlot(floor: 0).matrix, [[5]])
+        XCTAssertEqual(viewer.cachedRGBPlot().delay, [[5]])
+        XCTAssertEqual(viewer.delayMatrixForTimeGroups(), [[5]])
+
+        viewer.timeResolutionMS = 30
+        viewer.normalizeControls()
+        XCTAssertEqual(viewer.timeGroups(), [AxisGroup(start: 0, end: 1), AxisGroup(start: 2, end: 2)])
+        XCTAssertEqual(viewer.timelineSnapshot().matrices, [[[13]], [[3]]])
+        XCTAssertEqual(viewer.delayHeatmapPlot(floor: 0).matrix, [[15]])
+        XCTAssertEqual(viewer.cachedRGBPlot().delay, [[15]])
+
+        viewer.timeResolutionMS = 20
+        viewer.normalizeControls()
+        XCTAssertEqual(viewer.timeGroups(), nativeGroups)
+        XCTAssertEqual(viewer.timelineSnapshot().matrices, [[[5]], [[8]], [[3]]])
+        XCTAssertEqual(viewer.delayHeatmapPlot(floor: 0).matrix, [[5]])
+    }
+
+    func testRepeatedResponseSmoothingDoesNotCrossMissingOccupancy() throws {
+        let viewer = store(try data([[4], [0], [16]], edges: [0, 0.01], occupancy: [1, 0, 1]))
+        for mode in ResponseValueMode.allCases {
+            viewer.valueMode = mode
+            for radius in 1...3 {
+                viewer.smoothRadius = radius
+                XCTAssertEqual(viewer.currentHeatmapPlot().matrix, [[4, nil, 16]])
+                XCTAssertEqual(viewer.timelineSnapshot().matrices, [[[4, nil, 16]]])
+            }
+        }
+    }
+
+    func testPaletteChangesUseExactCachedBoundsAndColorZeroBaseline() throws {
+        let viewer = store(try data([[5], [10]], edges: [0, 0.01]))
+        XCTAssertEqual(viewer.currentHeatmapPlot().low, 5)
+        XCTAssertEqual(viewer.currentHeatmapPlot().high, 10)
+        for palette in [RFPalette.viridis, .inferno, .gray] {
+            viewer.palette = palette
+            XCTAssertEqual(viewer.currentHeatmapPlot().low, palette == .gray ? 5 : 0)
+            XCTAssertEqual(viewer.currentHeatmapPlot().high, 10)
+            XCTAssertEqual(viewer.currentHeatmapPlot().matrix, [[5, 10]])
+        }
+        let constant = store(try data([[5]], edges: [0, 0.01]))
+        XCTAssertEqual(constant.currentHeatmapPlot().high, 6)
+        constant.palette = .viridis
+        XCTAssertEqual(constant.currentHeatmapPlot().low, 0)
+        XCTAssertEqual(constant.currentHeatmapPlot().high, 5)
+        XCTAssertEqual(constant.cachedRGBPlot().maxTotal, 5)
+        constant.palette = .gray
+        XCTAssertEqual(constant.currentHeatmapPlot().high, 6)
+    }
+
+    func testColorScaleRemainsNondegenerateForZeroAndMissingResponses() throws {
+        let silent = store(try data([[0]], edges: [0, 0.01]))
+        let missing = store(try data([[9, 0]], edges: [0, 0.08, 0.16]))
+        missing.setRFSubtractEnabled(true)
+        for palette in [RFPalette.viridis, .inferno] {
+            silent.palette = palette
+            XCTAssertEqual(silent.currentHeatmapPlot().matrix, [[0]])
+            XCTAssertEqual(silent.currentHeatmapPlot().low, 0)
+            XCTAssertEqual(silent.currentHeatmapPlot().high, 1)
+            missing.palette = palette
+            XCTAssertEqual(missing.currentHeatmapPlot().matrix, [[nil]])
+            XCTAssertEqual(missing.currentHeatmapPlot().low, 0)
+            XCTAssertEqual(missing.currentHeatmapPlot().high, 1)
+        }
+    }
+
+    func testTemporalMetricReuseKeepsFloorValueModeAndDisplayChangesIndependent() throws {
+        let viewer = store(try data([[9, 0], [0, 9]], edges: [0, 0.01, 0.02]))
+        XCTAssertEqual(viewer.delayHeatmapPlot(floor: 9).matrix, [[nil, nil]])
+        XCTAssertEqual(viewer.cachedRGBPlot().delay, [[5, 15]])
+        viewer.valueMode = .spikeCount
+        XCTAssertEqual(viewer.delayHeatmapPlot(floor: 8).matrix, [[5, 15]])
+        viewer.xBins = 1
+        XCTAssertEqual(viewer.delayHeatmapPlot(floor: 8).matrix, [[5]])
+        XCTAssertEqual(viewer.cachedRGBPlot().entropy, [[1]])
+        viewer.xBins = 2
+        viewer.smoothRadius = 1
+        XCTAssertEqual(viewer.delayHeatmapPlot(floor: 8).matrix, [[5, 15]])
+        XCTAssertGreaterThan(try XCTUnwrap(viewer.cachedRGBPlot().entropy[0][0]), 0)
+    }
+
+    func testEscapeClosesZoomThenClearsProbeFilterThenTimelineWithoutChangingRFRange() throws {
+        let viewer = store(try data([[1, 2, 3]], edges: [0, 0.01, 0.02, 0.03]))
+        viewer.plotRangeStartMS = 10
+        viewer.plotRangeEndMS = 20
+        viewer.normalizePlotTimeRange()
+        viewer.selectTimelineBin(1, extending: false)
+        viewer.setProbeFilteredUnitIDs([17])
+        viewer.isWaveformZoomed = true
+
+        viewer.handleEscape()
+        XCTAssertFalse(viewer.isWaveformZoomed)
+        XCTAssertEqual(viewer.probeFilteredUnitIDs, Set([17]))
+        XCTAssertEqual(viewer.rangeStartMS, 10)
+        XCTAssertEqual(viewer.rangeEndMS, 20)
+        viewer.handleEscape()
+        XCTAssertNil(viewer.probeFilteredUnitIDs)
+        XCTAssertEqual(viewer.rangeStartMS, 10)
+        XCTAssertEqual(viewer.rangeEndMS, 20)
+        viewer.handleEscape()
+        XCTAssertEqual(viewer.rangeStartMS, 0)
+        XCTAssertEqual(viewer.rangeEndMS, 30)
+        XCTAssertEqual(viewer.plotRangeStartMS, 10)
+        XCTAssertEqual(viewer.plotRangeEndMS, 20)
+    }
+
     func testInspectorUsesCountRatePeakAndNativeEntropyInBothValueModes() throws {
         let viewer = store(try data([[5, 5, 8]], edges: [0, 0.01, 0.02, 0.03], occupancy: [2]))
         let cell = CellRef(yStart: 0, yEnd: 0, xStart: 0, xEnd: 0)
@@ -159,13 +272,29 @@ final class StableParityTests: XCTestCase {
         }
     }
 
-    func testMissingExposureContributesZeroToSmoothedTemporalCounts() throws {
+    func testMissingExposureStaysMissingAndDoesNotDiluteSmoothedTemporalCounts() throws {
         let viewer = store(try data([[0, 0], [9, 0], [0, 9]], edges: [0, 0.01, 0.02], occupancy: [0, 1, 1]))
         viewer.smoothRadius = 1
-        // At the center, weights 1:2:1 yield total 6.75, not 9 from dropping the missing neighbor.
-        XCTAssertNil(viewer.delayHeatmapPlot(floor: 7).matrix[0][1])
-        XCTAssertEqual(viewer.delayHeatmapPlot(floor: 6).matrix[0][1], 5)
+        // An unsampled neighbor is not a zero-response observation.
+        XCTAssertNil(viewer.delayHeatmapPlot(floor: 9).matrix[0][1])
+        XCTAssertEqual(viewer.delayHeatmapPlot(floor: 8).matrix[0][1], 5)
+        XCTAssertNil(viewer.delayHeatmapPlot(floor: 0).matrix[0][0])
         XCTAssertNil(viewer.cachedRGBPlot().total[0][0])
+        XCTAssertNil(viewer.cachedRGBPlot().entropy[0][0])
+    }
+
+    func testTemporalSmoothingKeepsMissingBarrierAndSampledZeroResponsesDistinct() throws {
+        let viewer = store(try data([[4, 0], [0, 0], [0, 16]], edges: [0, 0.01, 0.02], occupancy: [1, 0, 1]))
+        for radius in 1...3 {
+            viewer.smoothRadius = radius
+            XCTAssertEqual(viewer.delayHeatmapPlot(floor: 0).matrix, [[5, nil, 15]])
+            XCTAssertEqual(viewer.cachedRGBPlot().entropy, [[0, nil, 0]])
+        }
+        let silent = store(try data([[0, 0], [0, 0]], edges: [0, 0.01, 0.02], occupancy: [0, 1]))
+        silent.smoothRadius = 2
+        XCTAssertEqual(silent.delayHeatmapPlot(floor: 0).matrix, [[nil, nil]])
+        XCTAssertEqual(silent.cachedRGBPlot().total, [[nil, 0]])
+        XCTAssertEqual(silent.cachedRGBPlot().entropy, [[nil, 0]])
     }
 
     func testResolutionChangesOneSourceBinAtATime() throws {

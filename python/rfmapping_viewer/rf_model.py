@@ -14,7 +14,9 @@ from rfmapping_viewer.hd_tuning import (
     load_hd_tuning,
 )
 from rfmapping_viewer.rf_archive import IndexedRFMapList, RFCountSequence
-from rfmapping_viewer.rf_dataset import RFMap, is_indexed_rfmap, load_rf_maps
+from rfmapping_viewer.rf_dataset import (
+    RFMap, _count_sum_dtype, is_indexed_rfmap, load_rf_maps,
+)
 from rfmapping_viewer.rf_loading import load_rf_maps_isolated
 from rfmapping_viewer.waveform import (
     WaveformArtifactStore,
@@ -594,7 +596,10 @@ class RFMappingData:
         cached = self._best_cell_cache.get(unit_idx)
         if cached is not None:
             return cached
-        totals = self.counts[unit_idx].sum(axis=-1, dtype=np.uint64)
+        source = self.counts[unit_idx]
+        totals = source.sum(
+            axis=-1, dtype=_count_sum_dtype(source, self.n_bins)
+        ).astype(np.float64)
         rates = np.divide(
             totals,
             self._occupancy_array,
@@ -659,7 +664,7 @@ class RFMappingData:
         )
 
     def _unit_count_prefix(self, unit_idx: int) -> np.ndarray:
-        """Return a small per-unit ``uint64`` time prefix with LRU retention."""
+        """Return a small per-unit lossless time prefix with LRU retention."""
 
         unit_idx = int(self.rf_map(unit_idx).unit_index)
         with self._count_cache_lock:
@@ -669,11 +674,12 @@ class RFMappingData:
                 return cached
 
         source = np.asarray(self.counts[unit_idx])
+        dtype = _count_sum_dtype(source, self.n_bins)
         prefix = np.zeros(
             (self.n_y, self.n_x, self.n_bins + 1),
-            dtype=np.uint64,
+            dtype=dtype,
         )
-        np.cumsum(source, axis=-1, dtype=np.uint64, out=prefix[..., 1:])
+        np.cumsum(source, axis=-1, dtype=dtype, out=prefix[..., 1:])
         prefix.setflags(write=False)
         with self._count_cache_lock:
             existing = self._count_prefix_cache.pop(unit_idx, None)
@@ -769,10 +775,11 @@ class RFMappingData:
 
         if len(groups) == 1:
             start, end = groups[0]
+            source = self.counts[unit_idx][..., start : end + 1]
             windows = np.sum(
-                self.counts[unit_idx][..., start : end + 1],
+                source,
                 axis=-1,
-                dtype=np.uint64,
+                dtype=_count_sum_dtype(source, end - start + 1),
             )[None, ...]
         else:
             prefix = self._unit_count_prefix(unit_idx)
@@ -878,7 +885,9 @@ class RFMappingData:
         )
         grouped = np.divide(
             grouped,
-            np.maximum(source_pixel_counts, 1.0)[..., None],
+            source_pixel_counts[..., None],
+            out=np.full_like(grouped, np.nan),
+            where=source_pixel_counts[..., None] > 0.0,
         )
         if smooth_radius > 0:
             grouped = np.moveaxis(
@@ -921,10 +930,14 @@ class RFMappingData:
         )
         shape = histograms.shape[:-1]
         delay = np.full(shape, np.nan, dtype=np.float64)
-        entropy = np.zeros(shape, dtype=np.float64)
+        entropy = np.full(shape, np.nan, dtype=np.float64)
+        # Occupancy marks every time bin at a source position unavailable.
+        available = np.isfinite(histograms[..., 0])
         # Preserve direct window summation: subtracting floating prefixes can
         # turn equal peaks into different values and select a later interval.
         for index in np.ndindex(shape):
+            if not available[index]:
+                continue
             metrics = self.temporal_metrics_from_histogram(
                 histograms[index].tolist(), groups,
             )
@@ -947,9 +960,10 @@ class RFMappingData:
     ) -> list[float]:
         if value_mode not in VALUE_MODES:
             raise ValueError(f"Unknown value mode: {value_mode}")
-        totals = self.count_windows_array(unit_idx, time_groups).sum(
+        windows = self.count_windows_array(unit_idx, time_groups)
+        totals = windows.sum(
             axis=(1, 2),
-            dtype=np.uint64,
+            dtype=_count_sum_dtype(windows, self.n_y * self.n_x),
         ).astype(np.float64)
         if value_mode == VALUE_MODE_RATE:
             occupancy_total = sum(
@@ -991,9 +1005,10 @@ class RFMappingData:
         if np.all(stops == starts + 1):
             windows = source[..., starts]
         else:
-            prefix = np.empty(source.shape[:-1] + (self.n_bins + 1,), dtype=np.uint64)
+            dtype = _count_sum_dtype(source, self.n_bins)
+            prefix = np.empty(source.shape[:-1] + (self.n_bins + 1,), dtype=dtype)
             prefix[..., 0] = 0
-            np.cumsum(source, axis=-1, dtype=np.uint64, out=prefix[..., 1:])
+            np.cumsum(source, axis=-1, dtype=dtype, out=prefix[..., 1:])
             windows = prefix[..., stops] - prefix[..., starts]
         values = windows.sum(axis=(0, 1), dtype=np.float64) / denominator
         return values.tolist()
@@ -1021,11 +1036,8 @@ class RFMappingData:
         requested_start, requested_end = min(start, end), max(start, end)
         start = max(0, min(self.n_bins - 1, requested_start))
         end = max(0, min(self.n_bins - 1, requested_end))
-        count = float(
-            self.rf_map(unit_idx).spike_counts[
-                y_idx, x_idx, start : end + 1
-            ].sum(dtype=np.uint64)
-        )
+        source = self.rf_map(unit_idx).spike_counts[y_idx, x_idx, start : end + 1]
+        count = float(source.sum(dtype=_count_sum_dtype(source, end - start + 1)))
         occupancy_time_s = self.occupancy_time_s[y_idx][x_idx]
         if occupancy_time_s <= 0:
             return None
@@ -1082,9 +1094,9 @@ class RFMappingData:
         """
 
         start, end = self._normalized_time_groups([(start, end)])[0]
-        source = self._spatial_group_slice(unit_idx, y_group, x_group)
-        grouped_count = source[..., start : end + 1].sum(
-            axis=-1, dtype=np.uint64
+        source = self._spatial_group_slice(unit_idx, y_group, x_group)[..., start : end + 1]
+        grouped_count = source.sum(
+            axis=-1, dtype=_count_sum_dtype(source, end - start + 1)
         ).sum(dtype=np.float64)
         grouped_occupancy, source_pixel_counts = (
             self._spatial_group_exposure_arrays([y_group], [x_group])
@@ -1149,10 +1161,11 @@ class RFMappingData:
         y_end = max(0, min(self.n_y - 1, max(y_group)))
         x_start = max(0, min(self.n_x - 1, min(x_group)))
         x_end = max(0, min(self.n_x - 1, max(x_group)))
+        source = self.counts[unit_idx][y_start : y_end + 1, x_start : x_end + 1]
         histogram = np.sum(
-            self.counts[unit_idx][y_start : y_end + 1, x_start : x_end + 1],
+            source,
             axis=(0, 1),
-            dtype=np.uint64,
+            dtype=_count_sum_dtype(source, source.shape[0] * source.shape[1]),
         )
         return histogram.astype(np.float64).tolist()
 

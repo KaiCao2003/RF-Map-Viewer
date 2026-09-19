@@ -472,30 +472,30 @@ struct FigureExportRenderer {
             }
         }
         guard needsRF else { return nil }
-        var values: [Double] = []
+        var low = Double.infinity
+        var high = -Double.infinity
+        let store = RFMappingStore(
+            initialData: data,
+            loadDefault: false,
+            discoverJSONChoices: false,
+            discoverCompanions: false,
+            unitQualityFilterEnabled: false
+        )
+        store.applyViewerSyncState(configuration.viewerSnapshot)
         for unitID in configuration.selectedUnitIDs {
             guard data.unitIndex(forUnitID: unitID) != nil else { continue }
-            let store = RFMappingStore(
-                initialData: data,
-                loadDefault: false,
-                discoverJSONChoices: false,
-                discoverCompanions: false,
-                unitQualityFilterEnabled: false
-            )
-            store.applyViewerSyncState(configuration.viewerSnapshot)
             store.selectUnitID(unitID, resetInteraction: false)
-            values.append(contentsOf: store.currentHeatmapPlot().matrix
-                .flatMap { $0 }
-                .compactMap { value -> Double? in
-                    guard let value, value.isFinite else { return nil }
-                    return value
-                })
+            if let bounds = finiteBounds(store.currentHeatmapPlot().matrix) {
+                low = min(low, bounds.low)
+                high = max(high, bounds.high)
+            }
         }
-        guard let low = values.min(), let high = values.max() else {
-            return FigureScalarRange(vmin: 0, vmax: 1)
+        if configuration.viewerSnapshot.palette != .gray {
+            return FigureScalarRange(vmin: 0, vmax: high > 0 ? high : 1)
         }
-        let range = FigureScalarRange(vmin: low, vmax: high)
-        return range
+        return low.isFinite
+            ? FigureScalarRange(vmin: low, vmax: high)
+            : FigureScalarRange(vmin: 0, vmax: 1)
     }
 
     private func stablePageID(unitID: Int, pageID: UUID) -> UUID {
@@ -1288,7 +1288,7 @@ struct FigureExportRenderer {
               !version.isEmpty else {
             // `Bundle.main` belongs to xctest when the renderer is exercised
             // through SwiftPM, not to RF Map Viewer.
-            return "1.10.0"
+            return "1.10.1"
         }
         return version
     }

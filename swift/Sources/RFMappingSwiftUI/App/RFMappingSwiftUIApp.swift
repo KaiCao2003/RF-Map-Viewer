@@ -420,13 +420,7 @@ private struct RFMappingWindow: View {
             nextBin: { store.stepBin(1) },
             decreaseResolution: { store.stepTimeResolution(1.0) },
             increaseResolution: { store.stepTimeResolution(-1.0) },
-            showFullRange: {
-                if store.isWaveformZoomed {
-                    store.isWaveformZoomed = false
-                } else {
-                    store.clearTimelineSelection()
-                }
-            },
+            showFullRange: store.handleEscape,
             selectTab: store.selectTab,
             toggleFlipY: { store.flipY.toggle() },
             toggleSpatialFormat: {
@@ -556,7 +550,7 @@ private struct RFMappingCommands: Commands {
 
             Divider()
 
-            Button("Show Full Time Range (Esc)") { actions?.showFullRange() }
+            Button("Clear Selection / Show Full Time Range (Esc)") { actions?.showFullRange() }
         }
 
         CommandMenu("View") {
@@ -729,7 +723,7 @@ private func showKeyboardShortcuts() {
     -   Subtract RF windows (A − B)
     D   Show / hide display options
     Command-Shift-.   Show / hide filtered units
-    Esc   Close waveform zoom, otherwise show full time range
+    Esc   Close waveform zoom, clear probe selection, then show full time range
     [ / ]   Previous / next unit
     Command-O   Open RF map in a new window
     Command-E   Open Figure Export Composer

@@ -278,7 +278,7 @@ struct SidebarView: View {
     }
 
     private var shortcutHint: some View {
-        Text("←/→ unit   ↑/↓ timeline   1–3 views\nP rectangle/polar   ⇧P palette   Esc close/full range")
+        Text("←/→ unit   ↑/↓ timeline   1–3 views\nP rectangle/polar   ⇧P palette   Esc close/clear/full range")
             .font(.caption)
             .foregroundStyle(.tertiary)
     }

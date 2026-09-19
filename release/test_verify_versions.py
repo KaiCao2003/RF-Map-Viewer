@@ -94,7 +94,7 @@ class ComponentVersionTests(unittest.TestCase):
         for tag in (
             MANIFEST["components"]["python_stable"]["tag"],
             "python-v1.10.0-alpha.3",
-            "swift-v1.10.0",
+            "swift-v1.10.1",
             "web-v1.10.0",
         ):
             subprocess.run(

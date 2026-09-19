@@ -515,9 +515,9 @@ struct RFMapList: RandomAccessCollection, Sendable {
     typealias Index = Int
     typealias Element = RFMap
 
-    private let maps: [RFMap]
-    private let originalIndexLookup: [Int: Int]
-    private let unitIDLookup: [Int: Int]
+    private var maps: [RFMap]
+    private var originalIndexLookup: [Int: Int]
+    private var unitIDLookup: [Int: Int]
 
     init(_ maps: [RFMap]) throws {
         var originalIndexLookup: [Int: Int] = [:]
@@ -542,6 +542,33 @@ struct RFMapList: RandomAccessCollection, Sendable {
     var unitIDs: [Int] { maps.map(\.unitID) }
     var originalIndices: [Int] { maps.map(\.unitIndex) }
     var sourceURL: URL? { maps.first?.sourceURL }
+
+    /// Progressive loading normally appends in source order, but a requested
+    /// unit can arrive early. Only positions after that insertion need updates.
+    mutating func insertInOriginalOrder(_ map: RFMap) throws {
+        guard originalIndexLookup[map.unitIndex] == nil else {
+            throw RFMapError.invalidData("RFMap original unit indices must be unique.")
+        }
+        guard unitIDLookup[map.unitID] == nil else {
+            throw RFMapError.invalidData("RFMap unit IDs must be unique.")
+        }
+        var lower = maps.startIndex
+        var upper = maps.endIndex
+        while lower < upper {
+            let middle = lower + (upper - lower) / 2
+            if maps[middle].unitIndex < map.unitIndex {
+                lower = middle + 1
+            } else {
+                upper = middle
+            }
+        }
+        maps.insert(map, at: lower)
+        for position in lower..<maps.endIndex {
+            let current = maps[position]
+            originalIndexLookup[current.unitIndex] = position
+            unitIDLookup[current.unitID] = position
+        }
+    }
 
     func byOriginalIndex(_ originalIndex: Int) throws -> RFMap {
         guard let position = originalIndexLookup[originalIndex] else {

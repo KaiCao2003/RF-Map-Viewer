@@ -1162,6 +1162,30 @@ def test_gui_shared_rf_scale_is_selection_scoped_and_frozen_in_plot_options(
     assert all(plot.options["value_unit"] == "spikes" for plot in resolved[0].plots)
 
 
+@pytest.mark.parametrize(
+    "palette,counts,expected",
+    [
+        ("Viridis", [5, 10], (0.0, 10.0)),
+        ("Gray", [5, 10], (5.0, 10.0)),
+        ("Viridis", [0, 0], (0.0, 1.0)),
+        ("Gray", [5, 5], (5.0, 5.0)),
+    ],
+)
+def test_shared_rf_export_scale_matches_live_palette_baseline(
+    tmp_path: Path, palette: str, counts: list[int], expected: tuple[float, float],
+) -> None:
+    data = RFMappingData(_write_dataset(
+        tmp_path, unitsSpikeCounts=[[[[counts[0], 0], [counts[1], 0]]]],
+        unitsSpikeCountsSize=[1, 1, 2, 2], unitPool=[41],
+    ))
+    snapshot = replace(
+        _snapshot(), palette=palette, rf_source_start=0, rf_source_end=0,
+        x_groups=((0, 0), (1, 1)), y_groups=((0, 0),),
+        time_groups=((0, 0), (1, 1)),
+    )
+    assert GUIFigureDataProvider(data, snapshot).shared_rf_bounds((41,)) == expected
+
+
 def test_gui_shared_rf_scale_and_cartesian_polar_plots_reuse_derived_matrices(
     tmp_path: Path,
     monkeypatch,
