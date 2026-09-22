@@ -13,6 +13,8 @@ an artifact/tag identity rather than a version suffix.
 Version 1.10.2 opens Finder/Launch Services document URLs directly in the
 initial window instead of showing the file picker. Later external opens create
 independent windows, while launching without a document still shows the picker.
+Waveform discovery stops at the filesystem root for Finder file-reference URLs,
+preventing the loading freeze caused by repeatedly walking past that root.
 JSON and indexed RF maps may omit the descriptive count/occupancy definitions
 and occupancy size marker, matching Python. Explicit conflicting values remain
 errors, and raw counts, occupancy values, and actual dimensions remain validated.

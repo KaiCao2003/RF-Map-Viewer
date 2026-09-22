@@ -638,6 +638,9 @@ final class WaveformArtifactStore: @unchecked Sendable {
         var current = source.deletingLastPathComponent()
         while true {
             parents.append(current)
+            // Launch Services can supply a bridged NSURL whose parent of /
+            // is /.., then /../.., rather than a stable root URL.
+            if current.path == "/" { break }
             let parent = current.deletingLastPathComponent()
             if parent.path == current.path { break }
             current = parent

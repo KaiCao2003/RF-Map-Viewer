@@ -34,6 +34,8 @@ raw integer counts, required response-unit and normalization markers, and
 actual occupancy data retain their checks. The input files are unchanged.
 Swift also handles macOS URL-open events directly, so opening an RF document
 from Finder loads that document instead of leaving the initial file chooser open.
+Its waveform discovery stops at the filesystem root for Finder file-reference
+URLs, avoiding a loading freeze after document decoding.
 Python and Swift use macOS build 110002. Windows remains at 1.10.0, and the
 Free-Moving alpha remains at 1.10.0-alpha.3.
 

@@ -5,6 +5,22 @@ import XCTest
 
 @MainActor
 final class StartupBehaviorTests: XCTestCase {
+    func testFileReferenceURLCompanionDiscoveryStopsAtFilesystemRoot() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("#Recording/260918_10/data/rfmapping/ProbeA/map.rfmap")
+        try FileManager.default.createDirectory(
+            at: file.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        try Data().write(to: file)
+        // Finder's file-reference URLs retain Foundation's bridged NSURL
+        // parent behavior after standardization, unlike native Swift URLs.
+        let reference = try XCTUnwrap((file as NSURL).fileReferenceURL())
+        XCTAssertNil(try WaveformArtifactStore.discover(forRFURL: reference))
+        XCTAssertNil(ProbeGeometryDiscovery.discover(forRFURL: reference))
+    }
+
     func testURLLaunchQueuedBeforeInitialSceneLoadsDocumentWithoutPicker() async throws {
         let router = WindowRouter()
         let delegate = AppDelegate(windowRouter: router)
