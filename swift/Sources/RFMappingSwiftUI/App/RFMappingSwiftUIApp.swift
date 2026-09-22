@@ -573,6 +573,7 @@ private struct RFMappingCommands: Commands {
     }
 }
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let windowRouter: WindowRouter
 
