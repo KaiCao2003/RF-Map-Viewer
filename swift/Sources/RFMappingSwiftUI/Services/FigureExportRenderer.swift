@@ -1288,7 +1288,7 @@ struct FigureExportRenderer {
               !version.isEmpty else {
             // `Bundle.main` belongs to xctest when the renderer is exercised
             // through SwiftPM, not to RF Map Viewer.
-            return "1.10.1"
+            return "1.10.2"
         }
         return version
     }

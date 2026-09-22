@@ -1,3 +1,14 @@
+## Python 1.10.2: RF metadata compatibility
+
+Version **1.10.2**. Target: macOS Apple Silicon (build **110002**).
+
+- Open JSON and indexed NPZ RF files when `spikeCountDefinition`, `occupancyTimeDefinition`, or `occupancyTimeSecSize` is absent. Validate occupancy against the spatial axes, including MATLAB singleton-axis JSON encoding.
+- Reject explicit conflicting definitions or sizes. Continue requiring raw non-negative integer counts, `responseUnits=spike_count`, `responseNormalization=none`, and valid occupancy.
+- Preserve read-only input handling; no RF analysis or experimental data changes are required.
+
+Swift 1.10.2 and Web 1.10.1 receive the corresponding RF compatibility fixes.
+Windows remains available from Python 1.10.0; Free-Moving alpha is unchanged.
+
 ## Python 1.10.1: keyboard, data, display, and performance fixes
 
 Version **1.10.1**. Target: macOS Apple Silicon (build **110001**).

@@ -2,7 +2,7 @@
   "schema_version": 1,
   "reference": {
     "component": "python_stable",
-    "version": "1.10.1",
+    "version": "1.10.2",
     "stable_series": "1.10"
   },
   "policy": {
@@ -11,20 +11,20 @@
   },
   "components": {
     "python_stable": {
-      "release_version": "1.10.1",
-      "marketing_version": "1.10.1",
-      "package_version": "1.10.1",
-      "build": "110001",
+      "release_version": "1.10.2",
+      "marketing_version": "1.10.2",
+      "package_version": "1.10.2",
+      "build": "110002",
       "channel": "stable",
       "feature_generation_offset": 0,
       "edition": "Full",
       "artifact_flavor": "full",
-      "artifact": "RF_Map_Viewer-python-1.10.1-full-macos-arm64.zip",
-      "checksum": "SHA256SUMS-python-1.10.1-full.txt",
+      "artifact": "RF_Map_Viewer-python-1.10.2-full-macos-arm64.zip",
+      "checksum": "SHA256SUMS-python-1.10.2-full.txt",
       "windows_portable_artifact": "RF_Map_Viewer-python-1.10.0-full-windows-x64-portable.zip",
       "windows_installer_artifact": "RF_Map_Viewer-python-1.10.0-full-windows-x64-setup.exe",
       "windows_checksum": "SHA256SUMS-python-1.10.0-full-windows-x64.txt",
-      "tag": "python-v1.10.1",
+      "tag": "python-v1.10.2",
       "windows_release_version": "1.10.0",
       "windows_build": "11000"
     },
@@ -43,23 +43,23 @@
       "tag": "python-v1.10.0-alpha.3"
     },
     "swift": {
-      "release_version": "1.10.1",
-      "marketing_version": "1.10.1",
-      "build": "110001",
+      "release_version": "1.10.2",
+      "marketing_version": "1.10.2",
+      "build": "110002",
       "channel": "stable",
       "feature_generation_offset": 0,
-      "artifact": "RF_Map_Viewer-1.10.1-swift-macos-arm64.zip",
-      "tag": "swift-v1.10.1"
+      "artifact": "RF_Map_Viewer-1.10.2-swift-macos-arm64.zip",
+      "tag": "swift-v1.10.2"
     },
     "web": {
-      "release_version": "1.10.0",
-      "package_version": "1.10.0",
+      "release_version": "1.10.1",
+      "package_version": "1.10.1",
       "channel": "stable",
       "feature_generation_offset": 0,
       "artifact_flavor": "web",
-      "artifact": "RF_Map_Viewer-1.10.0-web.tar.gz",
-      "checksum": "SHA256SUMS-web-1.10.0.txt",
-      "tag": "web-v1.10.0"
+      "artifact": "RF_Map_Viewer-1.10.1-web.tar.gz",
+      "checksum": "SHA256SUMS-web-1.10.1.txt",
+      "tag": "web-v1.10.1"
     }
   }
 }

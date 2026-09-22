@@ -1,9 +1,72 @@
+import AppKit
 import Foundation
 import XCTest
 @testable import RFMappingSwiftUI
 
 @MainActor
 final class StartupBehaviorTests: XCTestCase {
+    func testURLLaunchQueuedBeforeInitialSceneLoadsDocumentWithoutPicker() async throws {
+        let router = WindowRouter()
+        let delegate = AppDelegate(windowRouter: router)
+        let url = URL(fileURLWithPath: "/tmp/direct-open.rfmap")
+        let replaced = expectation(description: "Initial scene consumes Launch Services URL")
+        var fallbackCount = 0
+
+        delegate.application(NSApplication.shared, open: [url])
+        router.install(
+            { _ in XCTFail("The first URL belongs in the initial window") },
+            coldLaunchReplacement: { actual in
+                XCTAssertEqual(actual, url)
+                replaced.fulfill()
+                return true
+            },
+            coldLaunchFallback: { fallbackCount += 1 }
+        )
+
+        await fulfillment(of: [replaced], timeout: 1)
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertEqual(fallbackCount, 0, "An explicit file launch must cancel the fallback picker")
+    }
+
+    func testLaterExternalOpensUseSeparatePreparedDocumentWindows() async throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString + ".json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let payload = currentRFSchemaPayload([
+            "unitsSpikeCounts": [[[[1.0]]]],
+            "unitsSpikeCountsSize": [1, 1, 1, 1],
+            "unitPool": [22], "xPositions": [0.0], "yPositions": [0.0],
+            "timeBinEdges": [0.0, 0.1],
+        ], occupancyTimeSec: 0.1, occupancyTimeSecSize: [1, 1])
+        try JSONSerialization.data(withJSONObject: payload).write(to: url)
+        let router = WindowRouter()
+        var replacementCount = 0
+        var requests: [DocumentWindowRequest] = []
+        router.install(
+            { requests.append($0) },
+            coldLaunchReplacement: { _ in
+                replacementCount += 1
+                return true
+            }
+        )
+        let completed = expectation(description: "All external documents opened")
+        router.openExternal([url, url, url]) { succeeded in
+            XCTAssertTrue(succeeded)
+            completed.fulfill()
+        }
+        await fulfillment(of: [completed], timeout: 2)
+
+        XCTAssertEqual(replacementCount, 1)
+        XCTAssertEqual(requests.count, 2)
+        XCTAssertEqual(Set(requests.map(\.id)).count, 2)
+        for request in requests {
+            XCTAssertEqual(request.path, url.standardizedFileURL.path)
+            let prepared = try XCTUnwrap(router.takePreparedDocument(for: request.id))
+            XCTAssertEqual(prepared.unitPool, [22])
+            XCTAssertNil(router.takePreparedDocument(for: request.id))
+        }
+    }
+
     func testFallbackPickerPresentsOnceWithoutConsumingInitialWindowClaim() async throws {
         let state = ColdLaunchInitialWindowState()
         var presentationCount = 0

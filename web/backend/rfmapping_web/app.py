@@ -61,7 +61,7 @@ from .waveforms import (
 )
 
 
-WEB_VERSION = "1.10.0"
+WEB_VERSION = "1.10.1"
 
 
 class StrictRequest(BaseModel):

@@ -60,10 +60,7 @@ REQUIRED_TOP_LEVEL = {
     "timeBinEdges",
     "responseUnits",
     "responseNormalization",
-    "spikeCountDefinition",
     "occupancyTimeSec",
-    "occupancyTimeSecSize",
-    "occupancyTimeDefinition",
 }
 CACHE_SCHEMA_VERSION = 3
 COUNT_DTYPES = ("|u1", "<u2", "<u4", "<u8")
@@ -343,17 +340,25 @@ def _normalize_metadata(raw: dict[str, Any]) -> dict[str, Any]:
         "occupancyTimeDefinition": EXPECTED_OCCUPANCY_DEFINITION,
     }
     for field, expected in fixed_strings.items():
-        if raw[field] != expected:
+        # MATLAB JSON and indexed exports can omit these descriptions;
+        # explicit markers must still agree with the raw-count contract.
+        if field in (
+            "spikeCountDefinition", "occupancyTimeDefinition"
+        ) and field not in raw:
+            continue
+        if raw.get(field) != expected:
             raise DatasetValidationError(f"{field} must be {expected!r}")
 
-    occupancy_size = [
-        _integer(value, "occupancyTimeSecSize value")
-        for value in _flat_list(raw["occupancyTimeSecSize"], "occupancyTimeSecSize")
-    ]
-    if occupancy_size != [n_y, n_x]:
-        raise DatasetValidationError(
-            "occupancyTimeSecSize must equal the y-by-x unitsSpikeCountsSize dimensions"
-        )
+    if "occupancyTimeSecSize" in raw:
+        occupancy_size = [
+            _integer(value, "occupancyTimeSecSize value")
+            for value in _flat_list(raw["occupancyTimeSecSize"], "occupancyTimeSecSize")
+        ]
+        if occupancy_size != [n_y, n_x]:
+            raise DatasetValidationError(
+                "occupancyTimeSecSize must equal the y-by-x unitsSpikeCountsSize dimensions"
+            )
+    # Validate occupancy against the count axes even without a size marker.
     occupancy_time_sec = _occupancy_matrix(raw["occupancyTimeSec"], n_y, n_x)
     if not any(value > 0 for row in occupancy_time_sec for value in row):
         raise DatasetValidationError(
@@ -370,8 +375,11 @@ def _normalize_metadata(raw: dict[str, Any]) -> dict[str, Any]:
         "isVerticalBar": raw.get("isVerticalBar"),
         "responseUnits": raw["responseUnits"],
         "responseNormalization": raw["responseNormalization"],
-        "spikeCountDefinition": raw["spikeCountDefinition"],
-        "occupancyTimeDefinition": raw["occupancyTimeDefinition"],
+        **{
+            field: raw[field]
+            for field in ("spikeCountDefinition", "occupancyTimeDefinition")
+            if field in raw
+        },
     }
 
 

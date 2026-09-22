@@ -18,8 +18,8 @@ through versioned file contracts, principally the RF formats described in
 
 ## Component versions
 
-The stable Python macOS and Swift viewers are versioned `1.10.1`; Web and the
-Python Windows packages remain at `1.10.0` in the same stable feature generation.
+The stable Python macOS and Swift viewers are versioned `1.10.2`; Web is
+`1.10.1`. Python Windows packages remain at `1.10.0` in the same stable feature generation.
 The separate Free-Moving Python viewer remains
 **`1.10.0-alpha.3`**. Component identity belongs in release tags and artifact
 names, not in a fourth version component. See
@@ -31,10 +31,10 @@ policy.
 GitHub Actions builds the stable packages published on the
 [Releases page](https://github.com/KaiCao2003/RF-Map-Viewer/releases):
 
-- [Python 1.10.1 macOS app](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/python-v1.10.1)
+- [Python 1.10.2 macOS app](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/python-v1.10.2)
 - [Python 1.10.0 Windows installer and portable ZIP](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/python-v1.10.0)
-- [Swift 1.10.1 macOS app](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/swift-v1.10.1)
-- [Web package](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/web-v1.10.0)
+- [Swift 1.10.2 macOS app](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/swift-v1.10.2)
+- [Web 1.10.1 package](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/web-v1.10.1)
 
 This repository was recreated from a reviewed source snapshot on 2026-09-07;
 previous release attachments were not imported. See [PRIVACY.md](PRIVACY.md)
@@ -54,7 +54,7 @@ the legacy `30:7` visual footprint; the physical 3D sphere is unchanged. Drag
 the sphere to rotate the viewing direction or double-click to reset it. Legacy
 JSON, tuning-curve, head-direction, and probe companions are intentionally
 outside this alpha app. The stable Python viewer remains available separately
-at `1.10.1` on macOS, alongside Swift `1.10.1` and Web `1.10.0`.
+at `1.10.2` on macOS, alongside Swift `1.10.2` and Web `1.10.1`.
 
 ## Current RF format and filename aliases
 
@@ -63,6 +63,12 @@ alongside existing JSON inputs. They display the first loaded unit while
 caching remaining units in the background, expose progress and retry, and
 prioritize a selected uncached unit. Multi-unit figure export becomes available
 when the cache completes.
+
+Python and Swift 1.10.2 and Web 1.10.1 accept JSON and indexed RF files that
+omit the descriptive `spikeCountDefinition`, `occupancyTimeDefinition`, and
+`occupancyTimeSecSize` fields. Explicit definitions and sizes must still match
+the raw-count contract. Required response-unit and normalization markers,
+integer counts, and occupancy data remain validated.
 
 All three support independent A − B RF windows with saved timing defaults,
 paired-window synchronization, and matching displayed-data and figure exports.

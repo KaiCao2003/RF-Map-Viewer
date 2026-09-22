@@ -18,8 +18,8 @@ Required top-level fields:
 - `responseNormalization`: exactly `none`.
 - `occupancyTimeSec`: finite, non-negative seconds with axes `(y, x)`.
 
-Python also accepts JSON and indexed exports that omit the following
-descriptive fields. When present, they must match these values:
+Python and Swift 1.10.2 and Web 1.10.1 accept JSON and indexed exports that omit
+the following descriptive fields. When present, they must match these values:
 
 - `spikeCountDefinition`:
   `each_qualifying_trial_contributes_once_per_final_spatial_bin`.
@@ -28,8 +28,8 @@ descriptive fields. When present, they must match these values:
 - `occupancyTimeDefinition`:
   `sum_of_qualifying_trial_durations_per_final_spatial_bin`.
 
-Omitting these fields does not change count or occupancy semantics. Python
-validates the occupancy values and dimensions against the declared count axes,
+Omitting these fields does not change count or occupancy semantics. Viewers
+validate the occupancy values and dimensions against the declared count axes,
 restoring MATLAB's scalar/vector encoding for singleton JSON dimensions.
 
 At least one spatial cell must have positive occupancy. A cell with zero

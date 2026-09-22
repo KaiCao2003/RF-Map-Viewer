@@ -37,7 +37,10 @@ rsync -a \
   --exclude='__pycache__' \
   --exclude='.pytest_cache' \
   "$ROOT_DIR/backend/" "$PAYLOAD_ROOT/backend/"
-rsync -a "$ROOT_DIR/deploy/" "$PAYLOAD_ROOT/deploy/"
+rsync -a \
+  --exclude='__pycache__' \
+  --exclude='.pytest_cache' \
+  "$ROOT_DIR/deploy/" "$PAYLOAD_ROOT/deploy/"
 rsync -a \
   --exclude='node_modules' \
   --exclude='coverage' \

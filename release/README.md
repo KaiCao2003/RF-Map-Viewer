@@ -18,21 +18,31 @@ component tag and artifact name:
 
 | Component | Release | Tag | Channel |
 | --- | --- | --- | --- |
-| Python stable (macOS) | `1.10.1` | `python-v1.10.1` | stable |
+| Python stable (macOS) | `1.10.2` | `python-v1.10.2` | stable |
 | Python Free-Moving | `1.10.0-alpha.3` | `python-v1.10.0-alpha.3` | alpha |
-| Swift | `1.10.1` | `swift-v1.10.1` | stable |
-| Web | `1.10.0` | `web-v1.10.0` | stable |
+| Swift | `1.10.2` | `swift-v1.10.2` | stable |
+| Web | `1.10.1` | `web-v1.10.1` | stable |
 
 Published downloads and checksums are available from the repository
 [Releases page](https://github.com/KaiCao2003/RF-Map-Viewer/releases). The root
 [`README.md`](../README.md#downloads) links directly to each component archive.
+
+Python and Swift 1.10.2 and Web 1.10.1 restore compatibility with JSON and
+indexed RF files that omit descriptive count/occupancy markers or the redundant
+occupancy-size field. Explicit conflicting markers and sizes are rejected;
+raw integer counts, required response-unit and normalization markers, and
+actual occupancy data retain their checks. The input files are unchanged.
+Swift also handles macOS URL-open events directly, so opening an RF document
+from Finder loads that document instead of leaving the initial file chooser open.
+Python and Swift use macOS build 110002. Windows remains at 1.10.0, and the
+Free-Moving alpha remains at 1.10.0-alpha.3.
 
 Python and Swift 1.10.1 repair keyboard behavior, RF color scales, missing
 exposure during smoothing, and progressive-loading consistency and performance.
 Swift time grouping now uses physical bin edges as Python does. Python validates
 the shared raw-count contract and preserves large integer counts. See the
 [parity report](python-swift-parity-1.10.1.md) for reproducible cases and impact.
-Windows and Web remain at 1.10.0; these patch releases target macOS arm64.
+Those patch releases targeted macOS arm64; Windows and Web stayed at 1.10.0.
 
 Stable 1.10.0 aligns Python, Swift, and Web on indexed version-2 RF input,
 progressive unit caching, RF window subtraction, display shortcuts, and the

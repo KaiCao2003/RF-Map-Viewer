@@ -1,11 +1,16 @@
-# Web Viewer 1.10.0
+# Web Viewer 1.10.1
 
 The Web implementation contains a FastAPI backend in `backend/` and a
 React/Vite frontend in `frontend/`. The backend owns its figure renderer and
 does not import the analysis repository or the Python/Tk implementation.
-Its `1.10.0` version places it in the same stable feature generation as the
-Python `1.10.0` reference; `web` remains an artifact/tag identity rather than a
+Its `1.10.1` version places it in the same stable feature generation as the
+Python `1.10.2` reference; `web` remains an artifact/tag identity rather than a
 version suffix.
+
+Version 1.10.1 opens current MATLAB JSON and indexed exports that omit
+`spikeCountDefinition`, `occupancyTimeDefinition`, and `occupancyTimeSecSize`.
+Explicit conflicting definitions remain invalid, and actual raw counts and
+occupancy are still validated against the declared axes.
 
 Version 1.10.0 adds version-2 indexed NPZ `.rfmap` input and a progressive
 unit cache. The first unit opens immediately; one background reader caches the
@@ -88,8 +93,11 @@ legacy `positions.csv`; automatic discovery prefers `positions.probe`.
 RF maps are primary documents; use the HD and Probe companion choosers after an
 RF map is open.
 RF JSON payloads must include raw finite non-negative integer `unitsSpikeCounts`,
-the fixed count-semantics markers, and a finite non-negative
-`occupancyTimeSec` matrix whose declared size matches the spatial axes. A
+`responseUnits=spike_count`, `responseNormalization=none`, and a finite
+non-negative `occupancyTimeSec` matrix matching the declared spatial axes.
+The descriptive fields `spikeCountDefinition`, `occupancyTimeDefinition`, and
+`occupancyTimeSecSize` are optional in both formats; any explicit values must
+match the raw-count contract. A
 zero-occupancy cell must contain only zero counts, and at least one cell must
 have positive occupancy. Payloads from earlier
 versions that omit the occupancy contract or contain normalized response

@@ -137,7 +137,7 @@ final class OccupancyRFTests: XCTestCase {
         }
     }
 
-    func testEveryCurrentSchemaFieldIsRequired() throws {
+    func testRawCountSchemaFieldsRemainRequired() throws {
         let valid = currentRFSchemaPayload([
             "unitsSpikeCounts": [[[[0.0]]]],
             "unitsSpikeCountsSize": [1, 1, 1, 1],
@@ -148,9 +148,8 @@ final class OccupancyRFTests: XCTestCase {
         ], occupancyTimeSec: 0.1, occupancyTimeSecSize: [1, 1])
         let required = [
             "unitsSpikeCounts", "unitsSpikeCountsSize", "unitPool", "xPositions",
-            "yPositions", "timeBinEdges", "occupancyTimeSec", "occupancyTimeSecSize",
-            "responseUnits", "responseNormalization", "spikeCountDefinition",
-            "occupancyTimeDefinition",
+            "yPositions", "timeBinEdges", "occupancyTimeSec",
+            "responseUnits", "responseNormalization",
         ]
 
         for key in required {
@@ -162,6 +161,54 @@ final class OccupancyRFTests: XCTestCase {
             )) { error in
                 XCTAssertTrue(error.localizedDescription.contains(key))
             }
+        }
+    }
+
+    func testOmittedDescriptionsAndOccupancySizeUseRawCountContract() throws {
+        let optionalKeys = ["spikeCountDefinition", "occupancyTimeDefinition", "occupancyTimeSecSize"]
+        let valid = currentRFSchemaPayload([
+            "unitsSpikeCounts": [[[[2.0, 4.0], [0.0, 0.0]]]],
+            "unitsSpikeCountsSize": [1, 1, 2, 2],
+            "unitPool": 17,
+            "xPositions": [-1.0, 1.0],
+            "yPositions": 0.0,
+            "timeBinEdges": [-0.1, 0.0, 0.1],
+        ], occupancyTimeSec: [0.5, 0.0], occupancyTimeSecSize: [1, 2])
+        for omitted in optionalKeys.map({ [$0] }) + [optionalKeys] {
+            var candidate = valid
+            for key in omitted { candidate.removeValue(forKey: key) }
+            let data = try RFMappingData(
+                data: JSONSerialization.data(withJSONObject: candidate), url: sourceURL
+            )
+            XCTAssertEqual(data.spikeCountDefinition, RFMappingData.expectedSpikeCountDefinition)
+            XCTAssertEqual(data.occupancyTimeDefinition, RFMappingData.expectedOccupancyTimeDefinition)
+            XCTAssertEqual(data.timeBinEdges, [-0.1, 0.0, 0.1])
+            XCTAssertEqual(try data.responseMatrix(
+                unitIndex: 0, start: 0, end: 1, valueMode: .meanFiringRate
+            ), [[12.0, nil]])
+        }
+
+        var minimal = valid
+        for key in optionalKeys { minimal.removeValue(forKey: key) }
+        let invalidValues: [(String, Any)] = [
+            ("occupancyTimeSec", [0.5]),
+            ("occupancyTimeSec", [-0.5, 0.0]),
+            ("unitsSpikeCounts", [[[[0.5, 4.0], [0.0, 0.0]]]]),
+            ("unitsSpikeCounts", [[[[2.0, 4.0], [1.0, 0.0]]]]),
+        ]
+        for (key, value) in invalidValues {
+            var candidate = minimal
+            candidate[key] = value
+            XCTAssertThrowsError(try RFMappingData(
+                data: JSONSerialization.data(withJSONObject: candidate), url: sourceURL
+            ))
+        }
+        for key in optionalKeys {
+            var candidate = minimal
+            candidate[key] = NSNull()
+            XCTAssertThrowsError(try RFMappingData(
+                data: JSONSerialization.data(withJSONObject: candidate), url: sourceURL
+            ), "An explicit null \(key) is invalid, not an omitted marker.")
         }
     }
 

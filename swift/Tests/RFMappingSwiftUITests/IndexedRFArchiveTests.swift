@@ -58,6 +58,59 @@ final class IndexedRFArchiveTests: XCTestCase {
         XCTAssertEqual(data.timeBinEdges, [0, 0.1])
     }
 
+    func testOmittedMetadataDescriptionsAndOccupancySizeAreAccepted() async throws {
+        let keys = ["spikeCountDefinition", "occupancyTimeDefinition", "occupancyTimeSecSize"]
+        for omitted in keys.map({ [$0] }) + [keys] {
+            let archive = zip(try makeEntries(
+                unitValues: [[2, 0], [4, 0]], shape: [1, 2, 1], occupancy: [0.5, 0],
+                omittingMetadata: Set(omitted)
+            ))
+            let data = try RFMappingData(data: archive, url: url)
+            XCTAssertEqual(data.spikeCountDefinition, RFMappingData.expectedSpikeCountDefinition)
+            XCTAssertEqual(data.occupancyTimeDefinition, RFMappingData.expectedOccupancyTimeDefinition)
+            XCTAssertEqual(try data.responseMatrix(
+                unitIndex: 0, start: 0, end: 0, valueMode: .meanFiringRate
+            ), [[4, nil]])
+            let second = try await data.loadUnit(at: 1)
+            try data.cacheUnit(second)
+            XCTAssertEqual(try data.responseMatrix(
+                unitIndex: 1, start: 0, end: 0, valueMode: .meanFiringRate
+            ), [[8, nil]])
+        }
+    }
+
+    func testMissingRequiredOrConflictingIndexedMetadataIsRejected() throws {
+        for key in ["responseUnits", "responseNormalization"] {
+            XCTAssertThrowsError(try RFMappingData(data: zip(makeEntries(
+                unitValues: [[1]], omittingMetadata: [key]
+            )), url: url))
+        }
+        let conflicts: [(String, Any)] = [
+            ("responseUnits", "mean_spikes"),
+            ("responseNormalization", "legacy"),
+            ("spikeCountDefinition", "legacy"),
+            ("occupancyTimeDefinition", "legacy"),
+            ("occupancyTimeSecSize", [2, 1]),
+            ("spikeCountDefinition", NSNull()),
+            ("occupancyTimeDefinition", NSNull()),
+            ("occupancyTimeSecSize", NSNull()),
+        ]
+        for (key, value) in conflicts {
+            XCTAssertThrowsError(try RFMappingData(data: zip(makeEntries(
+                unitValues: [[1]], metadataOverrides: [key: value]
+            )), url: url))
+        }
+    }
+
+    func testMissingSizeMarkerDoesNotBypassActualIndexedOccupancyShape() throws {
+        var entries = try makeEntries(
+            unitValues: [[1, 2]], shape: [1, 2, 1], omittingMetadata: ["occupancyTimeSecSize"]
+        )
+        let occupancyIndex = try XCTUnwrap(entries.firstIndex { $0.0 == "occupancyTimeSec" })
+        entries[occupancyIndex].1 = npy(dtype: "<f8", shape: [2, 1], bytes: doubles([1, 1]))
+        XCTAssertThrowsError(try RFMappingData(data: zip(entries), url: url))
+    }
+
     func testInvalidLaterCountsFailWithoutPublishingPartialUnitAndCanBeRetried() async throws {
         for invalid in [-1.0, 0.5, .nan, .infinity, 18_446_744_073_709_551_616.0] {
             let data = try RFMappingData(data: makeArchive(unitValues: [[1], [invalid]]), url: url)
@@ -164,9 +217,10 @@ final class IndexedRFArchiveTests: XCTestCase {
     }
 
     private func makeEntries(
-        unitValues: [[Double]], shape: [Int] = [1, 1, 1], occupancy: [Double]? = nil
+        unitValues: [[Double]], shape: [Int] = [1, 1, 1], occupancy: [Double]? = nil,
+        omittingMetadata: Set<String> = [], metadataOverrides: [String: Any] = [:]
     ) throws -> [(String, Data)] {
-        let metadata: [String: Any] = [
+        var metadata: [String: Any] = [
             "formatVersion": 2,
             "unitsSpikeCountsSize": [unitValues.count] + shape,
             "occupancyTimeSecSize": Array(shape.prefix(2)),
@@ -175,6 +229,8 @@ final class IndexedRFArchiveTests: XCTestCase {
             "spikeCountDefinition": RFMappingData.expectedSpikeCountDefinition,
             "occupancyTimeDefinition": RFMappingData.expectedOccupancyTimeDefinition,
         ]
+        for key in omittingMetadata { metadata.removeValue(forKey: key) }
+        metadata.merge(metadataOverrides) { _, replacement in replacement }
         let encoded = try JSONSerialization.data(withJSONObject: metadata)
         var ids = Data()
         for index in unitValues.indices { ids.appendLE(UInt64(41 + index)) }

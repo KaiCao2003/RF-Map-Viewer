@@ -84,11 +84,8 @@ private struct RFMappingPayload: Decodable {
             (.yPositions, "yPositions"),
             (.timeBinEdges, "timeBinEdges"),
             (.occupancyTimeSec, "occupancyTimeSec"),
-            (.occupancyTimeSecSize, "occupancyTimeSecSize"),
             (.responseUnits, "responseUnits"),
             (.responseNormalization, "responseNormalization"),
-            (.spikeCountDefinition, "spikeCountDefinition"),
-            (.occupancyTimeDefinition, "occupancyTimeDefinition"),
         ]
         let missingKeys = requiredKeys.compactMap { entry in
             container.contains(entry.0) ? nil : entry.1
@@ -126,11 +123,20 @@ private struct RFMappingPayload: Decodable {
         )
         timeBinEdges = try container.decode([Double].self, forKey: .timeBinEdges)
         occupancyTimeSec = try Self.decodeOccupancyTime(from: container)
-        occupancyTimeSecSize = try container.decode([Int].self, forKey: .occupancyTimeSecSize)
+        // MATLAB JSON and indexed exports can omit these descriptive markers.
+        // Explicit values (including null) must still satisfy the raw-count
+        // contract; the actual occupancy dimensions are validated below.
+        occupancyTimeSecSize = container.contains(.occupancyTimeSecSize)
+            ? try container.decode([Int].self, forKey: .occupancyTimeSecSize)
+            : [yPositions.count, xPositions.count]
         responseUnits = try container.decode(String.self, forKey: .responseUnits)
         responseNormalization = try container.decode(String.self, forKey: .responseNormalization)
-        spikeCountDefinition = try container.decode(String.self, forKey: .spikeCountDefinition)
-        occupancyTimeDefinition = try container.decode(String.self, forKey: .occupancyTimeDefinition)
+        spikeCountDefinition = container.contains(.spikeCountDefinition)
+            ? try container.decode(String.self, forKey: .spikeCountDefinition)
+            : RFMappingData.expectedSpikeCountDefinition
+        occupancyTimeDefinition = container.contains(.occupancyTimeDefinition)
+            ? try container.decode(String.self, forKey: .occupancyTimeDefinition)
+            : RFMappingData.expectedOccupancyTimeDefinition
 
         let arbitraryContainer = try decoder.container(
             keyedBy: RFMappingArbitraryCodingKey.self

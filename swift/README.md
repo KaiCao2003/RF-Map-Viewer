@@ -1,4 +1,4 @@
-# SwiftUI Viewer 1.10.1
+# SwiftUI Viewer 1.10.2
 
 This is the native SwiftUI implementation for macOS 15 on Apple silicon. It
 parses RF/HD/probe files itself and has no Python dependency. RF mapping files
@@ -7,8 +7,15 @@ positions use `.probe` (CSV schema). `.json` and `.csv` remain filename aliases,
 but an RF map's extension never enables an older schema. RF maps are primary
 documents; tuning and probe files are attached
 to a loaded RF map in the figure composer so recorded unit IDs can be matched.
-Its `1.10.1` version matches the stable Python macOS reference; `swift` remains
+Its `1.10.2` version matches the stable Python macOS reference; `swift` remains
 an artifact/tag identity rather than a version suffix.
+
+Version 1.10.2 opens Finder/Launch Services document URLs directly in the
+initial window instead of showing the file picker. Later external opens create
+independent windows, while launching without a document still shows the picker.
+JSON and indexed RF maps may omit the descriptive count/occupancy definitions
+and occupancy size marker, matching Python. Explicit conflicting values remain
+errors, and raw counts, occupancy values, and actual dimensions remain validated.
 
 Version 1.10.1 fixes nonuniform time-bin grouping, preserves missing exposure
 through every smoothing pass, and aligns colored RF ranges and RGB intensity
@@ -21,10 +28,14 @@ See the [parity report](../release/python-swift-parity-1.10.1.md) for cases and 
 Version 1.10.0 requires the current raw-count/occupancy RF schema. In addition to
 the RF tensor, axes, and time edges, every RF map must contain:
 
-- `occupancyTimeSec` with declared shape `occupancyTimeSecSize == [nY, nX]`;
-- `responseUnits == "spike_count"` and `responseNormalization == "none"`;
-- `spikeCountDefinition == "each_qualifying_trial_contributes_once_per_final_spatial_bin"`;
-- `occupancyTimeDefinition == "sum_of_qualifying_trial_durations_per_final_spatial_bin"`.
+- `occupancyTimeSec` matching the tensor's `[nY, nX]` spatial dimensions;
+- `responseUnits == "spike_count"` and `responseNormalization == "none"`.
+
+When supplied, `occupancyTimeSecSize` must equal `[nY, nX]`,
+`spikeCountDefinition` must equal
+`"each_qualifying_trial_contributes_once_per_final_spatial_bin"`, and
+`occupancyTimeDefinition` must equal
+`"sum_of_qualifying_trial_durations_per_final_spatial_bin"`.
 
 `unitsSpikeCounts` must contain finite, non-negative integer counts. Files from
 the earlier presentation-count/normalized RF schema are rejected rather than

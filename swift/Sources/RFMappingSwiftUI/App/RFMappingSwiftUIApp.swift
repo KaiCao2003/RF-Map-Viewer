@@ -77,11 +77,11 @@ final class WindowRouter {
     private var preparedDocuments: [UUID: RFMappingData] = [:]
 
     func install(
-        _ action: OpenWindowAction,
+        _ openDocumentWindow: @escaping (DocumentWindowRequest) -> Void,
         coldLaunchReplacement replacement: ((URL) async -> Bool)? = nil,
         coldLaunchFallback fallback: (() -> Void)? = nil
     ) {
-        opener = { request in action(value: request) }
+        opener = openDocumentWindow
 
         if let replacement, !didOfferColdLaunchReplacement {
             didOfferColdLaunchReplacement = true
@@ -388,7 +388,7 @@ private struct RFMappingWindow: View {
         }
         .task {
             WindowRouter.shared.install(
-                openWindow,
+                { request in openWindow(value: request) },
                 coldLaunchReplacement: isInitialWindow ? { url in
                     guard await loadColdLaunchReplacement(url, in: store) else {
                         let error = RFMappingError.invalidData(store.errorMessage ?? "Unknown document error")
@@ -574,15 +574,32 @@ private struct RFMappingCommands: Commands {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private let windowRouter: WindowRouter
+
+    override convenience init() {
+        self.init(windowRouter: .shared)
+    }
+
+    init(windowRouter: WindowRouter) {
+        self.windowRouter = windowRouter
+        super.init()
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
     }
 
     func application(_ sender: NSApplication, openFiles filenames: [String]) {
-        WindowRouter.shared.openExternal(filenames.map { URL(fileURLWithPath: $0) }) { succeeded in
+        windowRouter.openExternal(filenames.map { URL(fileURLWithPath: $0) }) { succeeded in
             sender.reply(toOpenOrPrint: succeeded ? .success : .failure)
         }
+    }
+
+    func application(_ application: NSApplication, open urls: [URL]) {
+        // SwiftUI's application delegate routes Launch Services through the
+        // URL callback, which takes precedence over the legacy openFiles one.
+        windowRouter.openExternal(urls) { _ in }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {

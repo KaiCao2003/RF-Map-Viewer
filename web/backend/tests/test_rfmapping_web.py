@@ -368,7 +368,7 @@ def test_health_and_lazy_browse_are_root_confined(
         ]
         assert health.json() == {
             "status": "ok",
-            "version": "1.10.0",
+            "version": "1.10.1",
             "rfRoot": str(settings.rf_root),
             "rfRootAvailable": True,
             "outputRoot": str(settings.output_root),
@@ -3076,7 +3076,7 @@ def test_figure_manifest_records_hashed_frozen_source_and_companions(
     assert provenance["provenanceVersion"] == 1
     assert provenance["application"] == {
         "name": "RF Map Viewer",
-        "version": "1.10.0",
+        "version": "1.10.1",
         "edition": "Web",
     }
     assert provenance["snapshot"] == {
@@ -4166,6 +4166,116 @@ def write_indexed(path: Path, payload: dict | None = None, **entries) -> Path:
     with path.open("wb") as handle:
         np.savez_compressed(handle, **arrays)
     return path
+
+
+@pytest.mark.parametrize("storage", ["json", "indexed"])
+@pytest.mark.parametrize("shape", [(2, 2, 3, 5), (1, 1, 1, 1), (4, 1, 30, 500), (1, 4, 1, 5)])
+def test_rf_formats_allow_missing_descriptions_and_occupancy_size(
+    app, settings, storage, shape
+):
+    n_units, n_y, n_x, n_bins = shape
+    counts = np.arange(math.prod(shape)).reshape(shape)
+    occupancy = np.arange(1, n_y * n_x + 1).reshape(n_y, n_x) / 10
+    payload = {
+        "unitsSpikeCounts": counts.tolist(),
+        "unitsSpikeCountsSize": list(shape),
+        "unitPool": list(range(1, n_units + 1)),
+        "xPositions": list(range(n_x)),
+        "yPositions": list(range(n_y)),
+        "timeBinEdges": (np.arange(n_bins + 1) / 1000 - 0.1).tolist(),
+        "responseUnits": "spike_count",
+        "responseNormalization": "none",
+        "occupancyTimeSec": occupancy.tolist(),
+    }
+    if storage == "json":
+        # MATLAB collapses singleton occupancy axes in JSON.
+        payload["occupancyTimeSec"] = occupancy.squeeze().tolist()
+    writer = write_json if storage == "json" else write_indexed
+    source = writer(settings.rf_root / "current-export.rfmap", payload)
+    original_bytes = source.read_bytes()
+    with authenticated_client(app) as client:
+        opened = _open(client, source)
+        assert opened["shape"] == list(shape)
+        assert opened["timeBinEdges"] == payload["timeBinEdges"]
+        assert opened["occupancyTimeSec"] == occupancy.tolist()
+        record = app.state.services.datasets.get(opened["id"])
+        assert "spikeCountDefinition" not in record.cache.metadata
+        assert "occupancyTimeDefinition" not in record.cache.metadata
+        for index, unit_id in enumerate(payload["unitPool"]):
+            response = client.get(f"/api/datasets/{opened['id']}/units/{unit_id}")
+            assert response.status_code == 200, response.text
+            actual = np.frombuffer(response.content, dtype="<f8").reshape(shape[1:])
+            np.testing.assert_array_equal(actual, counts[index])
+            np.testing.assert_array_equal(
+                actual.sum(axis=-1) / np.asarray(opened["occupancyTimeSec"]),
+                counts[index].sum(axis=-1) / occupancy,
+            )
+        assert client.delete(f"/api/datasets/{opened['id']}").status_code == 200
+    assert source.read_bytes() == original_bytes
+
+
+@pytest.mark.parametrize("storage", ["json", "indexed"])
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("responseUnits", "spike_rate"),
+        ("responseUnits", None),
+        ("responseNormalization", "occupancy"),
+        ("responseNormalization", None),
+        ("spikeCountDefinition", "all_overlapping_trials"),
+        ("spikeCountDefinition", None),
+        ("occupancyTimeDefinition", "number_of_trials"),
+        ("occupancyTimeDefinition", None),
+        ("occupancyTimeSecSize", [1, 4]),
+        ("occupancyTimeSecSize", None),
+    ],
+)
+def test_rf_formats_reject_explicit_incompatible_semantics(app, settings, storage, field, value):
+    payload = sample_payload()
+    payload[field] = value
+    writer = write_json if storage == "json" else write_indexed
+    source = writer(settings.rf_root / "conflicting-contract.rfmap", payload)
+    with authenticated_client(app) as client:
+        response = client.post("/api/datasets/open", json={"path": str(source)})
+    assert response.status_code == 422, response.text
+    assert field in response.json()["detail"]
+
+
+@pytest.mark.parametrize("storage", ["json", "indexed"])
+@pytest.mark.parametrize("field", ["responseUnits", "responseNormalization"])
+def test_rf_formats_require_raw_count_semantics(app, settings, storage, field):
+    payload = sample_payload()
+    del payload[field]
+    writer = write_json if storage == "json" else write_indexed
+    source = writer(settings.rf_root / "missing-contract.rfmap", payload)
+    with authenticated_client(app) as client:
+        response = client.post("/api/datasets/open", json={"path": str(source)})
+    assert response.status_code == 422, response.text
+    assert field in response.json()["detail"]
+
+
+@pytest.mark.parametrize("storage", ["json", "indexed"])
+@pytest.mark.parametrize("change", ["shape", "zero_occupancy", "negative_occupancy", "fractional_count"])
+def test_rf_formats_validate_counts_and_occupancy_without_descriptions(
+    app, settings, storage, change
+):
+    payload = sample_payload()
+    for field in ("spikeCountDefinition", "occupancyTimeDefinition", "occupancyTimeSecSize"):
+        del payload[field]
+    if change == "shape":
+        payload["occupancyTimeSec"] = [[1, 2, 3, 4]]
+    elif change == "zero_occupancy":
+        payload["occupancyTimeSec"][0][0] = 0
+    elif change == "negative_occupancy":
+        payload["occupancyTimeSec"][0][0] = -1
+    else:
+        payload["unitsSpikeCounts"][0][0][0][0] = 0.5
+    writer = write_json if storage == "json" else write_indexed
+    source = writer(settings.rf_root / "invalid-counts.rfmap", payload)
+    with authenticated_client(app) as client:
+        response = client.post("/api/datasets/open", json={"path": str(source)})
+    assert response.status_code == 422, response.text
+    assert not list(settings.cache_root.glob("*.counts"))
 
 
 def test_indexed_open_first_unit_then_progress_retry_and_close(app, settings, monkeypatch):
