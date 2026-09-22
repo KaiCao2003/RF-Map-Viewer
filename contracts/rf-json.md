@@ -16,12 +16,21 @@ Required top-level fields:
 - `timeBinEdges`: finite seconds, strictly increasing, with `time + 1` values.
 - `responseUnits`: exactly `spike_count`.
 - `responseNormalization`: exactly `none`.
-- `spikeCountDefinition`: exactly
-  `each_qualifying_trial_contributes_once_per_final_spatial_bin`.
 - `occupancyTimeSec`: finite, non-negative seconds with axes `(y, x)`.
-- `occupancyTimeSecSize`: two positive integers matching that exact shape.
-- `occupancyTimeDefinition`: exactly
+
+Python also accepts JSON and indexed exports that omit the following
+descriptive fields. When present, they must match these values:
+
+- `spikeCountDefinition`:
+  `each_qualifying_trial_contributes_once_per_final_spatial_bin`.
+- `occupancyTimeSecSize`: two positive integers matching the y-by-x axes in
+  `unitsSpikeCountsSize`.
+- `occupancyTimeDefinition`:
   `sum_of_qualifying_trial_durations_per_final_spatial_bin`.
+
+Omitting these fields does not change count or occupancy semantics. Python
+validates the occupancy values and dimensions against the declared count axes,
+restoring MATLAB's scalar/vector encoding for singleton JSON dimensions.
 
 At least one spatial cell must have positive occupancy. A cell with zero
 occupancy must have zero spike counts for every unit and time bin. Unknown

@@ -259,22 +259,39 @@ def test_rejects_fractional_raw_spike_counts(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     "field",
-    ["responseUnits", "responseNormalization", "spikeCountDefinition",
-     "occupancyTimeDefinition", "occupancyTimeSecSize"],
+    ["responseUnits", "responseNormalization"],
 )
-@pytest.mark.parametrize("missing", [False, True])
-def test_requires_declared_raw_count_and_occupancy_contract(
-    tmp_path: Path, field: str, missing: bool,
+def test_requires_declared_raw_count_semantics(
+    tmp_path: Path, field: str,
 ) -> None:
     path = _write_dataset(tmp_path)
     payload = json.loads(path.read_text())
-    if missing:
-        del payload[field]
-    else:
-        payload[field] = [2, 1] if field == "occupancyTimeSecSize" else "normalized"
+    del payload[field]
     path.write_text(json.dumps(payload))
     with pytest.raises((ValueError, KeyError), match=field):
         load_rf_maps(path)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("responseUnits", "spike_rate"),
+        ("responseUnits", None),
+        ("responseNormalization", "occupancy"),
+        ("responseNormalization", None),
+        ("spikeCountDefinition", "all_overlapping_trials"),
+        ("spikeCountDefinition", None),
+        ("occupancyTimeDefinition", "number_of_trials"),
+        ("occupancyTimeDefinition", None),
+        ("occupancyTimeSecSize", [2, 1]),
+        ("occupancyTimeSecSize", None),
+    ],
+)
+def test_rejects_incompatible_explicit_count_and_occupancy_contract(
+    tmp_path: Path, field: str, value: object,
+) -> None:
+    with pytest.raises(ValueError, match=field):
+        load_rf_maps(_write_dataset(tmp_path, **{field: value}))
 
 
 def test_integer_unit_ids_preserve_values_above_float_precision(tmp_path: Path) -> None:

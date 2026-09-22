@@ -172,10 +172,9 @@ def test_rejects_invalid_indexed_contract(tmp_path, change):
 
 @pytest.mark.parametrize(
     "field",
-    ["responseUnits", "responseNormalization", "spikeCountDefinition",
-     "occupancyTimeDefinition", "occupancyTimeSecSize"],
+    ["responseUnits", "responseNormalization"],
 )
-def test_indexed_metadata_requires_same_contract_as_json(tmp_path, field):
+def test_indexed_metadata_requires_raw_count_semantics(tmp_path, field):
     _, new, arrays = write_pair(tmp_path)
     meta = json.loads(arrays["metadata"].tobytes())
     del meta[field]
@@ -184,6 +183,88 @@ def test_indexed_metadata_requires_same_contract_as_json(tmp_path, field):
         np.savez_compressed(handle, **arrays)
     with pytest.raises((ValueError, KeyError), match=field):
         IndexedRFMapList(new)
+
+
+@pytest.mark.parametrize(
+    "shape", [(4, 2, 3, 5), (1, 1, 1, 1), (4, 1, 30, 500), (1, 4, 1, 5)]
+)
+def test_both_formats_can_omit_descriptions_and_occupancy_size(tmp_path, shape):
+    old, new, arrays = write_pair(tmp_path, shape)
+    expected = RFMappingData(old)
+    payload = json.loads(old.read_text())
+    meta = json.loads(arrays["metadata"].tobytes())
+    omitted = ("spikeCountDefinition", "occupancyTimeDefinition", "occupancyTimeSecSize")
+    for field in omitted:
+        del payload[field]
+        del meta[field]
+    # MATLAB JSON collapses singleton occupancy axes and emits integer counts.
+    payload["occupancyTimeSec"] = np.asarray(payload["occupancyTimeSec"]).squeeze().tolist()
+    payload["unitsSpikeCounts"] = np.asarray(payload["unitsSpikeCounts"], dtype=int).tolist()
+    old.write_text(json.dumps(payload))
+    arrays["metadata"] = np.frombuffer(json.dumps(meta).encode(), dtype=np.uint8)
+    with new.open("wb") as handle:
+        np.savez_compressed(handle, **arrays)
+    for path in (old, new):
+        actual = RFMappingData(path)
+        try:
+            assert actual.unit_pool == expected.unit_pool
+            np.testing.assert_array_equal(actual.time_bin_edges, expected.time_bin_edges)
+            assert actual.n_bins == shape[-1]
+            for index in range(shape[0]):
+                a, b = actual.rf_map(index), expected.rf_map(index)
+                np.testing.assert_array_equal(a.spike_counts, b.spike_counts)
+                np.testing.assert_array_equal(a.occupancy_time_s, b.occupancy_time_s)
+                assert all(field not in a.metadata for field in omitted)
+                for mode in ("Spike count", "Mean firing rate (Hz)"):
+                    np.testing.assert_array_equal(
+                        actual.response_matrix(index, 0, shape[-1] - 1, mode),
+                        expected.response_matrix(index, 0, shape[-1] - 1, mode),
+                    )
+        finally:
+            actual.close()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("responseUnits", "spike_rate"), ("responseUnits", None),
+     ("responseNormalization", "occupancy"), ("responseNormalization", None),
+     ("spikeCountDefinition", "all_overlapping_trials"),
+     ("spikeCountDefinition", None),
+     ("occupancyTimeDefinition", "number_of_trials"),
+     ("occupancyTimeDefinition", None), ("occupancyTimeSecSize", [3, 2]),
+     ("occupancyTimeSecSize", None)],
+)
+def test_indexed_metadata_rejects_incompatible_explicit_semantics(tmp_path, field, value):
+    _, new, arrays = write_pair(tmp_path)
+    meta = json.loads(arrays["metadata"].tobytes())
+    meta[field] = value
+    arrays["metadata"] = np.frombuffer(json.dumps(meta).encode(), dtype=np.uint8)
+    with new.open("wb") as handle:
+        np.savez_compressed(handle, **arrays)
+    with pytest.raises(ValueError, match=field):
+        IndexedRFMapList(new)
+
+
+@pytest.mark.parametrize("storage", ["json", "indexed"])
+@pytest.mark.parametrize("change", ["shape", "zero_occupancy"])
+def test_occupancy_is_validated_without_optional_metadata(tmp_path, storage, change):
+    old, new, arrays = write_pair(tmp_path)
+    payload = json.loads(old.read_text())
+    meta = json.loads(arrays["metadata"].tobytes())
+    for field in ("spikeCountDefinition", "occupancyTimeDefinition", "occupancyTimeSecSize"):
+        del payload[field]
+        del meta[field]
+    arrays["metadata"] = np.frombuffer(json.dumps(meta).encode(), dtype=np.uint8)
+    if change == "shape":
+        arrays["occupancyTimeSec"] = arrays["occupancyTimeSec"].T
+    else:
+        arrays["occupancyTimeSec"][0, 0] = 0
+    payload["occupancyTimeSec"] = arrays["occupancyTimeSec"].tolist()
+    old.write_text(json.dumps(payload))
+    with new.open("wb") as handle:
+        np.savez_compressed(handle, **arrays)
+    with pytest.raises(ValueError, match="occupancyTimeSec"):
+        load_rf_maps(old if storage == "json" else new)
 
 
 def test_preload_prioritizes_latest_selection_and_caches_once(tmp_path, monkeypatch):
@@ -317,10 +398,19 @@ def test_packaging_smoke_fixture_restores_legacy_singleton_axes(tmp_path):
     section = script[script.index("INDEXED_SMOKE="):]
     code = section.split("<<'PYTHON'\n", 1)[1].split("\nPYTHON", 1)[0]
     output = tmp_path / "smoke.rfmap"
+    json_output = tmp_path / "optional-metadata-smoke.rfmap"
     subprocess.run(
-        [sys.executable, "-", str(root / "tests/fixtures/release_smoke_rf.json"), str(output)],
+        [sys.executable, "-", str(root / "tests/fixtures/release_smoke_rf.json"),
+         str(output), str(json_output)],
         input=code, text=True, check=True,
     )
-    maps = load_rf_maps(output)
-    assert maps[0].n_y == 1
-    subprocess.run([sys.executable, str(root / "rfmapping_gui.py"), "--self-test", str(output)], check=True)
+    assert is_indexed_rfmap(output)
+    assert not is_indexed_rfmap(json_output)
+    for path in (output, json_output):
+        maps = load_rf_maps(path)
+        assert maps[0].n_y == 1
+        assert all(
+            field not in maps[0].metadata
+            for field in ("spikeCountDefinition", "occupancyTimeDefinition", "occupancyTimeSecSize")
+        )
+        subprocess.run([sys.executable, str(root / "rfmapping_gui.py"), "--self-test", str(path)], check=True)

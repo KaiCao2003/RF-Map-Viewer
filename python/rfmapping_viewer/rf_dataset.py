@@ -530,16 +530,24 @@ def _parse_rf_header(raw: Mapping[str, Any]) -> RFHeader:
         ),
     }
     for field, expected in required_semantics.items():
+        # MATLAB JSON and indexed exports can omit these descriptions;
+        # explicit markers must still agree with the raw-count contract.
+        if field in (
+            "spikeCountDefinition", "occupancyTimeDefinition"
+        ) and field not in raw:
+            continue
         if raw.get(field) != expected:
             raise ValueError(f"{field} must be {expected!r}")
-    occupancy_size = tuple(
-        _integer(value, "occupancyTimeSecSize value")
-        for value in _flat_list(raw["occupancyTimeSecSize"], "occupancyTimeSecSize")
-    )
-    if occupancy_size != (n_y, n_x):
-        raise ValueError(
-            "occupancyTimeSecSize must match the y-by-x unitsSpikeCountsSize"
+    if "occupancyTimeSecSize" in raw:
+        occupancy_size = tuple(
+            _integer(value, "occupancyTimeSecSize value")
+            for value in _flat_list(raw["occupancyTimeSecSize"], "occupancyTimeSecSize")
         )
+        if occupancy_size != (n_y, n_x):
+            raise ValueError(
+                "occupancyTimeSecSize must match the y-by-x unitsSpikeCountsSize"
+            )
+    # Validate occupancy against the declared count axes even without a size marker.
     occupancy_time_s = _occupancy_matrix(raw["occupancyTimeSec"], n_y, n_x)
     if not np.any(occupancy_time_s > 0):
         raise ValueError("occupancyTimeSec must contain at least one positive value")

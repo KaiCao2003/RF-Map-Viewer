@@ -413,13 +413,19 @@ verify_arm64_macho_files
 "$APP_BINARY" --self-test-isolated "$SMOKE_JSON"
 "$APP_BINARY" --self-test-dnd
 INDEXED_SMOKE="$WORK_DIR/release-smoke.rfmap"
-"$BUILD_VENV/bin/python" - "$SMOKE_JSON" "$INDEXED_SMOKE" <<'PYTHON'
+OPTIONAL_METADATA_SMOKE="$WORK_DIR/release-smoke-optional-metadata.json"
+"$BUILD_VENV/bin/python" - "$SMOKE_JSON" "$INDEXED_SMOKE" "$OPTIONAL_METADATA_SMOKE" <<'PYTHON'
 import json
 import sys
 import numpy as np
 
 with open(sys.argv[1], encoding="utf-8") as source:
     metadata = json.load(source)
+# Current MATLAB JSON and indexed exporters omit these redundant descriptions.
+for key in ("spikeCountDefinition", "occupancyTimeDefinition", "occupancyTimeSecSize"):
+    metadata.pop(key, None)
+with open(sys.argv[3], "w", encoding="utf-8") as target:
+    json.dump(metadata, target)
 counts = np.asarray(metadata.pop("unitsSpikeCounts"), dtype=np.float64)
 arrays = {key: np.asarray(metadata.pop(key)) for key in (
     "unitPool", "xPositions", "yPositions", "timeBinEdges", "occupancyTimeSec"
@@ -435,7 +441,9 @@ with open(sys.argv[2], "wb") as target:
     np.savez_compressed(target, **arrays)
 PYTHON
 "$APP_BINARY" --self-test "$INDEXED_SMOKE"
-rm -f -- "$INDEXED_SMOKE"
+"$APP_BINARY" --self-test "$OPTIONAL_METADATA_SMOKE"
+"$APP_BINARY" --self-test-isolated "$OPTIONAL_METADATA_SMOKE"
+rm -f -- "$INDEXED_SMOKE" "$OPTIONAL_METADATA_SMOKE"
 EXPORT_SMOKE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/rfmapping-stable-export-smoke.XXXXXX")"
 "$APP_BINARY" --self-test-export "$EXPORT_SMOKE_DIR"
 require_nonempty_file "$EXPORT_SMOKE_DIR/figure-export-smoke.pdf"

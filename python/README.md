@@ -52,6 +52,13 @@ Each unit has axes `(y, x, time)`, including singleton dimensions. The reader
 requires `formatVersion=2`; no transpose, time-axis trimming, or rate conversion
 is applied while reading. See the shared file contract for details.
 
+JSON documents and indexed archives may omit `spikeCountDefinition`,
+`occupancyTimeDefinition`, and `occupancyTimeSecSize`. Occupancy is validated
+against the spatial axes in `unitsSpikeCountsSize`, including MATLAB's
+singleton-axis JSON encoding. Explicit definitions and sizes must still match
+the raw-count contract. Both formats require `responseUnits=spike_count` and
+`responseNormalization=none`, valid occupancy, and non-negative integer counts.
+
 Counts are raw non-negative integers. Occupancy dimensions come from the
 y-by-x axes in `unitsSpikeCountsSize`. Each qualifying trial contributes once
 per final spatial bin, and occupancy sums the qualifying trial durations.

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import multiprocessing
 import os
 import queue
@@ -179,8 +180,18 @@ def test_local_queries_preserve_unavailable_cells_and_unsigned_window_sums(tmp_p
     assert data.spatial_group_response_values(0, (0, 0), (1, 1), [(0, 1)], constants_module.VALUE_MODE_COUNT) == [float(2**64 - 1)]
 
 
-def test_isolated_load_preserves_arrays_metadata_and_read_only_contract(tmp_path):
+@pytest.mark.parametrize("omit_descriptions", [False, True])
+def test_isolated_load_preserves_arrays_metadata_and_read_only_contract(
+    tmp_path, omit_descriptions,
+):
     path = _write_dataset(tmp_path, nested={"list": [1, {"a": "b"}]})
+    if omit_descriptions:
+        payload = json.loads(path.read_text())
+        for field in ("spikeCountDefinition", "occupancyTimeDefinition", "occupancyTimeSecSize"):
+            del payload[field]
+        payload["occupancyTimeSec"] = payload["occupancyTimeSec"][0]
+        path = path.with_suffix(".rfmap")
+        path.write_text(json.dumps(payload))
     direct = load_rf_maps(path)
     isolated = load_rf_maps_isolated(path)
     assert isolated.unit_ids == direct.unit_ids
