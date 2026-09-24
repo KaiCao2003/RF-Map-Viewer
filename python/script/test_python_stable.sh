@@ -8,6 +8,7 @@ source "$SCRIPT_DIR/python_stable_macos_release.env"
 
 cd "$ROOT_DIR"
 export PYTHONDONTWRITEBYTECODE=1
-"$TEST_PYTHON" -m pytest -c pytest-stable.ini -q "$@"
+export PYTHONFAULTHANDLER=1
+"$TEST_PYTHON" -m pytest -c pytest-stable.ini -v "$@"
 "$TEST_PYTHON" "$SCRIPT_DIR/verify_python_stable_release_metadata.py" \
   "$ROOT_DIR" "$RF_MAPPING_APP_VERSION" "$RF_MAPPING_RELEASE_EDITION"
