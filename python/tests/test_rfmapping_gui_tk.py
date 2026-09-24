@@ -21,7 +21,7 @@ import rfmapping_viewer.rf_model as rf_model_module
 import rfmapping_viewer.settings as settings_module
 import rfmapping_viewer.settings_window as settings_window_module
 import rfmapping_viewer.tk_support as tk_support_module
-from gui_test_support import base_payload, current_rf_payload, write_payload
+from gui_test_support import base_payload, current_rf_payload, tk_test_root, write_payload
 
 
 
@@ -29,19 +29,11 @@ from gui_test_support import base_payload, current_rf_payload, write_payload
 def _tk_runtime_error() -> str | None:
     if not tk_support_module.TK_AVAILABLE:
         return "this Python was built without tkinter"
-    root = None
     try:
-        root = tk_support_module.tk.Tk()
-        root.withdraw()
+        root = tk_test_root()
         root.update_idletasks()
     except tk_support_module.tk.TclError as exc:
         return f"Tk could not create a root window: {exc}"
-    finally:
-        if root is not None:
-            try:
-                root.destroy()
-            except tk_support_module.tk.TclError:
-                pass
     return None
 
 

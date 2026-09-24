@@ -1,11 +1,30 @@
 """Synthetic RF fixtures shared by the stable viewer tests."""
 
+import atexit
 import json
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
 from rfmapping_viewer.settings import ViewerSettings
+
+
+_tk_root = None
+
+
+def tk_test_root():
+    """Keep Cocoa's first application window/interpreter alive for the suite."""
+    from rfmapping_viewer.tk_support import tk
+
+    global _tk_root
+    if _tk_root is None:
+        _tk_root = tk.Tk()
+        _tk_root.withdraw()
+        # Viewer tests create their own interpreters; implicit images/variables
+        # must use that viewer's root, not this hidden application lifetime root.
+        tk._default_root = None
+        atexit.register(_tk_root.destroy)
+    return _tk_root
 
 
 class Variable:

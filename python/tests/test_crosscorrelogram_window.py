@@ -6,6 +6,7 @@ from itertools import combinations
 from pathlib import Path
 from unittest import mock
 
+from gui_test_support import tk_test_root
 import rfmapping_viewer.crosscorrelogram_window as window_module
 from rfmapping_viewer.tk_support import TK_AVAILABLE, tk
 
@@ -14,13 +15,21 @@ from rfmapping_viewer.tk_support import TK_AVAILABLE, tk
 class CrossCorrelogramWindowTests(unittest.TestCase):
     def setUp(self) -> None:
         try:
-            self.root = tk.Tk()
+            self.root = tk_test_root()
         except tk.TclError as error:
             self.skipTest(str(error))
         self.root.withdraw()
+        default_root = mock.patch.object(tk, "_default_root", self.root)
+        default_root.start()
+        self.addCleanup(default_root.stop)
         self.root.report_callback_exception = mock.Mock()
-        self.addCleanup(self.root.destroy)
+        self.addCleanup(self._close_windows)
         self.session_dir = Path("/recording/m20/260922/260922_1")
+
+    def _close_windows(self) -> None:
+        for window in self.root.winfo_children():
+            window.destroy()
+        self.root.update_idletasks()
 
     def wait_until(self, predicate) -> None:
         deadline = time.monotonic() + 5
