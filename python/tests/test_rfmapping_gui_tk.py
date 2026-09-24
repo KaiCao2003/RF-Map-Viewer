@@ -1,6 +1,7 @@
 import csv
 import gc
 import json
+import subprocess
 import sys
 import tempfile
 import threading
@@ -1393,27 +1394,16 @@ class TkViewerTests(unittest.TestCase):
 
     @unittest.skipUnless(sys.platform == "darwin", "requires Cocoa key events")
     def test_native_macos_keys_reach_the_document_after_opening(self) -> None:
-        from macos_key_events import send_key
-
-        child = gui.RFMViewer(
-            rf_model_module.RFMappingData(self.app.data.path), master=self.app._app_root,
+        # Cocoa retains the process's first Tcl interpreter for native menus.
+        # The suite destroys Tk roots between tests; use the app's real lifecycle
+        # (one interpreter per process) for native event dispatch.
+        result = subprocess.run(
+            [sys.executable, str(Path(__file__).with_name("macos_viewer_smoke.py")),
+             str(self.app.data.path)],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True, text=True, timeout=60,
         )
-        self.addCleanup(child.destroy)
-        self.app.update()
-        # Do not force focus here: opening the document must establish it.
-        send_key("p", 35)
-        child.update()
-        self.assertTrue(child.polar_layout_var.get())
-        send_key("d", 2)
-        child.update()
-        self.assertTrue(child.display_expanded_var.get())
-        send_key("\uf703", 124, (1 << 21) | (1 << 23))
-        child.update()
-        self.assertEqual(child.unit_idx.get(), 1)
-        with mock.patch.object(child, "_open_figure_exporter") as export:
-            send_key("e", 14, 1 << 20)
-            child.update()
-            export.assert_called_once_with()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_new_document_focuses_its_visible_plot_and_accepts_shortcuts(self) -> None:
         for tab in ("rf", "delay", "timeline"):
