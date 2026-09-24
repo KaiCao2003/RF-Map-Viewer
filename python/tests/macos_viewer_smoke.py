@@ -60,7 +60,7 @@ def check_native_keys(path: Path) -> None:
                 app.update()
             root.report_callback_exception.assert_not_called()
         finally:
-            root.destroy()
+            app._quit_application()
 
 
 if __name__ == "__main__":
