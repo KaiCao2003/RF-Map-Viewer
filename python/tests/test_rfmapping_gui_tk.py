@@ -148,6 +148,47 @@ class TkViewerTests(unittest.TestCase):
         self.assertTrue(any("never loads sample data" in label for label in labels))
         self.assertEqual(buttons, ["Open RF Map…"])
 
+    def test_crosscorrelogram_menu_works_without_an_rf_document(self) -> None:
+        chooser = gui.RFMViewer(master=self.app._app_root)
+        self.addCleanup(chooser.destroy)
+        chooser._cancel_startup_callback()
+        utility = tk_support_module.tk.Toplevel(self.app._app_root)
+        self.addCleanup(utility.destroy)
+        with (
+            mock.patch.object(gui.sys, "platform", "darwin"),
+            mock.patch(
+                "rfmapping_viewer.crosscorrelogram_window.CrossCorrelogramWindow",
+                return_value=utility,
+            ) as constructor,
+        ):
+            chooser._build_startup_menu()
+            menu = chooser._menu
+            apple = menu.nametowidget(menu.entrycget(0, "menu"))
+            self.assertEqual(apple.winfo_name(), "apple")
+            self.assertEqual(apple.entrycget(0, "label"), "Utilities")
+            utilities = apple.nametowidget(apple.entrycget(0, "menu"))
+            utilities.invoke("Cross-correlogram…")
+            constructor.assert_called_once_with(
+                self.app._app_root, session_dir=None, probe_name="A", unit_ids=(),
+            )
+            self.assertIs(self.app._app_root._rfm_crosscorrelogram_window, utility)
+
+    def test_crosscorrelogram_uses_active_session_and_reuses_utility_window(self) -> None:
+        utility = tk_support_module.tk.Toplevel(self.app._app_root)
+        self.addCleanup(utility.destroy)
+        session = Path(self.directory.name) / "260922_1"
+        self.app.data.path = session / "data" / "rfmap" / "ProbeB.rfmap"
+        self.app._set_selected_unit_id(8)
+        with mock.patch(
+            "rfmapping_viewer.crosscorrelogram_window.CrossCorrelogramWindow",
+            return_value=utility,
+        ) as constructor:
+            self.app._open_crosscorrelogram()
+            self.app._open_crosscorrelogram()
+        constructor.assert_called_once_with(
+            self.app._app_root, session_dir=session, probe_name="B", unit_ids=(8,),
+        )
+
     def test_delayed_macos_document_open_never_opens_file_chooser(self) -> None:
         with (
             mock.patch.object(gui.sys, "platform", "darwin"),
@@ -2332,6 +2373,152 @@ class TkViewerTests(unittest.TestCase):
                 if self.app.probe_canvas.type(item) == "oval"
             ]
             self.assertEqual(len(unit_dots), expected_units)
+
+    def _prepare_probe_interaction(self) -> None:
+        self.app.probe_geometry = companions_module.ProbeGeometry(
+            probe_name="ProbeA",
+            positions_path=Path(self.directory.name) / "positions.csv",
+            channels_path=None,
+            units=(
+                companions_module.ProbeUnitPosition(7, 0.0, 0.0),
+                companions_module.ProbeUnitPosition(8, 300.0, 300.0),
+            ),
+            channels=(
+                companions_module.ProbeChannel(0, 0.0, 0.0, 0),
+                companions_module.ProbeChannel(1, 300.0, 300.0, 0),
+            ),
+        )
+        self.app._draw_probe_canvas()
+        self.app.update()
+        self.app._draw_probe_canvas()
+
+    def test_probe_drag_shows_live_rectangle_until_region_is_applied(self) -> None:
+        self._prepare_probe_interaction()
+        canvas = self.app.probe_canvas
+        start = self.app._probe_to_canvas(70.0, 70.0)
+        end = self.app._probe_to_canvas(-5.0, -5.0)
+        assert start is not None and end is not None
+        start_x, start_y = (round(value) for value in start)
+        end_x, end_y = (round(value) for value in end)
+        start_probe = self.app._canvas_to_probe(start_x, start_y)
+        end_probe = self.app._canvas_to_probe(end_x, end_y)
+        assert start_probe is not None and end_probe is not None
+        expected_region = companions_module.SpatialRegion.from_corners(
+            *start_probe, *end_probe
+        )
+
+        canvas.event_generate("<ButtonPress-1>", x=start_x, y=start_y)
+        canvas.event_generate("<B1-Motion>", x=end_x, y=end_y)
+        self.app.update()
+
+        self.assertIsNone(self.app.spatial_region)
+        preview = canvas.find_withtag("probe-drag-preview")
+        self.assertEqual(len(preview), 1)
+        self.assertEqual(canvas.type(preview[0]), "rectangle")
+        expected_coords = [
+            min(start_x, end_x), min(start_y, end_y),
+            max(start_x, end_x), max(start_y, end_y),
+        ]
+        self.assertEqual(canvas.coords(preview[0]), expected_coords)
+
+        # A companion redraw while holding the mouse must keep the preview.
+        self.app._probe_static_signature = None
+        self.app._draw_probe_canvas()
+        preview = canvas.find_withtag("probe-drag-preview")
+        self.assertEqual(len(preview), 1)
+        self.assertEqual(canvas.coords(preview[0]), expected_coords)
+
+        canvas.event_generate("<ButtonRelease-1>", x=end_x, y=end_y)
+        self.app.update()
+        self.assertEqual(canvas.find_withtag("probe-drag-preview"), ())
+        self.assertEqual(self.app.spatial_region, expected_region)
+        self.assertEqual(self.app._unit_navigation_ids(), [7])
+
+    def test_probe_drag_returning_near_start_stays_a_region_gesture(self) -> None:
+        self._prepare_probe_interaction()
+        canvas = self.app.probe_canvas
+        point = self.app._probe_to_canvas(75.0, 75.0)
+        assert point is not None
+        x, y = (round(value) for value in point)
+
+        canvas.event_generate("<ButtonPress-1>", x=x, y=y)
+        canvas.event_generate("<B1-Motion>", x=x + 25, y=y - 25)
+        canvas.event_generate("<B1-Motion>", x=x + 1, y=y + 1)
+        canvas.event_generate("<ButtonRelease-1>", x=x + 1, y=y + 1)
+        self.app.update()
+
+        self.assertIsNotNone(self.app.spatial_region)
+        self.assertEqual(self.app._unit_navigation_ids(), [])
+        self.assertEqual(canvas.find_withtag("probe-drag-preview"), ())
+
+    def test_probe_click_and_tiny_motion_select_nearest_unit_without_region(self) -> None:
+        self._prepare_probe_interaction()
+        canvas = self.app.probe_canvas
+        # This is closest to unit 8 but well outside the old channel hit radius.
+        point = self.app._probe_to_canvas(210.0, 210.0)
+        assert point is not None
+        x, y = (round(value) for value in point)
+
+        for motion in (0, 1):
+            with self.subTest(motion=motion):
+                self.app._set_selected_unit_id(7)
+                canvas.event_generate("<ButtonPress-1>", x=x, y=y)
+                if motion:
+                    canvas.event_generate("<B1-Motion>", x=x + motion, y=y)
+                self.assertEqual(canvas.find_withtag("probe-drag-preview"), ())
+                canvas.event_generate("<ButtonRelease-1>", x=x + motion, y=y)
+                self.app.update()
+
+                self.assertEqual(self.app._selected_unit_id_value(), 8)
+                self.assertIsNone(self.app.spatial_region)
+                self.assertEqual(self.app._unit_navigation_ids(), [7, 8])
+                self.assertEqual(canvas.find_withtag("probe-drag-preview"), ())
+
+    def test_probe_click_clears_existing_region_for_inside_and_outside_units(self) -> None:
+        self._prepare_probe_interaction()
+        canvas = self.app.probe_canvas
+        for unit_id, coordinate in ((7, 0.0), (8, 300.0)):
+            with self.subTest(unit_id=unit_id):
+                self.app._apply_spatial_region(
+                    companions_module.SpatialRegion.from_corners(-10, -10, 10, 10)
+                )
+                self.assertEqual(self.app._unit_navigation_ids(), [7])
+                point = self.app._probe_to_canvas(coordinate, coordinate)
+                assert point is not None
+                x, y = (round(value) for value in point)
+                canvas.event_generate("<ButtonPress-1>", x=x, y=y)
+                canvas.event_generate("<ButtonRelease-1>", x=x, y=y)
+                self.app.update()
+
+                self.assertEqual(self.app._selected_unit_id_value(), unit_id)
+                self.assertIsNone(self.app.spatial_region)
+                self.assertEqual(self.app._unit_navigation_ids(), [7, 8])
+
+    def test_probe_click_ignores_units_hidden_by_rf_quality_filter(self) -> None:
+        self._prepare_probe_interaction()
+        canvas = self.app.probe_canvas
+        self.app.settings = replace(
+            self.app.settings,
+            rf_filter_units_with_zero_bins=True,
+            rf_zero_bin_threshold=1,
+        )
+        with mock.patch.object(
+            self.app.data,
+            "zero_spike_spatial_bin_count",
+            side_effect=lambda index, _start, _end: index,
+        ):
+            self.app._draw_probe_canvas()
+            self.assertEqual(self.app._local_quality_visible_unit_ids(), [7])
+            point = self.app._probe_to_canvas(300.0, 300.0)
+            assert point is not None
+            x, y = (round(value) for value in point)
+            canvas.event_generate("<ButtonPress-1>", x=x, y=y)
+            canvas.event_generate("<ButtonRelease-1>", x=x, y=y)
+            self.app.update()
+
+            self.assertEqual(self.app._selected_unit_id_value(), 7)
+            self.assertIsNone(self.app.spatial_region)
+            self.assertEqual(self.app._unit_navigation_ids(), [7])
 
     def test_nan_probe_selection_overlay_and_spatial_filter_parity(self) -> None:
         base = Path(self.directory.name)

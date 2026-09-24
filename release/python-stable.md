@@ -1,3 +1,14 @@
+## Python 1.10.3: probe interaction and cross-correlograms
+
+Version **1.10.3**. Target: macOS Apple Silicon (build **110003**).
+
+- Drag across the probe panel to select a spatial region with a live rectangle; clicking selects the nearest visible unit and clears the region filter.
+- Open **RF Map Viewer → Utilities → Cross-correlogram…** to compare two or three units from a session. Positive lag means the second unit fires after the first; plots can be saved as opaque-background PNGs.
+- The utility reads the matching probe's ADC spike times and Kilosort cluster assignments through Pynapple.
+- Includes a self-contained HTML renderer for exported session-overlay data.
+
+Windows remains available from Python 1.10.0; Free-Moving alpha is unchanged.
+
 ## Python 1.10.2: RF metadata compatibility
 
 Version **1.10.2**. Target: macOS Apple Silicon (build **110002**).

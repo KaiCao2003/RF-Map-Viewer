@@ -20,6 +20,10 @@ PYINSTALLER_VERSION="6.21.0"
 NUMPY_VERSION="2.4.6"
 PILLOW_VERSION="12.3.0"
 TKINTERDND2_VERSION="0.6.2"
+MATPLOTLIB_VERSION="3.11.0"
+PYNAPPLE_VERSION="0.11.3"
+NUMBA_VERSION="0.66.0"
+PANDAS_VERSION="3.0.3"
 
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 PYTHON_BIN="${RF_MAPPING_PYTHON_BIN:-${PYTHON_BIN:-/Library/Frameworks/Python.framework/Versions/3.14/bin/python3}}"
@@ -230,6 +234,7 @@ require_file "$SUPPORT_DOCUMENTATION"
 require_file "$SMOKE_JSON"
 require_file "$METADATA_AUDITOR"
 require_file "$PYINSTALLER_HOOKS/hook-tkinterdnd2.py"
+require_file "$PYINSTALLER_HOOKS/hook-pynapple.py"
 [[ -x "$PLIST_BUDDY" ]] || fail "PlistBuddy not found: $PLIST_BUDDY"
 [[ "$(uname -m)" == "$APP_ARCHITECTURE" ]] \
   || fail "Python macOS builds require an $APP_ARCHITECTURE host"
@@ -267,15 +272,30 @@ BUILD_PYTHON_TARGET="$(
   || fail "Build virtual environment must use Python 3.14 $APP_ARCHITECTURE; got $BUILD_PYTHON_TARGET"
 
 if ! "$BUILD_VENV/bin/python" -c \
-  "import importlib.metadata as m, PyInstaller, numpy, PIL; raise SystemExit(PyInstaller.__version__ != '$PYINSTALLER_VERSION' or numpy.__version__ != '$NUMPY_VERSION' or PIL.__version__ != '$PILLOW_VERSION' or m.version('tkinterdnd2') != '$TKINTERDND2_VERSION')"; then
+  "import importlib.metadata as m
+expected = {
+    'pyinstaller': '$PYINSTALLER_VERSION',
+    'numpy': '$NUMPY_VERSION',
+    'pillow': '$PILLOW_VERSION',
+    'tkinterdnd2': '$TKINTERDND2_VERSION',
+    'matplotlib': '$MATPLOTLIB_VERSION',
+    'pynapple': '$PYNAPPLE_VERSION',
+    'numba': '$NUMBA_VERSION',
+    'pandas': '$PANDAS_VERSION',
+}
+raise SystemExit(any(m.version(name) != version for name, version in expected.items()))"; then
   "$BUILD_VENV/bin/python" -m pip install --disable-pip-version-check \
     "pyinstaller==$PYINSTALLER_VERSION" \
     "numpy==$NUMPY_VERSION" \
     "pillow==$PILLOW_VERSION" \
-    "tkinterdnd2==$TKINTERDND2_VERSION"
+    "tkinterdnd2==$TKINTERDND2_VERSION" \
+    "matplotlib==$MATPLOTLIB_VERSION" \
+    "pynapple==$PYNAPPLE_VERSION" \
+    "numba==$NUMBA_VERSION" \
+    "pandas==$PANDAS_VERSION"
 fi
 "$BUILD_VENV/bin/python" -c \
-  'import tkinter, tkinterdnd2; print("Tk runtime:", tkinter.TkVersion, tkinterdnd2.__file__)'
+  'import tkinter, tkinterdnd2, pynapple; from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg; print("Tk runtime:", tkinter.TkVersion, tkinterdnd2.__file__); print("Pynapple runtime:", pynapple.__version__)'
 
 require_safe_removal_target "$APP_BUNDLE"
 require_safe_removal_target "$WORK_DIR"
@@ -306,7 +326,7 @@ cp "$ICON_MASTER" "$ICONSET_DIR/icon_512x512@2x.png"
 iconutil -c icns "$ICONSET_DIR" -o "$ICON_ICNS"
 
 run_pyinstaller() {
-  "$BUILD_VENV/bin/pyinstaller" \
+  MPLBACKEND=TkAgg "$BUILD_VENV/bin/pyinstaller" \
     --noconfirm \
     --clean \
     --windowed \
@@ -319,6 +339,7 @@ run_pyinstaller() {
     --workpath "$WORK_DIR/build" \
     --specpath "$WORK_DIR" \
     --additional-hooks-dir "$PYINSTALLER_HOOKS" \
+    --hidden-import matplotlib.backends.backend_tkagg \
     --exclude-module rfmapping_fm_gui \
     --exclude-module rfmapping_viewer.fm_dataset \
     --exclude-module h5py \

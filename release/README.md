@@ -18,7 +18,7 @@ component tag and artifact name:
 
 | Component | Release | Tag | Channel |
 | --- | --- | --- | --- |
-| Python stable (macOS) | `1.10.2` | `python-v1.10.2` | stable |
+| Python stable (macOS) | `1.10.3` | `python-v1.10.3` | stable |
 | Python Free-Moving | `1.10.0-alpha.3` | `python-v1.10.0-alpha.3` | alpha |
 | Swift | `1.10.2` | `swift-v1.10.2` | stable |
 | Web | `1.10.1` | `web-v1.10.1` | stable |
@@ -26,6 +26,10 @@ component tag and artifact name:
 Published downloads and checksums are available from the repository
 [Releases page](https://github.com/KaiCao2003/RF-Map-Viewer/releases). The root
 [`README.md`](../README.md#downloads) links directly to each component archive.
+
+Python stable 1.10.3 adds probe-panel drag selection with a live rectangle and
+nearest-visible-unit selection. Its macOS app includes a standalone
+cross-correlogram utility for two or three units, with PNG export.
 
 Python and Swift 1.10.2 and Web 1.10.1 restore compatibility with JSON and
 indexed RF files that omit descriptive count/occupancy markers or the redundant
@@ -36,7 +40,7 @@ Swift also handles macOS URL-open events directly, so opening an RF document
 from Finder loads that document instead of leaving the initial file chooser open.
 Its waveform discovery stops at the filesystem root for Finder file-reference
 URLs, avoiding a loading freeze after document decoding.
-Python and Swift use macOS build 110002. Windows remains at 1.10.0, and the
+Python stable uses macOS build 110003; Swift uses build 110002. Windows remains at 1.10.0, and the
 Free-Moving alpha remains at 1.10.0-alpha.3.
 
 Python and Swift 1.10.1 repair keyboard behavior, RF color scales, missing

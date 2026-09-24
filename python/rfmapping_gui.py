@@ -28,7 +28,6 @@ from rfmapping_viewer.figure_export import (
 )
 
 from rfmapping_viewer.companions import (
-    ProbeChannel,
     ProbeGeometry,
     SpatialRegion,
     TuningCurveData,
@@ -67,6 +66,7 @@ from rfmapping_viewer.constants import (
     VALUE_MODE_COUNT,
     VALUE_MODE_RATE,
     WAVEFORM_CHANNEL_MODE_LABELS,
+    _RECORDING_SESSION_RE,
 )
 from rfmapping_viewer.display import (
     PreparedSpatialMatrix,
@@ -171,6 +171,7 @@ class RFMViewer(tk.Toplevel):
                 self._app_root._rfm_settings_path
             )
             self._app_root._rfm_settings_window = None
+            self._app_root._rfm_crosscorrelogram_window = None
             self._app_root._rfm_settings_tab = "General"
             self._app_root._rfm_tuning_cache = {}
             self._app_root._rfm_viewer_windows = []
@@ -237,12 +238,14 @@ class RFMViewer(tk.Toplevel):
         if data is not None:
             self._initialize_viewer(data)
         elif startup_path is not None:
+            self._build_startup_menu()
             self._show_startup_loading_shell(startup_path)
             self._startup_after = self.after(
                 STARTUP_EVENT_WAIT_MS,
                 lambda path=startup_path: self._load_startup_document(path),
             )
         else:
+            self._build_startup_menu()
             self._show_startup_chooser_shell()
             # On macOS, OpenApplication opens the chooser; OpenDocument loads
             # the Finder selection, regardless of when that event arrives.
@@ -341,6 +344,8 @@ class RFMViewer(tk.Toplevel):
         self._waveform_error_key: tuple[int, str] | None = None
         self.spatial_region: SpatialRegion | None = None
         self._probe_drag_start: tuple[float, float] | None = None
+        self._probe_drag_end: tuple[float, float] | None = None
+        self._probe_press_canvas: tuple[float, float] | None = None
         self._probe_drag_moved = False
         self._probe_canvas_transform: tuple[float, float, float, float] | None = None
         self.probe_collapsed_var = tk.BooleanVar(value=False)
@@ -808,7 +813,8 @@ class RFMViewer(tk.Toplevel):
         return image
 
     def _build_menu(self) -> None:
-        menu = tk.Menu(self)
+        menu = tk.Menu(self, tearoff=False)
+        self._add_utilities_menu(menu)
 
         file_menu = tk.Menu(menu, tearoff=False)
         file_menu.add_command(
@@ -933,6 +939,58 @@ class RFMViewer(tk.Toplevel):
         self._help_menu = help_menu
         self.configure(menu=menu)
         self._menu = menu
+
+    def _add_utilities_menu(self, menu: tk.Menu) -> None:
+        parent = menu
+        if sys.platform == "darwin":
+            # Tk places the first .apple menu in the native application menu.
+            parent = tk.Menu(menu, name="apple", tearoff=False)
+            menu.add_cascade(label="RF Map Viewer", menu=parent)
+        utilities = tk.Menu(parent, tearoff=False)
+        utilities.add_command(
+            label="Cross-correlogram…",
+            command=self._open_crosscorrelogram,
+        )
+        parent.add_cascade(label="Utilities", menu=utilities)
+
+    def _build_startup_menu(self) -> None:
+        menu = tk.Menu(self, tearoff=False)
+        self._add_utilities_menu(menu)
+        self.configure(menu=menu)
+        self._menu = menu
+
+    def _open_crosscorrelogram(self) -> None:
+        from rfmapping_viewer.crosscorrelogram_window import CrossCorrelogramWindow
+
+        window = self._app_root._rfm_crosscorrelogram_window
+        if window is not None and window.winfo_exists():
+            window.deiconify()
+            window.lift()
+            window.focus_set()
+            return
+        viewer = self._active_viewer()
+        session_dir = None
+        probe_name = "A"
+        unit_ids = ()
+        if viewer._viewer_ready:
+            session_dir = next(
+                (path for path in viewer.data.path.parents if _RECORDING_SESSION_RE.fullmatch(path.name)),
+                None,
+            )
+            probe_name = (probe_name_for_json(viewer.data.path) or "ProbeA")[-1]
+            selected = viewer._selected_unit_id_value()
+            if selected is not None:
+                unit_ids = (selected,)
+        window = CrossCorrelogramWindow(
+            self._app_root,
+            session_dir=session_dir,
+            probe_name=probe_name,
+            unit_ids=unit_ids,
+        )
+        menu = tk.Menu(window, tearoff=False)
+        self._add_utilities_menu(menu)
+        window.configure(menu=menu)
+        self._app_root._rfm_crosscorrelogram_window = window
 
     def _build_layout(self) -> None:
         self.columnconfigure(0, weight=0)
@@ -4633,44 +4691,85 @@ class RFMViewer(tk.Toplevel):
             status = "No units in region"
             self.clear_spatial_button.state(["!disabled"])
         self.spatial_status_label.configure(text=status)
+        self._draw_probe_drag_preview()
+
+    def _draw_probe_drag_preview(self) -> None:
+        if not self._probe_drag_moved or self._probe_drag_start is None or self._probe_drag_end is None:
+            return
+        start = self._probe_to_canvas(*self._probe_drag_start)
+        end = self._probe_to_canvas(*self._probe_drag_end)
+        if start is None or end is None:
+            return
+        canvas = self.probe_canvas
+        tag = "probe-drag-preview"
+        if canvas.find_withtag(tag):
+            canvas.coords(tag, *start, *end)
+        else:
+            canvas.create_rectangle(
+                *start,
+                *end,
+                outline="#f04438",
+                width=2,
+                dash=(5, 3),
+                tags=(tag,),
+            )
+        canvas.tag_raise(tag)
 
     def _on_probe_press(self, event: tk.Event) -> None:
         point = self._canvas_to_probe(float(event.x), float(event.y))
         self._probe_drag_start = point
+        self._probe_drag_end = None
         self._probe_press_canvas = (float(event.x), float(event.y))
         self._probe_drag_moved = False
+        self.probe_canvas.delete("probe-drag-preview")
 
     def _on_probe_drag(self, event: tk.Event) -> None:
-        start_canvas = getattr(self, "_probe_press_canvas", None)
+        start_canvas = self._probe_press_canvas
         if start_canvas is None:
             return
-        self._probe_drag_moved = math.hypot(event.x - start_canvas[0], event.y - start_canvas[1]) >= 4.0
+        # Once a drag starts, returning near the press point is still a drag.
+        self._probe_drag_moved |= math.hypot(event.x - start_canvas[0], event.y - start_canvas[1]) >= 4.0
+        self._probe_drag_end = self._canvas_to_probe(float(event.x), float(event.y))
+        self._draw_probe_drag_preview()
 
     def _on_probe_release(self, event: tk.Event) -> None:
+        self._on_probe_drag(event)
         start = self._probe_drag_start
-        end = self._canvas_to_probe(float(event.x), float(event.y))
+        end = self._probe_drag_end
+        moved = self._probe_drag_moved
         self._probe_drag_start = None
-        if self.probe_geometry is None and not self._probe_drag_moved:
+        self._probe_drag_end = None
+        self._probe_press_canvas = None
+        self._probe_drag_moved = False
+        self.probe_canvas.delete("probe-drag-preview")
+        if self.probe_geometry is None and not moved:
             self._attach_probe_geometry()
             return
         if start is None or end is None or self.probe_geometry is None:
             return
-        if self._probe_drag_moved:
+        if moved:
             region = SpatialRegion.from_corners(start[0], start[1], end[0], end[1])
-        else:
-            nearest: tuple[float, ProbeChannel] | None = None
-            for channel in self.probe_geometry.channels:
-                point = self._probe_to_canvas(channel.x_um, channel.y_um)
-                if point is None:
-                    continue
-                distance = math.hypot(event.x - point[0], event.y - point[1])
-                if nearest is None or distance < nearest[0]:
-                    nearest = distance, channel
-            if nearest is None or nearest[0] > 14.0:
-                return
-            channel = nearest[1]
-            region = SpatialRegion.centered(channel.x_um, channel.y_um)
-        self._apply_spatial_region(region)
+            self._apply_spatial_region(region)
+            return
+
+        available = set(self._local_quality_visible_unit_ids())
+        nearest: tuple[float, int] | None = None
+        for unit in self.probe_geometry.units:
+            if unit.unit_id not in available or unit.x_um is None or unit.y_um is None:
+                continue
+            point = self._probe_to_canvas(unit.x_um, unit.y_um)
+            if point is None:
+                continue
+            distance = math.hypot(event.x - point[0], event.y - point[1])
+            if nearest is None or distance < nearest[0]:
+                nearest = distance, unit.unit_id
+        if nearest is None:
+            return
+        self.spatial_region = None
+        self._set_selected_unit_id(nearest[1])
+        self.selected_cell = None
+        self._update_all()
+        self._publish_pairing_state_if_changed()
 
     def _apply_spatial_region(self, region: SpatialRegion) -> None:
         self.spatial_region = region
@@ -8177,6 +8276,9 @@ class RFMViewer(tk.Toplevel):
         self._tuning_scale_cache = None
         self.spatial_region = None
         self._probe_drag_start = None
+        self._probe_drag_end = None
+        self._probe_press_canvas = None
+        self._probe_drag_moved = False
         self._probe_canvas_transform = None
         self._probe_static_signature = None
         self._waveform_generation += 1
