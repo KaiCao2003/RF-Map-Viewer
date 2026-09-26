@@ -24,8 +24,8 @@ class RecentDocumentList(tk.Canvas):
         self._open_recent = open_recent
         self._selection_changed = selection_changed
         family = self.tk.call("font", "actual", "TkDefaultFont", "-family")
-        self._name_font = tkfont.Font(self, family=family, size=12, weight="bold")
-        self._path_font = tkfont.Font(self, family=family, size=10)
+        self._name_font = tkfont.Font(self, family=family, size=-13, weight="bold")
+        self._path_font = tkfont.Font(self, family=family, size=-11)
         self.bind("<Configure>", self._draw)
         self.bind("<FocusIn>", self._draw)
         self.bind("<FocusOut>", self._draw)
@@ -157,17 +157,24 @@ class WelcomeFrame(tk.Frame):
         introduction.grid(row=0, column=0, sticky="nsew")
         introduction.grid_propagate(False)
         content = tk.Frame(introduction, background="#f6f6f7")
-        content.place(relx=0.5, rely=0.47, anchor="center")
+        content.place(relx=0.5, rely=0.5, anchor="center")
         icon_path = (Path(sys.executable).parent.parent / "Resources" / "RFMappingViewer.icns"
                      if getattr(sys, "frozen", False)
                      else Path(__file__).parent.parent / "assets" / "rf-mapping-viewer-icon-1024.png")
         if icon_path.is_file():
-            with Image.open(icon_path) as icon:
-                self._icon = ImageTk.PhotoImage(icon.convert("RGBA").resize((128, 128), Image.Resampling.LANCZOS), master=self)
+            if "nsimage" in self.tk.call("image", "types"):
+                # NSImage keeps the bundle icon's Retina representations intact.
+                self._icon = tk.Image("nsimage", master=self, cnf={
+                    "source": str(icon_path), "as": "file", "width": 104, "height": 104,
+                })
+            else:
+                with Image.open(icon_path) as icon:
+                    self._icon = ImageTk.PhotoImage(icon.convert("RGBA").resize((104, 104), Image.Resampling.LANCZOS), master=self)
             tk.Label(content, image=self._icon, background="#f6f6f7", borderwidth=0).pack()
+        # Pixel sizes avoid Tk's 96-dpi point conversion enlarging the macOS type.
         tk.Label(content, text="RF Map Viewer", background="#f6f6f7", foreground="#202023",
-                 font=(family, 21, "bold")).pack(pady=(8, 0))
-        self.open_button = ttk.Button(content, text="Open RF Map…", command=open_document, width=19)
+                 font=(family, -22, "bold")).pack(pady=(14, 0))
+        self.open_button = ttk.Button(content, text="Open RF Map…", command=open_document, width=17)
         self.open_button.pack(pady=(28, 0))
         tk.Frame(self, width=1, background="#dedee2").grid(row=0, column=1, sticky="ns")
 
@@ -175,7 +182,7 @@ class WelcomeFrame(tk.Frame):
         recent.grid(row=0, column=2, sticky="nsew")
         recent.columnconfigure(0, weight=1)
         recent.rowconfigure(1, weight=1)
-        tk.Label(recent, text="Recent", font=(family, 12, "bold"), foreground="#606066",
+        tk.Label(recent, text="Recent", font=(family, -12, "bold"), foreground="#606066",
                  background="white", anchor="w").grid(row=0, column=0, sticky="ew", padx=10, pady=(0, 14))
         listing = tk.Frame(recent, background="white")
         listing.grid(row=1, column=0, sticky="nsew")
@@ -185,7 +192,7 @@ class WelcomeFrame(tk.Frame):
         self.recent_list.grid(row=0, column=0, sticky="nsew")
         self._scrollbar = ttk.Scrollbar(listing, orient="vertical", command=self.recent_list.yview)
         self.recent_list.configure(yscrollcommand=self._update_scrollbar)
-        self._empty_label = tk.Label(listing, text="No Recent Documents", font=(family, 12),
+        self._empty_label = tk.Label(listing, text="No Recent Documents", font=(family, -13),
                                      foreground="#8a8a90", background="white")
         footer = tk.Frame(recent, background="white")
         footer.grid(row=2, column=0, sticky="ew", pady=(18, 0))
