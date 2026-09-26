@@ -43,7 +43,7 @@ class WelcomeButton(ttk.Button):
                 color = "#dedede" if pressed else "#f8f8f8" if close else "#ececec"
                 bitmap = Image.new("RGB", (width * 4, 144), "white")
                 draw = ImageDraw.Draw(bitmap)
-                draw.rounded_rectangle((4, 4, width * 4 - 4, 140), radius=68,
+                draw.rounded_rectangle((0, 0, width * 4 - 1, 143), radius=72,
                                        fill=color, outline="#7ca8e8" if focused else color, width=6)
                 if close:
                     draw.line((48, 48, 96, 96), fill="#a5a5a5", width=6)
@@ -217,14 +217,16 @@ class WelcomeFrame(tk.Frame):
         family = self.tk.call("font", "actual", "TkDefaultFont", "-family")
         self.close_button = WelcomeButton(self, command=close_window, close=True)
         self.close_button.place(x=20, y=20, width=36, height=36)
+        bundled = getattr(sys, "frozen", False)
         icon_path = (Path(sys.executable).parent.parent / "Resources" / "RFMappingViewer.icns"
-                     if getattr(sys, "frozen", False)
+                     if bundled
                      else Path(__file__).parent.parent / "assets" / "rf-mapping-viewer-icon-1024.png")
         if icon_path.is_file():
             if "nsimage" in self.tk.call("image", "types"):
-                # NSImage keeps the bundle icon's Retina representations intact.
+                # Use the system-rendered bundle icon, matching the Swift welcome.
                 self._icon = tk.Image("nsimage", master=self, cnf={
-                    "source": str(icon_path), "as": "file", "width": 128, "height": 128,
+                    "source": str(icon_path.parents[2] if bundled else icon_path),
+                    "as": "path" if bundled else "file", "width": 128, "height": 128,
                 })
             else:
                 with Image.open(icon_path) as icon:
@@ -232,7 +234,8 @@ class WelcomeFrame(tk.Frame):
             tk.Label(self, image=self._icon, background="white", borderwidth=0).place(relx=0.5, y=62, anchor="n")
         # Pixel sizes avoid Tk's 96-dpi point conversion enlarging the macOS type.
         tk.Label(self, text="RF Map Viewer", background="white", foreground="#202023",
-                 font=(family, -18, "bold"), borderwidth=0).place(relx=0.5, y=190, anchor="n")
+                 font=(family, -18, "bold"), borderwidth=0, padx=0, pady=0).place(
+                     relx=0.5, y=190, anchor="n", height=22)
         self.open_button = WelcomeButton(self, command=open_document)
         self.open_button.place(relx=0.5, y=242, anchor="n", width=360, height=36)
 
