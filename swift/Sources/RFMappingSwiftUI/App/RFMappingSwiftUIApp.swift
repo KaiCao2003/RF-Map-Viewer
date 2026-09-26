@@ -59,7 +59,7 @@ final class WindowRouter {
     }
 
     func showWelcome(openNew: () -> Void) {
-        if let welcomeWindow, welcomeWindow.isVisible {
+        if let welcomeWindow, welcomeWindow.isVisible || welcomeWindow.isMiniaturized {
             welcomeWindow.deminiaturize(nil)
             welcomeWindow.makeKeyAndOrderFront(nil)
         } else {
