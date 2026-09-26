@@ -3,6 +3,7 @@ import SwiftUI
 
 struct WelcomeView: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.controlActiveState) private var controlActiveState
     let openDocument: () -> Void
     let openRecent: (URL) -> Void
     @State private var recents = RecentDocuments.shared
@@ -151,7 +152,7 @@ struct WelcomeView: View {
         .background(alignment: .top) {
             if selectedURL == url {
                 RoundedRectangle(cornerRadius: 10)
-                    .fill(focusedControl == .recents
+                    .fill(focusedControl == .recents && controlActiveState == .key
                         ? Color(red: 220.0 / 255.0, green: 232.0 / 255.0, blue: 248.0 / 255.0)
                         : Color(white: 222.0 / 255.0))
                     .frame(height: 47)

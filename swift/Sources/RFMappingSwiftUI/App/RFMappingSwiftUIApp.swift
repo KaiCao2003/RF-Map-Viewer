@@ -39,7 +39,7 @@ final class WindowRouter {
     }
 
     func showWelcome(openNew: () -> Void) {
-        if let welcomeWindow, welcomeWindow.isVisible || welcomeWindow.isMiniaturized {
+        if let welcomeWindow {
             welcomeWindow.deminiaturize(nil)
             welcomeWindow.makeKeyAndOrderFront(nil)
         } else {
@@ -216,6 +216,7 @@ private struct RFMappingWelcomeWindow: View {
     var body: some View {
         WelcomeView(openDocument: { isImporting = true }, openRecent: openDocument)
             .frame(width: 480, height: 632)
+            .windowResizeBehavior(.enabled)
             .background(WelcomeWindowRegistration(dismissImporter: { isImporting = false }))
             .focusedSceneValue(\.rfMappingOpenActions, RFMappingOpenActions(
                 openRFMap: { isImporting = true }, openRecent: openDocument

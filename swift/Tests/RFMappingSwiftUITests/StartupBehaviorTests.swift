@@ -123,7 +123,9 @@ final class StartupBehaviorTests: XCTestCase {
         router.documentDidAppear()
         XCTAssertFalse(isImporting)
         XCTAssertFalse(welcome.isVisible)
-        router.showWelcome { welcome.orderFront(nil) }
+        var openedNewWindow = false
+        router.showWelcome { openedNewWindow = true }
+        XCTAssertFalse(openedNewWindow, "The ordered-out welcome window must be reused")
         XCTAssertTrue(welcome.isVisible)
         router.showWelcome { XCTFail("The visible welcome window must be reused") }
     }
