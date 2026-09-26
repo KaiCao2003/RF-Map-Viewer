@@ -183,7 +183,7 @@ struct RFMappingSwiftUIApp: App {
             RFMappingWelcomeWindow()
         }
         .defaultSize(width: 480, height: 632)
-        .windowStyle(.plain)
+        .windowStyle(.hiddenTitleBar)
         .windowBackgroundDragBehavior(.enabled)
         .windowResizability(.contentSize)
         .defaultLaunchBehavior(.presented)
@@ -214,9 +214,9 @@ private struct RFMappingWelcomeWindow: View {
     @State private var isOpening = false
 
     var body: some View {
-        WelcomeView(openDocument: { isImporting = true }, openRecent: openDocument)
-            .frame(width: 480, height: 632)
-            .windowResizeBehavior(.enabled)
+        WelcomeWindowContent {
+            WelcomeView(openDocument: { isImporting = true }, openRecent: openDocument)
+        }
             .background(WelcomeWindowRegistration(dismissImporter: { isImporting = false }))
             .focusedSceneValue(\.rfMappingOpenActions, RFMappingOpenActions(
                 openRFMap: { isImporting = true }, openRecent: openDocument

@@ -1,6 +1,23 @@
 import AppKit
 import SwiftUI
 
+struct WelcomeWindowContent<Content: View>: View {
+    @ViewBuilder let content: () -> Content
+    @State private var titlebarInset: CGFloat = 0
+
+    var body: some View {
+        GeometryReader { geometry in
+            content()
+                .ignoresSafeArea()
+                .onChange(of: geometry.safeAreaInsets.top, initial: true) { _, inset in
+                    titlebarInset = inset
+                }
+        }
+        // Hidden titlebars still contribute a safe area to the outer window size.
+        .frame(width: 480, height: 632 - titlebarInset)
+    }
+}
+
 struct WelcomeView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.controlActiveState) private var controlActiveState
@@ -219,6 +236,9 @@ struct WelcomeWindowRegistration: NSViewRepresentable {
             WindowRouter.shared.registerWelcomeWindow(window, dismissImporter: dismissImporter)
             window.appearance = NSAppearance(named: .aqua)
             window.backgroundColor = .white
+            window.standardWindowButton(.closeButton)?.isHidden = true
+            window.standardWindowButton(.miniaturizeButton)?.isHidden = true
+            window.standardWindowButton(.zoomButton)?.isHidden = true
         }
     }
 }

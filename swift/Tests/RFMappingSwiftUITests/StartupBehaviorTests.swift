@@ -10,24 +10,27 @@ final class StartupBehaviorTests: XCTestCase {
         _ = NSApplication.shared
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 480, height: 632),
-            styleMask: .borderless,
+            styleMask: [.titled, .closable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
         window.isReleasedWhenClosed = false
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
         defer { window.close() }
         var openCount = 0
         let host = NSHostingView(rootView:
-            WelcomeView(openDocument: { openCount += 1 }, openRecent: { _ in openCount += 1 })
-                .frame(width: 480, height: 632)
+            WelcomeWindowContent {
+                WelcomeView(openDocument: { openCount += 1 }, openRecent: { _ in openCount += 1 })
+            }
         )
         window.contentView = host
         host.layoutSubtreeIfNeeded()
         try await Task.sleep(for: .milliseconds(250))
 
         XCTAssertEqual(host.fittingSize.width, 480, accuracy: 0.1)
-        // Welcome uses the plain scene style, with no titlebar safe area.
         XCTAssertEqual(host.fittingSize.height, 632, accuracy: 0.1)
+        XCTAssertTrue(window.canBecomeKey)
         XCTAssertEqual(openCount, 0)
         XCTAssertNil(window.attachedSheet)
         XCTAssertNil(NSApplication.shared.modalWindow)
