@@ -101,69 +101,39 @@ struct WelcomeView: View {
     }
 }
 
-/// SwiftUI keeps a scene's initial size when its content changes. Resize once
-/// when the welcome scene becomes a document, then leave user resizing alone.
-struct ViewerWindowPresentation: NSViewRepresentable {
-    let isWelcome: Bool
+struct WelcomeWindowRegistration: NSViewRepresentable {
+    let dismissImporter: () -> Void
 
-    func makeNSView(context: Context) -> PresentationView {
-        let view = PresentationView()
-        view.isWelcome = isWelcome
+    func makeNSView(context: Context) -> RegistrationView {
+        let view = RegistrationView()
+        view.dismissImporter = dismissImporter
         return view
     }
 
-    func updateNSView(_ view: PresentationView, context: Context) {
-        view.isWelcome = isWelcome
-        view.updatePresentation()
+    func updateNSView(_ view: RegistrationView, context: Context) {
+        view.dismissImporter = dismissImporter
+        view.registerWindow()
     }
 
-    final class PresentationView: NSView {
-        var isWelcome = true
-        private var appliedWelcome: Bool?
+    final class RegistrationView: NSView {
+        var dismissImporter: () -> Void = {}
 
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
-            updatePresentation()
+            registerWindow()
         }
 
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
-        func updatePresentation() {
-            // SwiftUI finishes configuring the scene after attaching this view.
-            // Apply window chrome afterwards, rather than marking it complete
-            // while its titlebar and content-size policy are still being set.
-            DispatchQueue.main.async { [weak self] in
-                self?.applyPresentation()
-            }
-        }
-
-        private func applyPresentation() {
-            guard let window, appliedWelcome != isWelcome else { return }
-            appliedWelcome = isWelcome
-            WindowRouter.shared.updateWelcomeWindow(window, isWelcome: isWelcome)
-            if isWelcome {
-                window.styleMask.insert(.fullSizeContentView)
-                window.styleMask.remove(.resizable)
-            } else {
-                window.styleMask.remove(.fullSizeContentView)
-                window.styleMask.insert(.resizable)
-            }
-            window.titleVisibility = isWelcome ? .hidden : .visible
-            window.titlebarAppearsTransparent = isWelcome
-            window.appearance = isWelcome ? NSAppearance(named: .aqua) : nil
-            window.isMovableByWindowBackground = isWelcome
-            window.backgroundColor = isWelcome ? .white : .windowBackgroundColor
-            window.standardWindowButton(.closeButton)?.isHidden = isWelcome
-            window.standardWindowButton(.miniaturizeButton)?.isHidden = isWelcome
-            window.standardWindowButton(.zoomButton)?.isHidden = isWelcome
-            if isWelcome {
-                var frame = window.frame
-                frame.origin.y = frame.maxY - 632
-                frame.size = NSSize(width: 480, height: 632)
-                window.setFrame(frame, display: true)
-            } else {
-                window.setContentSize(NSSize(width: 1440, height: 900))
-            }
+        func registerWindow() {
+            guard let window else { return }
+            WindowRouter.shared.registerWelcomeWindow(window, dismissImporter: dismissImporter)
+            window.appearance = NSAppearance(named: .aqua)
+            window.backgroundColor = .white
+            window.isMovableByWindowBackground = true
+            window.standardWindowButton(.closeButton)?.isHidden = true
+            window.standardWindowButton(.miniaturizeButton)?.isHidden = true
+            window.standardWindowButton(.zoomButton)?.isHidden = true
         }
     }
 }

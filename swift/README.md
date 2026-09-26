@@ -21,8 +21,9 @@ only when requested. **File → Open Recent** and the welcome list use macOS's
 `NSDocumentController` history. **Clear Recent** clears that list without changing
 the files. **File → Welcome to RF Map Viewer** brings the welcome window back.
 A missing or unreadable recent document leaves the welcome window available.
-The first document fills the initial window, and later opens create independent
-document windows. This is a same-version update to 1.10.3.
+The welcome window hides once an opened document is ready. Each RF document has
+its own resizable window with a normal title bar. This is a same-version update
+to 1.10.3.
 
 Version 1.10.2 opens Finder/Launch Services document URLs directly in the
 initial window instead of showing the file picker. Later external opens create

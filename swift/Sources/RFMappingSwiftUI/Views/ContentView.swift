@@ -9,16 +9,7 @@ struct ContentView: View {
     let openRFMapInNewWindow: (URL) -> Void
 
     var body: some View {
-        Group {
-            if !store.hasData {
-                WelcomeView(
-                    openDocument: { store.isImporting = true },
-                    openRecent: openRFMapInNewWindow
-                )
-            } else {
-                viewerContent
-            }
-        }
+        viewerContent
         .preferredColorScheme(.light)
         .overlay {
             if store.isWaveformZoomed {
