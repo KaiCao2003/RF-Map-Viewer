@@ -553,7 +553,6 @@ class RFMViewer(tk.Toplevel):
 
         if self._startup_chooser_frame is not None:
             return
-        set_macos_welcome_chrome(self, True)
         self.geometry("480x632")
         self.minsize(480, 632)
         self.resizable(False, False)
@@ -567,6 +566,7 @@ class RFMViewer(tk.Toplevel):
         frame.refresh_recent_documents(list_recent_documents())
         self._startup_chooser_frame = frame
         self.title("Welcome to RF Map Viewer")
+        set_macos_welcome_chrome(self, True)
         self.deiconify()
         self.lift()
 

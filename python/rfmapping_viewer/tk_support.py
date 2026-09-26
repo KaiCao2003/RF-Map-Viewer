@@ -43,21 +43,25 @@ def set_macos_welcome_chrome(window: tk.Misc, enabled: bool) -> bool:
         return False
 
     try:
+        import _tkinter
+
         # The Tk attribute query realizes the native window without pumping
         # Python callbacks through update(), which could open a document here.
         stylemask = window.tk.call("wm", "attributes", window._w, "-stylemask")
-        process = ctypes.CDLL(None)
-        process.TkMacOSXDrawable.argtypes = (ctypes.c_void_p,)
-        process.TkMacOSXDrawable.restype = ctypes.c_void_p
-        native_window = process.TkMacOSXDrawable(window.winfo_id())
+        # Tk may be loaded locally by the frozen _tkinter extension, so look
+        # up its public bridge through that library and its dependencies.
+        library = ctypes.CDLL(_tkinter.__file__)
+        library.Tk_MacOSXGetNSWindowForDrawable.argtypes = (ctypes.c_void_p,)
+        library.Tk_MacOSXGetNSWindowForDrawable.restype = ctypes.c_void_p
+        native_window = library.Tk_MacOSXGetNSWindowForDrawable(window.winfo_id())
         if not native_window:
-            return False
+            raise RuntimeError("Tk did not create a native welcome window")
         objc = ctypes.CDLL("/usr/lib/libobjc.A.dylib")
         objc.sel_registerName.argtypes = (ctypes.c_char_p,)
         objc.sel_registerName.restype = ctypes.c_void_p
         address = ctypes.cast(objc.objc_msgSend, ctypes.c_void_p).value
         if not address:
-            return False
+            raise RuntimeError("Objective-C window messaging is unavailable")
         selector = objc.sel_registerName
         get_integer = ctypes.CFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p)(address)
         get_boolean = ctypes.CFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)(address)
@@ -89,8 +93,8 @@ def set_macos_welcome_chrome(window: tk.Misc, enabled: bool) -> bool:
             window._rfm_welcome_chrome = saved
         else:
             del window._rfm_welcome_chrome
-    except (AttributeError, OSError, TypeError, tk.TclError):
-        return False
+    except (AttributeError, OSError, TypeError, tk.TclError) as error:
+        raise RuntimeError("Could not configure the native welcome window") from error
     return True
 
 
