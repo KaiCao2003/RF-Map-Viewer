@@ -2100,8 +2100,47 @@ class TkViewerTests(unittest.TestCase):
         )
         self.assertEqual(
             [label for _x, label in direction_labels],
-            ["180", "90", "0", "270", "180"],
+            ["180", "270", "0", "90", "180"],
         )
+
+    def test_tuning_peaks_align_with_rf_angles_in_line_and_polar(self) -> None:
+        canvas = self.app.tuning_curve_canvas
+        width = max(canvas.winfo_width(), 280)
+        height = max(canvas.winfo_height(), 220)
+        angles = (0.0, 90.0, 180.0, 270.0)
+        for angle, rf_angle, vector in (
+            (0.0, 0.0, (0.0, -1.0)),
+            (90.0, 90.0, (1.0, 0.0)),
+            (270.0, -90.0, (-1.0, 0.0)),
+        ):
+            rates = tuple(float(value == angle) for value in angles)
+            with self.subTest(angle=angle, mode="line"):
+                canvas.delete("all")
+                self.app._draw_tuning_line(angles, rates, 7)
+                curve = next(
+                    item for item in canvas.find_all()
+                    if canvas.type(item) == "line"
+                    and canvas.itemcget(item, "fill") == "#1570ef"
+                )
+                coords = canvas.coords(curve)
+                peak = min(zip(coords[::2], coords[1::2]), key=lambda point: point[1])
+                expected_x = 54.0 + (width - 16.0 - 54.0) * (rf_angle + 180.0) / 360.0
+                self.assertAlmostEqual(peak[0], expected_x)
+                self.assertAlmostEqual(peak[1], 18.0)
+
+            with self.subTest(angle=angle, mode="polar"):
+                canvas.delete("all")
+                self.app._draw_tuning_polar(angles, rates, 7)
+                curve = next(
+                    item for item in canvas.find_all()
+                    if canvas.type(item) == "line"
+                    and canvas.itemcget(item, "fill") == "#1570ef"
+                )
+                coords = canvas.coords(curve)
+                index = angles.index(angle) * 2
+                radius = max(30.0, min(width, height) / 2.0 - 40.0)
+                self.assertAlmostEqual(coords[index], width / 2.0 + radius * vector[0])
+                self.assertAlmostEqual(coords[index + 1], height / 2.0 + 8.0 + radius * vector[1])
 
     def test_compare_scale_uses_one_processed_peak_for_line_and_polar(self) -> None:
         tuning_path = Path(self.directory.name) / "tuning_curves.json"

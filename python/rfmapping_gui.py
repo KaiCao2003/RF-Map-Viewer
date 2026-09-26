@@ -4185,7 +4185,7 @@ class RFMViewer(tk.Toplevel):
         canvas.create_line(left, top, left, bottom, right, bottom, fill="#98a2b3")
         for angle, label in zip(
             (-180, -90, 0, 90, 180),
-            ("180", "90", "0", "270", "180"),
+            ("180", "270", "0", "90", "180"),
         ):
             x = left + plot_width * (angle + 180.0) / 360.0
             canvas.create_line(x, bottom, x, bottom + 4, fill="#98a2b3")

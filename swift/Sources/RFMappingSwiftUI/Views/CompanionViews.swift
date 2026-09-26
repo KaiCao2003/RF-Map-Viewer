@@ -456,6 +456,7 @@ struct HDTuningCompanionView: View {
                     Canvas { context, size in
                         drawHDTuning(context: &context, size: size, curve: curve)
                     }
+                    .background(Color.white)
                 }
                 Text(store.hdTuningURL?.path ?? "")
                     .font(.system(size: 8, design: .monospaced))
@@ -494,16 +495,18 @@ struct HDTuningCompanionView: View {
         let high = max(curve.ratesHz.max() ?? 0, 1e-12)
         context.draw(
             Text("Unit ID \(store.selectedUnitID ?? 0) · max \(String(format: "%.2f", high)) Hz")
-                .font(.system(size: 10, weight: .semibold)),
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.black),
             at: CGPoint(x: 12, y: 14),
             anchor: .leading
         )
-        context.stroke(Path(lineRect), with: .color(.secondary.opacity(0.5)), lineWidth: 1)
+        context.stroke(Path(lineRect), with: .color(.gray), lineWidth: 1)
+        let centered = curve.centeredOnZero()
         var line = Path()
-        for index in curve.ratesHz.indices {
+        for index in centered.ratesHz.indices {
             let point = CGPoint(
-                x: lineRect.minX + lineRect.width * CGFloat(index) / CGFloat(max(1, curve.ratesHz.count - 1)),
-                y: lineRect.maxY - lineRect.height * CGFloat(curve.ratesHz[index] / high)
+                x: lineRect.minX + lineRect.width * CGFloat((centered.anglesDegrees[index] + 180) / 360),
+                y: lineRect.maxY - lineRect.height * CGFloat(centered.ratesHz[index] / high)
             )
             if index == 0 {
                 line.move(to: point)
@@ -512,6 +515,15 @@ struct HDTuningCompanionView: View {
             }
         }
         context.stroke(line, with: .color(.blue), lineWidth: 2)
+        for (angle, label) in [(-180, "180°"), (-90, "270°"), (0, "0°"), (90, "90°"), (180, "180°")] {
+            context.draw(
+                Text(label).font(.system(size: 9)).foregroundStyle(.black),
+                at: CGPoint(
+                    x: lineRect.minX + lineRect.width * CGFloat(angle + 180) / 360,
+                    y: lineRect.maxY + 14
+                )
+            )
+        }
         for fraction in [0.25, 0.5, 0.75, 1.0] {
             let radius = polarRadius * CGFloat(fraction)
             context.stroke(
@@ -521,18 +533,18 @@ struct HDTuningCompanionView: View {
                     width: radius * 2,
                     height: radius * 2
                 )),
-                with: .color(.secondary.opacity(0.22)),
+                with: .color(.gray.opacity(0.3)),
                 lineWidth: 1
             )
         }
         var polar = Path()
         for index in 0...curve.ratesHz.count {
             let source = index % curve.ratesHz.count
-            let angle = curve.anglesDegrees[source] * .pi / 180 - .pi / 2
+            let vector = hdScreenVector(angleDegrees: curve.anglesDegrees[source])
             let radius = polarRadius * CGFloat(curve.ratesHz[source] / high)
             let point = CGPoint(
-                x: polarCenter.x + radius * CGFloat(cos(angle)),
-                y: polarCenter.y + radius * CGFloat(sin(angle))
+                x: polarCenter.x + radius * CGFloat(vector.x),
+                y: polarCenter.y + radius * CGFloat(vector.y)
             )
             if index == 0 {
                 polar.move(to: point)
@@ -541,6 +553,16 @@ struct HDTuningCompanionView: View {
             }
         }
         context.stroke(polar, with: .color(.blue), lineWidth: 2)
+        for angle in [0, 90, 180, 270] {
+            let vector = hdScreenVector(angleDegrees: Double(angle))
+            context.draw(
+                Text("\(angle)°").font(.system(size: 9)).foregroundStyle(.black),
+                at: CGPoint(
+                    x: polarCenter.x + (polarRadius + 14) * CGFloat(vector.x),
+                    y: polarCenter.y + (polarRadius + 14) * CGFloat(vector.y)
+                )
+            )
+        }
     }
 
     private func chooseHDTuning() {

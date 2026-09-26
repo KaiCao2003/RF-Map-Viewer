@@ -145,7 +145,7 @@ export function sharedHdPeak(
 
 export function centerHdCurveOnZero(curve: ProcessedHdCurve): ProcessedHdCurve {
   const pairs = curve.angles.map((angle, index) => ({
-    angle: ((-angle + 180) % 360 + 360) % 360 - 180,
+    angle: ((angle + 180) % 360 + 360) % 360 - 180,
     rate: curve.rates[index],
   })).sort((left, right) => left.angle - right.angle);
   return { angles: pairs.map((pair) => pair.angle), rates: pairs.map((pair) => pair.rate) };
@@ -153,5 +153,5 @@ export function centerHdCurveOnZero(curve: ProcessedHdCurve): ProcessedHdCurve {
 
 export function headDirectionUnitVector(angleDeg: number): readonly [number, number] {
   const radians = angleDeg * Math.PI / 180;
-  return [-Math.sin(radians), -Math.cos(radians)];
+  return [Math.sin(radians), -Math.cos(radians)];
 }

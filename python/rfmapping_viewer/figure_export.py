@@ -1484,6 +1484,13 @@ def _draw_line(
     spec: PlotSpec,
 ) -> None:
     x_values, y_values = _xy_payload(spec.data)
+    if spec.kind is PlotKind.HD_LINE:
+        # HD and RF both increase clockwise; only wrap the display around zero.
+        centered = sorted(
+            (((angle + 180.0) % 360.0) - 180.0, rate)
+            for angle, rate in zip(x_values, y_values)
+        )
+        x_values, y_values = zip(*centered)
     left, top, right, bottom = box
     show_axes = _boolean_option(spec.options, "show_axes", default=True)
     span = min(right - left, bottom - top)
@@ -1493,7 +1500,11 @@ def _draw_line(
         right - 12,
         bottom - (max(38, round(span * 0.12)) if show_axes else 8),
     )
-    x_low, x_high = min(x_values), max(x_values)
+    x_low, x_high = (
+        (-180.0, 180.0)
+        if spec.kind is PlotKind.HD_LINE
+        else (min(x_values), max(x_values))
+    )
     y_low, y_high = min(y_values), max(y_values)
     draw.line(
         (plot_box[0], plot_box[3], plot_box[2], plot_box[3]),
@@ -1535,6 +1546,7 @@ def _draw_line(
         for tick_index in range(5):
             fraction = tick_index / 4.0
             x_value = x_low + (x_high - x_low) * fraction
+            x_label = x_value % 360.0 if spec.kind is PlotKind.HD_LINE else x_value
             pixel_x = plot_box[0] + (plot_box[2] - plot_box[0]) * fraction
             draw.line(
                 (pixel_x, plot_box[3], pixel_x, plot_box[3] + 4),
@@ -1545,7 +1557,7 @@ def _draw_line(
                 draw,
                 box,
                 (pixel_x, plot_box[3] + 6),
-                f"{x_value:.4g}",
+                f"{x_label:.4g}",
                 fill=axis_color,
                 font=axis_font,
                 anchor="ma",
@@ -1873,6 +1885,7 @@ def _draw_polar_line(
     center_y = (top + bottom) / 2.0
     maximum = max(max(values), 0.0)
     minimum = min(min(values), 0.0)
+    clockwise = _boolean_option(spec.options, "clockwise", default=True)
     draw.ellipse(
         (
             round(center_x - radius),
@@ -1884,7 +1897,7 @@ def _draw_polar_line(
         width=2,
     )
     for angle in (0, 90, 180, 270):
-        theta = math.radians(angle - 90.0)
+        theta = math.radians((angle if clockwise else -angle) - 90.0)
         draw.line(
             (
                 round(center_x),
@@ -1895,11 +1908,10 @@ def _draw_polar_line(
             fill="#e2e8f0",
             width=1,
         )
-    clockwise = _boolean_option(spec.options, "clockwise", default=True)
     points: list[tuple[int, int]] = []
     for angle, value in zip(angles, values):
         normalized = 0.0 if maximum <= minimum else (value - minimum) / (maximum - minimum)
-        theta_degrees = (-angle if clockwise else angle) - 90.0
+        theta_degrees = (angle if clockwise else -angle) - 90.0
         theta = math.radians(theta_degrees)
         points.append(
             (
@@ -1921,7 +1933,7 @@ def _draw_polar_line(
         axis_font = _font(max(8, round(radius * 0.09)))
         axis_color = "#475467"
         for cardinal in (0, 90, 180, 270):
-            theta = math.radians(cardinal - 90.0)
+            theta = math.radians((cardinal if clockwise else -cardinal) - 90.0)
             label_radius = radius + max(12, radius * 0.12)
             _draw_text_inside(
                 draw,
@@ -2538,7 +2550,8 @@ class PillowFigureRenderer:
         left, top, right, bottom = panel
         if right - left < 40 or bottom - top < 40:
             raise FigureExportValidationError("page has too many plots for its size")
-        draw.rounded_rectangle(panel, radius=10, fill="#f8fafc", outline="#cbd5e1", width=2)
+        background = "#ffffff" if spec.kind in {PlotKind.HD_LINE, PlotKind.HD_POLAR} else "#f8fafc"
+        draw.rounded_rectangle(panel, radius=10, fill=background, outline="#cbd5e1", width=2)
         definition = PLOT_KIND_REGISTRY[spec.kind.value]
         title = spec.title.strip() if spec.title and spec.title.strip() else definition.label
         subtitle = str(spec.options.get("subtitle", "")).strip()

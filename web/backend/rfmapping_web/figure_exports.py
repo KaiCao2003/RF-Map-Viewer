@@ -1616,7 +1616,7 @@ class FigurePageRenderer:
                 },
                 options={
                     "color": "#7c3aed",
-                    "clockwise": False,
+                    "clockwise": True,
                     "x_unit": "°",
                     "y_unit": "Hz",
                     "show_axes": True,

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   aggregateHdCounts,
   centerHdCurveOnZero,
+  headDirectionUnitVector,
   normalizeHdBinCount,
   processHdUnit,
   sharedHdPeak,
@@ -73,6 +74,22 @@ describe("HD tuning math", () => {
   it("centers line plots on physical zero degrees", () => {
     const centered = centerHdCurveOnZero({ angles: [0, 90, 180, 270], rates: [10, 20, 30, 40] });
     expect(centered.angles).toEqual([-180, -90, 0, 90]);
-    expect(centered.rates).toEqual([30, 20, 10, 40]);
+    expect(centered.rates).toEqual([30, 40, 10, 20]);
+  });
+
+  it("aligns clockwise HD angles with signed RF azimuths", () => {
+    for (const [hdAngle, rfAzimuth] of [[270, -90], [90, 90], [0, 0]]) {
+      const centered = centerHdCurveOnZero({ angles: [hdAngle], rates: [7] });
+      expect(centered.angles).toEqual([rfAzimuth]);
+      expect(centered.rates).toEqual([7]);
+    }
+  });
+
+  it("places zero north and increases clockwise on the polar canvas", () => {
+    for (const [angle, x, y] of [[0, 0, -1], [90, 1, 0], [180, 0, 1], [270, -1, 0]]) {
+      const vector = headDirectionUnitVector(angle);
+      expect(vector[0]).toBeCloseTo(x, 14);
+      expect(vector[1]).toBeCloseTo(y, 14);
+    }
   });
 });

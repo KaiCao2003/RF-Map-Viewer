@@ -1,3 +1,13 @@
+## Python 1.10.4: clockwise HD and RF alignment
+
+Version **1.10.4**. Target: macOS Apple Silicon (build **110004**).
+
+- Align RF −90° with HD 270°, RF 90° with HD 90°, and 0° with 0° in line and polar views.
+- Center HD line plots without mirroring their values; keep polar curves and angle labels clockwise in both the viewer and figure exports.
+- Use opaque white HD plot backgrounds and preserve the source TC angles, counts, and firing rates.
+
+Swift 1.10.3 and Web 1.10.2 receive the corresponding alignment fixes.
+
 ## Python 1.10.3: probe interaction and cross-correlograms
 
 Version **1.10.3**. Target: macOS Apple Silicon (build **110003**).

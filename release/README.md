@@ -18,14 +18,20 @@ component tag and artifact name:
 
 | Component | Release | Tag | Channel |
 | --- | --- | --- | --- |
-| Python stable (macOS) | `1.10.3` | `python-v1.10.3` | stable |
+| Python stable (macOS) | `1.10.4` | `python-v1.10.4` | stable |
 | Python Free-Moving | `1.10.0-alpha.3` | `python-v1.10.0-alpha.3` | alpha |
-| Swift | `1.10.2` | `swift-v1.10.2` | stable |
-| Web | `1.10.1` | `web-v1.10.1` | stable |
+| Swift | `1.10.3` | `swift-v1.10.3` | stable |
+| Web | `1.10.2` | `web-v1.10.2` | stable |
 
 Published downloads and checksums are available from the repository
 [Releases page](https://github.com/KaiCao2003/RF-Map-Viewer/releases). The root
 [`README.md`](../README.md#downloads) links directly to each component archive.
+
+Python stable 1.10.4, Swift 1.10.3, and Web 1.10.2 align HD tuning and RF azimuth
+as clockwise angles: RF −90° corresponds to HD 270°, RF 90° to HD 90°, and 0° to 0°.
+Centered line plots preserve the angle sign, and polar curves and labels agree
+on screen and in exports. HD plots have opaque white backgrounds; source TC
+data is unchanged. Python stable uses macOS build 110004; Swift uses build 110003.
 
 Python stable 1.10.3 adds probe-panel drag selection with a live rectangle and
 nearest-visible-unit selection. Its macOS app includes a standalone
@@ -40,8 +46,7 @@ Swift also handles macOS URL-open events directly, so opening an RF document
 from Finder loads that document instead of leaving the initial file chooser open.
 Its waveform discovery stops at the filesystem root for Finder file-reference
 URLs, avoiding a loading freeze after document decoding.
-Python stable uses macOS build 110003; Swift uses build 110002. Windows remains at 1.10.0, and the
-Free-Moving alpha remains at 1.10.0-alpha.3.
+Windows remains at 1.10.0, and the Free-Moving alpha remains at 1.10.0-alpha.3.
 
 Python and Swift 1.10.1 repair keyboard behavior, RF color scales, missing
 exposure during smoothing, and progressive-loading consistency and performance.

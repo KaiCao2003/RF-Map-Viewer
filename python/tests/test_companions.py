@@ -623,14 +623,14 @@ class TuningCurveModelTests(unittest.TestCase):
                 sigma_bins = companions_module.tuning_smoothing_sigma(1.5, display_bins)
                 self.assertAlmostEqual(sigma_bins * 360.0 / display_bins, 18.0)
 
-    def test_line_plot_mirrors_head_direction_with_zero_in_the_center(self) -> None:
+    def test_line_plot_aligns_clockwise_head_direction_with_rf(self) -> None:
         angles, values = companions_module.center_tuning_curve_on_zero(
             (0.0, 90.0, 180.0, 270.0),
             (10.0, 20.0, 30.0, 40.0),
         )
 
         self.assertEqual(angles, (-180.0, -90.0, 0.0, 90.0))
-        self.assertEqual(values, (30.0, 20.0, 10.0, 40.0))
+        self.assertEqual(values, (30.0, 40.0, 10.0, 20.0))
 
         with self.assertRaisesRegex(ValueError, "same length"):
             companions_module.center_tuning_curve_on_zero((0.0,), ())
@@ -684,12 +684,12 @@ class TuningCurveModelTests(unittest.TestCase):
         )
         self.assertEqual(companions_module.smooth_tuning_curve((), 1.5), ())
 
-    def test_head_direction_vectors_are_north_zero_and_counter_clockwise(self) -> None:
+    def test_head_direction_vectors_are_north_zero_and_clockwise(self) -> None:
         expected = {
             0.0: (0.0, -1.0),
-            90.0: (-1.0, 0.0),
+            90.0: (1.0, 0.0),
             180.0: (0.0, 1.0),
-            270.0: (1.0, 0.0),
+            270.0: (-1.0, 0.0),
         }
         for angle, vector in expected.items():
             with self.subTest(angle=angle):

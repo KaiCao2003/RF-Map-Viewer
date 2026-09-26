@@ -1,4 +1,4 @@
-# SwiftUI Viewer 1.10.2
+# SwiftUI Viewer 1.10.3
 
 This is the native SwiftUI implementation for macOS 15 on Apple silicon. It
 parses RF/HD/probe files itself and has no Python dependency. RF mapping files
@@ -7,8 +7,13 @@ positions use `.probe` (CSV schema). `.json` and `.csv` remain filename aliases,
 but an RF map's extension never enables an older schema. RF maps are primary
 documents; tuning and probe files are attached
 to a loaded RF map in the figure composer so recorded unit IDs can be matched.
-Its `1.10.2` version matches the stable Python macOS reference; `swift` remains
-an artifact/tag identity rather than a version suffix.
+Its `1.10.3` release follows the stable Python macOS `1.10.4` display
+conventions; `swift` remains an artifact/tag identity rather than a version suffix.
+
+Version 1.10.3 aligns HD tuning with clockwise RF angles in the viewer and
+exported figures: RF −90° matches HD 270°, RF 90° matches HD 90°, and 0° matches
+0°. HD line plots center on 0° without mirroring rates; polar plots use 0° north
+and increase clockwise. Stored tuning-curve angles remain unchanged.
 
 Version 1.10.2 opens Finder/Launch Services document URLs directly in the
 initial window instead of showing the file picker. Later external opens create

@@ -2,7 +2,7 @@
 
 This directory contains two separately versioned applications:
 
-- `rfmapping_gui.py`: the stable RF Map Viewer `1.10.3`;
+- `rfmapping_gui.py`: the stable RF Map Viewer `1.10.4`;
 - `rfmapping_fm_gui.py`: the Free-Moving RF Viewer `1.10.0-alpha.3`.
 
 They have distinct app names, bundle identifiers, release artifacts, and tags,
@@ -277,9 +277,14 @@ Open **Help → Keyboard Shortcuts** for the in-app list.
 
 ---
 
-## Stable viewer 1.10.3
+## Stable viewer 1.10.4
 
-The probe panel supports drag-to-select with a live rectangle. A click selects
+HD tuning and RF azimuth both increase clockwise: RF −90° aligns with HD 270°,
+RF 90° with HD 90°, and 0° with 0°. Line plots wrap around zero without
+mirroring the rates; polar curves and labels use the same direction on screen
+and in figure exports. HD plots use opaque white backgrounds. TC data is unchanged.
+
+Version 1.10.3 added probe-panel drag selection with a live rectangle. A click selects
 the nearest visible unit and clears any region filter.
 
 Open **RF Map Viewer → Utilities → Cross-correlogram…** on macOS to compare
@@ -430,7 +435,7 @@ Opening the app without a path shows the native file chooser. Release packages
 do not contain or auto-load sample RF data.
 
 Its macOS identity is `RF Map Viewer.app`, bundle ID
-`org.local.rfmapping.viewer`, and version/build `1.10.3` / `110003`. Build it with:
+`org.local.rfmapping.viewer`, and version/build `1.10.4` / `110004`. Build it with:
 
 ```sh
 script/build_python_stable_macos_app.sh

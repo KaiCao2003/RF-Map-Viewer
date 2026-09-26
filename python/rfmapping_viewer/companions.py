@@ -740,13 +740,13 @@ def center_tuning_curve_on_zero(
     angles_deg: Sequence[float],
     rates: Sequence[float],
 ) -> tuple[tuple[float, ...], tuple[float, ...]]:
-    """Mirror a circular HD curve onto -180..180 with 0 degrees centered."""
+    """Wrap clockwise HD onto the RF -180..180 axis without mirroring it."""
 
     if len(angles_deg) != len(rates):
         raise ValueError("Tuning-curve angles and rates must have the same length.")
     centered = sorted(
         (
-            ((-float(angle) + 180.0) % 360.0) - 180.0,
+            ((float(angle) + 180.0) % 360.0) - 180.0,
             float(rate),
         )
         for angle, rate in zip(angles_deg, rates)
@@ -758,10 +758,10 @@ def center_tuning_curve_on_zero(
 
 
 def head_direction_unit_vector(angle_deg: float) -> tuple[float, float]:
-    """Map HD degrees to Canvas coordinates: 0 north, positive counter-clockwise."""
+    """Map HD degrees to Canvas coordinates: 0 north, positive clockwise."""
 
     radians = math.radians(float(angle_deg))
-    return -math.sin(radians), -math.cos(radians)
+    return math.sin(radians), -math.cos(radians)
 
 
 @dataclass(frozen=True, slots=True)

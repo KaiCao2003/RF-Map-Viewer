@@ -577,6 +577,54 @@ final class FigureExportTests: XCTestCase {
         XCTAssertNil(descriptor.plots[4].placeholder)
     }
 
+    func testHDExportCurvesKeepClockwisePeaksAlignedWithRFAngles() throws {
+        let data = try makeData()
+        let page = FigurePageTemplate(
+            name: "HD alignment",
+            plots: [
+                FigurePlotPlacement(kind: .hdLine),
+                FigurePlotPlacement(kind: .hdPolar),
+            ]
+        )
+        for hdAngle in [90, 270] {
+            var payload = strictHDTuningPayload(unitIDs: [22], zeroOccupancyBin: nil)
+            var counts = Array(repeating: 0, count: HDTuningData.rawBinCount)
+            counts[hdAngle / 2 - 1] = 120
+            counts[hdAngle / 2] = 120
+            payload["spike_counts"] = [counts]
+            payload["firing_rate_hz"] = [counts.map(Double.init)]
+            let tuning = try HDTuningData(
+                data: JSONSerialization.data(withJSONObject: payload),
+                sourceURL: URL(fileURLWithPath: "/tmp/clockwise.tc")
+            )
+            var companions = FigureExportCompanions()
+            companions.hdTuning = tuning
+            let descriptor = try XCTUnwrap(FigureExportRenderer().descriptors(
+                configuration: configuration(unitIDs: [22], pages: [page]),
+                data: data,
+                companions: companions
+            ).first)
+
+            XCTAssertEqual(descriptor.plots.count, 2)
+            for plot in descriptor.plots {
+                let curve = try XCTUnwrap(plot.hdCurve)
+                let peak = try XCTUnwrap(curve.ratesHz.indices.max {
+                    curve.ratesHz[$0] < curve.ratesHz[$1]
+                })
+                XCTAssertEqual(curve.anglesDegrees[peak], Double(hdAngle))
+                let centered = curve.centeredOnZero()
+                let centeredPeak = try XCTUnwrap(centered.ratesHz.indices.max {
+                    centered.ratesHz[$0] < centered.ratesHz[$1]
+                })
+                XCTAssertEqual(centered.anglesDegrees[centeredPeak], hdAngle == 270 ? -90 : 90)
+                let vector = hdScreenVector(angleDegrees: curve.anglesDegrees[peak])
+                XCTAssertEqual(vector.x, hdAngle == 270 ? -1 : 1, accuracy: 1e-12)
+                XCTAssertEqual(vector.y, 0, accuracy: 1e-12)
+            }
+            XCTAssertEqual(tuning.angleBinEdgesDegrees, (0...180).map { Double($0) * 2 })
+        }
+    }
+
     func testIsolatedRendererStoreSkipsAutomaticCompanionDiscovery() throws {
         let data = try makeData()
         let store = RFMappingStore(
@@ -1244,7 +1292,7 @@ final class FigureExportTests: XCTestCase {
         XCTAssertEqual(provenance["provenanceVersion"] as? Int, 1)
         let application = try XCTUnwrap(provenance["application"] as? [String: Any])
         XCTAssertEqual(application["name"] as? String, "RF Map Viewer")
-        XCTAssertEqual(application["version"] as? String, "1.10.2")
+        XCTAssertEqual(application["version"] as? String, "1.10.3")
         XCTAssertEqual(application["edition"] as? String, "SwiftUI")
         let source = try XCTUnwrap(provenance["source"] as? [String: Any])
         XCTAssertEqual(source["path"] as? String, data.url.path)

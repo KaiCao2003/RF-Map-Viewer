@@ -60,6 +60,7 @@ func strictHDTuningPayload(
             "timebase": "open_ephys_adc_t0_relative_seconds",
             "num_angle_bins": HDTuningData.rawBinCount,
             "feature_fs_hz": 100.0,
+            "head_direction_is_clockwise": true,
             "classification": [
                 "method": "fixture",
                 "rayleigh_alpha": 0.05,
@@ -137,6 +138,33 @@ final class HDTuningDataTests: XCTestCase {
         XCTAssertEqual(decoded.occupancySamples.last, 0)
         XCTAssertEqual(try decoded.unit(byID: 17).hdClass, 1)
         XCTAssertNil(try decoded.unit(byID: 17).rawRatesHz.last!)
+    }
+
+    func testCenteredCurveAlignsClockwiseHDWithSignedRFAnglesWithoutMirroringRates() {
+        let curve = ProcessedHDCurve(
+            anglesDegrees: [0, 90, 180, 270],
+            ratesHz: [10, 20, 30, 40]
+        )
+        let centered = curve.centeredOnZero()
+
+        XCTAssertEqual(centered.anglesDegrees, [-180, -90, 0, 90])
+        XCTAssertEqual(centered.ratesHz, [30, 40, 10, 20])
+        XCTAssertEqual(curve.anglesDegrees, [0, 90, 180, 270])
+        XCTAssertEqual(curve.ratesHz, [10, 20, 30, 40])
+    }
+
+    func testHDPolarScreenCoordinatesIncreaseClockwiseFromNorth() {
+        for (angle, x, y) in [
+            (0.0, 0.0, -1.0),
+            (90.0, 1.0, 0.0),
+            (180.0, 0.0, 1.0),
+            (270.0, -1.0, 0.0),
+            (-90.0, -1.0, 0.0),
+        ] {
+            let vector = hdScreenVector(angleDegrees: angle)
+            XCTAssertEqual(vector.x, x, accuracy: 1e-12)
+            XCTAssertEqual(vector.y, y, accuracy: 1e-12)
+        }
     }
 
     func testRejectsObsoleteSchemaVersionAndNonExactTopLevelKeys() throws {

@@ -1288,7 +1288,7 @@ struct FigureExportRenderer {
               !version.isEmpty else {
             // `Bundle.main` belongs to xctest when the renderer is exercised
             // through SwiftPM, not to RF Map Viewer.
-            return "1.10.2"
+            return "1.10.3"
         }
         return version
     }
@@ -2485,11 +2485,12 @@ private struct HDCurveExportView: View {
         let rect = CGRect(x: 52, y: 66, width: max(10, size.width - 76), height: max(10, size.height - 102))
         context.stroke(Path(rect), with: .color(.secondary.opacity(0.6)), lineWidth: 1)
         let high = max(curve.ratesHz.max() ?? 0, 1e-12)
+        let centered = curve.centeredOnZero()
         var path = Path()
-        for index in curve.ratesHz.indices {
+        for index in centered.ratesHz.indices {
             let point = CGPoint(
-                x: rect.minX + rect.width * CGFloat(index) / CGFloat(max(1, curve.ratesHz.count - 1)),
-                y: rect.maxY - rect.height * CGFloat(curve.ratesHz[index] / high)
+                x: rect.minX + rect.width * CGFloat((centered.anglesDegrees[index] + 180) / 360),
+                y: rect.maxY - rect.height * CGFloat(centered.ratesHz[index] / high)
             )
             if index == 0 {
                 path.move(to: point)
@@ -2498,10 +2499,10 @@ private struct HDCurveExportView: View {
             }
         }
         context.stroke(path, with: .color(.blue), lineWidth: 2)
-        for angle in stride(from: 0, through: 360, by: 90) {
-            let x = rect.minX + rect.width * CGFloat(angle) / 360
+        for (angle, label) in [(-180, "180°"), (-90, "270°"), (0, "0°"), (90, "90°"), (180, "180°")] {
+            let x = rect.minX + rect.width * CGFloat(angle + 180) / 360
             context.draw(
-                Text("\(angle)°").font(.system(size: 9)).foregroundStyle(.secondary),
+                Text(label).font(.system(size: 9)).foregroundStyle(.secondary),
                 at: CGPoint(x: x, y: rect.maxY + 16),
                 anchor: .center
             )
@@ -2528,11 +2529,11 @@ private struct HDCurveExportView: View {
         var path = Path()
         for index in 0...curve.ratesHz.count {
             let sourceIndex = index % curve.ratesHz.count
-            let angle = curve.anglesDegrees[sourceIndex] * Double.pi / 180 - Double.pi / 2
+            let vector = hdScreenVector(angleDegrees: curve.anglesDegrees[sourceIndex])
             let r = radius * CGFloat(curve.ratesHz[sourceIndex] / high)
             let point = CGPoint(
-                x: center.x + r * CGFloat(cos(angle)),
-                y: center.y + r * CGFloat(sin(angle))
+                x: center.x + r * CGFloat(vector.x),
+                y: center.y + r * CGFloat(vector.y)
             )
             if index == 0 {
                 path.move(to: point)
@@ -2541,12 +2542,13 @@ private struct HDCurveExportView: View {
             }
         }
         context.stroke(path, with: .color(.blue), lineWidth: 2)
-        for (label, angle) in [("0°", -Double.pi / 2), ("90°", 0.0), ("180°", Double.pi / 2), ("270°", Double.pi)] {
+        for angle in [0, 90, 180, 270] {
+            let vector = hdScreenVector(angleDegrees: Double(angle))
             context.draw(
-                Text(label).font(.system(size: 9)).foregroundStyle(.secondary),
+                Text("\(angle)°").font(.system(size: 9)).foregroundStyle(.secondary),
                 at: CGPoint(
-                    x: center.x + (radius + 15) * CGFloat(cos(angle)),
-                    y: center.y + (radius + 15) * CGFloat(sin(angle))
+                    x: center.x + (radius + 15) * CGFloat(vector.x),
+                    y: center.y + (radius + 15) * CGFloat(vector.y)
                 ),
                 anchor: .center
             )

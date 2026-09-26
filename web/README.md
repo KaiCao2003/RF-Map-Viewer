@@ -1,11 +1,16 @@
-# Web Viewer 1.10.1
+# Web Viewer 1.10.2
 
 The Web implementation contains a FastAPI backend in `backend/` and a
 React/Vite frontend in `frontend/`. The backend owns its figure renderer and
 does not import the analysis repository or the Python/Tk implementation.
-Its `1.10.1` version places it in the same stable feature generation as the
-Python `1.10.2` reference; `web` remains an artifact/tag identity rather than a
+Its `1.10.2` version places it in the same stable feature generation as the
+Python `1.10.4` reference; `web` remains an artifact/tag identity rather than a
 version suffix.
+
+Version 1.10.2 aligns HD tuning curves with clockwise-increasing RF azimuths
+in both the viewer and figure exports: RF −90° matches HD 270°, RF 90° matches
+HD 90°, and 0° matches 0°. Line plots remain centered on zero, and polar
+curves and angle labels use the same clockwise convention.
 
 Version 1.10.1 opens current MATLAB JSON and indexed exports that omit
 `spikeCountDefinition`, `occupancyTimeDefinition`, and `occupancyTimeSecSize`.

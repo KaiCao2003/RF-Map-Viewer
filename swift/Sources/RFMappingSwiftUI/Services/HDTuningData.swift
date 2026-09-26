@@ -27,6 +27,25 @@ struct HDTuningUnit: Equatable, Sendable {
 struct ProcessedHDCurve: Equatable, Sendable {
     let anglesDegrees: [Double]
     let ratesHz: [Double]
+
+    func centeredOnZero() -> ProcessedHDCurve {
+        // HD and RF both increase clockwise; wrapping must not mirror the rates.
+        let samples = zip(anglesDegrees, ratesHz).map { angle, rate in
+            var centered = (angle + 180).truncatingRemainder(dividingBy: 360)
+            if centered < 0 { centered += 360 }
+            return (angle: centered - 180, rate: rate)
+        }.sorted { $0.angle < $1.angle }
+        return ProcessedHDCurve(
+            anglesDegrees: samples.map(\.angle),
+            ratesHz: samples.map(\.rate)
+        )
+    }
+}
+
+/// Canvas coordinates: 0 degrees is north and positive angles turn clockwise.
+func hdScreenVector(angleDegrees: Double) -> (x: Double, y: Double) {
+    let radians = angleDegrees * .pi / 180
+    return (sin(radians), -cos(radians))
 }
 
 private struct HDTuningPayload: Decodable {

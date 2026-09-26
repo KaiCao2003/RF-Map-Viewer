@@ -64,7 +64,8 @@ function CurvePlot({ curve, mode, maximum }: {
     canvas.current.style.height = `${height}px`;
     const context = canvas.current.getContext("2d")!;
     context.setTransform(ratio, 0, 0, ratio, 0, 0);
-    context.clearRect(0, 0, width, height);
+    context.fillStyle = "#ffffff";
+    context.fillRect(0, 0, width, height);
     const high = Number.isFinite(maximum) && maximum > 1e-12 ? maximum : 1;
 
     if (mode === "line") {
@@ -118,7 +119,7 @@ function CurvePlot({ curve, mode, maximum }: {
         context.lineTo(x, top + chartHeight + 4);
         context.strokeStyle = "#667085";
         context.stroke();
-        context.fillText(`${[180, 90, 0, 270, 180][index]}°`, x, top + chartHeight + 18);
+        context.fillText(`${[180, 270, 0, 90, 180][index]}°`, x, top + chartHeight + 18);
       });
       context.textAlign = "center";
       context.fillText("Head direction (0° centered)", left + chartWidth / 2, height - 8);
@@ -307,7 +308,7 @@ export default function HdPanel({
             <label className="check-row"><input type="checkbox" checked={compareScale} onChange={(event) => onSettingsChange({ ...settings, compareScale: event.target.checked })} /><span>Shared file scale</span></label>
           </div>
           <CurvePlot curve={processed.curve} mode={resolvedMode} maximum={maximum} />
-          <p className="hd-status">Peak scale {formatNumber(maximum, 3)} Hz · {resolvedMode === "polar" ? "0° north, positive counter-clockwise" : "0° centered"}</p>
+          <p className="hd-status">Peak scale {formatNumber(maximum, 3)} Hz · {resolvedMode === "polar" ? "0° north, positive clockwise" : "0° centered"}</p>
         </>
       ) : null}
     </section>

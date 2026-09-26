@@ -368,7 +368,7 @@ def test_health_and_lazy_browse_are_root_confined(
         ]
         assert health.json() == {
             "status": "ok",
-            "version": "1.10.1",
+            "version": "1.10.2",
             "rfRoot": str(settings.rf_root),
             "rfRootAvailable": True,
             "outputRoot": str(settings.output_root),
@@ -2294,6 +2294,37 @@ def test_figure_hd_display_bins_use_greatest_supported_divisor_below_request() -
     np.testing.assert_allclose(centers, (np.arange(45) + 0.5) * 8.0)
 
 
+@pytest.mark.parametrize("kind", ["hd.line", "hd.polar"])
+def test_figure_hd_specs_keep_native_clockwise_angles(kind: str) -> None:
+    metadata = {
+        "shape": [1, 1, 1, 1],
+        "unitPool": [7],
+        "timeBinEdges": [0.0, 0.1],
+        "xPositions": [0.0],
+        "yPositions": [0.0],
+    }
+    raw_counts = np.arange(1, 181, dtype=np.float64)
+    tuning = SimpleNamespace(
+        units_by_id={7: SimpleNamespace(spike_counts=tuple(raw_counts))},
+        occupancy_time_s=tuple(np.ones(180, dtype=np.float64)),
+    )
+    pages = figure_exports_module.normalize_pages(
+        [{"title": "HD", "plots": [{"type": kind, "settings": {"displayBins": 180, "smoothing": False}}]}],
+        metadata,
+    )
+    renderer = figure_exports_module.FigurePageRenderer(
+        SimpleNamespace(cache=SimpleNamespace(metadata=metadata)),
+        tuning=tuning,
+        probe=None,
+    )
+
+    spec = renderer._shared_spec(7, np.zeros((1, 1, 1)), pages[0].plots[0], [])
+
+    assert spec.options["clockwise"] is True
+    np.testing.assert_array_equal(spec.data["angles_deg"], np.arange(1, 360, 2))
+    np.testing.assert_array_equal(spec.data["rates"], raw_counts)
+
+
 def test_figure_hd_smoothing_matches_raw_observation_pipeline() -> None:
     raw_counts = np.zeros(180, dtype=np.float64)
     raw_counts[[0, 5, 37, 179]] = [180.0, 60.0, 90.0, 45.0]
@@ -3076,7 +3107,7 @@ def test_figure_manifest_records_hashed_frozen_source_and_companions(
     assert provenance["provenanceVersion"] == 1
     assert provenance["application"] == {
         "name": "RF Map Viewer",
-        "version": "1.10.1",
+        "version": "1.10.2",
         "edition": "Web",
     }
     assert provenance["snapshot"] == {

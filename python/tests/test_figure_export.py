@@ -1228,6 +1228,83 @@ def test_polar_maps_label_angle_and_radius_coordinates_inside_panel(
         assert bounds[3] <= 510
 
 
+def test_hd_line_export_centers_clockwise_angles_without_mirroring(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    curves = []
+    original_line = ImageDraw.ImageDraw.line
+
+    def recording_line(self, xy, *args, **kwargs):
+        if kwargs.get("width") == 4:
+            curves.append(xy)
+        return original_line(self, xy, *args, **kwargs)
+
+    monkeypatch.setattr(ImageDraw.ImageDraw, "line", recording_line)
+    image = Image.new("RGB", (400, 400), "white")
+    figure_export_module._draw_line(
+        ImageDraw.Draw(image),
+        (0, 0, 400, 400),
+        PlotSpec(
+            PlotKind.HD_LINE,
+            {"angles_deg": [0, 90, 180, 270], "rates": [1, 2, 3, 4]},
+            options={"show_axes": False},
+        ),
+    )
+
+    # HD 180, 270, 0, 90 occupy RF -180, -90, 0, 90 respectively.
+    assert curves == [[(8, 139), (103, 12), (198, 392), (293, 265)]]
+
+
+@pytest.mark.parametrize("angle", [0, 90, 270])
+@pytest.mark.parametrize("clockwise", [None, True, False])
+def test_hd_polar_export_peak_and_tick_share_direction(
+    angle: int,
+    clockwise: bool | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    curves = []
+    labels = {}
+    original_line = ImageDraw.ImageDraw.line
+    original_text = ImageDraw.ImageDraw.text
+
+    def recording_line(self, xy, *args, **kwargs):
+        if kwargs.get("width") == 4:
+            curves.append(xy)
+        return original_line(self, xy, *args, **kwargs)
+
+    def recording_text(self, xy, text, *args, **kwargs):
+        labels[str(text)] = xy
+        return original_text(self, xy, text, *args, **kwargs)
+
+    monkeypatch.setattr(ImageDraw.ImageDraw, "line", recording_line)
+    monkeypatch.setattr(ImageDraw.ImageDraw, "text", recording_text)
+    image = Image.new("RGB", (400, 400), "white")
+    options = {} if clockwise is None else {"clockwise": clockwise}
+    angles = [0, 90, 180, 270]
+    figure_export_module._draw_polar_line(
+        ImageDraw.Draw(image),
+        (0, 0, 400, 400),
+        PlotSpec(
+            PlotKind.HD_POLAR,
+            {"angles_deg": angles, "rates": [float(item == angle) for item in angles]},
+            options=options,
+        ),
+    )
+
+    expected = {0: (200, 52), 90: (348, 200), 270: (52, 200)}[angle]
+    if clockwise is False:
+        expected = (400 - expected[0], expected[1])
+    peak = curves[0][angles.index(angle)]
+    assert peak == expected
+    label = labels[f"{angle}°"]
+    # A label and its peak must lie on the same ray, including explicit CCW.
+    for peak_coord, label_coord in zip(peak, label):
+        if peak_coord == 200:
+            assert label_coord == pytest.approx(200)
+        else:
+            assert (peak_coord - 200) * (label_coord - 200) > 0
+
+
 @pytest.mark.parametrize("kind", [PlotKind.HD_LINE, PlotKind.HD_POLAR])
 def test_hd_curves_render_quantitative_axes_inside_panel(
     kind: PlotKind,
@@ -1252,7 +1329,7 @@ def test_hd_curves_render_quantitative_axes_inside_panel(
             (10, 10, 510, 410),
             spec,
         )
-        required = {"x (deg)", "y (Hz)", "0", "300"}
+        required = {"x (deg)", "y (Hz)", "180", "270", "0", "90"}
     else:
         figure_export_module._draw_polar_line(  # type: ignore[attr-defined]
             draw,
