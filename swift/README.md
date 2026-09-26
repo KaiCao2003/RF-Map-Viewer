@@ -15,9 +15,18 @@ exported figures: RF −90° matches HD 270°, RF 90° matches HD 90°, and 0° 
 0°. HD line plots center on 0° without mirroring rates; polar plots use 0° north
 and increase clockwise. Stored tuning-curve angles remain unchanged.
 
+Launching without a document now opens a compact welcome window. Choose
+**Open RF Map…** or double-click a recent document; the native file picker opens
+only when requested. **File → Open Recent** and the welcome list use macOS's
+`NSDocumentController` history. **Clear Recent** clears that list without changing
+the files. **File → Welcome to RF Map Viewer** brings the welcome window back.
+A missing or unreadable recent document leaves the welcome window available.
+The first document fills the initial window, and later opens create independent
+document windows. This is a same-version update to 1.10.3.
+
 Version 1.10.2 opens Finder/Launch Services document URLs directly in the
 initial window instead of showing the file picker. Later external opens create
-independent windows, while launching without a document still shows the picker.
+independent windows. The welcome window above replaces the original automatic picker.
 Waveform discovery stops at the filesystem root for Finder file-reference URLs,
 preventing the loading freeze caused by repeatedly walking past that root.
 JSON and indexed RF maps may omit the descriptive count/occupancy definitions

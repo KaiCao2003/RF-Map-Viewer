@@ -26,7 +26,6 @@ final class StartupBehaviorTests: XCTestCase {
         let delegate = AppDelegate(windowRouter: router)
         let url = URL(fileURLWithPath: "/tmp/direct-open.rfmap")
         let replaced = expectation(description: "Initial scene consumes Launch Services URL")
-        var fallbackCount = 0
 
         delegate.application(NSApplication.shared, open: [url])
         router.install(
@@ -35,13 +34,10 @@ final class StartupBehaviorTests: XCTestCase {
                 XCTAssertEqual(actual, url)
                 replaced.fulfill()
                 return true
-            },
-            coldLaunchFallback: { fallbackCount += 1 }
+            }
         )
 
         await fulfillment(of: [replaced], timeout: 1)
-        try await Task.sleep(for: .milliseconds(200))
-        XCTAssertEqual(fallbackCount, 0, "An explicit file launch must cancel the fallback picker")
     }
 
     func testLaterExternalOpensUseSeparatePreparedDocumentWindows() async throws {
@@ -83,29 +79,35 @@ final class StartupBehaviorTests: XCTestCase {
         }
     }
 
-    func testFallbackPickerPresentsOnceWithoutConsumingInitialWindowClaim() async throws {
+    func testNativeRecentOpenUsesTheInitialWindowRoute() async {
+        let router = WindowRouter()
+        let delegate = AppDelegate(windowRouter: router)
+        let url = URL(fileURLWithPath: "/tmp/native-recent.rfmap")
+        let opened = expectation(description: "Native recent document is routed")
+        router.install(
+            { _ in XCTFail("The initial window should receive the recent document") },
+            coldLaunchReplacement: { selected in
+                XCTAssertEqual(selected, url)
+                opened.fulfill()
+                return true
+            }
+        )
+
+        XCTAssertTrue(delegate.application(NSApplication.shared, openFile: url.path))
+        await fulfillment(of: [opened], timeout: 1)
+    }
+
+    func testInitialWindowClaimIsConsumedByFirstOpenOnly() async throws {
         let state = ColdLaunchInitialWindowState()
-        var presentationCount = 0
         var loadedURL: URL?
         state.install(
             replacement: { url in
                 loadedURL = url
                 return true
-            },
-            fallback: {
-                presentationCount += 1
             }
         )
 
-        XCTAssertTrue(state.shouldScheduleFallback)
-        let fallback = try XCTUnwrap(state.takeFallbackPresentation())
-        fallback()
-
-        XCTAssertEqual(presentationCount, 1)
-        XCTAssertTrue(state.didPresentFallback)
         XCTAssertTrue(state.canClaimInitialWindow)
-        XCTAssertFalse(state.shouldScheduleFallback)
-        XCTAssertNil(state.takeFallbackPresentation())
 
         let selectedURL = URL(fileURLWithPath: "/tmp/selected.rfmap")
         let replacement = try XCTUnwrap(state.takeReplacement())
@@ -113,31 +115,21 @@ final class StartupBehaviorTests: XCTestCase {
         XCTAssertTrue(didLoad)
         XCTAssertEqual(loadedURL, selectedURL)
         XCTAssertFalse(state.canClaimInitialWindow)
+        XCTAssertNil(state.takeReplacement())
     }
 
-    func testCancelAbandonsClaimAndCannotPresentFallbackAgain() throws {
+    func testClosingInitialWindowAbandonsItsClaim() {
         let state = ColdLaunchInitialWindowState()
-        var presentationCount = 0
-        state.install(
-            replacement: { _ in true },
-            fallback: { presentationCount += 1 }
-        )
-        let fallback = try XCTUnwrap(state.takeFallbackPresentation())
-        fallback()
-        XCTAssertEqual(presentationCount, 1)
+        state.install(replacement: { _ in true })
         XCTAssertTrue(state.canClaimInitialWindow)
 
         state.abandon()
 
-        XCTAssertTrue(state.didPresentFallback)
         XCTAssertFalse(state.canClaimInitialWindow)
-        XCTAssertFalse(state.shouldScheduleFallback)
         XCTAssertNil(state.takeReplacement())
-        XCTAssertNil(state.takeFallbackPresentation())
-        XCTAssertEqual(presentationCount, 1)
     }
 
-    func testDocumentlessColdLaunchPresentsPickerWithoutLoadingDiscoveredData() {
+    func testDocumentlessColdLaunchShowsWelcomeWithoutPickerOrDiscoveredData() async throws {
         let suiteName = "StartupBehaviorTests.\(UUID().uuidString)"
         let preferences = UserDefaults(suiteName: suiteName)!
         defer { preferences.removePersistentDomain(forName: suiteName) }
@@ -152,14 +144,17 @@ final class StartupBehaviorTests: XCTestCase {
         XCTAssertFalse(store.isImporting)
         XCTAssertNil(store.data)
 
-        presentColdLaunchDocumentPicker(in: store)
+        presentColdLaunchWelcome(in: store)
+        let router = WindowRouter()
+        router.install({ _ in XCTFail("No document was requested") }, coldLaunchReplacement: { _ in true })
+        try await Task.sleep(for: .milliseconds(250))
 
         XCTAssertFalse(store.isAwaitingStartupDocument)
-        XCTAssertTrue(store.isImporting)
+        XCTAssertFalse(store.isImporting)
         XCTAssertNil(store.data)
     }
 
-    func testLateExternalOpenDismissesFallbackPickerAndLoadsInitialStore() async throws {
+    func testLateExternalOpenDismissesExplicitPickerAndLoadsInitialStore() async throws {
         let suiteName = "StartupBehaviorTests.\(UUID().uuidString)"
         let preferences = UserDefaults(suiteName: suiteName)!
         defer { preferences.removePersistentDomain(forName: suiteName) }
@@ -184,15 +179,15 @@ final class StartupBehaviorTests: XCTestCase {
         ], occupancyTimeSec: 0.1, occupancyTimeSecSize: [1, 1])
         try JSONSerialization.data(withJSONObject: payload).write(to: url, options: .atomic)
 
-        presentColdLaunchDocumentPicker(in: store)
+        presentColdLaunchWelcome(in: store)
+        store.isImporting = true
         XCTAssertTrue(store.isImporting)
 
         let state = ColdLaunchInitialWindowState()
         state.install(
             replacement: { externalURL in
                 await loadColdLaunchReplacement(externalURL, in: store)
-            },
-            fallback: nil
+            }
         )
         let replacement = try XCTUnwrap(state.takeReplacement())
         let didReplace = await replacement(url)
@@ -203,5 +198,32 @@ final class StartupBehaviorTests: XCTestCase {
         XCTAssertEqual(store.data?.url.standardizedFileURL, url.standardizedFileURL)
         XCTAssertEqual(store.data?.unitPool, [22])
         XCTAssertNil(state.takeReplacement(), "The initial-window replacement must remain one-shot")
+    }
+
+    func testUnavailableDocumentLeavesWelcomeReadyForAnotherOpen() async throws {
+        let suiteName = "StartupBehaviorTests.\(UUID().uuidString)"
+        let preferences = UserDefaults(suiteName: suiteName)!
+        defer { preferences.removePersistentDomain(forName: suiteName) }
+        let store = RFMappingStore(
+            loadDefault: false,
+            discoverJSONChoices: false,
+            discoverCompanions: false,
+            preferences: preferences
+        )
+        presentColdLaunchWelcome(in: store)
+        let missing = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString + ".rfmap")
+
+        let succeeded = await loadColdLaunchReplacement(missing, in: store)
+
+        XCTAssertFalse(succeeded)
+        XCTAssertFalse(store.hasData)
+        XCTAssertFalse(store.isLoadingData)
+        XCTAssertFalse(store.isAwaitingStartupDocument)
+        XCTAssertFalse(store.isImporting)
+        XCTAssertNotNil(store.errorMessage)
+        store.errorMessage = nil
+        store.isImporting = true
+        XCTAssertTrue(store.isImporting)
     }
 }

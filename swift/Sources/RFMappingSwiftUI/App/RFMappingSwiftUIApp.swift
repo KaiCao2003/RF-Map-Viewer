@@ -11,51 +11,25 @@ struct DocumentWindowRequest: Codable, Hashable {
     }
 }
 
-/// Owns the one-shot claim on the document-less initial window. Presenting the
-/// fallback picker must not consume that claim: the file chosen from that
-/// picker still belongs in the initial window, while the picker itself is only
-/// presented once automatically.
+/// The first Finder or welcome-window open reuses the document-less scene.
 @MainActor
 final class ColdLaunchInitialWindowState {
     private var replacement: ((URL) async -> Bool)?
-    private var fallback: (() -> Void)?
-    private(set) var didPresentFallback = false
 
     var canClaimInitialWindow: Bool { replacement != nil }
-    var shouldScheduleFallback: Bool {
-        replacement != nil && fallback != nil && !didPresentFallback
-    }
 
-    func install(
-        replacement: @escaping (URL) async -> Bool,
-        fallback: (() -> Void)?
-    ) {
+    func install(replacement: @escaping (URL) async -> Bool) {
         self.replacement = replacement
-        self.fallback = fallback
-        didPresentFallback = false
     }
 
     func takeReplacement() -> ((URL) async -> Bool)? {
         guard let replacement else { return nil }
         self.replacement = nil
-        fallback = nil
         return replacement
-    }
-
-    func takeFallbackPresentation() -> (() -> Void)? {
-        guard shouldScheduleFallback, let fallback else { return nil }
-        didPresentFallback = true
-        self.fallback = nil
-        return fallback
     }
 
     func abandon() {
         replacement = nil
-        fallback = nil
-        // Abandonment is terminal for this initial scene. Keep the fallback
-        // marked as handled so a canceled picker can never be auto-presented
-        // again by a later lifecycle notification.
-        didPresentFallback = true
     }
 }
 
@@ -72,21 +46,36 @@ final class WindowRouter {
     private var pending: [DocumentWindowRequest] = []
     private var pendingExternalOpens: [PendingExternalOpen] = []
     private let coldLaunchState = ColdLaunchInitialWindowState()
-    private var coldLaunchExpiration: Task<Void, Never>?
     private var didOfferColdLaunchReplacement = false
     private var preparedDocuments: [UUID: RFMappingData] = [:]
+    private weak var welcomeWindow: NSWindow?
+
+    func updateWelcomeWindow(_ window: NSWindow, isWelcome: Bool) {
+        if isWelcome {
+            welcomeWindow = window
+        } else if welcomeWindow === window {
+            welcomeWindow = nil
+        }
+    }
+
+    func showWelcome(openNew: () -> Void) {
+        if let welcomeWindow, welcomeWindow.isVisible {
+            welcomeWindow.deminiaturize(nil)
+            welcomeWindow.makeKeyAndOrderFront(nil)
+        } else {
+            openNew()
+        }
+    }
 
     func install(
         _ openDocumentWindow: @escaping (DocumentWindowRequest) -> Void,
-        coldLaunchReplacement replacement: ((URL) async -> Bool)? = nil,
-        coldLaunchFallback fallback: (() -> Void)? = nil
+        coldLaunchReplacement replacement: ((URL) async -> Bool)? = nil
     ) {
         opener = openDocumentWindow
 
         if let replacement, !didOfferColdLaunchReplacement {
             didOfferColdLaunchReplacement = true
-            coldLaunchState.install(replacement: replacement, fallback: fallback)
-            scheduleColdLaunchFallback()
+            coldLaunchState.install(replacement: replacement)
         }
 
         let queued = pending
@@ -125,29 +114,13 @@ final class WindowRouter {
 
     func claimColdInitialWindow(for url: URL) -> Bool {
         guard let replacement = coldLaunchState.takeReplacement() else { return false }
-        coldLaunchExpiration?.cancel()
-        coldLaunchExpiration = nil
         Task { @MainActor in
             _ = await replacement(url)
         }
         return true
     }
 
-    func pauseColdInitialWindowFallback() {
-        guard coldLaunchState.canClaimInitialWindow else { return }
-        coldLaunchExpiration?.cancel()
-        coldLaunchExpiration = nil
-    }
-
-    func resumeColdInitialWindowFallback() {
-        guard coldLaunchState.shouldScheduleFallback,
-              coldLaunchExpiration == nil else { return }
-        scheduleColdLaunchFallback()
-    }
-
     func expireColdInitialWindowClaim() {
-        coldLaunchExpiration?.cancel()
-        coldLaunchExpiration = nil
         coldLaunchState.abandon()
     }
 
@@ -178,8 +151,6 @@ final class WindowRouter {
         var remaining = urls[...]
         if let first = remaining.first,
            let replacement = coldLaunchState.takeReplacement() {
-            coldLaunchExpiration?.cancel()
-            coldLaunchExpiration = nil
             allSucceeded = await replacement(first) && allSucceeded
             remaining = remaining.dropFirst()
         }
@@ -205,24 +176,12 @@ final class WindowRouter {
         }
         return try await RFMappingData.decodeOffMain(url: url)
     }
-
-    private func scheduleColdLaunchFallback() {
-        guard coldLaunchState.shouldScheduleFallback else { return }
-        coldLaunchExpiration?.cancel()
-        coldLaunchExpiration = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .milliseconds(150))
-            guard !Task.isCancelled, let self,
-                  let fallback = self.coldLaunchState.takeFallbackPresentation() else {
-                return
-            }
-            self.coldLaunchExpiration = nil
-            fallback()
-        }
-    }
 }
 
 struct RFMappingCommandActions {
+    let hasDocument: Bool
     let openRFMap: () -> Void
+    let openRecent: (URL) -> Void
     let exportFigures: () -> Void
     let exportDisplayed: () -> Void
     let previousUnit: () -> Void
@@ -241,19 +200,14 @@ struct RFMappingCommandActions {
     let toggleFilteredUnits: () -> Void
 }
 
-/// Completes a document-less launch without consulting bundled or discovered
-/// sample data. The native importer is presented after Launch Services has had
-/// a chance to deliver an explicit Finder/CLI document-open request.
+/// A document-less launch remains usable without presenting a modal picker.
 @MainActor
-func presentColdLaunchDocumentPicker(in store: RFMappingStore) {
+func presentColdLaunchWelcome(in store: RFMappingStore) {
     store.isAwaitingStartupDocument = false
-    store.isImporting = true
+    store.isImporting = false
 }
 
-/// A Finder/Launch Services open can arrive after the document-less launch
-/// fallback has already presented the importer. Dismiss that importer before
-/// loading into the claimed initial window so the same URL is not opened by a
-/// stale picker completion in a second window.
+/// Finder may open a file while an explicitly requested picker is visible.
 @MainActor
 @discardableResult
 func loadColdLaunchReplacement(_ url: URL, in store: RFMappingStore) async -> Bool {
@@ -278,10 +232,10 @@ struct RFMappingSwiftUIApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     var body: some Scene {
-        WindowGroup("RF Map Viewer", for: DocumentWindowRequest.self) { request in
+        WindowGroup("RF Map Viewer", id: "rf-map-viewer", for: DocumentWindowRequest.self) { request in
             RFMappingWindow(request: request.wrappedValue)
         }
-        .defaultSize(width: 1440, height: 900)
+        .defaultSize(width: 800, height: 480)
         .windowResizability(.contentMinSize)
         .commands {
             RFMappingCommands()
@@ -327,7 +281,6 @@ private struct FigureExportWindow: View {
 
 private struct RFMappingWindow: View {
     @Environment(\.openWindow) private var openWindow
-    @Environment(\.dismiss) private var dismiss
     @State private var store: RFMappingStore
     @State private var pairingCoordinator: WindowPairingCoordinator
     @State private var pairingWindowID: UUID
@@ -337,10 +290,12 @@ private struct RFMappingWindow: View {
     init(request: DocumentWindowRequest?) {
         let url = request.map { URL(fileURLWithPath: $0.path) }
         let prepared = request.flatMap { WindowRouter.shared.takePreparedDocument(for: $0.id) }
-        _store = State(initialValue: RFMappingStore(
+        let store = RFMappingStore(
             initialData: prepared,
             loadDefault: false
-        ))
+        )
+        if request == nil { presentColdLaunchWelcome(in: store) }
+        _store = State(initialValue: store)
         _pairingCoordinator = State(initialValue: WindowPairingCoordinator.shared)
         _pairingWindowID = State(initialValue: UUID())
         isInitialWindow = request == nil
@@ -353,20 +308,15 @@ private struct RFMappingWindow: View {
             pairingCoordinator: pairingCoordinator,
             pairingWindowID: pairingWindowID,
             openFigureExporter: openFigureExporter,
-            openRFMapInNewWindow: { url in
-                if isInitialWindow, !store.hasData,
-                   WindowRouter.shared.claimColdInitialWindow(for: url) {
-                    return
-                }
-                Task { @MainActor in
-                    _ = await WindowRouter.shared.openAsync(url)
-                }
-            }
+            openRFMapInNewWindow: openDocument
         )
-        .frame(minWidth: 1120, minHeight: 720)
-        .navigationTitle(store.windowTitle)
+        .frame(minWidth: store.hasData ? 1120 : 760, minHeight: store.hasData ? 720 : 440)
+        .navigationTitle(store.hasData ? store.windowTitle : "Welcome to RF Map Viewer")
         .focusedSceneValue(\.rfMappingCommands, commandActions)
-        .background(WindowShortcutMonitor(actions: commandActions))
+        .background(ViewerWindowPresentation(isWelcome: !store.hasData))
+        .background {
+            if store.hasData { WindowShortcutMonitor(actions: commandActions) }
+        }
         .background(WindowCloseObserver {
             store.cancelPendingLoads()
             pairingCoordinator.unregister(id: pairingWindowID)
@@ -386,21 +336,14 @@ private struct RFMappingWindow: View {
         .onChange(of: store.viewerSyncState) { _, state in
             pairingCoordinator.synchronizedStateDidChange(state, from: pairingWindowID)
         }
+        .onChange(of: store.data?.url, initial: true) { _, url in
+            if let url { RecentDocuments.shared.record(url) }
+        }
         .task {
             WindowRouter.shared.install(
                 { request in openWindow(value: request) },
                 coldLaunchReplacement: isInitialWindow ? { url in
-                    guard await loadColdLaunchReplacement(url, in: store) else {
-                        let error = RFMappingError.invalidData(store.errorMessage ?? "Unknown document error")
-                        WindowRouter.shared.showOpenError(error, url: url)
-                        store.errorMessage = nil
-                        dismiss()
-                        return false
-                    }
-                    return true
-                } : nil,
-                coldLaunchFallback: isInitialWindow ? {
-                    presentColdLaunchDocumentPicker(in: store)
+                    await loadColdLaunchReplacement(url, in: store)
                 } : nil
             )
             if let initialURL, !store.hasData {
@@ -411,7 +354,9 @@ private struct RFMappingWindow: View {
 
     private var commandActions: RFMappingCommandActions {
         RFMappingCommandActions(
+            hasDocument: store.hasData,
             openRFMap: { store.isImporting = true },
+            openRecent: openDocument,
             exportFigures: openFigureExporter,
             exportDisplayed: store.prepareExport,
             previousUnit: { store.stepUnit(-1) },
@@ -433,6 +378,24 @@ private struct RFMappingWindow: View {
             toggleDisplayOptions: { store.showDisplayOptions.toggle() },
             toggleFilteredUnits: { store.setRFUnitQualityFilterEnabled(!store.rfFilterUnitsWithZeroBins) }
         )
+    }
+
+    private func openDocument(_ url: URL) {
+        if !store.hasData && !store.isLoadingData {
+            // Claim synchronously so multiple importer selections cannot all
+            // compete for the same empty window before their tasks begin.
+            store.isLoadingData = true
+            if isInitialWindow, WindowRouter.shared.claimColdInitialWindow(for: url) {
+                return
+            }
+            Task { @MainActor in
+                _ = await loadColdLaunchReplacement(url, in: store)
+            }
+        } else {
+            Task { @MainActor in
+                _ = await WindowRouter.shared.openAsync(url)
+            }
+        }
     }
 
     private func openFigureExporter() {
@@ -518,53 +481,83 @@ private struct WindowCloseObserver: NSViewRepresentable {
     }
 }
 
+@MainActor
 private struct RFMappingCommands: Commands {
     @FocusedValue(\.rfMappingCommands) private var actions
+    @Environment(\.openWindow) private var openWindow
+    @State private var recents = RecentDocuments.shared
 
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
-            Button("Open RF Map in New Window…") { actions?.openRFMap() }
+            Button("Open RF Map…") { actions?.openRFMap() }
                 .keyboardShortcut("o", modifiers: [.command])
                 .disabled(actions == nil)
+            Menu("Open Recent") {
+                ForEach(recents.urls, id: \.self) { url in
+                    Button(url.lastPathComponent) {
+                        if let actions {
+                            actions.openRecent(url)
+                        } else {
+                            Task { @MainActor in _ = await WindowRouter.shared.openAsync(url) }
+                        }
+                    }
+                    .help(url.path)
+                }
+                if recents.urls.isEmpty { Text("No Recent Documents") }
+                Divider()
+                Button("Clear Recent Documents", action: recents.clear)
+                    .disabled(recents.urls.isEmpty)
+            }
+            Divider()
+            Button("Welcome to RF Map Viewer") {
+                recents.refresh()
+                WindowRouter.shared.showWelcome { openWindow(id: "rf-map-viewer") }
+            }
         }
 
         CommandGroup(after: .saveItem) {
             Button("Export Figures…") { actions?.exportFigures() }
                 .keyboardShortcut("e", modifiers: [.command])
-                .disabled(actions == nil)
+                .disabled(actions?.hasDocument != true)
             Button("Export Displayed CSV…") { actions?.exportDisplayed() }
                 .keyboardShortcut("e", modifiers: [.command, .shift])
-                .disabled(actions == nil)
+                .disabled(actions?.hasDocument != true)
         }
 
         CommandMenu("Navigate") {
-            Button("Previous Unit (← or [)") { actions?.previousUnit() }
-            Button("Next Unit (→ or ])") { actions?.nextUnit() }
+            Group {
+                Button("Previous Unit (← or [)") { actions?.previousUnit() }
+                Button("Next Unit (→ or ])") { actions?.nextUnit() }
 
-            Divider()
+                Divider()
 
-            Button("Previous Timeline Bin (↑)") { actions?.previousBin() }
-            Button("Next Timeline Bin (↓)") { actions?.nextBin() }
-            Button("Coarser Time Resolution (Shift-,)") { actions?.decreaseResolution() }
-            Button("Finer Time Resolution (Shift-.)") { actions?.increaseResolution() }
+                Button("Previous Timeline Bin (↑)") { actions?.previousBin() }
+                Button("Next Timeline Bin (↓)") { actions?.nextBin() }
+                Button("Coarser Time Resolution (Shift-,)") { actions?.decreaseResolution() }
+                Button("Finer Time Resolution (Shift-.)") { actions?.increaseResolution() }
 
-            Divider()
+                Divider()
 
-            Button("Clear Selection / Show Full Time Range (Esc)") { actions?.showFullRange() }
+                Button("Clear Selection / Show Full Time Range (Esc)") { actions?.showFullRange() }
+            }
+            .disabled(actions?.hasDocument != true)
         }
 
         CommandMenu("View") {
-            ForEach(Array(PlotTab.allCases.enumerated()), id: \.element) { index, tab in
-                Button("\(tab.rawValue) (\(index + 1))") { actions?.selectTab(index) }
+            Group {
+                ForEach(Array(PlotTab.allCases.enumerated()), id: \.element) { index, tab in
+                    Button("\(tab.rawValue) (\(index + 1))") { actions?.selectTab(index) }
+                }
+                Divider()
+                Button("Invert Y (F)") { actions?.toggleFlipY() }
+                Button("Toggle Rectangle / Polar (P)") { actions?.toggleSpatialFormat() }
+                Button("Cycle Palette (Shift-P)") { actions?.cyclePalette() }
+                Button("Subtract RF Windows (A − B) (-)") { actions?.toggleSubtract() }
+                Button("Show / Hide Display Options (D)") { actions?.toggleDisplayOptions() }
+                Button("Show / Hide Filtered Units") { actions?.toggleFilteredUnits() }
+                    .keyboardShortcut(".", modifiers: [.command, .shift])
             }
-            Divider()
-            Button("Invert Y (F)") { actions?.toggleFlipY() }
-            Button("Toggle Rectangle / Polar (P)") { actions?.toggleSpatialFormat() }
-            Button("Cycle Palette (Shift-P)") { actions?.cyclePalette() }
-            Button("Subtract RF Windows (A − B) (-)") { actions?.toggleSubtract() }
-            Button("Show / Hide Display Options (D)") { actions?.toggleDisplayOptions() }
-            Button("Show / Hide Filtered Units") { actions?.toggleFilteredUnits() }
-                .keyboardShortcut(".", modifiers: [.command, .shift])
+            .disabled(actions?.hasDocument != true)
         }
 
         CommandGroup(after: .help) {
@@ -595,6 +588,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         windowRouter.openExternal(filenames.map { URL(fileURLWithPath: $0) }) { succeeded in
             sender.reply(toOpenOrPrint: succeeded ? .success : .failure)
         }
+    }
+
+    func application(_ sender: NSApplication, openFile filename: String) -> Bool {
+        // NSDocumentController uses this delegate entry point for native recents.
+        windowRouter.openExternal([URL(fileURLWithPath: filename)]) { _ in }
+        return true
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {

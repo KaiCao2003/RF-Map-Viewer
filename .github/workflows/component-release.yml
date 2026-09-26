@@ -299,20 +299,32 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v6
       - uses: actions/download-artifact@v6
         with:
           name: swift-${{ needs.validate-versions.outputs.swift_release }}
           path: release-assets
-      - name: Create immutable Swift release
+      - name: Create or update Swift release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            release-assets/* \
-            --repo "$GITHUB_REPOSITORY" \
-            --verify-tag \
-            --generate-notes \
-            --title "RF Map Viewer Swift ${{ needs.validate-versions.outputs.swift_release }}"
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" \
+              release-assets/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --clobber
+            gh release edit "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "RF Map Viewer Swift ${{ needs.validate-versions.outputs.swift_release }}" \
+              --notes-file release/swift-stable.md
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              release-assets/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --notes-file release/swift-stable.md \
+              --title "RF Map Viewer Swift ${{ needs.validate-versions.outputs.swift_release }}"
+          fi
 
   publish-web:
     name: Publish Web release

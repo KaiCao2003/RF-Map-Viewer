@@ -9,16 +9,15 @@ struct ContentView: View {
     let openRFMapInNewWindow: (URL) -> Void
 
     var body: some View {
-        HStack(spacing: 0) {
-            SidebarView(
-                store: store,
-                pairingCoordinator: pairingCoordinator,
-                pairingWindowID: pairingWindowID,
-                openFigureExporter: openFigureExporter
-            )
-            .frame(width: 318)
-            Divider()
-            mainContent
+        Group {
+            if !store.hasData {
+                WelcomeView(
+                    openDocument: { store.isImporting = true },
+                    openRecent: openRFMapInNewWindow
+                )
+            } else {
+                viewerContent
+            }
         }
         .preferredColorScheme(.light)
         .overlay {
@@ -41,19 +40,9 @@ struct ContentView: View {
         ) { result in
             switch result {
             case .success(let urls):
-                if urls.isEmpty {
-                    if !store.hasData {
-                        WindowRouter.shared.expireColdInitialWindowClaim()
-                    }
-                } else {
-                    urls.forEach(openRFMapInNewWindow)
-                }
+                urls.forEach(openRFMapInNewWindow)
             case .failure(let error):
-                if (error as? CocoaError)?.code == .userCancelled {
-                    if !store.hasData {
-                        WindowRouter.shared.expireColdInitialWindowClaim()
-                    }
-                } else {
+                if (error as? CocoaError)?.code != .userCancelled {
                     store.errorMessage = error.localizedDescription
                 }
             }
@@ -82,14 +71,19 @@ struct ContentView: View {
         .onChange(of: hoverContext) { _, _ in
             store.clearHover()
         }
-        .onChange(of: store.isImporting) { _, isImporting in
-            if isImporting, !store.hasData {
-                WindowRouter.shared.pauseColdInitialWindowFallback()
-            } else if !isImporting, !store.hasData {
-                DispatchQueue.main.async {
-                    WindowRouter.shared.resumeColdInitialWindowFallback()
-                }
-            }
+    }
+
+    private var viewerContent: some View {
+        HStack(spacing: 0) {
+            SidebarView(
+                store: store,
+                pairingCoordinator: pairingCoordinator,
+                pairingWindowID: pairingWindowID,
+                openFigureExporter: openFigureExporter
+            )
+            .frame(width: 318)
+            Divider()
+            mainContent
         }
     }
 
