@@ -3,18 +3,21 @@ import SwiftUI
 
 struct WelcomeWindowContent<Content: View>: View {
     @ViewBuilder let content: () -> Content
-    @State private var titlebarInset: CGFloat = 0
+    @State private var titlebarInset = NSWindow.frameRect(
+        forContentRect: NSRect(x: 0, y: 0, width: 480, height: 632), styleMask: .titled
+    ).height - 632
 
     var body: some View {
-        GeometryReader { geometry in
-            content()
-                .ignoresSafeArea()
-                .onChange(of: geometry.safeAreaInsets.top, initial: true) { _, inset in
-                    titlebarInset = inset
-                }
-        }
-        // Hidden titlebars still contribute a safe area to the outer window size.
-        .frame(width: 480, height: 632 - titlebarInset)
+        content()
+            // Hidden titlebars still contribute to the outer window size.
+            .frame(width: 480, height: 632 - titlebarInset)
+            .ignoresSafeArea()
+            .onReceive(NotificationCenter.default.publisher(for: NSWindow.didUpdateNotification)) { notification in
+                guard let window = notification.object as? NSWindow,
+                      WindowRouter.shared.isWelcomeWindow(window) else { return }
+                let inset = window.frame.height - window.contentLayoutRect.height
+                if titlebarInset != inset { titlebarInset = inset }
+            }
     }
 }
 

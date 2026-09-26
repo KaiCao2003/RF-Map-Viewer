@@ -33,6 +33,10 @@ final class WindowRouter {
         dismissWelcomeImporter = dismissImporter
     }
 
+    func isWelcomeWindow(_ window: NSWindow) -> Bool {
+        welcomeWindow === window
+    }
+
     func documentDidAppear() {
         dismissWelcomeImporter?()
         welcomeWindow?.orderOut(nil)

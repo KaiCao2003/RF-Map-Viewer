@@ -17,6 +17,7 @@ final class StartupBehaviorTests: XCTestCase {
         window.isReleasedWhenClosed = false
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
+        WindowRouter.shared.registerWelcomeWindow(window)
         defer { window.close() }
         var openCount = 0
         let host = NSHostingView(rootView:
@@ -26,6 +27,7 @@ final class StartupBehaviorTests: XCTestCase {
         )
         window.contentView = host
         host.layoutSubtreeIfNeeded()
+        window.update()
         try await Task.sleep(for: .milliseconds(250))
 
         XCTAssertEqual(host.fittingSize.width, 480, accuracy: 0.1)
