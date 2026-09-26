@@ -52,6 +52,17 @@ class TkRuntimeAvailabilityTests(unittest.TestCase):
 @unittest.skipIf(TK_RUNTIME_ERROR is not None, TK_RUNTIME_ERROR or "Tk unavailable")
 class TkViewerTests(unittest.TestCase):
     def setUp(self) -> None:
+        # macOS event tests simulate darwin on the remote Linux Tk runtime.
+        self.recent_paths = []
+        recent_list = mock.patch.object(gui, "list_recent_documents", side_effect=lambda: self.recent_paths)
+        recent_record = mock.patch.object(gui, "record_recent_document")
+        recent_clear = mock.patch.object(gui, "clear_recent_documents", side_effect=self.recent_paths.clear)
+        recent_list.start()
+        self.record_recent = recent_record.start()
+        recent_clear.start()
+        self.addCleanup(recent_list.stop)
+        self.addCleanup(recent_record.stop)
+        self.addCleanup(recent_clear.stop)
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         n_bins = 30
@@ -117,29 +128,23 @@ class TkViewerTests(unittest.TestCase):
         self.assertEqual(float(self.app.range_start_ms_var.get()), 0.0)
         self.assertEqual(float(self.app.range_end_ms_var.get()), 30.0)
 
-    def test_no_document_window_has_real_open_file_landing(self) -> None:
-        chooser = gui.RFMViewer(master=self.app._app_root)
-        self.addCleanup(chooser.destroy)
-        if chooser._startup_after is not None:
-            chooser.after_cancel(chooser._startup_after)
-            chooser._startup_after = None
+    def test_no_document_window_waits_for_an_explicit_open(self) -> None:
+        with mock.patch.object(gui.filedialog, "askopenfilename", return_value="") as dialog:
+            chooser = gui.RFMViewer(master=self.app._app_root)
+            self.addCleanup(chooser.destroy)
+            deadline = time.monotonic() + 0.4
+            while time.monotonic() < deadline:
+                chooser.update()
+                time.sleep(0.01)
 
-        self.assertFalse(chooser._viewer_ready)
-        self.assertIsNotNone(chooser._startup_chooser_frame)
-        assert chooser._startup_chooser_frame is not None
-        labels = [
-            str(widget.cget("text"))
-            for widget in chooser._startup_chooser_frame.winfo_children()
-            if isinstance(widget, tk_support_module.ttk.Label)
-        ]
-        buttons = [
-            str(widget.cget("text"))
-            for widget in chooser._startup_chooser_frame.winfo_children()
-            if isinstance(widget, tk_support_module.ttk.Button)
-        ]
-        self.assertIn("Open RF mapping data", labels)
-        self.assertTrue(any("never loads sample data" in label for label in labels))
-        self.assertEqual(buttons, ["Open RF Map…"])
+            self.assertFalse(chooser._viewer_ready)
+            self.assertIsNone(chooser._startup_after)
+            self.assertIsNone(chooser.grab_current())
+            self.assertEqual(chooser.title(), "Welcome to RF Map Viewer")
+            dialog.assert_not_called()
+            chooser._startup_chooser_frame.open_button.invoke()
+            dialog.assert_called_once()
+            self.assertIsNotNone(chooser._startup_chooser_frame)
 
     def test_crosscorrelogram_menu_works_without_an_rf_document(self) -> None:
         chooser = gui.RFMViewer(master=self.app._app_root)
@@ -182,6 +187,100 @@ class TkViewerTests(unittest.TestCase):
             self.app._app_root, session_dir=session, probe_name="B", unit_ids=(8,),
         )
 
+    def test_crosscorrelogram_remains_usable_after_last_rf_window_closes(self) -> None:
+        root = self.app._app_root
+        self.addCleanup(self.app._quit_application)
+        self.app._open_crosscorrelogram()
+        utility = root._rfm_crosscorrelogram_window
+        self.app._close_window()
+        self.app = None
+        root.update()
+
+        self.assertEqual(root._rfm_viewer_windows, [])
+        self.assertTrue(utility.winfo_exists())
+        self.assertIsNone(utility.grab_current())
+        utility.session_var.set("/a/session/folder")
+        self.assertEqual(utility.session_entry.get(), "/a/session/folder")
+        menu = utility.nametowidget(utility.cget("menu"))
+        file_menu = menu.nametowidget(menu.entrycget("File", "menu"))
+        file_menu.invoke("Welcome to RF Map Viewer")
+        root.update()
+        welcome = root._rfm_viewer_windows[0]
+        self.assertIsNotNone(welcome._startup_chooser_frame)
+        self.assertTrue(utility.winfo_exists())
+
+        welcome._close_window()
+        # Root-owned keyboard callbacks must survive the window that created them.
+        with mock.patch.object(gui.filedialog, "askopenfilename", return_value="") as dialog:
+            utility.session_entry.focus_force()
+            root.update()
+            utility.session_entry.event_generate("<Control-o>")
+            root.update()
+            dialog.assert_called_once()
+        self.assertEqual(len(root._rfm_viewer_windows), 1)
+
+    def test_closing_welcome_keeps_ccg_alive_until_its_own_close(self) -> None:
+        welcome = gui.RFMViewer()
+        root = welcome._app_root
+        welcome._open_crosscorrelogram()
+        utility = root._rfm_crosscorrelogram_window
+        welcome._close_window()
+        root.update()
+        self.assertTrue(utility.winfo_exists())
+        self.assertFalse(root._rfm_quitting)
+        utility.destroy()
+        root.update()
+        self.assertTrue(root._rfm_quitting)
+
+    def test_welcome_opens_selected_recent_and_records_success(self) -> None:
+        self.recent_paths.extend([self.app.data.path, Path(self.directory.name) / "missing.rfmap"])
+        welcome = gui.RFMViewer(master=self.app._app_root)
+        self.addCleanup(welcome.destroy)
+        frame = welcome._startup_chooser_frame
+        self.assertEqual(len(frame.recent_list.get_children()), 2)
+        with mock.patch.object(gui.filedialog, "askopenfilename") as dialog:
+            frame.open_recent_button.invoke()
+            deadline = time.monotonic() + 5
+            while not welcome._viewer_ready and time.monotonic() < deadline:
+                welcome.update()
+                time.sleep(0.01)
+            self.assertTrue(welcome._viewer_ready)
+            self.assertEqual(welcome.data.path, self.app.data.path)
+            self.record_recent.assert_called_with(self.app.data.path)
+            dialog.assert_not_called()
+
+    def test_unavailable_recent_returns_to_welcome_and_keeps_ccg(self) -> None:
+        self.recent_paths.append(Path(self.directory.name) / "missing.rfmap")
+        welcome = gui.RFMViewer(master=self.app._app_root)
+        self.addCleanup(welcome.destroy)
+        welcome._open_crosscorrelogram()
+        utility = self.app._app_root._rfm_crosscorrelogram_window
+        self.addCleanup(utility.destroy)
+        self.record_recent.reset_mock()
+        with mock.patch.object(gui.messagebox, "showerror") as error:
+            welcome._startup_chooser_frame.open_recent_button.invoke()
+            deadline = time.monotonic() + 5
+            while not error.called and time.monotonic() < deadline:
+                welcome.update()
+                time.sleep(0.01)
+            error.assert_called_once()
+        self.assertIsNotNone(welcome._startup_chooser_frame)
+        self.assertIsNone(welcome._startup_loading_frame)
+        self.assertTrue(utility.winfo_exists())
+        self.record_recent.assert_not_called()
+
+    def test_clear_recent_refreshes_all_welcome_windows(self) -> None:
+        self.recent_paths.append(self.app.data.path)
+        welcomes = [gui.RFMViewer(master=self.app._app_root) for _ in range(2)]
+        for welcome in welcomes:
+            self.addCleanup(welcome.destroy)
+        welcomes[0]._startup_chooser_frame.clear_button.invoke()
+        self.assertTrue(self.app.data.path.exists())
+        for welcome in welcomes:
+            frame = welcome._startup_chooser_frame
+            self.assertEqual(frame.recent_list.get_children(), ())
+            self.assertTrue(frame.open_recent_button.instate(("disabled",)))
+
     def test_delayed_macos_document_open_never_opens_file_chooser(self) -> None:
         with (
             mock.patch.object(gui.sys, "platform", "darwin"),
@@ -203,7 +302,7 @@ class TkViewerTests(unittest.TestCase):
             self.assertEqual(viewer.data.path, self.app.data.path)
             dialog.assert_not_called()
 
-    def test_macos_application_open_shows_file_chooser(self) -> None:
+    def test_macos_application_open_shows_nonmodal_welcome(self) -> None:
         with (
             mock.patch.object(gui.sys, "platform", "darwin"),
             mock.patch.object(gui.filedialog, "askopenfilename", return_value="") as dialog,
@@ -213,8 +312,10 @@ class TkViewerTests(unittest.TestCase):
             viewer.tk.call("::tk::mac::OpenApplication")
             viewer.update()
 
-            dialog.assert_called_once()
+            dialog.assert_not_called()
             self.assertFalse(viewer._viewer_ready)
+            self.assertIsNotNone(viewer._startup_chooser_frame)
+            self.assertIsNone(viewer.grab_current())
 
     def test_macos_application_open_during_tk_initialization_is_preserved(self) -> None:
         loadtk = gui.tk.Tk.loadtk
@@ -237,7 +338,7 @@ class TkViewerTests(unittest.TestCase):
             self.addCleanup(viewer.destroy)
             viewer.update()
 
-            dialog.assert_called_once()
+            dialog.assert_not_called()
             self.assertFalse(viewer._viewer_ready)
 
     def test_macos_application_open_does_not_interrupt_pending_document(self) -> None:

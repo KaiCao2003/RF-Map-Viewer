@@ -35,8 +35,10 @@ input is never edited; exports are created only when you request them.
 
 ### Open an RF map
 
-1. Launch **RF Map Viewer**. If no document is supplied, the app opens a file
-   chooser; it does not load example data.
+1. Launch **RF Map Viewer**. If no document is supplied, a nonmodal welcome
+   window shows **Open RF Map…** and **Recent Documents**. The file chooser
+   opens only when you request it, so **Utilities → Cross-correlogram…** is
+   available immediately without opening an RF map.
 2. Choose a current RF mapping document (.rfmap or .json). You can also use
    **Open…** in the toolbar or **File → Open RF Map in New Window…** to open
    another recording while keeping the current window available.
@@ -44,6 +46,14 @@ input is never edited; exports are created only when you request them.
    cache indicator while later units load. You can inspect units as they
    become available; **Figures…** becomes available after the archive cache
    finishes. If caching reports an error, use **Retry**.
+
+On macOS, recent documents use the application's native `NSDocumentController`
+history. Open one from the welcome window or **File → Open Recent**.
+**Clear Recent** clears that history without changing the files.
+**File → Welcome to RF Map Viewer** brings the welcome window back.
+Closing an RF document or the welcome window leaves an open Cross-correlogram
+utility running; close the utility separately or quit RF Map Viewer to close all
+windows. A missing or unreadable recent file returns to the welcome window.
 
 The viewer reads the RF data without changing the source file. A version-2
 indexed archive can be named .rfmap or .json; the viewer detects its file

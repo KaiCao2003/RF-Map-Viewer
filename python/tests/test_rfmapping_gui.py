@@ -49,7 +49,7 @@ class ShortcutModifierTests(unittest.TestCase):
 
 
 class MacOSLifecycleTests(unittest.TestCase):
-    def test_no_argument_main_opens_file_chooser_viewer_without_sample_data(self) -> None:
+    def test_no_argument_main_opens_welcome_without_sample_data(self) -> None:
         viewer = mock.Mock()
         with (
             mock.patch.object(gui, "TK_AVAILABLE", True),
@@ -85,7 +85,7 @@ class MacOSLifecycleTests(unittest.TestCase):
             def protocol(self, name, callback) -> None:
                 self.protocols[name] = callback
 
-            def bind_all(self, event, callback) -> None:
+            def bind(self, event, callback) -> None:
                 self.bindings[event] = callback
 
         viewer = FakeViewer()
@@ -96,6 +96,7 @@ class MacOSLifecycleTests(unittest.TestCase):
         self.assertIs(viewer.tk.commands["::tk::mac::OpenApplication"], viewer._dispatch_macos_open_application)
         self.assertIs(viewer.tk.commands["::tk::mac::OpenDocument"], viewer._dispatch_macos_open_documents)
         self.assertIs(viewer.tk.commands["::tk::mac::Quit"], viewer._quit_application)
+        viewer._app_root.bind_all.assert_any_call("<Command-o>", viewer._dispatch_open_json)
         self.assertIs(
             viewer.tk.commands["::tk::mac::ShowHelp"],
             viewer._open_support_documentation,
@@ -116,6 +117,8 @@ class MacOSLifecycleTests(unittest.TestCase):
 
     def test_open_dialog_routes_ready_document_to_new_window(self) -> None:
         class FakeViewer:
+            _open_document_path = gui.RFMViewer._open_document_path
+
             def __init__(self) -> None:
                 self._viewer_ready = True
                 self.data = mock.Mock(path=Path("/tmp/current.json"))
@@ -168,6 +171,7 @@ class MacOSLifecycleTests(unittest.TestCase):
         class FakeRoot:
             def __init__(self) -> None:
                 self._rfm_quitting = False
+                self._rfm_utility_close_after = None
                 self.destroy_calls = 0
 
             def destroy(self) -> None:

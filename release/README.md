@@ -32,6 +32,9 @@ as clockwise angles: RF −90° corresponds to HD 270°, RF 90° to HD 90°, and
 Centered line plots preserve the angle sign, and polar curves and labels agree
 on screen and in exports. HD plots have opaque white backgrounds; source TC
 data is unchanged. Python stable uses macOS build 110004; Swift uses build 110003.
+The Python 1.10.4 package also includes a nonmodal welcome window with native
+macOS recent documents and a Cross-correlogram utility that stays open when
+RF document windows close.
 
 Python stable 1.10.3 adds probe-panel drag selection with a live rectangle and
 nearest-visible-unit selection. Its macOS app includes a standalone

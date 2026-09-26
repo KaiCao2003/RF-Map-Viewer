@@ -118,6 +118,11 @@ from rfmapping_viewer.paths import (
 )
 from rfmapping_viewer.rf_dataset import is_indexed_rfmap
 from rfmapping_viewer.rf_model import RFMappingData
+from rfmapping_viewer.recent_documents import (
+    clear_recent_documents,
+    list_recent_documents,
+    record_recent_document,
+)
 from rfmapping_viewer.settings import (
     ViewerSettings,
     load_viewer_settings,
@@ -172,6 +177,7 @@ class RFMViewer(tk.Toplevel):
             )
             self._app_root._rfm_settings_window = None
             self._app_root._rfm_crosscorrelogram_window = None
+            self._app_root._rfm_utility_close_after = None
             self._app_root._rfm_settings_tab = "General"
             self._app_root._rfm_tuning_cache = {}
             self._app_root._rfm_viewer_windows = []
@@ -181,6 +187,7 @@ class RFMViewer(tk.Toplevel):
             self._app_root._rfm_quitting = False
         self.settings: ViewerSettings = self._app_root._rfm_settings
         super().__init__(self._app_root)
+        self.bind("<FocusIn>", self._on_window_focus, add="+")
         self._app_root._rfm_viewer_windows.append(self)
         self._quitting = False
         self._viewer_ready = False
@@ -198,7 +205,7 @@ class RFMViewer(tk.Toplevel):
         ] = queue.SimpleQueue()
         self._startup_loading_frame: ttk.Frame | None = None
         self._startup_progress: ttk.Progressbar | None = None
-        self._startup_chooser_frame: ttk.Frame | None = None
+        self._startup_chooser_frame: WelcomeFrame | None = None
         self._optional_autoload_after: str | None = None
         self._optional_poll_after: str | None = None
         self._optional_autoload_generation = 0
@@ -247,11 +254,7 @@ class RFMViewer(tk.Toplevel):
         else:
             self._build_startup_menu()
             self._show_startup_chooser_shell()
-            # On macOS, OpenApplication opens the chooser; OpenDocument loads
-            # the Finder selection, regardless of when that event arrives.
-            if sys.platform != "darwin":
-                self._startup_after = self.after(200, self._open_startup_file_dialog)
-            elif opened_application:
+            if opened_application:
                 self._dispatch_macos_open_application()
 
     def _initialize_viewer(self, data: RFMappingData) -> None:
@@ -362,6 +365,8 @@ class RFMViewer(tk.Toplevel):
         self._select_tab_key(self.settings.default_viewer_tab)
         self._update_all()
         self._viewer_ready = True
+        record_recent_document(data.path)
+        self._refresh_welcome_windows()
         self._start_unit_cache()
         self._pair_ready_viewer_set_changed(adopt_viewer=self)
         self.deiconify()
@@ -513,8 +518,8 @@ class RFMViewer(tk.Toplevel):
 
     def _show_startup_loading_shell(self, path: Path) -> None:
         if self._startup_loading_frame is None:
-            self.geometry("560x190")
-            self.minsize(480, 170)
+            self.geometry("560x160")
+            self.minsize(480, 150)
             frame = ttk.Frame(self, padding=24)
             frame.pack(fill="both", expand=True)
             frame.columnconfigure(0, weight=1)
@@ -533,11 +538,6 @@ class RFMViewer(tk.Toplevel):
             progress = ttk.Progressbar(frame, mode="indeterminate")
             progress.grid(row=2, column=0, sticky="ew")
             progress.start(12)
-            ttk.Label(
-                frame,
-                text="Decoding and validating counts off the interface thread…",
-                foreground="#667085",
-            ).grid(row=3, column=0, sticky="w", pady=(10, 0))
             self._startup_loading_frame = frame
             self._startup_progress = progress
         self._startup_path_label.configure(text=path.name)
@@ -546,49 +546,54 @@ class RFMViewer(tk.Toplevel):
         self.lift()
 
     def _show_startup_chooser_shell(self) -> None:
-        """Show the no-document landing view behind the native file chooser."""
+        """Keep document opening optional so Utilities remain available."""
+
+        from rfmapping_viewer.welcome import WelcomeFrame
 
         if self._startup_chooser_frame is not None:
             return
-        self.geometry("560x230")
-        self.minsize(480, 210)
-        frame = ttk.Frame(self, padding=28)
+        self.geometry("820x460")
+        self.minsize(760, 420)
+        frame = WelcomeFrame(
+            self,
+            open_document=self._open_json,
+            open_recent=self._open_document_path,
+            clear_recent=self._clear_recent_documents,
+        )
         frame.pack(fill="both", expand=True)
-        frame.columnconfigure(0, weight=1)
-        ttk.Label(
-            frame,
-            text="Open RF mapping data",
-            font=("TkDefaultFont", 15, "bold"),
-        ).grid(row=0, column=0, sticky="w")
-        ttk.Label(
-            frame,
-            text=(
-                "Choose a current .rfmap or JSON result. The viewer never "
-                "loads sample data when opened without a document."
-            ),
-            foreground="#667085",
-            wraplength=500,
-            justify="left",
-        ).grid(row=1, column=0, sticky="ew", pady=(10, 18))
-        ttk.Button(
-            frame,
-            text="Open RF Map…",
-            command=self._open_json,
-        ).grid(row=2, column=0, sticky="w")
+        frame.refresh_recent_documents(list_recent_documents())
         self._startup_chooser_frame = frame
-        self.title("RF Map Viewer")
+        self.title("Welcome to RF Map Viewer")
         self.deiconify()
         self.lift()
+
+    def _refresh_welcome_windows(self) -> None:
+        for window in self._app_root._rfm_viewer_windows:
+            if window._startup_chooser_frame is not None:
+                window._startup_chooser_frame.refresh_recent_documents(list_recent_documents())
+
+    def _clear_recent_documents(self) -> None:
+        clear_recent_documents()
+        self._refresh_welcome_windows()
+
+    def _show_welcome_window(self) -> None:
+        welcome = next(
+            (window for window in self._app_root._rfm_viewer_windows
+             if window._startup_chooser_frame is not None),
+            None,
+        )
+        if welcome is None:
+            welcome = RFMViewer(master=self._app_root)
+        else:
+            welcome._startup_chooser_frame.refresh_recent_documents(list_recent_documents())
+        welcome.deiconify()
+        welcome.lift()
+        welcome.focus_set()
 
     def _remove_startup_chooser_shell(self) -> None:
         if self._startup_chooser_frame is not None:
             self._startup_chooser_frame.destroy()
             self._startup_chooser_frame = None
-
-    def _open_startup_file_dialog(self) -> None:
-        self._startup_after = None
-        if not self._quitting and self._startup_chooser_frame is not None:
-            self._open_json()
 
     def _remove_startup_loading_shell(self) -> None:
         if self._startup_progress is not None:
@@ -621,7 +626,8 @@ class RFMViewer(tk.Toplevel):
         _generation, _path, data, error = matching
         if error is not None:
             messagebox.showerror("Could not open RF map", str(error), parent=self)
-            self._quit_application()
+            self._remove_startup_loading_shell()
+            self._show_startup_chooser_shell()
             return
         assert data is not None
         self._initialize_viewer(data)
@@ -716,10 +722,16 @@ class RFMViewer(tk.Toplevel):
         if windows:
             windows[-1]._install_application_handlers()
             return
+        self._quit_if_no_windows()
+
+    def _quit_if_no_windows(self) -> None:
+        if self._app_root._rfm_quitting or self._app_root._rfm_viewer_windows:
+            return
+        utility = self._app_root._rfm_crosscorrelogram_window
+        if utility is not None and utility.winfo_exists():
+            return
         try:
-            self._app_root._rfm_quitting = True
-            _shutdown_export_executor(self._app_root)
-            self._app_root.destroy()
+            self._quit_application()
         except tk.TclError:
             pass
 
@@ -822,6 +834,8 @@ class RFMViewer(tk.Toplevel):
             accelerator="⌘O" if sys.platform == "darwin" else "Ctrl+O",
             command=self._open_json,
         )
+        self._add_recent_menu(file_menu)
+        file_menu.add_command(label="Welcome to RF Map Viewer", command=self._show_welcome_window)
         self._discovered_json_menu = tk.Menu(file_menu, tearoff=False)
         file_menu.add_cascade(
             label="Open Discovered RF Map",
@@ -956,8 +970,48 @@ class RFMViewer(tk.Toplevel):
     def _build_startup_menu(self) -> None:
         menu = tk.Menu(self, tearoff=False)
         self._add_utilities_menu(menu)
+        self._add_startup_file_menu(menu, self._close_window)
         self.configure(menu=menu)
         self._menu = menu
+
+    def _add_startup_file_menu(self, menu: tk.Menu, close: Callable[[], None]) -> None:
+        file_menu = tk.Menu(menu, tearoff=False)
+        file_menu.add_command(
+            label="Open RF Map…",
+            accelerator="⌘O" if sys.platform == "darwin" else "Ctrl+O",
+            command=self._dispatch_open_json,
+        )
+        self._add_recent_menu(file_menu)
+        file_menu.add_command(label="Welcome to RF Map Viewer", command=self._show_welcome_window)
+        file_menu.add_separator()
+        file_menu.add_command(
+            label="Close Window",
+            accelerator="⌘W" if sys.platform == "darwin" else "Ctrl+W",
+            command=close,
+        )
+        menu.add_cascade(label="File", menu=file_menu)
+
+    def _add_recent_menu(self, file_menu: tk.Menu) -> None:
+        recent = tk.Menu(file_menu, tearoff=False)
+        recent.configure(postcommand=lambda: self._populate_recent_menu(recent))
+        file_menu.add_cascade(label="Open Recent", menu=recent)
+
+    def _populate_recent_menu(self, menu: tk.Menu) -> None:
+        menu.delete(0, "end")
+        paths = list_recent_documents()
+        for path in paths:
+            menu.add_command(
+                label=f"{path.name} — {path.parent}",
+                command=lambda selected=path: self._active_viewer()._open_document_path(selected),
+            )
+        if not paths:
+            menu.add_command(label="No Recent RF Maps", state="disabled")
+        menu.add_separator()
+        menu.add_command(
+            label="Clear Recent",
+            command=self._clear_recent_documents,
+            state="normal" if paths else "disabled",
+        )
 
     def _open_crosscorrelogram(self) -> None:
         from rfmapping_viewer.crosscorrelogram_window import CrossCorrelogramWindow
@@ -989,8 +1043,23 @@ class RFMViewer(tk.Toplevel):
         )
         menu = tk.Menu(window, tearoff=False)
         self._add_utilities_menu(menu)
+        self._add_startup_file_menu(menu, window.destroy)
         window.configure(menu=menu)
         self._app_root._rfm_crosscorrelogram_window = window
+        window.bind("<Destroy>", self._on_crosscorrelogram_destroyed, add="+")
+        window.bind("<Command-w>" if sys.platform == "darwin" else "<Control-w>", lambda _event: window.destroy())
+        window.lift()
+        window.focus_set()
+
+    def _on_crosscorrelogram_destroyed(self, event: tk.Event) -> None:
+        if event.widget is self._app_root._rfm_crosscorrelogram_window:
+            self._app_root._rfm_crosscorrelogram_window = None
+            if not self._app_root._rfm_quitting:
+                def finish_close() -> None:
+                    self._app_root._rfm_utility_close_after = None
+                    self._quit_if_no_windows()
+
+                self._app_root._rfm_utility_close_after = self._app_root.after_idle(finish_close)
 
     def _build_layout(self) -> None:
         self.columnconfigure(0, weight=0)
@@ -1959,7 +2028,6 @@ class RFMViewer(tk.Toplevel):
         self.palette_var.trace_add("write", lambda *_: self._on_control_changed())
         self.polar_radius_var.trace_add("write", lambda *_: self._on_control_changed())
         self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
-        self.bind("<FocusIn>", self._on_window_focus, add="+")
         self.bind("<Button-1>", self._focus_clicked_viewer_control, add="+")
         navigation_shortcuts = (
             ("<Left>", self._step_unit, (-1,)),
@@ -2270,15 +2338,18 @@ class RFMViewer(tk.Toplevel):
 
     def _install_application_handlers(self) -> None:
         self.protocol("WM_DELETE_WINDOW", self._close_window)
+        self.bind("<Command-w>" if sys.platform == "darwin" else "<Control-w>", self._close_window)
         self._app_root._rfm_active_viewer = self
-        self.bind_all("<Control-o>", self._dispatch_open_json)
-        self.bind_all("<Control-comma>", self._dispatch_settings)
+        # Application shortcuts must outlive the last RF window when a utility
+        # is still open. Register their Tcl commands on the application root.
+        self._app_root.bind_all("<Control-o>", self._dispatch_open_json)
+        self._app_root.bind_all("<Control-comma>", self._dispatch_settings)
 
         if sys.platform != "darwin":
             return
         try:
-            self.bind_all("<Command-o>", self._dispatch_open_json)
-            self.bind_all("<Command-comma>", self._dispatch_settings)
+            self._app_root.bind_all("<Command-o>", self._dispatch_open_json)
+            self._app_root.bind_all("<Command-comma>", self._dispatch_settings)
             self.tk.createcommand("::tk::mac::OpenApplication", self._dispatch_macos_open_application)
             self.tk.createcommand("::tk::mac::OpenDocument", self._dispatch_macos_open_documents)
             self.tk.createcommand("::tk::mac::Quit", self._quit_application)
@@ -2292,7 +2363,9 @@ class RFMViewer(tk.Toplevel):
     def _active_viewer(self) -> RFMViewer:
         active = getattr(self._app_root, "_rfm_active_viewer", None)
         windows = self._app_root._rfm_viewer_windows
-        return active if active in windows else (windows[-1] if windows else self)
+        return active if active in windows else (
+            windows[-1] if windows else RFMViewer(master=self._app_root)
+        )
 
     def _ready_pairing_viewers(self) -> list[RFMViewer]:
         windows = self._app_root._rfm_viewer_windows
@@ -3202,7 +3275,9 @@ class RFMViewer(tk.Toplevel):
             and viewer._startup_chooser_frame is not None
             and viewer._startup_after is None
         ):
-            viewer._startup_after = viewer.after_idle(viewer._open_startup_file_dialog)
+            viewer._startup_chooser_frame.refresh_recent_documents(list_recent_documents())
+            viewer.deiconify()
+            viewer.lift()
 
     def _dispatch_macos_open_documents(self, *paths: str) -> None:
         self._active_viewer()._on_macos_open_documents(*paths)
@@ -3229,6 +3304,9 @@ class RFMViewer(tk.Toplevel):
             return
         self._quitting = True
         self._app_root._rfm_quitting = True
+        if self._app_root._rfm_utility_close_after is not None:
+            self._app_root.after_cancel(self._app_root._rfm_utility_close_after)
+            self._app_root._rfm_utility_close_after = None
         _shutdown_export_executor(self._app_root)
         self._app_root.destroy()
 
@@ -3270,14 +3348,17 @@ class RFMViewer(tk.Toplevel):
             filetypes=RF_DOCUMENT_FILETYPES,
         )
         if path:
-            if self._viewer_ready:
-                self._open_json_window(Path(path))
-            else:
-                self._cancel_startup_callback()
-                self._remove_startup_chooser_shell()
-                self._startup_after = self.after_idle(
-                    lambda selected=Path(path): self._load_startup_document(selected)
-                )
+            self._open_document_path(Path(path))
+
+    def _open_document_path(self, path: Path) -> None:
+        if self._viewer_ready:
+            self._open_json_window(path)
+        else:
+            self._cancel_startup_callback()
+            self._remove_startup_chooser_shell()
+            self._startup_after = self.after_idle(
+                lambda: self._load_startup_document(path)
+            )
 
     def _open_external_companion(self, path: Path) -> bool:
         """Attach a Finder-opened companion to this RF document window."""

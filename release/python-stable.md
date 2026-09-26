@@ -1,7 +1,9 @@
-## Python 1.10.4: clockwise HD and RF alignment
+## Python 1.10.4: welcome window, independent CCG, and clockwise alignment
 
 Version **1.10.4**. Target: macOS Apple Silicon (build **110004**).
 
+- Start with a nonmodal welcome window offering Open and native macOS recent documents. The file chooser opens only on request.
+- Open Cross-correlogram from Utilities without an RF document. Closing the welcome or RF window leaves the utility running; unavailable recent files return to the welcome window.
 - Align RF −90° with HD 270°, RF 90° with HD 90°, and 0° with 0° in line and polar views.
 - Center HD line plots without mirroring their values; keep polar curves and angle labels clockwise in both the viewer and figure exports.
 - Use opaque white HD plot backgrounds and preserve the source TC angles, counts, and firing rates.

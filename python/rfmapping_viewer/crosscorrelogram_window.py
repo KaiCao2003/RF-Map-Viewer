@@ -37,8 +37,8 @@ class CrossCorrelogramWindow(tk.Toplevel):
         ]
         self.bin_var = tk.StringVar(self, value="1")
         self.window_var = tk.StringVar(self, value="50")
-        self.status_var = tk.StringVar(self, value="Choose a session folder to begin.")
-        self.subtitle_var = tk.StringVar(self, value="Spike timing between selected units")
+        self.status_var = tk.StringVar(self)
+        self.subtitle_var = tk.StringVar(self)
         self._results: queue.SimpleQueue = queue.SimpleQueue()
         self._poll_after: str | None = None
         self._busy = False
@@ -63,7 +63,6 @@ class CrossCorrelogramWindow(tk.Toplevel):
             style.configure(f"{name}.Muted.TLabel", background=background, foreground="#6e6e73", font=small_font)
             style.configure(f"{name}.Section.TLabel", background=background, foreground="#1d1d1f", font=(family, font_size, "bold"))
         style.configure("CCG.Title.TLabel", background="white", foreground="#1d1d1f", font=(family, font_size + 6, "bold"))
-        style.configure("CCG.Empty.TLabel", background="white", foreground="#1d1d1f", font=(family, font_size + 4, "bold"))
         style.configure("CCG.TEntry", padding=(8, 6), fieldbackground="white", foreground="#1d1d1f", bordercolor="#d2d2d7", lightcolor="#d2d2d7", darkcolor="#d2d2d7")
         style.configure("CCG.TCombobox", padding=(8, 5), fieldbackground="white", foreground="#1d1d1f", background="white", arrowcolor="#6e6e73", bordercolor="#d2d2d7", lightcolor="#d2d2d7", darkcolor="#d2d2d7")
         style.map("CCG.TCombobox", fieldbackground=[("disabled", "#ececef"), ("readonly", "white")], foreground=[("disabled", "#86868b"), ("readonly", "#1d1d1f")])
@@ -145,7 +144,7 @@ class CrossCorrelogramWindow(tk.Toplevel):
         toolbar = ttk.Frame(workspace, padding=24, style="CCG.TFrame")
         toolbar.grid(row=0, column=0, sticky="ew")
         toolbar.columnconfigure(0, weight=1)
-        ttk.Label(toolbar, text="Pairwise cross-correlograms", style="CCG.Title.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(toolbar, text="Cross-correlograms", style="CCG.Title.TLabel").grid(row=0, column=0, sticky="w")
         ttk.Label(toolbar, textvariable=self.subtitle_var, style="CCG.Muted.TLabel").grid(row=1, column=0, sticky="w", pady=(6, 0))
         self.save_button = ttk.Button(toolbar, text="Save figure…", command=self._save, state="disabled", style="CCG.TButton")
         self.save_button.grid(row=0, column=1, rowspan=2, sticky="e", padx=(16, 0))
@@ -159,13 +158,6 @@ class CrossCorrelogramWindow(tk.Toplevel):
         self.plot_frame.grid(row=2, column=0, sticky="nsew", padx=16, pady=12)
         self._placeholder = ttk.Frame(self.plot_frame, style="CCG.TFrame")
         self._placeholder.pack(fill="both", expand=True)
-        empty = ttk.Frame(self._placeholder, style="CCG.TFrame")
-        empty.place(relx=0.5, rely=0.5, anchor="center")
-        ttk.Label(empty, text="Compare spike timing", style="CCG.Empty.TLabel").pack()
-        ttk.Label(
-            empty, text="Choose a recording and select two or three units.\nEach unique pair gets its own correlogram.",
-            style="CCG.Muted.TLabel", justify="center",
-        ).pack(pady=(10, 0))
         footer = ttk.Frame(workspace, padding=(24, 0, 24, 18), style="CCG.TFrame")
         footer.grid(row=3, column=0, sticky="ew")
         footer.columnconfigure(0, weight=1)
