@@ -552,7 +552,7 @@ class RFMViewer(tk.Toplevel):
 
         if self._startup_chooser_frame is not None:
             return
-        self.geometry("820x460")
+        self.geometry("800x460")
         self.minsize(760, 420)
         frame = WelcomeFrame(
             self,

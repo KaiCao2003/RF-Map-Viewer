@@ -237,7 +237,7 @@ class TkViewerTests(unittest.TestCase):
         welcome = gui.RFMViewer(master=self.app._app_root)
         self.addCleanup(welcome.destroy)
         frame = welcome._startup_chooser_frame
-        self.assertEqual(len(frame.recent_list.get_children()), 2)
+        self.assertEqual(len(frame.recent_list.paths), 2)
         with mock.patch.object(gui.filedialog, "askopenfilename") as dialog:
             frame.open_recent_button.invoke()
             deadline = time.monotonic() + 5
@@ -278,8 +278,28 @@ class TkViewerTests(unittest.TestCase):
         self.assertTrue(self.app.data.path.exists())
         for welcome in welcomes:
             frame = welcome._startup_chooser_frame
-            self.assertEqual(frame.recent_list.get_children(), ())
+            self.assertEqual(frame.recent_list.paths, ())
             self.assertTrue(frame.open_recent_button.instate(("disabled",)))
+
+    def test_recent_keyboard_selection_stays_visible_and_survives_refresh(self) -> None:
+        self.recent_paths.extend(Path(f"/example/Probe{index}.rfmap") for index in range(12))
+        welcome = gui.RFMViewer(master=self.app._app_root)
+        self.addCleanup(welcome.destroy)
+        welcome.update()
+        listing = welcome._startup_chooser_frame.recent_list
+        self.assertEqual(listing.selected_path, self.recent_paths[0])
+        self.assertEqual(listing.canvasy(0), 0)
+        listing.focus_force()
+        listing.event_generate("<End>")
+        welcome.update()
+        self.assertEqual(listing.selected_path, self.recent_paths[-1])
+        self.assertGreater(listing.canvasy(listing.winfo_height()), 11 * listing._row_height)
+        listing.refresh(list(reversed(self.recent_paths)))
+        self.assertEqual(listing.selected_path, self.recent_paths[-1])
+        self.assertEqual(listing.canvasy(0), 0)
+        with mock.patch.object(listing, "_open_recent") as open_recent:
+            listing.event_generate("<Return>")
+            open_recent.assert_called_once_with(self.recent_paths[-1])
 
     def test_delayed_macos_document_open_never_opens_file_chooser(self) -> None:
         with (
