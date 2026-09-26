@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 import sys
 from pathlib import Path
 from tkinter import font as tkfont
@@ -13,14 +12,21 @@ from PIL import Image, ImageDraw, ImageTk
 from rfmapping_viewer.tk_support import tk, ttk
 
 
-def _rounded_rectangle(canvas, x1, y1, x2, y2, radius, **options):
-    points = []
-    for cx, cy, start in ((x2 - radius, y1 + radius, -90), (x2 - radius, y2 - radius, 0),
-                          (x1 + radius, y2 - radius, 90), (x1 + radius, y1 + radius, 180)):
-        for step in range(17):
-            angle = math.radians(start + step * 90 / 16)
-            points.extend((cx + radius * math.cos(angle), cy + radius * math.sin(angle)))
-    return canvas.create_polygon(*points, **options)
+def _rounded_rectangle(canvas, x1, y1, x2, y2, radius, *, fill):
+    width, height = int(x2 - x1), int(y2 - y1)
+    if width < 2 or height < 2:
+        return
+    key = (width, height, radius, fill)
+    if not hasattr(canvas, "_rounded_images"):
+        canvas._rounded_images = {}
+    if key not in canvas._rounded_images:
+        # Tk's polygon corners are aliased on macOS; supersample the surface.
+        bitmap = Image.new("RGB", (width * 4, height * 4), canvas.cget("background"))
+        ImageDraw.Draw(bitmap).rounded_rectangle((0, 0, width * 4 - 1, height * 4 - 1),
+                                                radius=radius * 4, fill=fill)
+        canvas._rounded_images[key] = ImageTk.PhotoImage(
+            bitmap.resize((width, height), Image.Resampling.LANCZOS), master=canvas)
+    canvas.create_image(x1, y1, anchor="nw", image=canvas._rounded_images[key])
 
 
 class WelcomeButton(ttk.Button):
@@ -66,6 +72,7 @@ class RecentDocumentList(tk.Canvas):
     def __init__(self, master, *, open_recent):
         super().__init__(master, background="#f7f7f7", highlightthickness=0, takefocus=True)
         self.paths: tuple[Path, ...] = ()
+        self._icons = {}
         self.selected: int | None = None
         self._open_recent = open_recent
         family = self.tk.call("font", "actual", "TkDefaultFont", "-family")
@@ -96,6 +103,12 @@ class RecentDocumentList(tk.Canvas):
     def refresh(self, paths: Sequence[Path]) -> None:
         previous = self.selected_path
         self.paths = tuple(paths)
+        if "nsimage" in self.tk.call("image", "types"):
+            self._icons = {
+                path: tk.Image("nsimage", master=self, cnf={
+                    "source": str(path), "as": "path", "width": 24, "height": 24,
+                }) for path in self.paths
+            }
         self.selected = None
         self.configure(scrollregion=(0, 0, 0, len(self.paths) * self._row_height))
         self.yview_moveto(0)
@@ -171,13 +184,16 @@ class RecentDocumentList(tk.Canvas):
             y = index * self._row_height
             if index == self.selected:
                 _rounded_rectangle(self, 0, y, width, y + 47, 10,
-                                   fill="#dce8f8" if self.focus_get() == self else "#dedede", outline="")
+                                   fill="#dce8f8" if self.focus_get() == self else "#dedede")
             # The folded document outline keeps rows recognizable without extra copy.
-            self.create_polygon(14, y + 11, 27, y + 11, 33, y + 17, 33, y + 36,
-                                14, y + 36, fill="white", outline="#a7a7ad", width=1)
-            self.create_line(27, y + 11, 27, y + 17, 33, y + 17, fill="#a7a7ad")
-            self.create_line(18, y + 24, 29, y + 24, fill="#c2c2c7")
-            self.create_line(18, y + 29, 27, y + 29, fill="#c2c2c7")
+            if path in self._icons:
+                self.create_image(12, y + 12, anchor="nw", image=self._icons[path])
+            else:
+                self.create_polygon(14, y + 11, 27, y + 11, 33, y + 17, 33, y + 36,
+                                    14, y + 36, fill="white", outline="#a7a7ad", width=1)
+                self.create_line(27, y + 11, 27, y + 17, 33, y + 17, fill="#a7a7ad")
+                self.create_line(18, y + 24, 29, y + 24, fill="#c2c2c7")
+                self.create_line(18, y + 29, 27, y + 29, fill="#c2c2c7")
             available = max(width - 58, 0)
             self.create_text(48, y + 16, anchor="w", fill="#252528", font=self._name_font,
                              text=self._abbreviate(path.name, self._name_font, available))
@@ -222,7 +238,7 @@ class WelcomeFrame(tk.Frame):
 
         recent = tk.Canvas(self, background="white", highlightthickness=0)
         recent.place(relx=0.5, y=294, anchor="n", width=360, height=278)
-        _rounded_rectangle(recent, 0, 0, 360, 278, 16, fill="#f7f7f7", outline="")
+        _rounded_rectangle(recent, 0, 0, 360, 278, 16, fill="#f7f7f7")
         self.recent_list = RecentDocumentList(recent, open_recent=open_recent)
         self.recent_list.place(x=8, y=8, width=344, height=262)
         self._scrollbar = ttk.Scrollbar(recent, orient="vertical", command=self.recent_list.yview)
