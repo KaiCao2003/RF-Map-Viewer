@@ -10,27 +10,24 @@ final class StartupBehaviorTests: XCTestCase {
         _ = NSApplication.shared
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 480, height: 632),
-            styleMask: [.titled, .closable, .fullSizeContentView],
+            styleMask: .borderless,
             backing: .buffered,
             defer: false
         )
         window.isReleasedWhenClosed = false
-        window.titleVisibility = .hidden
-        window.titlebarAppearsTransparent = true
         defer { window.close() }
         var openCount = 0
         let host = NSHostingView(rootView:
             WelcomeView(openDocument: { openCount += 1 }, openRecent: { _ in openCount += 1 })
                 .frame(width: 480, height: 632)
-                .ignoresSafeArea()
         )
         window.contentView = host
         host.layoutSubtreeIfNeeded()
         try await Task.sleep(for: .milliseconds(250))
 
         XCTAssertEqual(host.fittingSize.width, 480, accuracy: 0.1)
-        // This titled AppKit host includes its titlebar safe area in fittingSize;
-        // it does not model the hidden-titlebar SwiftUI scene's outer height.
+        // Welcome uses the plain scene style, with no titlebar safe area.
+        XCTAssertEqual(host.fittingSize.height, 632, accuracy: 0.1)
         XCTAssertEqual(openCount, 0)
         XCTAssertNil(window.attachedSheet)
         XCTAssertNil(NSApplication.shared.modalWindow)
