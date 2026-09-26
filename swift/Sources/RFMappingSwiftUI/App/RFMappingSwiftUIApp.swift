@@ -311,6 +311,7 @@ private struct RFMappingWindow: View {
             openRFMapInNewWindow: openDocument
         )
         .frame(minWidth: store.hasData ? 1120 : 480, minHeight: store.hasData ? 720 : 632)
+        .ignoresSafeArea(.container, edges: store.hasData ? [] : .top)
         .navigationTitle(store.hasData ? store.windowTitle : "Welcome to RF Map Viewer")
         .focusedSceneValue(\.rfMappingCommands, commandActions)
         .background(ViewerWindowPresentation(isWelcome: !store.hasData))

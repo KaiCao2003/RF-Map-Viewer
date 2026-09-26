@@ -20,18 +20,17 @@ struct WelcomeView: View {
                 .frame(height: 22)
             Button(action: openDocument) {
                 Text("Open…")
-                    .font(.system(size: 13, weight: .medium))
+                    .font(.system(size: 13))
                     .frame(maxWidth: .infinity)
+                    .frame(height: 36)
+                    .background(Color(white: 236.0 / 255.0), in: Capsule())
             }
-            .buttonStyle(.bordered)
-            .buttonBorderShape(.capsule)
-            .controlSize(.large)
-            .frame(height: 36)
+            .buttonStyle(.plain)
             .padding(.top, 30)
 
             recentDocuments
                 .frame(height: 278)
-                .background(Color(nsColor: .windowBackgroundColor), in: RoundedRectangle(cornerRadius: 16))
+                .background(Color(white: 247.0 / 255.0), in: RoundedRectangle(cornerRadius: 16))
                 .clipShape(RoundedRectangle(cornerRadius: 16))
                 .padding(.top, 16)
             Spacer(minLength: 28)
@@ -52,7 +51,6 @@ struct WelcomeView: View {
             .accessibilityLabel("Close Window")
             .padding(20)
         }
-        .ignoresSafeArea()
         .preferredColorScheme(.light)
         .onAppear(perform: recents.refresh)
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
@@ -131,6 +129,15 @@ struct ViewerWindowPresentation: NSViewRepresentable {
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
         func updatePresentation() {
+            // SwiftUI finishes configuring the scene after attaching this view.
+            // Apply window chrome afterwards, rather than marking it complete
+            // while its titlebar and content-size policy are still being set.
+            DispatchQueue.main.async { [weak self] in
+                self?.applyPresentation()
+            }
+        }
+
+        private func applyPresentation() {
             guard let window, appliedWelcome != isWelcome else { return }
             appliedWelcome = isWelcome
             WindowRouter.shared.updateWelcomeWindow(window, isWelcome: isWelcome)
@@ -149,9 +156,14 @@ struct ViewerWindowPresentation: NSViewRepresentable {
             window.standardWindowButton(.closeButton)?.isHidden = isWelcome
             window.standardWindowButton(.miniaturizeButton)?.isHidden = isWelcome
             window.standardWindowButton(.zoomButton)?.isHidden = isWelcome
-            window.setContentSize(isWelcome
-                ? NSSize(width: 480, height: 632)
-                : NSSize(width: 1440, height: 900))
+            if isWelcome {
+                var frame = window.frame
+                frame.origin.y = frame.maxY - 632
+                frame.size = NSSize(width: 480, height: 632)
+                window.setFrame(frame, display: true)
+            } else {
+                window.setContentSize(NSSize(width: 1440, height: 900))
+            }
         }
     }
 }

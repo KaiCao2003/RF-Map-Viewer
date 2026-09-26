@@ -5,6 +5,48 @@ import XCTest
 
 @MainActor
 final class StartupBehaviorTests: XCTestCase {
+    func testWelcomePresentationFollowsSceneSetupAndRestoresDocumentChrome() async {
+        _ = NSApplication.shared
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 480, height: 632),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        let view = ViewerWindowPresentation.PresentationView()
+        window.contentView = view
+        // Scene configuration follows viewDidMoveToWindow, so these settings
+        // must be replaced by the queued welcome presentation.
+        window.titleVisibility = .visible
+        window.titlebarAppearsTransparent = false
+        let welcomeApplied = expectation(description: "Welcome applied after scene setup")
+        DispatchQueue.main.async { welcomeApplied.fulfill() }
+        await fulfillment(of: [welcomeApplied], timeout: 1)
+
+        XCTAssertTrue(window.styleMask.contains(.fullSizeContentView))
+        XCTAssertFalse(window.styleMask.contains(.resizable))
+        XCTAssertTrue(window.titlebarAppearsTransparent)
+        XCTAssertEqual(window.titleVisibility, .hidden)
+        XCTAssertEqual(window.standardWindowButton(.closeButton)?.isHidden, true)
+        XCTAssertEqual(window.frame.width, 480, accuracy: 0.1)
+        XCTAssertEqual(window.frame.height, 632, accuracy: 0.1)
+
+        view.isWelcome = false
+        view.updatePresentation()
+        let documentApplied = expectation(description: "Document chrome restored")
+        DispatchQueue.main.async { documentApplied.fulfill() }
+        await fulfillment(of: [documentApplied], timeout: 1)
+
+        XCTAssertFalse(window.styleMask.contains(.fullSizeContentView))
+        XCTAssertTrue(window.styleMask.contains(.resizable))
+        XCTAssertFalse(window.titlebarAppearsTransparent)
+        XCTAssertEqual(window.titleVisibility, .visible)
+        XCTAssertEqual(window.standardWindowButton(.closeButton)?.isHidden, false)
+        XCTAssertFalse(window.isMovableByWindowBackground)
+    }
+
     func testFileReferenceURLCompanionDiscoveryStopsAtFilesystemRoot() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
