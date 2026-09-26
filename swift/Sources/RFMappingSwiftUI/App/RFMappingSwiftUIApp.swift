@@ -235,7 +235,7 @@ struct RFMappingSwiftUIApp: App {
         WindowGroup("RF Map Viewer", id: "rf-map-viewer", for: DocumentWindowRequest.self) { request in
             RFMappingWindow(request: request.wrappedValue)
         }
-        .defaultSize(width: 800, height: 480)
+        .defaultSize(width: 480, height: 632)
         .windowResizability(.contentMinSize)
         .commands {
             RFMappingCommands()
@@ -310,7 +310,7 @@ private struct RFMappingWindow: View {
             openFigureExporter: openFigureExporter,
             openRFMapInNewWindow: openDocument
         )
-        .frame(minWidth: store.hasData ? 1120 : 760, minHeight: store.hasData ? 720 : 440)
+        .frame(minWidth: store.hasData ? 1120 : 480, minHeight: store.hasData ? 720 : 632)
         .navigationTitle(store.hasData ? store.windowTitle : "Welcome to RF Map Viewer")
         .focusedSceneValue(\.rfMappingCommands, commandActions)
         .background(ViewerWindowPresentation(isWelcome: !store.hasData))

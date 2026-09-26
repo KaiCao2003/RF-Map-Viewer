@@ -2,94 +2,58 @@ import AppKit
 import SwiftUI
 
 struct WelcomeView: View {
+    @Environment(\.dismiss) private var dismiss
     let openDocument: () -> Void
     let openRecent: (URL) -> Void
     @State private var recents = RecentDocuments.shared
     @State private var selectedURL: URL?
 
     var body: some View {
-        HStack(spacing: 0) {
-            VStack(spacing: 0) {
-                Image(nsImage: NSApplication.shared.applicationIconImage)
-                    .resizable()
-                    .interpolation(.high)
-                    .frame(width: 104, height: 104)
-                    .accessibilityHidden(true)
-                Text("RF Map Viewer")
-                    .font(.system(size: 22, weight: .semibold))
-                    .padding(.top, 18)
-                Button(action: openDocument) {
-                    Label("Open RF Map…", systemImage: "folder")
-                        .frame(width: 176)
-                }
-                .controlSize(.large)
-                .padding(.top, 30)
+        VStack(spacing: 0) {
+            Image(nsImage: NSApplication.shared.applicationIconImage)
+                .resizable()
+                .interpolation(.high)
+                .frame(width: 128, height: 128)
+                .accessibilityHidden(true)
+            Text("RF Map Viewer")
+                .font(.system(size: 18, weight: .semibold))
+                .frame(height: 22)
+            Button(action: openDocument) {
+                Text("Open…")
+                    .font(.system(size: 13, weight: .medium))
+                    .frame(maxWidth: .infinity)
             }
-            .frame(width: 320)
-            .frame(maxHeight: .infinity)
-            .background(Color(nsColor: .windowBackgroundColor))
+            .buttonStyle(.bordered)
+            .buttonBorderShape(.capsule)
+            .controlSize(.large)
+            .frame(height: 36)
+            .padding(.top, 30)
 
-            Divider()
-
-            VStack(alignment: .leading, spacing: 14) {
-                HStack {
-                    Text("Recent")
-                        .font(.headline)
-                    Spacer()
-                    if !recents.urls.isEmpty {
-                        Button("Clear Recent", action: recents.clear)
-                            .buttonStyle(.plain)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .padding(.horizontal, 10)
-
-                List(selection: $selectedURL) {
-                    ForEach(recents.urls, id: \.self) { url in
-                        HStack(spacing: 12) {
-                            Image(nsImage: NSWorkspace.shared.icon(forFile: url.path))
-                                .resizable()
-                                .frame(width: 30, height: 30)
-                                .accessibilityHidden(true)
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(url.lastPathComponent)
-                                    .font(.body.weight(.medium))
-                                    .lineLimit(1)
-                                Text((url.deletingLastPathComponent().path as NSString).abbreviatingWithTildeInPath)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1)
-                                    .truncationMode(.middle)
-                            }
-                            Spacer(minLength: 0)
-                        }
-                        .padding(.vertical, 7)
-                        .contentShape(Rectangle())
-                        .tag(url)
-                        .onTapGesture(count: 2) { openRecent(url) }
-                        .accessibilityAction { openRecent(url) }
-                    }
-                }
-                .listStyle(.inset)
-                .scrollContentBackground(.hidden)
-                .onKeyPress(.return) {
-                    guard let selectedURL else { return .ignored }
-                    openRecent(selectedURL)
-                    return .handled
-                }
-                .overlay {
-                    if recents.urls.isEmpty {
-                        Text("No Recent Documents")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
-            .padding(24)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Color(nsColor: .controlBackgroundColor))
+            recentDocuments
+                .frame(height: 278)
+                .background(Color(nsColor: .windowBackgroundColor), in: RoundedRectangle(cornerRadius: 16))
+                .clipShape(RoundedRectangle(cornerRadius: 16))
+                .padding(.top, 16)
+            Spacer(minLength: 28)
         }
+        .frame(width: 360)
+        .padding(.top, 62)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .background(.white)
+        .overlay(alignment: .topLeading) {
+            Button(action: { dismiss() }) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 14, weight: .light))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 36, height: 36)
+                    .background(Color(white: 248.0 / 255.0), in: Circle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Close Window")
+            .padding(20)
+        }
+        .ignoresSafeArea()
+        .preferredColorScheme(.light)
         .onAppear(perform: recents.refresh)
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             recents.refresh()
@@ -98,6 +62,43 @@ struct WelcomeView: View {
             if let selectedURL, !urls.contains(selectedURL) {
                 self.selectedURL = nil
             }
+        }
+    }
+
+    private var recentDocuments: some View {
+        List(selection: $selectedURL) {
+            ForEach(recents.urls, id: \.self) { url in
+                HStack(spacing: 10) {
+                    Image(nsImage: NSWorkspace.shared.icon(forFile: url.path))
+                        .resizable()
+                        .frame(width: 24, height: 24)
+                        .accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(url.lastPathComponent)
+                            .font(.system(size: 13, weight: .semibold))
+                            .lineLimit(1)
+                        Text((url.deletingLastPathComponent().path as NSString).abbreviatingWithTildeInPath)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .frame(height: 47)
+                .contentShape(Rectangle())
+                .tag(url)
+                .listRowSeparator(.hidden)
+                .onTapGesture(count: 2) { openRecent(url) }
+                .accessibilityAction { openRecent(url) }
+            }
+        }
+        .listStyle(.inset)
+        .scrollContentBackground(.hidden)
+        .onKeyPress(.return) {
+            guard let selectedURL else { return .ignored }
+            openRecent(selectedURL)
+            return .handled
         }
     }
 }
@@ -133,10 +134,23 @@ struct ViewerWindowPresentation: NSViewRepresentable {
             guard let window, appliedWelcome != isWelcome else { return }
             appliedWelcome = isWelcome
             WindowRouter.shared.updateWelcomeWindow(window, isWelcome: isWelcome)
+            if isWelcome {
+                window.styleMask.insert(.fullSizeContentView)
+                window.styleMask.remove(.resizable)
+            } else {
+                window.styleMask.remove(.fullSizeContentView)
+                window.styleMask.insert(.resizable)
+            }
             window.titleVisibility = isWelcome ? .hidden : .visible
             window.titlebarAppearsTransparent = isWelcome
+            window.appearance = isWelcome ? NSAppearance(named: .aqua) : nil
+            window.isMovableByWindowBackground = isWelcome
+            window.backgroundColor = isWelcome ? .white : .windowBackgroundColor
+            window.standardWindowButton(.closeButton)?.isHidden = isWelcome
+            window.standardWindowButton(.miniaturizeButton)?.isHidden = isWelcome
+            window.standardWindowButton(.zoomButton)?.isHidden = isWelcome
             window.setContentSize(isWelcome
-                ? NSSize(width: 800, height: 480)
+                ? NSSize(width: 480, height: 632)
                 : NSSize(width: 1440, height: 900))
         }
     }

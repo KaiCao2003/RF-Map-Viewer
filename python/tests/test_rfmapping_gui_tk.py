@@ -224,7 +224,7 @@ class TkViewerTests(unittest.TestCase):
         root = welcome._app_root
         welcome._open_crosscorrelogram()
         utility = root._rfm_crosscorrelogram_window
-        welcome._close_window()
+        welcome._startup_chooser_frame.close_button.invoke()
         root.update()
         self.assertTrue(utility.winfo_exists())
         self.assertFalse(root._rfm_quitting)
@@ -239,12 +239,13 @@ class TkViewerTests(unittest.TestCase):
         frame = welcome._startup_chooser_frame
         self.assertEqual(len(frame.recent_list.paths), 2)
         with mock.patch.object(gui.filedialog, "askopenfilename") as dialog:
-            frame.open_recent_button.invoke()
+            frame.recent_list.open_selected()
             deadline = time.monotonic() + 5
             while not welcome._viewer_ready and time.monotonic() < deadline:
                 welcome.update()
                 time.sleep(0.01)
             self.assertTrue(welcome._viewer_ready)
+            self.assertEqual(tuple(map(bool, welcome.resizable())), (True, True))
             self.assertEqual(welcome.data.path, self.app.data.path)
             self.record_recent.assert_called_with(self.app.data.path)
             dialog.assert_not_called()
@@ -258,7 +259,7 @@ class TkViewerTests(unittest.TestCase):
         self.addCleanup(utility.destroy)
         self.record_recent.reset_mock()
         with mock.patch.object(gui.messagebox, "showerror") as error:
-            welcome._startup_chooser_frame.open_recent_button.invoke()
+            welcome._startup_chooser_frame.recent_list.open_selected()
             deadline = time.monotonic() + 5
             while not error.called and time.monotonic() < deadline:
                 welcome.update()
@@ -274,12 +275,12 @@ class TkViewerTests(unittest.TestCase):
         welcomes = [gui.RFMViewer(master=self.app._app_root) for _ in range(2)]
         for welcome in welcomes:
             self.addCleanup(welcome.destroy)
-        welcomes[0]._startup_chooser_frame.clear_button.invoke()
+        welcomes[0]._clear_recent_documents()
         self.assertTrue(self.app.data.path.exists())
         for welcome in welcomes:
             frame = welcome._startup_chooser_frame
             self.assertEqual(frame.recent_list.paths, ())
-            self.assertTrue(frame.open_recent_button.instate(("disabled",)))
+            self.assertIsNone(frame.recent_list.selected_path)
 
     def test_recent_keyboard_selection_stays_visible_and_survives_refresh(self) -> None:
         self.recent_paths.extend(Path(f"/example/Probe{index}.rfmap") for index in range(12))

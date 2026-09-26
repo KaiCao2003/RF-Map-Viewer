@@ -2,29 +2,74 @@
 
 from __future__ import annotations
 
+import math
 import sys
 from pathlib import Path
 from tkinter import font as tkfont
 from typing import Callable, Sequence
 
-from PIL import Image, ImageTk
+from PIL import Image, ImageDraw, ImageTk
 
 from rfmapping_viewer.tk_support import tk, ttk
+
+
+def _rounded_rectangle(canvas, x1, y1, x2, y2, radius, **options):
+    points = []
+    for cx, cy, start in ((x2 - radius, y1 + radius, -90), (x2 - radius, y2 - radius, 0),
+                          (x1 + radius, y2 - radius, 90), (x1 + radius, y1 + radius, 180)):
+        for step in range(17):
+            angle = math.radians(start + step * 90 / 16)
+            points.extend((cx + radius * math.cos(angle), cy + radius * math.sin(angle)))
+    return canvas.create_polygon(*points, **options)
+
+
+class WelcomeButton(ttk.Button):
+    def __init__(self, master, *, command, close=False):
+        root = master._root()
+        style = ttk.Style(root)
+        name = "WelcomeClose" if close else "WelcomeOpen"
+        element = name + ".border"
+        if element not in style.element_names():
+            # Skin only the bezel; ttk retains button semantics and bindings.
+            width = 36 if close else 360
+            images = []
+            for pressed, focused in ((False, False), (True, False), (False, True)):
+                color = "#dedede" if pressed else "#f8f8f8" if close else "#ececec"
+                bitmap = Image.new("RGB", (width * 4, 144), "white")
+                draw = ImageDraw.Draw(bitmap)
+                draw.rounded_rectangle((4, 4, width * 4 - 4, 140), radius=68,
+                                       fill=color, outline="#7ca8e8" if focused else color, width=6)
+                if close:
+                    draw.line((48, 48, 96, 96), fill="#a5a5a5", width=6)
+                    draw.line((96, 48, 48, 96), fill="#a5a5a5", width=6)
+                images.append(ImageTk.PhotoImage(bitmap.resize((width, 36), Image.Resampling.LANCZOS), master=root))
+            setattr(root, "_" + name + "_images", images)
+            style.element_create(element, "image", images[0], ("pressed", images[1]),
+                                 ("focus", images[2]), sticky="nswe")
+            layout = {"sticky": "nswe"}
+            if not close:
+                layout["children"] = [("Button.label", {"sticky": "nswe"})]
+            style.layout(name + ".TButton", [(element, layout)])
+            family = root.tk.call("font", "actual", "TkDefaultFont", "-family")
+            style.configure(name + ".TButton", font=(family, -13), foreground="#242424", anchor="center")
+            style.map(name + ".TButton", foreground=[("pressed", "#242424")])
+        super().__init__(master, text="Close Window" if close else "Open…", command=command,
+                         style=name + ".TButton", takefocus=True)
+        self.bind("<Return>", lambda event: self.invoke())
 
 
 class RecentDocumentList(tk.Canvas):
     """A compact, keyboard-accessible list with filename and path typography."""
 
-    _row_height = 64
+    _row_height = 48
 
-    def __init__(self, master, *, open_recent, selection_changed):
-        super().__init__(master, background="white", highlightthickness=0, takefocus=True)
+    def __init__(self, master, *, open_recent):
+        super().__init__(master, background="#f7f7f7", highlightthickness=0, takefocus=True)
         self.paths: tuple[Path, ...] = ()
         self.selected: int | None = None
         self._open_recent = open_recent
-        self._selection_changed = selection_changed
         family = self.tk.call("font", "actual", "TkDefaultFont", "-family")
-        self._name_font = tkfont.Font(self, family=family, size=-13, weight="bold")
+        self._name_font = tkfont.Font(self, family=family, size=-13)
         self._path_font = tkfont.Font(self, family=family, size=-11)
         self.bind("<Configure>", self._draw)
         self.bind("<FocusIn>", self._draw)
@@ -36,10 +81,13 @@ class RecentDocumentList(tk.Canvas):
         self.bind("<Down>", lambda event: self._step(1))
         self.bind("<Home>", lambda event: self.select(0))
         self.bind("<End>", lambda event: self.select(len(self.paths) - 1))
+        self._tk9_scrolling = int(str(self.tk.call("package", "present", "Tk")).split(".")[0]) >= 9
         self.bind("<MouseWheel>", self._scroll)
-        self.bind("<Button-4>", lambda event: self.yview_scroll(-1, "units"))
-        self.bind("<Button-5>", lambda event: self.yview_scroll(1, "units"))
-        self.configure(yscrollincrement=16)
+        if self._tk9_scrolling:
+            self.bind("<TouchpadScroll>", lambda event: self._scroll(event, precise=True))
+        self.bind("<Button-4>", lambda event: self.yview_scroll(-16 if self._tk9_scrolling else -1, "units"))
+        self.bind("<Button-5>", lambda event: self.yview_scroll(16 if self._tk9_scrolling else 1, "units"))
+        self.configure(yscrollincrement=1 if self._tk9_scrolling else 16)
 
     @property
     def selected_path(self) -> Path | None:
@@ -64,7 +112,6 @@ class RecentDocumentList(tk.Canvas):
             elif bottom > self.canvasy(height):
                 self.yview_moveto((bottom - height) / (len(self.paths) * self._row_height))
         self._draw()
-        self._selection_changed()
         return "break"
 
     def open_selected(self, _event=None) -> str:
@@ -88,8 +135,15 @@ class RecentDocumentList(tk.Canvas):
             self.open_selected()
         return "break"
 
-    def _scroll(self, event) -> str:
-        delta = -event.delta if sys.platform == "darwin" else -int(event.delta / 120)
+    def _scroll(self, event, *, precise=False) -> str:
+        if precise:
+            # Tk 9 packs signed horizontal/vertical pixel deltas into %D.
+            _, delta_y = self.tk.call("tk::PreciseScrollDeltas", event.delta)
+            delta = -int(delta_y)
+        elif self._tk9_scrolling:
+            delta = -int(event.delta / 120) * 16
+        else:
+            delta = -event.delta if sys.platform == "darwin" else -int(event.delta / 120)
         self.yview_scroll(delta, "units")
         return "break"
 
@@ -116,26 +170,21 @@ class RecentDocumentList(tk.Canvas):
         for index, path in enumerate(self.paths):
             y = index * self._row_height
             if index == self.selected:
-                color = "#e7f0fd" if self.focus_get() == self else "#f0f0f2"
-                self.create_polygon(
-                    10, y + 2, width - 10, y + 2, width - 3, y + 9,
-                    width - 3, y + 55, width - 10, y + 62, 10, y + 62,
-                    3, y + 55, 3, y + 9, smooth=True, splinesteps=16,
-                    fill=color, outline="",
-                )
+                _rounded_rectangle(self, 0, y, width, y + 47, 10,
+                                   fill="#dce8f8" if self.focus_get() == self else "#dedede", outline="")
             # The folded document outline keeps rows recognizable without extra copy.
-            self.create_polygon(17, y + 17, 32, y + 17, 39, y + 24, 39, y + 46,
-                                17, y + 46, fill="white", outline="#a7a7ad", width=1)
-            self.create_line(32, y + 17, 32, y + 24, 39, y + 24, fill="#a7a7ad")
-            self.create_line(22, y + 32, 34, y + 32, fill="#c2c2c7")
-            self.create_line(22, y + 37, 31, y + 37, fill="#c2c2c7")
-            available = max(width - 72, 0)
-            self.create_text(53, y + 22, anchor="w", fill="#252528", font=self._name_font,
+            self.create_polygon(14, y + 11, 27, y + 11, 33, y + 17, 33, y + 36,
+                                14, y + 36, fill="white", outline="#a7a7ad", width=1)
+            self.create_line(27, y + 11, 27, y + 17, 33, y + 17, fill="#a7a7ad")
+            self.create_line(18, y + 24, 29, y + 24, fill="#c2c2c7")
+            self.create_line(18, y + 29, 27, y + 29, fill="#c2c2c7")
+            available = max(width - 58, 0)
+            self.create_text(48, y + 16, anchor="w", fill="#252528", font=self._name_font,
                              text=self._abbreviate(path.name, self._name_font, available))
             parent = path.parent
             home = Path.home()
             display = str(Path("~") / parent.relative_to(home)) if parent.is_relative_to(home) else str(parent)
-            self.create_text(53, y + 42, anchor="w", fill="#74747a", font=self._path_font,
+            self.create_text(48, y + 33, anchor="w", fill="#74747a", font=self._path_font,
                              text=self._abbreviate(display, self._path_font, available, keep_end=True))
 
 
@@ -146,18 +195,12 @@ class WelcomeFrame(tk.Frame):
         *,
         open_document: Callable[[], None],
         open_recent: Callable[[Path], None],
-        clear_recent: Callable[[], None],
+        close_window: Callable[[], None],
     ) -> None:
         super().__init__(master, background="white")
-        self.columnconfigure(2, weight=1)
-        self.rowconfigure(0, weight=1)
         family = self.tk.call("font", "actual", "TkDefaultFont", "-family")
-
-        introduction = tk.Frame(self, width=318, background="#f6f6f7")
-        introduction.grid(row=0, column=0, sticky="nsew")
-        introduction.grid_propagate(False)
-        content = tk.Frame(introduction, background="#f6f6f7")
-        content.place(relx=0.5, rely=0.5, anchor="center")
+        self.close_button = WelcomeButton(self, command=close_window, close=True)
+        self.close_button.place(x=20, y=20, width=36, height=36)
         icon_path = (Path(sys.executable).parent.parent / "Resources" / "RFMappingViewer.icns"
                      if getattr(sys, "frozen", False)
                      else Path(__file__).parent.parent / "assets" / "rf-mapping-viewer-icon-1024.png")
@@ -165,61 +208,35 @@ class WelcomeFrame(tk.Frame):
             if "nsimage" in self.tk.call("image", "types"):
                 # NSImage keeps the bundle icon's Retina representations intact.
                 self._icon = tk.Image("nsimage", master=self, cnf={
-                    "source": str(icon_path), "as": "file", "width": 104, "height": 104,
+                    "source": str(icon_path), "as": "file", "width": 128, "height": 128,
                 })
             else:
                 with Image.open(icon_path) as icon:
-                    self._icon = ImageTk.PhotoImage(icon.convert("RGBA").resize((104, 104), Image.Resampling.LANCZOS), master=self)
-            tk.Label(content, image=self._icon, background="#f6f6f7", borderwidth=0).pack()
+                    self._icon = ImageTk.PhotoImage(icon.convert("RGBA").resize((128, 128), Image.Resampling.LANCZOS), master=self)
+            tk.Label(self, image=self._icon, background="white", borderwidth=0).place(relx=0.5, y=62, anchor="n")
         # Pixel sizes avoid Tk's 96-dpi point conversion enlarging the macOS type.
-        tk.Label(content, text="RF Map Viewer", background="#f6f6f7", foreground="#202023",
-                 font=(family, -22, "bold")).pack(pady=(14, 0))
-        self.open_button = ttk.Button(content, text="Open RF Map…", command=open_document, width=17)
-        self.open_button.pack(pady=(28, 0))
-        tk.Frame(self, width=1, background="#dedee2").grid(row=0, column=1, sticky="ns")
+        tk.Label(self, text="RF Map Viewer", background="white", foreground="#202023",
+                 font=(family, -18, "bold"), borderwidth=0).place(relx=0.5, y=190, anchor="n")
+        self.open_button = WelcomeButton(self, command=open_document)
+        self.open_button.place(relx=0.5, y=242, anchor="n", width=360, height=36)
 
-        recent = tk.Frame(self, background="white", padx=20, pady=24)
-        recent.grid(row=0, column=2, sticky="nsew")
-        recent.columnconfigure(0, weight=1)
-        recent.rowconfigure(1, weight=1)
-        tk.Label(recent, text="Recent", font=(family, -12, "bold"), foreground="#606066",
-                 background="white", anchor="w").grid(row=0, column=0, sticky="ew", padx=10, pady=(0, 14))
-        listing = tk.Frame(recent, background="white")
-        listing.grid(row=1, column=0, sticky="nsew")
-        listing.columnconfigure(0, weight=1)
-        listing.rowconfigure(0, weight=1)
-        self.recent_list = RecentDocumentList(listing, open_recent=open_recent, selection_changed=self._selection_changed)
-        self.recent_list.grid(row=0, column=0, sticky="nsew")
-        self._scrollbar = ttk.Scrollbar(listing, orient="vertical", command=self.recent_list.yview)
+        recent = tk.Canvas(self, background="white", highlightthickness=0)
+        recent.place(relx=0.5, y=294, anchor="n", width=360, height=278)
+        _rounded_rectangle(recent, 0, 0, 360, 278, 16, fill="#f7f7f7", outline="")
+        self.recent_list = RecentDocumentList(recent, open_recent=open_recent)
+        self.recent_list.place(x=8, y=8, width=344, height=262)
+        self._scrollbar = ttk.Scrollbar(recent, orient="vertical", command=self.recent_list.yview)
         self.recent_list.configure(yscrollcommand=self._update_scrollbar)
-        self._empty_label = tk.Label(listing, text="No Recent Documents", font=(family, -13),
-                                     foreground="#8a8a90", background="white")
-        footer = tk.Frame(recent, background="white")
-        footer.grid(row=2, column=0, sticky="ew", pady=(18, 0))
-        footer.columnconfigure(0, weight=1)
-        self.clear_button = ttk.Button(footer, text="Clear Recent", command=clear_recent)
-        self.clear_button.grid(row=0, column=0, sticky="w")
-        self.open_recent_button = ttk.Button(footer, text="Open", command=self.recent_list.open_selected, width=8)
-        self.open_recent_button.grid(row=0, column=1, sticky="e")
         self.refresh_recent_documents(())
 
     def refresh_recent_documents(self, paths: Sequence[Path]) -> None:
         self.recent_list.refresh(paths)
-        if paths:
-            self._empty_label.place_forget()
-            self.clear_button.grid()
-            self.open_recent_button.grid()
-        else:
-            self._empty_label.place(relx=0.5, rely=0.5, anchor="center")
-            self.clear_button.grid_remove()
-            self.open_recent_button.grid_remove()
-
-    def _selection_changed(self) -> None:
-        self.open_recent_button.state(["!disabled"] if self.recent_list.selected_path else ["disabled"])
 
     def _update_scrollbar(self, first, last) -> None:
         self._scrollbar.set(first, last)
         if float(first) <= 0 and float(last) >= 1:
-            self._scrollbar.grid_remove()
+            self._scrollbar.place_forget()
+            self.recent_list.place_configure(width=344)
         else:
-            self._scrollbar.grid(row=0, column=1, sticky="ns")
+            self._scrollbar.place(x=338, y=12, height=254)
+            self.recent_list.place_configure(width=326)

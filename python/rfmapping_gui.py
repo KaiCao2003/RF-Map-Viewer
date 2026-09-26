@@ -136,6 +136,7 @@ from rfmapping_viewer.tk_support import (
     allow_macos_fullscreen_resize,
     filedialog,
     messagebox,
+    set_macos_welcome_chrome,
     tk,
     ttk,
 )
@@ -552,13 +553,15 @@ class RFMViewer(tk.Toplevel):
 
         if self._startup_chooser_frame is not None:
             return
-        self.geometry("800x460")
-        self.minsize(760, 420)
+        set_macos_welcome_chrome(self, True)
+        self.geometry("480x632")
+        self.minsize(480, 632)
+        self.resizable(False, False)
         frame = WelcomeFrame(
             self,
             open_document=self._open_json,
             open_recent=self._open_document_path,
-            clear_recent=self._clear_recent_documents,
+            close_window=self._close_window,
         )
         frame.pack(fill="both", expand=True)
         frame.refresh_recent_documents(list_recent_documents())
@@ -594,6 +597,8 @@ class RFMViewer(tk.Toplevel):
         if self._startup_chooser_frame is not None:
             self._startup_chooser_frame.destroy()
             self._startup_chooser_frame = None
+            set_macos_welcome_chrome(self, False)
+            self.resizable(True, True)
 
     def _remove_startup_loading_shell(self) -> None:
         if self._startup_progress is not None:
