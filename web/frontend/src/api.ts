@@ -526,8 +526,7 @@ function normalizeHdUnit(payload: unknown, fallbackUnitId?: number): HdUnitArtif
   if (!Number.isFinite(unitId)) return null;
   const rates = nullableNumbers(first(source, "rates", "firingRateHz", "firing_rate_hz"));
   const countsRaw = first(source, "spikeCounts", "spike_counts");
-  if (!Array.isArray(countsRaw)) return null;
-  const counts = countsRaw.map((value) => finiteNumber(value));
+  const counts = Array.isArray(countsRaw) ? countsRaw.map((value) => finiteNumber(value)) : null;
   const hdClassRaw = first(source, "hdClass", "hd_class");
   return {
     unitId,

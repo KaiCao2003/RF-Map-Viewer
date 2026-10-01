@@ -51,6 +51,16 @@ export function smoothCircular(values: ReadonlyArray<number>, sigma: number): nu
   }, 0));
 }
 
+export function smoothCircularMissingAware(
+  values: ReadonlyArray<number | null>,
+  sigma: number,
+): Array<number | null> {
+  const finite = values.map((value) => value != null && Number.isFinite(value));
+  const numerator = smoothCircular(values.map((value, index) => finite[index] ? value! : 0), sigma);
+  const denominator = smoothCircular(finite.map((valid) => valid ? 1 : 0), sigma);
+  return numerator.map((value, index) => denominator[index] > 1e-12 ? value / denominator[index] : null);
+}
+
 function anglesFor(displayBins: number): number[] {
   const width = 360 / displayBins;
   return Array.from({ length: displayBins }, (_unused, index) => (index + 0.5) * width);
@@ -88,7 +98,7 @@ export function aggregateHdCounts(
   const grouped = aggregateHdObservations(spikeCounts, occupancyTimeS, displayBins);
   return {
     angles: grouped.angles,
-    rates: grouped.counts.map((count, index) => grouped.occupancy[index] > 0
+    rates: grouped.counts.map((count, index) => grouped.occupancy[index] > 1e-12
       ? count / grouped.occupancy[index]
       : null),
   };
@@ -116,12 +126,35 @@ export function smoothHdCounts(
   };
 }
 
+export function aggregateHdRates(
+  rates: ReadonlyArray<number | null>,
+  requestedDisplayBins: number,
+): ProcessedHdCurve {
+  requireRawLength(rates, "HD rates");
+  const displayBins = normalizeHdBinCount(requestedDisplayBins);
+  const groupSize = HD_RAW_BIN_COUNT / displayBins;
+  const groupedRates: Array<number | null> = [];
+  for (let start = 0; start < HD_RAW_BIN_COUNT; start += groupSize) {
+    const group = rates.slice(start, start + groupSize).filter((rate): rate is number => rate != null && Number.isFinite(rate));
+    groupedRates.push(group.length ? group.reduce((sum, rate) => sum + rate, 0) / group.length : null);
+  }
+  return { angles: anglesFor(displayBins), rates: groupedRates };
+}
+
 export function processHdUnit(
   unit: HdUnitArtifact,
-  occupancyTimeS: ReadonlyArray<number>,
+  occupancyTimeS: ReadonlyArray<number> | null,
   options: HdProcessingOptions,
 ): ProcessedHdCurve {
   const displayBins = normalizeHdBinCount(options.displayBins);
+  if (unit.spikeCounts == null || occupancyTimeS == null || !occupancyTimeS.some((value) => value > 0)) {
+    // Legacy files have rates only: smooth and average those rates without inventing exposure.
+    requireRawLength(unit.rates, "HD rates");
+    const rates = options.smoothing
+      ? smoothCircularMissingAware(unit.rates, tuningSmoothingSigma(options.sigma, HD_RAW_BIN_COUNT))
+      : unit.rates;
+    return aggregateHdRates(rates, displayBins);
+  }
   requireRawLength(unit.spikeCounts, "HD spike counts");
   requireRawLength(occupancyTimeS, "HD occupancy");
   return options.smoothing
@@ -137,7 +170,7 @@ export function hdRatePeak(rates: ReadonlyArray<number | null>): number {
 
 export function sharedHdPeak(
   units: ReadonlyArray<HdUnitArtifact>,
-  occupancyTimeS: ReadonlyArray<number>,
+  occupancyTimeS: ReadonlyArray<number> | null,
   options: HdProcessingOptions,
 ): number {
   return Math.max(0, ...units.map((unit) => hdRatePeak(processHdUnit(unit, occupancyTimeS, options).rates)));

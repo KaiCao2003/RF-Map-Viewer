@@ -20,22 +20,11 @@ HD_RAW_BIN_COUNT = 180
 TUNING_TOP_LEVEL_KEYS = (
     "metadata",
     "angle_bin_edges_deg",
-    "occupancy_samples",
     "occupancy_time_s",
     "unit_id",
     "spike_counts",
     "firing_rate_hz",
     "unit_data",
-)
-TUNING_UNIT_DATA_KEYS = (
-    "hd_class",
-    "rate_mvl",
-    "spike_angle_mrl",
-    "rayleigh_score",
-    "rayleigh_p",
-    "rayleigh_significant",
-    "shuffle_p",
-    "shuffle_significant",
 )
 PROBE_RE = re.compile(r"^probe[ab]$", re.IGNORECASE)
 SESSION_RE = re.compile(r"^(?P<date>\d{6,8})_(?P<index>\d+)$")
@@ -45,7 +34,7 @@ SESSION_RE = re.compile(r"^(?P<date>\d{6,8})_(?P<index>\d+)$")
 class TuningUnit:
     unit_id: int
     rates: tuple[float | None, ...]
-    spike_counts: tuple[int, ...]
+    spike_counts: tuple[int, ...] | None
     hd_class: int | None = None
 
 
@@ -53,7 +42,7 @@ class TuningUnit:
 class TuningCurveData:
     path: Path
     units: tuple[TuningUnit, ...]
-    occupancy_time_s: tuple[float, ...]
+    occupancy_time_s: tuple[float, ...] | None
     metadata: dict[str, Any] | None = None
 
     @property
@@ -642,12 +631,13 @@ def _validated_metadata(raw_metadata: Any) -> dict[str, Any] | None:
             "class_0",
             "class_1",
             "class_2",
+            "class_3",
             "class_null",
             "rayleigh_test",
         ):
             if key in classification_raw:
                 classification[key] = _metadata_string(classification_raw, key, context)
-        for key in ("rayleigh_alpha", "shuffle_alpha"):
+        for key in ("kappa_cutoff", "rayleigh_alpha", "shuffle_alpha"):
             if key in classification_raw:
                 classification[key] = _metadata_float(classification_raw, key, context)
         for key in ("num_shuffle", "shuffle_seed"):
@@ -701,323 +691,204 @@ def _validated_metadata(raw_metadata: Any) -> dict[str, Any] | None:
     return result
 
 
-def _load_tuning_curve_payload(
-    path: Path, payload: Mapping[str, Any]
-) -> TuningCurveData:
-    metadata = _validated_metadata(payload.get("metadata"))
-    if metadata is None:
-        raise ValueError("Tuning-curve metadata must be an object.")
-    if metadata.get("num_angle_bins") not in (None, HD_RAW_BIN_COUNT):
-        raise ValueError(
-            f"Tuning-curve metadata.num_angle_bins must equal {HD_RAW_BIN_COUNT}."
-        )
-    metadata_fs = metadata.get("feature_fs_hz")
-    if metadata_fs is not None and float(metadata_fs) <= 0.0:
-        raise ValueError("Tuning-curve metadata.feature_fs_hz must be positive.")
-    classification = metadata.get("classification")
-    rayleigh_alpha = 0.05
-    shuffle_alpha = 0.01
-    if isinstance(classification, dict):
-        if classification.get("rayleigh_alpha") is not None:
-            rayleigh_alpha = float(classification["rayleigh_alpha"])
-        if classification.get("shuffle_alpha") is not None:
-            shuffle_alpha = float(classification["shuffle_alpha"])
-    if not 0.0 <= rayleigh_alpha <= 1.0:
-        raise ValueError(
-            "Tuning-curve metadata.classification.rayleigh_alpha must be between 0 and 1."
-        )
-    if not 0.0 <= shuffle_alpha <= 1.0:
-        raise ValueError(
-            "Tuning-curve metadata.classification.shuffle_alpha must be between 0 and 1."
-        )
+def _tuning_array(value: Any, label: str, length: int) -> list[Any]:
+    if not isinstance(value, list) or len(value) != length:
+        raise ValueError(f"{label} must contain {length} values.")
+    return value
 
-    raw_edges = payload.get("angle_bin_edges_deg")
-    if not isinstance(raw_edges, list) or len(raw_edges) != HD_RAW_BIN_COUNT + 1:
-        raise ValueError(
-            f"Tuning-curve angle_bin_edges_deg must contain {HD_RAW_BIN_COUNT + 1} values."
-        )
-    edges: list[float] = []
-    for index, raw_edge in enumerate(raw_edges):
-        if isinstance(raw_edge, bool) or not isinstance(raw_edge, (int, float)):
-            raise ValueError(f"Tuning-curve angle edge {index + 1} is not numeric.")
-        edge = _json_number(raw_edge, f"Tuning-curve angle edge {index + 1}")
-        edges.append(edge)
-    if not all(after > before for before, after in zip(edges, edges[1:])):
-        raise ValueError(
-            "Tuning-curve angle_bin_edges_deg must be strictly increasing."
-        )
-    expected_width = 360.0 / HD_RAW_BIN_COUNT
+
+def _tuning_integer(value: Any, label: str) -> int:
+    if type(value) is not int:
+        raise ValueError(f"{label} must be an integer.")
+    return value
+
+
+def _tuning_observations(payload: Mapping[str, Any]) -> tuple[float, ...]:
+    raw_edges = _tuning_array(
+        payload.get("angle_bin_edges_deg"),
+        "Tuning-curve angle_bin_edges_deg",
+        HD_RAW_BIN_COUNT + 1,
+    )
+    edges = [
+        _json_number(value, f"Tuning-curve angle edge {index + 1}")
+        for index, value in enumerate(raw_edges)
+    ]
     if not all(
-        math.isclose(edge, index * expected_width, rel_tol=0.0, abs_tol=1e-8)
+        math.isclose(edge, index * 2.0, rel_tol=0.0, abs_tol=1e-8)
         for index, edge in enumerate(edges)
     ):
         raise ValueError("Tuning-curve angle bins must span 0–360° in 180 equal bins.")
-
-    raw_occupancy_samples = payload.get("occupancy_samples")
-    if (
-        not isinstance(raw_occupancy_samples, list)
-        or len(raw_occupancy_samples) != HD_RAW_BIN_COUNT
-    ):
-        raise ValueError(
-            f"Tuning-curve occupancy_samples must contain {HD_RAW_BIN_COUNT} values."
+    raw_occupancy = _tuning_array(
+        payload.get("occupancy_time_s"),
+        "Tuning-curve occupancy_time_s",
+        HD_RAW_BIN_COUNT,
+    )
+    occupancy = tuple(
+        _json_number(
+            value, f"Tuning-curve occupancy time {index + 1}", nonnegative=True
         )
-    occupancy_samples: list[int] = []
-    for index, raw_value in enumerate(raw_occupancy_samples):
-        if type(raw_value) is not int or raw_value < 0:
-            raise ValueError(
-                f"Tuning-curve occupancy sample {index + 1} must be a non-negative integer."
-            )
-        occupancy_samples.append(int(raw_value))
-
-    raw_occupancy = payload.get("occupancy_time_s")
-    if not isinstance(raw_occupancy, list) or len(raw_occupancy) != HD_RAW_BIN_COUNT:
-        raise ValueError(
-            f"Tuning-curve occupancy_time_s must contain {HD_RAW_BIN_COUNT} values."
-        )
-    occupancy: list[float] = []
-    for index, raw_value in enumerate(raw_occupancy):
-        if isinstance(raw_value, bool) or not isinstance(raw_value, (int, float)):
-            raise ValueError(f"Tuning-curve occupancy time {index + 1} is not numeric.")
-        value = _json_number(
-            raw_value,
-            f"Tuning-curve occupancy time {index + 1}",
-            nonnegative=True,
-        )
-        occupancy.append(value)
+        for index, value in enumerate(raw_occupancy)
+    )
     if not any(value > 0.0 for value in occupancy):
-        raise ValueError(
-            "Tuning-curve occupancy_time_s must contain positive occupancy."
-        )
+        raise ValueError("Tuning-curve occupancy_time_s must contain positive occupancy.")
+    return occupancy
 
-    sampling_rates: list[float] = []
-    for index, (samples, occupied_s) in enumerate(zip(occupancy_samples, occupancy)):
-        if (samples == 0) != (occupied_s == 0.0):
+
+def _observed_tuning_unit(
+    unit_id: int,
+    raw_counts: Any,
+    raw_rates: Any,
+    hd_class: Any,
+    occupancy: tuple[float, ...],
+) -> TuningUnit:
+    count_values = _tuning_array(
+        raw_counts, f"Unit {unit_id} spike_counts", HD_RAW_BIN_COUNT
+    )
+    rate_values = _tuning_array(
+        raw_rates, f"Unit {unit_id} firing_rate_hz", HD_RAW_BIN_COUNT
+    )
+    counts: list[int] = []
+    rates: list[float | None] = []
+    for bin_index, (raw_count, raw_rate, occupied_s) in enumerate(
+        zip(count_values, rate_values, occupancy)
+    ):
+        if type(raw_count) is not int or raw_count < 0:
             raise ValueError(
-                f"Tuning-curve occupancy bin {index + 1} has inconsistent samples and time."
+                f"Unit {unit_id} spike count {bin_index + 1} must be a non-negative integer."
             )
-        if samples > 0:
+        if occupied_s == 0.0:
+            if raw_count != 0 or raw_rate is not None:
+                raise ValueError(
+                    f"Unit {unit_id} bin {bin_index + 1} has zero occupancy and must contain count 0 / rate null."
+                )
+            rate = None
+        else:
+            rate = _json_number(
+                raw_rate,
+                f"Unit {unit_id} firing rate {bin_index + 1}",
+                nonnegative=True,
+            )
             try:
-                sampling_rate = samples / occupied_s
+                expected_rate = raw_count / occupied_s
             except OverflowError as exc:
                 raise ValueError(
-                    f"Tuning-curve occupancy bin {index + 1} implies an invalid sampling rate."
+                    f"Unit {unit_id} bin {bin_index + 1} implies an invalid firing rate."
                 ) from exc
-            if not math.isfinite(sampling_rate) or sampling_rate <= 0.0:
+            if not math.isfinite(expected_rate) or not math.isclose(
+                rate, expected_rate, rel_tol=1e-7, abs_tol=1e-9
+            ):
                 raise ValueError(
-                    f"Tuning-curve occupancy bin {index + 1} implies an invalid sampling rate."
+                    f"Unit {unit_id} firing rate {bin_index + 1} does not match count / occupancy."
                 )
-            sampling_rates.append(sampling_rate)
-    reference_fs = sampling_rates[0]
-    if not all(
-        math.isclose(value, reference_fs, rel_tol=1e-9, abs_tol=1e-9)
-        for value in sampling_rates[1:]
+        counts.append(raw_count)
+        rates.append(rate)
+    if hd_class is not None and (
+        type(hd_class) is not int or hd_class not in {0, 1, 2, 3}
     ):
-        raise ValueError(
-            "Tuning-curve occupancy_samples and occupancy_time_s imply inconsistent sampling rates."
-        )
-    if metadata_fs is not None and not math.isclose(
-        float(metadata_fs), reference_fs, rel_tol=1e-9, abs_tol=1e-9
-    ):
-        raise ValueError(
-            "Tuning-curve metadata.feature_fs_hz does not match occupancy samples/time."
-        )
+        raise ValueError(f"Unit {unit_id} hd_class must be 0, 1, 2, 3, or null.")
+    # Classification is saved scientific input. The viewer does not derive it
+    # from significance flags, which cannot distinguish the kappa-based class 3.
+    return TuningUnit(unit_id, tuple(rates), tuple(counts), hd_class)
 
+
+def _load_tuning_curve_payload(
+    path: Path, payload: Mapping[str, Any]
+) -> TuningCurveData:
+    missing = [key for key in TUNING_TOP_LEVEL_KEYS if key not in payload]
+    if missing:
+        raise ValueError(f"Missing tuning-curve keys: {', '.join(missing)}.")
+    metadata = _validated_metadata(payload.get("metadata"))
+    occupancy = _tuning_observations(payload)
     raw_unit_ids = payload.get("unit_id")
     if not isinstance(raw_unit_ids, list) or not raw_unit_ids:
         raise ValueError("Tuning-curve unit_id must be a non-empty list.")
-    unit_ids: list[int] = []
-    for unit_index, raw_unit_id in enumerate(raw_unit_ids):
-        if type(raw_unit_id) is not int or raw_unit_id < 0:
-            raise ValueError(
-                f"Tuning-curve unit_id value {unit_index + 1} must be a non-negative integer."
-            )
-        unit_ids.append(int(raw_unit_id))
+    unit_ids = [
+        _tuning_integer(value, f"Tuning-curve unit_id value {index + 1}")
+        for index, value in enumerate(raw_unit_ids)
+    ]
     if len(set(unit_ids)) != len(unit_ids):
         raise ValueError("Tuning-curve unit_id values must be unique.")
-
-    raw_counts_matrix = payload.get("spike_counts")
-    raw_rates_matrix = payload.get("firing_rate_hz")
     num_units = len(unit_ids)
-    if not isinstance(raw_counts_matrix, list) or len(raw_counts_matrix) != num_units:
-        raise ValueError(
-            "Tuning-curve spike_counts row count must match unit_id length."
-        )
-    if not isinstance(raw_rates_matrix, list) or len(raw_rates_matrix) != num_units:
-        raise ValueError(
-            "Tuning-curve firing_rate_hz row count must match unit_id length."
-        )
-
-    raw_unit_data = payload.get("unit_data")
-    if not isinstance(raw_unit_data, dict):
-        raise ValueError("Tuning-curve unit_data must be an object.")
-    missing_unit_data = [
-        key for key in TUNING_UNIT_DATA_KEYS if key not in raw_unit_data
-    ]
-    unexpected_unit_data = [
-        key for key in raw_unit_data if key not in TUNING_UNIT_DATA_KEYS
-    ]
-    if missing_unit_data:
-        raise ValueError(
-            f"Missing tuning-curve unit_data keys: {', '.join(missing_unit_data)}."
-        )
-    if unexpected_unit_data:
-        raise ValueError(
-            f"Unexpected tuning-curve unit_data keys: {', '.join(unexpected_unit_data)}."
-        )
-    unit_data: dict[str, list[Any]] = {}
-    for key in TUNING_UNIT_DATA_KEYS:
-        raw_column = raw_unit_data[key]
-        if not isinstance(raw_column, list) or len(raw_column) != num_units:
-            raise ValueError(f"Tuning-curve unit_data.{key} length must match unit_id.")
-        unit_data[key] = raw_column
-
-    def optional_number(
-        key: str,
-        unit_index: int,
-        *,
-        maximum: float | None = None,
-    ) -> float | None:
-        raw_value = unit_data[key][unit_index]
-        if raw_value is None:
-            return None
-        value = _json_number(
-            raw_value,
-            f"Unit {unit_ids[unit_index]} {key}",
-            nonnegative=True,
-        )
-        if maximum is not None and value > maximum:
-            if not math.isclose(value, maximum, rel_tol=0.0, abs_tol=1e-12):
-                raise ValueError(
-                    f"Unit {unit_ids[unit_index]} {key} must not exceed {maximum}."
-                )
-            value = maximum
-        return value
-
-    units: list[TuningUnit] = []
-    for unit_index, unit_id in enumerate(unit_ids):
-        raw_counts = raw_counts_matrix[unit_index]
-        raw_rates = raw_rates_matrix[unit_index]
-        if not isinstance(raw_counts, list) or len(raw_counts) != HD_RAW_BIN_COUNT:
-            raise ValueError(
-                f"Unit {unit_id} spike_counts must contain {HD_RAW_BIN_COUNT} values."
-            )
-        if not isinstance(raw_rates, list) or len(raw_rates) != HD_RAW_BIN_COUNT:
-            raise ValueError(
-                f"Unit {unit_id} firing_rate_hz must contain {HD_RAW_BIN_COUNT} values."
-            )
-        counts: list[int] = []
-        rates: list[float | None] = []
-        for bin_index, (raw_count, raw_rate, occupied_s) in enumerate(
-            zip(raw_counts, raw_rates, occupancy)
-        ):
-            if type(raw_count) is not int or raw_count < 0:
-                raise ValueError(
-                    f"Unit {unit_id} spike count {bin_index + 1} must be a non-negative integer."
-                )
-            count = int(raw_count)
-            if occupied_s == 0.0:
-                if count != 0 or raw_rate is not None:
-                    raise ValueError(
-                        f"Unit {unit_id} bin {bin_index + 1} has zero occupancy and must contain count 0 / rate null."
-                    )
-                rate: float | None = None
-            else:
-                if isinstance(raw_rate, bool) or not isinstance(raw_rate, (int, float)):
-                    raise ValueError(
-                        f"Unit {unit_id} firing rate {bin_index + 1} is not numeric."
-                    )
-                rate = _json_number(
-                    raw_rate,
-                    f"Unit {unit_id} firing rate {bin_index + 1}",
-                    nonnegative=True,
-                )
-                try:
-                    expected_rate = count / occupied_s
-                except OverflowError as exc:
-                    raise ValueError(
-                        f"Unit {unit_id} bin {bin_index + 1} implies an invalid firing rate."
-                    ) from exc
-                if not math.isfinite(expected_rate) or not math.isclose(
-                    rate, expected_rate, rel_tol=1e-7, abs_tol=1e-9
-                ):
-                    raise ValueError(
-                        f"Unit {unit_id} firing rate {bin_index + 1} does not match count / occupancy."
-                    )
-            counts.append(count)
-            rates.append(rate)
-
-        optional_number("rate_mvl", unit_index, maximum=1.0)
-        optional_number("spike_angle_mrl", unit_index, maximum=1.0)
-        rayleigh_score = optional_number("rayleigh_score", unit_index)
-        rayleigh_p = optional_number("rayleigh_p", unit_index, maximum=1.0)
-        shuffle_p = optional_number("shuffle_p", unit_index, maximum=1.0)
-        if (rayleigh_score is None) != (rayleigh_p is None):
-            raise ValueError(
-                f"Unit {unit_id} rayleigh_score and rayleigh_p must both be null or numeric."
-            )
-        raw_rayleigh_significant = unit_data["rayleigh_significant"][unit_index]
-        raw_shuffle_significant = unit_data["shuffle_significant"][unit_index]
-        if (
-            raw_rayleigh_significant is not None
-            and type(raw_rayleigh_significant) is not bool
-        ):
-            raise ValueError(
-                f"Unit {unit_id} rayleigh_significant must be boolean or null."
-            )
-        if (
-            raw_shuffle_significant is not None
-            and type(raw_shuffle_significant) is not bool
-        ):
-            raise ValueError(
-                f"Unit {unit_id} shuffle_significant must be boolean or null."
-            )
-        expected_rayleigh_significant = (
-            None if rayleigh_p is None else rayleigh_p < rayleigh_alpha
-        )
-        expected_shuffle_significant = (
-            None if shuffle_p is None else shuffle_p <= shuffle_alpha
-        )
-        if raw_rayleigh_significant != expected_rayleigh_significant:
-            raise ValueError(
-                f"Unit {unit_id} rayleigh_significant does not match rayleigh_p."
-            )
-        if raw_shuffle_significant != expected_shuffle_significant:
-            raise ValueError(
-                f"Unit {unit_id} shuffle_significant does not match shuffle_p."
-            )
-
-        hd_class = unit_data["hd_class"][unit_index]
-        if hd_class is not None and (
-            type(hd_class) is not int or hd_class not in {0, 1, 2}
-        ):
-            raise ValueError(f"Unit {unit_id} hd_class must be 0, 1, 2, or null.")
-        expected_hd_class = (
-            None
-            if raw_rayleigh_significant is None or raw_shuffle_significant is None
-            else 2
-            if raw_rayleigh_significant and raw_shuffle_significant
-            else 1
-            if raw_rayleigh_significant or raw_shuffle_significant
-            else 0
-        )
-        if hd_class != expected_hd_class:
-            raise ValueError(
-                f"Unit {unit_id} hd_class does not match its significance results."
-            )
-        units.append(
-            TuningUnit(
-                unit_id=unit_id,
-                rates=tuple(rates),
-                spike_counts=tuple(counts),
-                hd_class=hd_class,
-            )
-        )
-    return TuningCurveData(
-        path=path,
-        units=tuple(units),
-        occupancy_time_s=tuple(occupancy),
-        metadata=metadata,
+    counts = _tuning_array(
+        payload.get("spike_counts"), "Tuning-curve spike_counts rows", num_units
     )
+    rates = _tuning_array(
+        payload.get("firing_rate_hz"), "Tuning-curve firing_rate_hz rows", num_units
+    )
+    unit_data = payload.get("unit_data")
+    if not isinstance(unit_data, dict):
+        raise ValueError("Tuning-curve unit_data must be an object of per-unit columns.")
+    for key, column in unit_data.items():
+        _tuning_array(column, f"Tuning-curve unit_data.{key}", num_units)
+    classes = unit_data.get("hd_class", [None] * num_units)
+    units = tuple(
+        _observed_tuning_unit(
+            unit_id, counts[index], rates[index], classes[index], occupancy
+        )
+        for index, unit_id in enumerate(unit_ids)
+    )
+    return TuningCurveData(path, units, occupancy, metadata)
+
+
+def _load_nested_tuning_curve(
+    path: Path, payload: Mapping[str, Any]
+) -> TuningCurveData:
+    if type(payload.get("schema_version")) is not int or payload["schema_version"] != 2:
+        raise ValueError(
+            f"Unsupported tuning-curve schema version: {payload.get('schema_version')!r}."
+        )
+    occupancy = _tuning_observations(payload)
+    raw_units = payload.get("units")
+    if not isinstance(raw_units, list) or not raw_units:
+        raise ValueError("Schema v2 units must be a non-empty array.")
+    units: list[TuningUnit] = []
+    seen: set[int] = set()
+    for index, item in enumerate(raw_units):
+        if not isinstance(item, dict):
+            raise ValueError(f"Schema v2 unit {index + 1} must be an object.")
+        unit_id = _tuning_integer(
+            item.get("unit_id"), f"Schema v2 unit {index + 1} unit_id"
+        )
+        if unit_id in seen:
+            raise ValueError(f"Duplicate schema v2 unit_id: {unit_id}.")
+        units.append(
+            _observed_tuning_unit(
+                unit_id,
+                item.get("spike_counts"),
+                item.get("firing_rate_hz"),
+                item.get("hd_class"),
+                occupancy,
+            )
+        )
+        seen.add(unit_id)
+    return TuningCurveData(
+        path, tuple(units), occupancy, _validated_metadata(payload.get("metadata"))
+    )
+
+
+def _load_legacy_tuning_curve(
+    path: Path, payload: Mapping[str, Any]
+) -> TuningCurveData:
+    units: list[TuningUnit] = []
+    seen: set[int] = set()
+    for raw_unit_id, raw_rates in payload.items():
+        try:
+            unit_id = int(raw_unit_id)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Invalid legacy HD unit ID: {raw_unit_id!r}.") from exc
+        if unit_id in seen:
+            raise ValueError(f"Duplicate legacy HD unit ID after normalization: {unit_id}.")
+        rates = tuple(
+            _json_number(value, f"Legacy unit {unit_id} rate", nonnegative=True)
+            for value in _tuning_array(
+                raw_rates, f"Legacy unit {unit_id}", HD_RAW_BIN_COUNT
+            )
+        )
+        # Legacy rate mappings contain no counts or exposure. Leave these
+        # absent so the live view can process rates without inventing occupancy.
+        units.append(TuningUnit(unit_id, rates, None))
+        seen.add(unit_id)
+    return TuningCurveData(path, tuple(units), None)
 
 
 def load_tuning_curve(path: Path) -> TuningCurveData:
@@ -1035,20 +906,18 @@ def load_tuning_curve(path: Path) -> TuningCurveData:
     _require_finite_json(payload)
     if not isinstance(payload, dict) or not payload:
         raise ValueError("Tuning-curve JSON must be a non-empty object.")
-    missing = [key for key in TUNING_TOP_LEVEL_KEYS if key not in payload]
-    unexpected = [key for key in payload if key not in TUNING_TOP_LEVEL_KEYS]
-    if missing:
-        raise ValueError(f"Missing tuning-curve keys: {', '.join(missing)}.")
-    if unexpected:
-        raise ValueError(f"Unexpected tuning-curve keys: {', '.join(unexpected)}.")
-    return _load_tuning_curve_payload(resolved, payload)
+    if "schema_version" in payload:
+        return _load_nested_tuning_curve(resolved, payload)
+    if set(TUNING_TOP_LEVEL_KEYS).intersection(payload):
+        return _load_tuning_curve_payload(resolved, payload)
+    return _load_legacy_tuning_curve(resolved, payload)
 
 
 def tuning_unit_payload(unit: TuningUnit) -> dict[str, Any]:
     return {
         "unitId": unit.unit_id,
         "rates": list(unit.rates),
-        "spikeCounts": list(unit.spike_counts),
+        "spikeCounts": list(unit.spike_counts) if unit.spike_counts is not None else None,
         "hdClass": unit.hd_class,
     }
 
@@ -1058,7 +927,9 @@ def tuning_dataset_payload(data: TuningCurveData) -> dict[str, Any]:
         "available": True,
         "sourcePath": str(data.path),
         "metadata": data.metadata,
-        "occupancyTimeS": list(data.occupancy_time_s),
+        "occupancyTimeS": (
+            list(data.occupancy_time_s) if data.occupancy_time_s is not None else None
+        ),
         "units": [tuning_unit_payload(unit) for unit in data.units],
     }
 
@@ -1069,8 +940,13 @@ def tuning_cluster_payload(data: TuningCurveData, cluster_id: int) -> dict[str, 
         "available": unit is not None,
         "sourcePath": str(data.path),
         "rates": list(unit.rates) if unit is not None else None,
-        "spikeCounts": list(unit.spike_counts) if unit is not None else None,
-        "occupancyTimeS": list(data.occupancy_time_s),
+        "spikeCounts": (
+            list(unit.spike_counts)
+            if unit is not None and unit.spike_counts is not None else None
+        ),
+        "occupancyTimeS": (
+            list(data.occupancy_time_s) if data.occupancy_time_s is not None else None
+        ),
         "hdClass": unit.hd_class if unit is not None else None,
         "metadata": data.metadata,
     }

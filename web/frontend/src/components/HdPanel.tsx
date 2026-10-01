@@ -25,6 +25,7 @@ interface HdPanelProps {
   onSettingsChange: (settings: HdViewSettings) => void;
   onToggleCollapsed: () => void;
   onChoosePath: () => void;
+  autoLoad?: boolean;
 }
 
 function metadataRows(value: unknown, prefix = ""): Array<readonly [string, string]> {
@@ -224,6 +225,7 @@ export default function HdPanel({
   onSettingsChange,
   onToggleCollapsed,
   onChoosePath,
+  autoLoad = true,
 }: HdPanelProps) {
   const [showInfo, setShowInfo] = useState(false);
   const { plotMode, displayBins, smoothing, sigmaDeg, compareScale } = settings;
@@ -232,17 +234,14 @@ export default function HdPanel({
   const options = useMemo(() => ({ displayBins, smoothing, sigma }), [displayBins, sigma, smoothing]);
   const processed = useMemo(() => {
     if (!unit) return { curve: null, error: "" };
-    if (!artifact?.occupancyTimeS) {
-      return { curve: null, error: "HD occupancy is unavailable." };
-    }
     try {
-      return { curve: processHdUnit(unit, artifact.occupancyTimeS, options), error: "" };
+      return { curve: processHdUnit(unit, artifact?.occupancyTimeS ?? null, options), error: "" };
     } catch (caught) {
       return { curve: null, error: caught instanceof Error ? caught.message : "HD processing failed." };
     }
   }, [artifact?.occupancyTimeS, options, unit]);
   const sharedMaximum = useMemo(() => {
-    if (!compareScale || !artifact?.occupancyTimeS) return null;
+    if (!compareScale || !artifact) return null;
     try {
       return sharedHdPeak(artifact.units, artifact.occupancyTimeS, options);
     } catch {
@@ -269,7 +268,7 @@ export default function HdPanel({
           <p>{blocked ? "No active cluster" : `cluster ${clusterId}`}{artifact?.sourcePath ? ` · ${artifact.sourcePath}` : ""}</p>
         </div>
         <div className="hd-actions">
-          {unit?.hdClass === 1 || unit?.hdClass === 2
+          {unit?.hdClass === 1 || unit?.hdClass === 2 || unit?.hdClass === 3
             ? <span className={`hd-class-badge class-${unit.hdClass}`}>HD {unit.hdClass}</span>
             : null}
           {artifact?.metadata && <button type="button" onClick={() => setShowInfo((value) => !value)}>Info</button>}
@@ -293,7 +292,9 @@ export default function HdPanel({
       ) : error ? (
         <div className="companion-empty error-state"><strong>HD tuning data could not be loaded</strong><span>{error}</span><button type="button" onClick={onChoosePath}>Choose .tc / tuning_curves.json…</button></div>
       ) : !artifact?.available ? (
-        <div className="companion-empty"><strong>HD tuning unavailable</strong><span>No tuning_curves.tc or tuning_curves.json was found automatically for this recording date. Generate one with the analysis pipeline, or choose a matching remote file.</span><button type="button" onClick={onChoosePath}>Choose .tc / tuning_curves.json…</button></div>
+        <div className="companion-empty"><strong>HD tuning unavailable</strong><span>{autoLoad
+          ? "No tuning_curves.tc or tuning_curves.json was found automatically for this recording date. Generate one with the analysis pipeline, or choose a matching remote file."
+          : "Automatic loading is off. Choose a matching tuning file or enable auto-load in Settings."}</span><button type="button" onClick={onChoosePath}>Choose .tc / tuning_curves.json…</button></div>
       ) : !unit ? (
         <div className="companion-empty"><strong>No HD curve for cluster {clusterId}</strong><span>The RF map remains available.</span></div>
       ) : processed.error ? (

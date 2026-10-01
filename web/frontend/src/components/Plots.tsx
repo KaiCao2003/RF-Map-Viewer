@@ -110,7 +110,8 @@ function contextFor(canvas: HTMLCanvasElement, width: number, height: number): C
   const context = canvas.getContext("2d")!;
   context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
   context.imageSmoothingEnabled = false;
-  context.clearRect(0, 0, width, height);
+  context.fillStyle = "#ffffff";
+  context.fillRect(0, 0, width, height);
   return context;
 }
 
@@ -170,7 +171,7 @@ function drawPolarMatrix(
   const thetaEdges = Array.from({ length: layout.xGroups.length + 1 }, (_, index) =>
     ((90 + layout.totalDegrees / 2 - (layout.totalDegrees * index) / layout.xGroups.length) * Math.PI) / 180,
   );
-  context.fillStyle = "#f8fafc";
+  context.fillStyle = "#ffffff";
   context.beginPath();
   context.arc(layout.cx, layout.cy, INNER_BLANK_ROWS * layout.scale, 0, Math.PI * 2);
   context.fill();
@@ -503,7 +504,7 @@ const SpatialPlotContent = memo(function SpatialPlotContent({
       };
       layout.current = nextLayout;
       if (kind === "delay" && state.rgbMode) {
-        context.fillStyle = "#f8fafc";
+        context.fillStyle = "#ffffff";
         context.beginPath();
         context.arc(nextLayout.cx, nextLayout.cy, INNER_BLANK_ROWS * scale, 0, Math.PI * 2);
         context.fill();
@@ -1012,10 +1013,6 @@ const TimelinePlotContent = memo(function TimelinePlotContent({
       { color: "#667085" },
     );
     const zeroX = chartX + (chartWidth * (0 - axisStart)) / Math.max(axisEnd - axisStart, 1);
-    if (axisStart < 0 && axisEnd >= 0) {
-      context.fillStyle = "#f8fafc";
-      context.fillRect(chartX, chartY, zeroX - chartX, chartHeight);
-    }
     context.strokeStyle = "#cbd5e1";
     context.strokeRect(chartX, chartY, chartWidth, chartHeight);
     if (axisStart <= 0 && axisEnd >= 0) {

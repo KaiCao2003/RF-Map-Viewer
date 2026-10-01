@@ -1205,33 +1205,71 @@ def test_tuning_loader_rejects_duplicate_json_keys(tmp_path: Path) -> None:
         load_tuning_curve(path)
 
 
+@pytest.mark.parametrize("format_name", ["columnar", "nested", "legacy"])
+def test_hd_api_accepts_python_tuning_formats(
+    app, settings: Settings, format_name: str
+) -> None:
+    source = write_json(settings.rf_root / "session" / "rf.json")
+    payload = tuning_payload((11,))
+    payload["unit_data"]["hd_class"] = [3]  # type: ignore[index]
+    payload["metadata"]["classification"].update({  # type: ignore[index,union-attr]
+        "class_3": "rayleigh and shuffle significant; kappa >= cutoff",
+        "kappa_cutoff": 0.075,
+    })
+    if format_name == "nested":
+        payload = {
+            "schema_version": 2,
+            "metadata": payload["metadata"],
+            "angle_bin_edges_deg": payload["angle_bin_edges_deg"],
+            "occupancy_time_s": payload["occupancy_time_s"],
+            "units": [{
+                "unit_id": 11,
+                "spike_counts": payload["spike_counts"][0],  # type: ignore[index]
+                "firing_rate_hz": payload["firing_rate_hz"][0],  # type: ignore[index]
+                "hd_class": 3,
+            }],
+        }
+    elif format_name == "legacy":
+        payload = {"11": [2.0] * 180}
+    tuning_path = write_json(settings.rf_root / f"{format_name}.tc", payload)
+
+    with authenticated_client(app) as client:
+        opened = _open(client, source)
+        dataset = client.get(
+            f"/api/datasets/{opened['id']}/hd", params={"path": str(tuning_path)}
+        )
+        unit = client.get(
+            f"/api/datasets/{opened['id']}/hd/11", params={"path": str(tuning_path)}
+        )
+
+    assert dataset.status_code == 200, dataset.text
+    assert unit.status_code == 200, unit.text
+    assert dataset.json()["units"][0]["unitId"] == 11
+    assert unit.json()["available"] is True
+    if format_name == "legacy":
+        assert dataset.json()["occupancyTimeS"] is None
+        assert unit.json()["spikeCounts"] is None
+        assert unit.json()["rates"] == [2.0] * 180
+    else:
+        assert unit.json()["hdClass"] == 3
+        assert unit.json()["metadata"]["classification"]["kappa_cutoff"] == 0.075
+
+
 @pytest.mark.parametrize(
     "case",
     [
-        "legacy-mapping",
-        "old-units-array",
         "obsolete-schema-version",
         "missing-top-level-key",
-        "unexpected-top-level-key",
         "unequal-edges",
-        "nonpositive-feature-fs",
-        "feature-fs-mismatch",
-        "non-integer-occupancy-sample",
-        "occupancy-zero-mask",
         "all-zero-occupancy",
         "duplicate-unit",
         "count-row-mismatch",
         "rate-row-mismatch",
         "rate-bin-mismatch",
-        "missing-unit-data-key",
-        "unexpected-unit-data-key",
         "unit-data-length-mismatch",
         "non-integer-count",
         "zero-occupancy-mismatch",
         "rate-mismatch",
-        "bad-unit-metric",
-        "non-boolean-significance",
-        "inconsistent-significance",
         "bad-hd-class",
         "non-finite-metadata",
     ],
@@ -1239,76 +1277,35 @@ def test_tuning_loader_rejects_duplicate_json_keys(tmp_path: Path) -> None:
 def test_tuning_loader_rejects_malformed_current_contract(
     tmp_path: Path, case: str
 ) -> None:
-    if case == "legacy-mapping":
-        payload: dict[str, object] = {"11": [1.0] * 180}
-    elif case == "old-units-array":
-        current = tuning_payload((11,))
-        payload = {
-            "schema_version": 2,
-            "metadata": current["metadata"],
-            "angle_bin_edges_deg": current["angle_bin_edges_deg"],
-            "occupancy_samples": current["occupancy_samples"],
-            "occupancy_time_s": current["occupancy_time_s"],
-            "units": [
-                {
-                    "unit_id": 11,
-                    "spike_counts": current["spike_counts"][0],  # type: ignore[index]
-                    "firing_rate_hz": current["firing_rate_hz"][0],  # type: ignore[index]
-                    "hd_class": current["unit_data"]["hd_class"][0],  # type: ignore[index]
-                }
-            ],
-        }
-    else:
-        payload = tuning_payload((11, 22) if case == "duplicate-unit" else (11,))
-        if case == "obsolete-schema-version":
-            payload["schema_version"] = 2
-        elif case == "missing-top-level-key":
-            payload.pop("occupancy_samples")
-        elif case == "unexpected-top-level-key":
-            payload["unexpected"] = None
-        elif case == "unequal-edges":
-            payload["angle_bin_edges_deg"][1] = 3.0  # type: ignore[index]
-        elif case == "nonpositive-feature-fs":
-            payload["metadata"]["feature_fs_hz"] = 0.0  # type: ignore[index]
-        elif case == "feature-fs-mismatch":
-            payload["metadata"]["feature_fs_hz"] = 99.0  # type: ignore[index]
-        elif case == "non-integer-occupancy-sample":
-            payload["occupancy_samples"][0] = 1.5  # type: ignore[index]
-        elif case == "occupancy-zero-mask":
-            payload["occupancy_samples"][0] = 0  # type: ignore[index]
-        elif case == "all-zero-occupancy":
-            payload["occupancy_samples"] = [0] * 180
-            payload["occupancy_time_s"] = [0.0] * 180
-        elif case == "duplicate-unit":
-            payload["unit_id"][1] = 11  # type: ignore[index]
-        elif case == "count-row-mismatch":
-            payload["spike_counts"].clear()  # type: ignore[union-attr]
-        elif case == "rate-row-mismatch":
-            payload["firing_rate_hz"].clear()  # type: ignore[union-attr]
-        elif case == "rate-bin-mismatch":
-            payload["firing_rate_hz"][0].pop()  # type: ignore[index]
-        elif case == "missing-unit-data-key":
-            payload["unit_data"].pop("rate_mvl")  # type: ignore[union-attr]
-        elif case == "unexpected-unit-data-key":
-            payload["unit_data"]["unexpected"] = [None]  # type: ignore[index]
-        elif case == "unit-data-length-mismatch":
-            payload["unit_data"]["rate_mvl"].clear()  # type: ignore[index,union-attr]
-        elif case == "non-integer-count":
-            payload["spike_counts"][0][0] = 1.5  # type: ignore[index]
-        elif case == "zero-occupancy-mismatch":
-            payload["spike_counts"][0][-1] = 1  # type: ignore[index]
-        elif case == "rate-mismatch":
-            payload["firing_rate_hz"][0][0] = 999.0  # type: ignore[index]
-        elif case == "bad-unit-metric":
-            payload["unit_data"]["rate_mvl"][0] = 1.5  # type: ignore[index]
-        elif case == "non-boolean-significance":
-            payload["unit_data"]["rayleigh_significant"][0] = 1  # type: ignore[index]
-        elif case == "inconsistent-significance":
-            payload["unit_data"]["rayleigh_significant"][0] = False  # type: ignore[index]
-        elif case == "bad-hd-class":
-            payload["unit_data"]["hd_class"][0] = 3  # type: ignore[index]
-        elif case == "non-finite-metadata":
-            payload["metadata"]["invalid"] = float("nan")  # type: ignore[index]
+    payload = tuning_payload((11, 22) if case == "duplicate-unit" else (11,))
+    if case == "obsolete-schema-version":
+        payload["schema_version"] = 99
+    elif case == "missing-top-level-key":
+        payload.pop("occupancy_time_s")
+    elif case == "unequal-edges":
+        payload["angle_bin_edges_deg"][1] = 3.0  # type: ignore[index]
+    elif case == "all-zero-occupancy":
+        payload["occupancy_time_s"] = [0.0] * 180
+    elif case == "duplicate-unit":
+        payload["unit_id"][1] = 11  # type: ignore[index]
+    elif case == "count-row-mismatch":
+        payload["spike_counts"].clear()  # type: ignore[union-attr]
+    elif case == "rate-row-mismatch":
+        payload["firing_rate_hz"].clear()  # type: ignore[union-attr]
+    elif case == "rate-bin-mismatch":
+        payload["firing_rate_hz"][0].pop()  # type: ignore[index]
+    elif case == "unit-data-length-mismatch":
+        payload["unit_data"]["rate_mvl"].clear()  # type: ignore[index,union-attr]
+    elif case == "non-integer-count":
+        payload["spike_counts"][0][0] = 1.5  # type: ignore[index]
+    elif case == "zero-occupancy-mismatch":
+        payload["spike_counts"][0][-1] = 1  # type: ignore[index]
+    elif case == "rate-mismatch":
+        payload["firing_rate_hz"][0][0] = 999.0  # type: ignore[index]
+    elif case == "bad-hd-class":
+        payload["unit_data"]["hd_class"][0] = 4  # type: ignore[index]
+    elif case == "non-finite-metadata":
+        payload["metadata"]["invalid"] = float("nan")  # type: ignore[index]
     path = write_json(tmp_path / f"{case}.json", payload)
     with pytest.raises(ValueError):
         load_tuning_curve(path)
@@ -1316,7 +1313,7 @@ def test_tuning_loader_rejects_malformed_current_contract(
 
 @pytest.mark.parametrize(
     "case",
-    ["nan", "overflow-token", "huge-occupancy-sample", "huge-spike-count"],
+    ["nan", "overflow-token", "huge-spike-count"],
 )
 def test_hd_api_returns_422_for_non_finite_or_overflowing_tuning_numbers(
     app, settings: Settings, case: str
@@ -1327,8 +1324,6 @@ def test_hd_api_returns_422_for_non_finite_or_overflowing_tuning_numbers(
         payload["metadata"]["invalid"] = float("nan")  # type: ignore[index]
     elif case == "overflow-token":
         payload["metadata"]["invalid"] = "OVERFLOW_TOKEN"  # type: ignore[index]
-    elif case == "huge-occupancy-sample":
-        payload["occupancy_samples"][0] = 10**1000  # type: ignore[index]
     elif case == "huge-spike-count":
         payload["spike_counts"][0][0] = 10**1000  # type: ignore[index]
 

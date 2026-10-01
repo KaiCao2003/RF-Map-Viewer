@@ -97,7 +97,7 @@ export interface ProbeGeometry {
 export interface HdUnitArtifact {
   unitId: number;
   rates: Array<number | null>;
-  spikeCounts: number[];
+  spikeCounts: number[] | null;
   hdClass: number | null;
 }
 

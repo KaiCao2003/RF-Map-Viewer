@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { canvasFont } from "../canvasFont";
-import { hasProbePosition, probeUnitsInRegion } from "../probeSelection";
+import { hasProbePosition, probeUnitsInRegion, type PositionedProbeUnit } from "../probeSelection";
 import type { ProbeGeometry } from "../types";
 
 export interface ProbeSelection {
@@ -28,6 +28,26 @@ interface PlotTransform {
   top: number;
   width: number;
   height: number;
+}
+
+export function nearestProbeUnit(
+  units: ReadonlyArray<PositionedProbeUnit>,
+  transform: PlotTransform,
+  screenX: number,
+  screenY: number,
+  maximumDistance = Number.POSITIVE_INFINITY,
+): number | null {
+  let nearest: number | null = null;
+  let distance = maximumDistance;
+  units.forEach((unit) => {
+    const [x, y] = toCanvas(transform, unit.x, unit.y);
+    const candidate = Math.hypot(x - screenX, y - screenY);
+    if (candidate < distance) {
+      distance = candidate;
+      nearest = unit.unitId;
+    }
+  });
+  return nearest;
 }
 
 function paddedRange(values: number[], fallback: readonly [number, number]): readonly [number, number] {
@@ -113,7 +133,8 @@ export default function ProbeLayout({
     node.style.height = `${height}px`;
     const context = node.getContext("2d")!;
     context.setTransform(ratio, 0, 0, ratio, 0, 0);
-    context.clearRect(0, 0, width, height);
+    context.fillStyle = "#ffffff";
+    context.fillRect(0, 0, width, height);
     const allX = [...geometry.channels.map((item) => item.x), ...positionedUnits.map((item) => item.x)];
     const allY = [...geometry.channels.map((item) => item.y), ...positionedUnits.map((item) => item.y)];
     const [xMin, xMax] = paddedRange(allX, [-100, 100]);
@@ -134,7 +155,7 @@ export default function ProbeLayout({
     context.fillStyle = "#667085";
     context.font = canvasFont(10.5);
     context.fillText(`${geometry.channels.length} channels · ${positionedUnits.length}/${availableUnitIds.length} RF units positioned`, 8, 36);
-    context.fillStyle = "#fbfcfd";
+    context.fillStyle = "#ffffff";
     context.fillRect(next.left, next.top, next.width, next.height);
     context.strokeStyle = "#d0d5dd";
     context.strokeRect(next.left, next.top, next.width, next.height);
@@ -196,19 +217,19 @@ export default function ProbeLayout({
     return [event.clientX - bounds.left, event.clientY - bounds.top] as const;
   };
 
-  const nearestUnit = (screenX: number, screenY: number): number | null => {
-    if (!transform.current) return null;
-    let nearest: number | null = null;
-    let distance = 11;
-    positionedUnits.forEach((unit) => {
-      const [x, y] = toCanvas(transform.current!, unit.x, unit.y);
-      const candidate = Math.hypot(x - screenX, y - screenY);
-      if (candidate < distance) {
-        distance = candidate;
-        nearest = unit.unitId;
-      }
-    });
-    return nearest;
+  const updateDrag = (screenX: number, screenY: number) => {
+    if (!dragStart.current || !transform.current) return;
+    const [startX, startY] = dragStart.current;
+    // Once a drag starts, returning near the press point still selects a region.
+    if (!draftSelection.current && Math.hypot(screenX - startX, screenY - startY) < 4) return;
+    const first = fromCanvas(transform.current, startX, startY);
+    const last = fromCanvas(transform.current, screenX, screenY);
+    const next = {
+      xMin: Math.min(first[0], last[0]), xMax: Math.max(first[0], last[0]),
+      yMin: Math.min(first[1], last[1]), yMax: Math.max(first[1], last[1]),
+    };
+    draftSelection.current = next;
+    setDraft(next);
   };
 
   return (
@@ -225,43 +246,32 @@ export default function ProbeLayout({
         }}
         onPointerMove={(event) => {
           const [x, y] = pointerCoordinates(event);
-          setHoverUnit(nearestUnit(x, y));
-          if (!dragStart.current || !transform.current) return;
-          const [startX, startY] = dragStart.current;
-          if (Math.hypot(x - startX, y - startY) < 3) return;
-          const first = fromCanvas(transform.current, startX, startY);
-          const last = fromCanvas(transform.current, x, y);
-          const nextDraft = {
-            xMin: Math.min(first[0], last[0]), xMax: Math.max(first[0], last[0]),
-            yMin: Math.min(first[1], last[1]), yMax: Math.max(first[1], last[1]),
-          };
-          draftSelection.current = nextDraft;
-          setDraft(nextDraft);
+          setHoverUnit(transform.current ? nearestProbeUnit(positionedUnits, transform.current, x, y, 11) : null);
+          updateDrag(x, y);
         }}
         onPointerLeave={() => setHoverUnit(null)}
         onPointerUp={(event) => {
+          if (!dragStart.current) return;
           const [x, y] = pointerCoordinates(event);
+          updateDrag(x, y);
           const dragged = draftSelection.current;
-          const clickedUnit = nearestUnit(x, y);
-          let next = dragged;
-          if (!next && clickedUnit == null && transform.current) {
-            const clickedChannel = geometry.channels
-              .map((channel) => ({ channel, point: toCanvas(transform.current!, channel.x, channel.y) }))
-              .sort((a, b) => Math.hypot(a.point[0] - x, a.point[1] - y) - Math.hypot(b.point[0] - x, b.point[1] - y))[0];
-            if (clickedChannel && Math.hypot(clickedChannel.point[0] - x, clickedChannel.point[1] - y) < 12) {
-              next = {
-                xMin: clickedChannel.channel.x - 80,
-                xMax: clickedChannel.channel.x + 80,
-                yMin: clickedChannel.channel.y - 37.5,
-                yMax: clickedChannel.channel.y + 37.5,
-              };
-            }
-          }
           dragStart.current = null;
           draftSelection.current = null;
           setDraft(null);
-          if (clickedUnit != null && !dragged) onCluster(clickedUnit);
-          if (next) onSelection(next, probeUnitsInRegion(geometry, next, availableUnitIds));
+          if (dragged) {
+            onSelection(dragged, probeUnitsInRegion(geometry, dragged, availableUnitIds));
+            return;
+          }
+          const clickedUnit = transform.current ? nearestProbeUnit(positionedUnits, transform.current, x, y) : null;
+          if (clickedUnit != null) {
+            onSelection(null, [...availableUnitIds]);
+            onCluster(clickedUnit);
+          }
+        }}
+        onPointerCancel={() => {
+          dragStart.current = null;
+          draftSelection.current = null;
+          setDraft(null);
         }}
       />
       {currentPositionMissing && (
@@ -276,7 +286,7 @@ export default function ProbeLayout({
               ? `${probeUnitsInRegion(geometry, selection, availableUnitIds).length
                 ? `${probeUnitsInRegion(geometry, selection, availableUnitIds).length} units in region`
                 : "No units in region"}`
-              : "Click a channel for a 160 × 75 µm region, or drag any region."}
+              : "Click to select the nearest unit; drag to filter a region."}
         </span>
         {hoverUnit != null && <span className="probe-hover">Cluster {hoverUnit}</span>}
         <button

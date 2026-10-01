@@ -15,6 +15,8 @@ import {
   openRemoteDataset,
 } from "./api";
 import RfWindowInput from "./components/RfWindowInput";
+import ViewerSettingsDialog from "./components/ViewerSettingsDialog";
+import { loadViewerSettings, saveViewerSettings, viewerSettingsPatch, type ViewerSettings, type HdLayout } from "./viewerSettings";
 import HdPanel from "./components/HdPanel";
 import FigureExportComposer from "./components/FigureExportComposer";
 import { SpatialPlot, TimelinePlot } from "./components/Plots";
@@ -47,12 +49,11 @@ import {
   unitMetrics,
   valueModeUnit,
 } from "./math";
-import { DEFAULT_HD_DISPLAY_BINS, DEFAULT_HD_SMOOTH_SIGMA } from "./hdMath";
 import { exportShortcutAction, steppedTimeResolutionMs } from "./appShortcuts";
 import { nearestProbeUnitToRegionCenter, probeUnitsInRegion } from "./probeSelection";
 import { resolutionChangePatch, timelineSelectionPatch } from "./viewStateMath";
 import { VIEWER_TABS } from "./viewTabs";
-import { usePairedWindows } from "./pairedWindows";
+import { usePairedWindows, type PairViewState } from "./pairedWindows";
 import { RF_TIMING_KEY, readRfTiming, resetRfTiming, timingPatch, timingFromState, toggleRfMode } from "./rfTiming";
 import { LatestRequest, LatestSerialRead, UnitCountsCache } from "./requestLifecycle";
 import { startCacheProgressPolling } from "./cacheProgress";
@@ -81,76 +82,6 @@ import type {
 import { DEFAULT_VALUE_MODE, PALETTES, POLAR_RADIUS_MODES, VALUE_MODES } from "./types";
 
 const RECENT_JSON_KEY = "rfmapping-recent-json-v1";
-const HD_LAYOUT_KEY = "rfmapping-hd-layout-v1";
-const COMPANION_PREFERENCES_KEY = "rfmapping-companion-preferences-v1";
-const UNIT_FILTER_PREFERENCES_KEY = "rfmapping-zero-bin-unit-filter-v1";
-
-const INITIAL_HD_VIEW_SETTINGS: HdViewSettings = {
-  plotMode: "auto",
-  displayBins: DEFAULT_HD_DISPLAY_BINS,
-  smoothing: true,
-  sigmaDeg: DEFAULT_HD_SMOOTH_SIGMA * 360 / DEFAULT_HD_DISPLAY_BINS,
-  compareScale: false,
-};
-
-type HdLayout = "side-by-side" | "stacked";
-
-function loadHdLayout(): HdLayout {
-  return window.localStorage.getItem(HD_LAYOUT_KEY) === "stacked" ? "stacked" : "side-by-side";
-}
-
-interface CompanionPreferences {
-  tuningSession: number;
-  showWaveform: boolean;
-  waveformChannelMode: WaveformChannelMode;
-}
-
-function loadCompanionPreferences(): CompanionPreferences {
-  const fallback: CompanionPreferences = {
-    tuningSession: 1,
-    showWaveform: true,
-    waveformChannelMode: "same_x_column",
-  };
-  try {
-    const parsed = JSON.parse(window.localStorage.getItem(COMPANION_PREFERENCES_KEY) ?? "null");
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return fallback;
-    const source = parsed as Record<string, unknown>;
-    const rawSession = Number(source.tuningSession);
-    return {
-      tuningSession: Number.isInteger(rawSession) && rawSession >= 1 ? rawSession : 1,
-      showWaveform: typeof source.showWaveform === "boolean" ? source.showWaveform : true,
-      waveformChannelMode: source.waveformChannelMode === "same_shank"
-        ? "same_shank"
-        : "same_x_column",
-    };
-  } catch {
-    return fallback;
-  }
-}
-
-interface UnitFilterPreferences {
-  enabled: boolean;
-  zeroSpikeSpatialBinThreshold: number;
-}
-
-function loadUnitFilterPreferences(): UnitFilterPreferences {
-  const fallback = { enabled: true, zeroSpikeSpatialBinThreshold: 1 };
-  try {
-    const parsed = JSON.parse(window.localStorage.getItem(UNIT_FILTER_PREFERENCES_KEY) ?? "null");
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return fallback;
-    const source = parsed as Record<string, unknown>;
-    const threshold = Number(source.zeroSpikeSpatialBinThreshold);
-    return {
-      enabled: typeof source.enabled === "boolean" ? source.enabled : true,
-      zeroSpikeSpatialBinThreshold: Number.isInteger(threshold) && threshold >= 1
-        ? threshold
-        : 1,
-    };
-  } catch {
-    return fallback;
-  }
-}
-
 interface MessageDialogState {
   title: string;
   text: string;
@@ -168,10 +99,10 @@ function valueModeSlug(valueMode: ValueMode): string {
   return "mean_firing_rate_hz";
 }
 
-function initialViewState(meta: DatasetMeta): ViewState {
+function initialViewState(meta: DatasetMeta, settings: ViewerSettings): ViewState {
   const rfRange = snapTimeRange(meta, 0, 200);
   const rfBounds = timeBounds(meta, rfRange);
-  const resolution = baseBinMs(meta);
+  const resolution = viewerSettingsPatch(meta, settings).timeResolutionMs!;
   const groups = timeGroups(meta, resolution);
   const activeBounds = timeBounds(meta, groups[0]);
   return {
@@ -196,7 +127,8 @@ function initialViewState(meta: DatasetMeta): ViewState {
     selectedCellYMidpoint: null,
     selectedCellXMidpoint: null,
     timelineScrollFraction: 0,
-    selectedTab: "rf",
+    ...viewerSettingsPatch(meta, settings),
+    selectedTab: settings.initialTab,
   };
 }
 
@@ -252,6 +184,8 @@ function SourceChooser({
 }
 
 export default function App() {
+  const [settings, setSettings] = useState(() => loadViewerSettings(window.localStorage));
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [meta, setMeta] = useState<DatasetMeta | null>(null);
   const [viewState, setViewState] = useState<ViewState | null>(null);
   const [counts, setCounts] = useState<Float64Array | null>(null);
@@ -269,10 +203,10 @@ export default function App() {
   const [unitRequestRetry, setUnitRequestRetry] = useState(0);
   const lastCountRetryProgress = useRef("");
   const [unitFilterEnabled, setUnitFilterEnabled] = useState(
-    () => loadUnitFilterPreferences().enabled,
+    () => settings.filterUnits,
   );
   const [zeroSpikeSpatialBinThreshold, setZeroSpikeSpatialBinThreshold] = useState(
-    () => loadUnitFilterPreferences().zeroSpikeSpatialBinThreshold,
+    () => settings.zeroBinThreshold,
   );
   const [qualityVisibleUnitIds, setQualityVisibleUnitIds] = useState<number[]>([]);
   const [unitFilterStatus, setUnitFilterStatus] = useState<"loading" | "ready" | "error">("loading");
@@ -300,33 +234,69 @@ export default function App() {
   const [hdPath, setHdPath] = useState<string | null>(null);
   const [hdChooserOpen, setHdChooserOpen] = useState(false);
   const [hdCollapsed, setHdCollapsed] = useState(false);
-  const [hdLayout, setHdLayout] = useState<HdLayout>(loadHdLayout);
-  const [hdSettings, setHdSettings] = useState<HdViewSettings>(INITIAL_HD_VIEW_SETTINGS);
+  const [hdLayout, setHdLayout] = useState<HdLayout>(settings.hdLayout);
+  const [hdSettings, setHdSettings] = useState<HdViewSettings>(settings.hd);
   const [hdRefresh, setHdRefresh] = useState(0);
-  const [tuningSession, setTuningSession] = useState(() => loadCompanionPreferences().tuningSession);
-  const [showWaveform, setShowWaveform] = useState(() => loadCompanionPreferences().showWaveform);
+  const [tuningSession, setTuningSession] = useState(() => settings.tuningSession);
+  const [showWaveform, setShowWaveform] = useState(() => settings.showWaveform);
   const [waveformChannelMode, setWaveformChannelMode] = useState<WaveformChannelMode>(
-    () => loadCompanionPreferences().waveformChannelMode,
+    () => settings.waveformChannelMode,
   );
   const [waveformArtifact, setWaveformArtifact] = useState<WaveformArtifact | null>(null);
   const [waveformLoading, setWaveformLoading] = useState(false);
   const [waveformError, setWaveformError] = useState("");
 
+  const [showHd, setShowHd] = useState(settings.showHd);
+  const [showProbe, setShowProbe] = useState(settings.showProbe);
+
   const updateState = useCallback((patch: Partial<ViewState> | ((current: ViewState) => Partial<ViewState>)) => {
     setViewState((current) => current ? { ...current, ...(typeof patch === "function" ? patch(current) : patch) } : current);
   }, []);
 
-  const applyPairedPatch = useCallback((patch: Partial<ViewState>) => {
+  const changeTuningSession = useCallback((session: number) => {
+    if (session === tuningSession) return;
+    setHdArtifact(null);
+    setHdPath(null);
+    setHdError("");
+    setHdCollapsed(false);
+    setTuningSession(session);
+  }, [tuningSession]);
+
+  const applyPairedPatch = useCallback((patch: Partial<PairViewState>) => {
     if (!meta) return;
+    const { hdSettings: sharedHd, showHd: sharedShowHd, showProbe: sharedShowProbe,
+      showWaveform: sharedShowWaveform, waveformChannelMode: sharedWaveformMode,
+      hdLayout: sharedLayout, tuningSession: sharedSession, unitFilterEnabled: sharedFilter,
+      zeroSpikeSpatialBinThreshold: sharedThreshold, autoLoadHd: sharedAutoHd, autoLoadProbe: sharedAutoProbe,
+      ...rfPatch } = patch;
+    if (sharedHd) setHdSettings(sharedHd);
+    if (sharedShowHd !== undefined) setShowHd(sharedShowHd);
+    if (sharedShowProbe !== undefined) {
+      setShowProbe(sharedShowProbe);
+      if (!sharedShowProbe) setProbeSelection(null);
+    }
+    if (sharedShowWaveform !== undefined) setShowWaveform(sharedShowWaveform);
+    if (sharedWaveformMode) setWaveformChannelMode(sharedWaveformMode);
+    if (sharedLayout) setHdLayout(sharedLayout);
+    if (sharedSession !== undefined) changeTuningSession(sharedSession);
+    if (sharedFilter !== undefined) setUnitFilterEnabled(sharedFilter);
+    if (sharedThreshold !== undefined) setZeroSpikeSpatialBinThreshold(sharedThreshold);
+    if (sharedAutoHd !== undefined || sharedAutoProbe !== undefined) setSettings((current) => ({ ...current,
+      autoLoadHd: sharedAutoHd ?? current.autoLoadHd, autoLoadProbe: sharedAutoProbe ?? current.autoLoadProbe }));
     updateState((current) => {
-      const next = { ...current, ...patch };
+      const next = { ...current, ...rfPatch };
       const a = timeBounds(meta, snapTimeRange(meta, next.rfStartMs, next.rfEndMs));
       const b = timeBounds(meta, snapTimeRange(meta, next.rfBStartMs ?? 0, next.rfBEndMs ?? 80));
-      return { ...patch, rfStartMs: a[0], rfEndMs: a[1], rfBStartMs: b[0], rfBEndMs: b[1],
+      return { ...rfPatch, rfStartMs: a[0], rfEndMs: a[1], rfBStartMs: b[0], rfBEndMs: b[1],
         xBins: clamp(next.xBins, 1, meta.shape[2]), yBins: clamp(next.yBins, 1, meta.shape[1]) };
     });
-  }, [meta, updateState]);
-  const paired = usePairedWindows(meta, viewState, qualityVisibleUnitIds, applyPairedPatch);
+  }, [meta, updateState, changeTuningSession]);
+  const pairedState = useMemo(() => viewState ? { ...viewState, hdSettings, showHd, showProbe,
+    showWaveform, waveformChannelMode, hdLayout, tuningSession, unitFilterEnabled, zeroSpikeSpatialBinThreshold,
+    autoLoadHd: settings.autoLoadHd, autoLoadProbe: settings.autoLoadProbe } : null,
+    [viewState, hdSettings, showHd, showProbe, showWaveform, waveformChannelMode, hdLayout,
+      tuningSession, unitFilterEnabled, zeroSpikeSpatialBinThreshold, settings.autoLoadHd, settings.autoLoadProbe]);
+  const paired = usePairedWindows(meta, pairedState, qualityVisibleUnitIds, applyPairedPatch);
 
   const commitDataset = useCallback((next: DatasetMeta) => {
     probeRequest.current.cancel();
@@ -339,7 +309,7 @@ export default function App() {
     setJsonChoices([{ path: next.sourcePath, mtime: null }]);
     lastLocalCluster.current = next.unitPool[0];
     setViewState((current) => {
-      const initial = initialViewState(next);
+      const initial = initialViewState(next, loadViewerSettings(window.localStorage));
       if (!current) return initial;
       return {
         ...initial,
@@ -403,6 +373,49 @@ export default function App() {
     setSourceBusy(false);
   }, []);
 
+  const closeCurrentMap = () => {
+    cancelSourceLoad();
+    probeRequest.current.cancel();
+    waveformReads.current.cancel();
+    paired.setEnabled(false);
+    setMeta(null);
+    setViewState(null);
+    setCounts(null);
+    setSourceOpen(false);
+    setProbe(null);
+    setProbeSelection(null);
+    setHdArtifact(null);
+    setWaveformArtifact(null);
+    setError("");
+    const url = new URL(window.location.href);
+    url.searchParams.delete("json");
+    window.history.replaceState(null, "", url);
+  };
+
+  const applySettings = (next: ViewerSettings) => {
+    saveViewerSettings(window.localStorage, next);
+    setSettings(next);
+    setShowHd(next.showHd);
+    setShowProbe(next.showProbe);
+    if (!next.showProbe) setProbeSelection(null);
+    setShowWaveform(next.showWaveform);
+    changeTuningSession(next.tuningSession);
+    setWaveformChannelMode(next.waveformChannelMode);
+    setHdLayout(next.hdLayout);
+    setHdSettings(next.hd);
+    setHdCollapsed(false);
+    setUnitFilterEnabled(next.filterUnits);
+    setZeroSpikeSpatialBinThreshold(next.zeroBinThreshold);
+    if (meta) updateState((current) => ({
+      ...resolutionChangePatch(meta, current, next.timeResolutionMs), ...viewerSettingsPatch(meta, next),
+    }));
+    setSettingsOpen(false);
+  };
+
+  const settingsDialog = settingsOpen && <ViewerSettingsDialog settings={{ ...settings, tuningSession, showHd, showProbe,
+    showWaveform, waveformChannelMode, hdLayout, filterUnits: unitFilterEnabled, zeroBinThreshold: zeroSpikeSpatialBinThreshold }}
+    onSave={applySettings} onClose={() => setSettingsOpen(false)} />;
+
   useEffect(() => () => {
     sourceRequest.current.cancel();
     probeRequest.current.cancel();
@@ -440,18 +453,18 @@ export default function App() {
   }, [meta]);
 
   useEffect(() => {
-    window.localStorage.setItem(COMPANION_PREFERENCES_KEY, JSON.stringify({
+    window.localStorage.setItem("rfmapping-companion-preferences-v1", JSON.stringify({
       tuningSession,
       showWaveform,
       waveformChannelMode,
-    } satisfies CompanionPreferences));
+    }));
   }, [showWaveform, tuningSession, waveformChannelMode]);
 
   useEffect(() => {
-    window.localStorage.setItem(UNIT_FILTER_PREFERENCES_KEY, JSON.stringify({
+    window.localStorage.setItem("rfmapping-zero-bin-unit-filter-v1", JSON.stringify({
       enabled: unitFilterEnabled,
       zeroSpikeSpatialBinThreshold,
-    } satisfies UnitFilterPreferences));
+    }));
   }, [unitFilterEnabled, zeroSpikeSpatialBinThreshold]);
 
   useEffect(() => {
@@ -641,7 +654,7 @@ export default function App() {
   }, [meta, qualityVisibleUnitIds, selectedUnitVisible, unitFilterStatus, viewState?.clusterId, cacheProgress?.indexed, cacheProgress?.complete]);
 
   useEffect(() => {
-    if (!meta?.capabilities.probe || probePositionsPath) return;
+    if (!meta?.capabilities.probe || probePositionsPath || !showProbe || !settings.autoLoadProbe) return;
     const signal = probeRequest.current.begin();
     setProbeError("");
     getProbeGeometry(meta.id, {}, signal)
@@ -652,11 +665,11 @@ export default function App() {
     return () => {
       if (probeRequest.current.isCurrent(signal)) probeRequest.current.cancel();
     };
-  }, [meta, probePositionsPath]);
+  }, [meta, probePositionsPath, showProbe, settings.autoLoadProbe]);
 
   useEffect(() => {
-    if (!meta) {
-      setHdArtifact(null);
+    if (!meta || !showHd || (!hdPath && !settings.autoLoadHd)) {
+      if (!meta) setHdArtifact(null);
       setHdLoading(false);
       return;
     }
@@ -673,7 +686,7 @@ export default function App() {
       })
       .finally(() => { if (!controller.signal.aborted) setHdLoading(false); });
     return () => controller.abort();
-  }, [hdPath, hdRefresh, meta, tuningSession]);
+  }, [hdPath, hdRefresh, meta, tuningSession, showHd, settings.autoLoadHd]);
 
   useEffect(() => {
     waveformReads.current.cancel();
@@ -705,9 +718,9 @@ export default function App() {
   }, [meta, showWaveform, viewState?.clusterId, waveformChannelMode]);
 
   const probeFilter = useMemo(() => {
-    if (probe == null || probeSelection == null) return null;
+    if (!showProbe || probe == null || probeSelection == null) return null;
     return probeUnitsInRegion(probe, probeSelection, qualityVisibleUnitIds);
-  }, [probe, probeSelection, qualityVisibleUnitIds]);
+  }, [showProbe, probe, probeSelection, qualityVisibleUnitIds]);
 
   const navigationPool = useMemo(() => {
     return navigationUnitIds(paired.unitIDs ?? qualityVisibleUnitIds, probeFilter);
@@ -716,11 +729,9 @@ export default function App() {
   useEffect(() => {
     if (!viewState || unitFilterStatus !== "ready") return;
     const nextClusterId = reconciledClusterId(viewState.clusterId, navigationPool);
-    if (nextClusterId == null) {
-      setCounts(null);
-      setUnitStatus("unavailable");
-      return;
-    }
+    // Pair membership can briefly be empty while tabs join. Navigation has
+    // its own empty state; it must not invalidate a loaded unit's counts.
+    if (nextClusterId == null) return;
     lastLocalCluster.current = nextClusterId;
     if (nextClusterId !== viewState.clusterId) {
       updateState({
@@ -956,7 +967,10 @@ export default function App() {
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
-      if (figureComposerOpen) return;
+      if (settingsOpen || sourceOpen || probeChooserOpen || hdChooserOpen || figureComposerOpen) return;
+      if ((event.metaKey || event.ctrlKey) && event.key === ",") {
+        event.preventDefault(); setSettingsOpen(true); return;
+      }
       const target = event.target as HTMLElement | null;
       const editing = target?.closest("input, textarea, [contenteditable='true']");
       const picker = target?.tagName === "SELECT";
@@ -1007,10 +1021,12 @@ export default function App() {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [figureComposerOpen, meta, openChooser, openExportDialog, openFigureComposer, probeSelection, showFullTimeline, stepResolution, stepTimeline, stepUnit, updateState, viewState]);
+  }, [settingsOpen, sourceOpen, probeChooserOpen, hdChooserOpen, figureComposerOpen, meta, openChooser, openExportDialog, openFigureComposer, probeSelection, showFullTimeline, stepResolution, stepTimeline, stepUnit, updateState, viewState]);
 
   if (!meta || !viewState) {
     return (
+      <div className="welcome-screen">
+      <div className="welcome-actions"><button type="button" onClick={() => setSettingsOpen(true)}>Settings…</button></div>
       <SourceChooser
         overlay={false}
         busy={sourceBusy}
@@ -1020,6 +1036,15 @@ export default function App() {
         onClose={() => undefined}
         onRemote={handleRemoteChoice}
       />
+      {recentPaths.length > 0 && <section className="recent-maps" aria-label="Recent RF maps">
+        <header><h2>Recent RF maps</h2><button type="button" onClick={() => {
+          window.localStorage.removeItem(RECENT_JSON_KEY); setRecentPaths([]);
+        }}>Clear Recent</button></header>
+        {recentPaths.map((path) => <button type="button" key={path} disabled={sourceBusy}
+          title={path} onClick={() => void openRemote(path)}>{path.split("/").at(-1)}<span>{parentDirectory(path)}</span></button>)}
+      </section>}
+      {settingsDialog}
+      </div>
     );
   }
 
@@ -1064,6 +1089,7 @@ export default function App() {
         <div className="sidebar-inner">
           <div className="sidebar-title-row">
             <h1 className="viewer-title">RF Map Viewer</h1>
+            <button type="button" aria-label="Settings" title="Settings (⌘/Ctrl+,)" onClick={() => setSettingsOpen(true)}>⚙</button>
             <button type="button" aria-label="Collapse Probe and controls sidebar" onClick={() => setProbeCollapsed(true)}>‹</button>
           </div>
           <p className="data-summary">
@@ -1083,6 +1109,7 @@ export default function App() {
               </select>
               <button type="button" onClick={openChooser}>Open…</button>
             </div>
+            <button className="close-map-button" type="button" onClick={closeCurrentMap}>Close map</button>
             {sourceBusy && !sourceOpen && (
               <div className="dialog-status" role="status">
                 <span className="spinner small" /> Opening RF mapping file…
@@ -1098,7 +1125,7 @@ export default function App() {
                 value={tuningSession}
                 onChange={(event) => {
                   const requested = Number(event.target.value);
-                  if (Number.isInteger(requested) && requested >= 1) setTuningSession(requested);
+                  if (Number.isInteger(requested) && requested >= 1) changeTuningSession(requested);
                 }}
                 title="Load only the exact DATE_SESSION tuning-curve artifact"
               />
@@ -1106,7 +1133,7 @@ export default function App() {
           </section>
 
           <hr />
-          <section className="sidebar-block probe-sidebar-block">
+          {showProbe && <section className="sidebar-block probe-sidebar-block">
             <div className="probe-sidebar-heading">
               <h2>Probe Layout</h2>
               <button type="button" onClick={() => setProbeChooserOpen(true)}>Choose .probe / positions.csv…</button>
@@ -1119,7 +1146,6 @@ export default function App() {
                 selection={probeSelection}
                 onCluster={(clusterId) => {
                   if (!qualityVisibleUnitIds.includes(clusterId)) return;
-                  if (probeFilter != null && !probeFilter.includes(clusterId)) return;
                   updateState({ clusterId, selectedCellXMidpoint: null, selectedCellYMidpoint: null });
                 }}
                 onSelection={(selection, units) => {
@@ -1132,13 +1158,13 @@ export default function App() {
               />
             ) : (
               <div className="probe-unavailable">
-                {probeBusy || (meta.capabilities.probe && !probeError)
+                {probeBusy || (meta.capabilities.probe && settings.autoLoadProbe && !probeError)
                   ? <><span className="spinner small" /> Loading probe geometry…</>
                   : <><strong>Probe layout unavailable</strong><span>{probeError || "Choose the matching remote .probe or positions.csv file."}</span><button type="button" onClick={() => setProbeChooserOpen(true)}>Choose .probe / positions.csv…</button></>}
               </div>
             )}
             {probePositionsPath && <p className="companion-path" title={probePositionsPath}>{probePositionsPath}</p>}
-          </section>
+          </section>}
 
           <hr />
           <section className="sidebar-block">
@@ -1296,7 +1322,7 @@ export default function App() {
             {viewState.selectedTab === "rf" && <label className="hd-layout-control"><span>RF + HD</span><select value={hdLayout} onChange={(event) => {
               const layout = event.target.value as HdLayout;
               setHdLayout(layout);
-              window.localStorage.setItem(HD_LAYOUT_KEY, layout);
+              window.localStorage.setItem("rfmapping-hd-layout-v1", layout);
             }}><option value="side-by-side">Side by side</option><option value="stacked">Stacked</option></select></label>}
             <button className="reset-button" type="button" onClick={() => { const saved = readRfTiming(window.localStorage.getItem(RF_TIMING_KEY)); updateState(resetRfTiming(meta, viewState, saved)); }}>Reset windows</button>
             <button type="button" onClick={() => { window.localStorage.setItem(RF_TIMING_KEY, JSON.stringify(timingFromState(viewState))); setMessageDialog({ title: "RF timing defaults saved", text: "New datasets use these Sum and A − B windows. Reset restores the saved windows for the active mode." }); }}>Save timing defaults</button>
@@ -1312,7 +1338,7 @@ export default function App() {
             ))}
           </nav>
           <section className="view-surface">
-            <div className={`rf-hd-layout hd-layout-${hdLayout} ${hdCollapsed ? "hd-is-collapsed" : ""}`} hidden={viewState.selectedTab !== "rf"}>
+            <div className={`rf-hd-layout hd-layout-${hdLayout} ${!showHd ? "hd-is-hidden" : hdCollapsed ? "hd-is-collapsed" : ""}`} hidden={viewState.selectedTab !== "rf"}>
               <div className="rf-primary-pane">
                 {noNavigationUnits && <div className={`view-empty${unitFilterStatus === "error" ? " error-state" : ""}`}><strong>{emptyUnitTitle}</strong><span>{emptyUnitDetail}</span></div>}
                 {unavailableUnit && unavailableView}
@@ -1320,7 +1346,7 @@ export default function App() {
                 {!noNavigationUnits && unitStatus === "error" && <div className="view-empty error-state"><strong>Unit data could not be loaded</strong><span>{error}</span></div>}
                 {viewState.selectedTab === "rf" && !noNavigationUnits && !unavailableUnit && counts && selectedCell && <SpatialPlot kind="rf" meta={meta} counts={counts} state={viewState} unitIndex={localIndex} selectedCell={selectedCell} onSelectCell={selectCell} />}
               </div>
-              <HdPanel
+              {showHd && <HdPanel
                 artifact={hdArtifact}
                 clusterId={viewState.clusterId}
                 loading={hdLoading}
@@ -1332,7 +1358,8 @@ export default function App() {
                 onSettingsChange={setHdSettings}
                 onToggleCollapsed={() => setHdCollapsed((value) => !value)}
                 onChoosePath={() => setHdChooserOpen(true)}
-              />
+                autoLoad={settings.autoLoadHd}
+              />}
             </div>
             {viewState.selectedTab === "delay" && (
               noNavigationUnits
@@ -1356,6 +1383,7 @@ export default function App() {
         </div>
       </main>
 
+      {settingsDialog}
       {sourceOpen && (
         <SourceChooser
           overlay
@@ -1444,7 +1472,7 @@ export default function App() {
         <div className="modal-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) setHelpOpen(false); }}>
           <div className="info-dialog" role="dialog" aria-modal="true" aria-label="Keyboard Shortcuts">
             <header><strong>Keyboard Shortcuts</strong><button type="button" aria-label="Close" onClick={() => setHelpOpen(false)}>×</button></header>
-            <pre>← / → or [ / ]   Previous / next unit{"\n"}↑ / ↓   Previous / next timeline bin{"\n"}Shift+, / Shift+.   Coarser / finer by one source bin{"\n"}−   Toggle RF Sum / A − B windows{"\n"}D   Show / hide Display Options{"\n"}Command/Ctrl-Shift+.   Show / hide filtered units{"\n"}1–3   Switch RF / Delay-RGB / Timeline{"\n"}F   Invert Y{"\n"}P   Toggle rectangular / polar layout{"\n"}Shift+P   Cycle palette{"\n"}Double-click waveform   Enlarge local waveform{"\n"}Esc   Close waveform zoom; clear Probe region; otherwise show full Timeline{"\n"}Command/Ctrl-O   Open an RF mapping file in this viewer{"\n"}Command/Ctrl-E   Open Figure Export Composer{"\n"}Command/Ctrl-Shift-E   Export displayed data CSV</pre>
+            <pre>← / → or [ / ]   Previous / next unit{"\n"}↑ / ↓   Previous / next timeline bin{"\n"}Shift+, / Shift+.   Coarser / finer by one source bin{"\n"}−   Toggle RF Sum / A − B windows{"\n"}D   Show / hide Display Options{"\n"}Command/Ctrl-Shift+.   Show / hide filtered units{"\n"}1–3   Switch RF / Delay-RGB / Timeline{"\n"}F   Invert Y{"\n"}P   Toggle rectangular / polar layout{"\n"}Shift+P   Cycle palette{"\n"}Double-click waveform   Enlarge local waveform{"\n"}Esc   Close waveform zoom; clear Probe region; otherwise show full Timeline{"\n"}Command/Ctrl-,   Settings{"\n"}Command/Ctrl-O   Open an RF mapping file in this viewer{"\n"}Command/Ctrl-E   Open Figure Export Composer{"\n"}Command/Ctrl-Shift-E   Export displayed data CSV</pre>
             <footer><button type="button" onClick={() => setHelpOpen(false)}>OK</button></footer>
           </div>
         </div>

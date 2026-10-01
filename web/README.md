@@ -1,11 +1,33 @@
 # Web Viewer 1.10.2
 
+The current source ports the stable Python viewer's non-export updates:
+saved Settings, welcome/recent-file actions, HD input compatibility and Class 3,
+Probe selection, and companion synchronization between paired tabs. Figure
+Studio/export updates, CCG, and the separate Free-Moving alpha are excluded.
+
+Open **Settings…** on the welcome screen or use the gear button in the viewer
+(**Command/Ctrl+,**). Its General, RF Map, Waveform, and Tuning Curve sections
+save defaults in this browser. General controls HD/Probe visibility and automatic
+loading independently; manual attachment remains available when auto-load is off.
+RF defaults adapt to each file's axes, while the Timeline keeps its full time
+support. Saving applies to the current viewer and synchronizes runtime settings
+with opted-in paired tabs. **Restore Defaults** takes effect when saved.
+**Close map** returns to the welcome screen, whose Recent RF maps list can reopen
+a file or be cleared without changing the files.
+
+HD readers accept current columnar tuning JSON, nested schema-v2 JSON, and legacy
+unit-ID-to-rate mappings. Saved classes 0–3 are accepted; Class 3 has a blue badge,
+and its saved `kappa_cutoff` and class description are available under **Info**.
+Saved classifications are displayed directly. Observation files pool counts and
+occupancy; legacy rate-only files average finite rates and use missing-aware
+Gaussian smoothing, without inventing counts or exposure.
+
 The Web implementation contains a FastAPI backend in `backend/` and a
 React/Vite frontend in `frontend/`. The backend owns its figure renderer and
 does not import the analysis repository or the Python/Tk implementation.
-Its `1.10.2` version places it in the same stable feature generation as the
-Python `1.10.4` reference; `web` remains an artifact/tag identity rather than a
-version suffix.
+The published Web package remains at `1.10.2`, one feature generation behind
+the Python `1.11.0` reference; `web` remains an artifact/tag identity rather than
+a version suffix.
 
 Version 1.10.2 aligns HD tuning curves with clockwise-increasing RF azimuths
 in both the viewer and figure exports: RF −90° matches HD 270°, RF 90° matches

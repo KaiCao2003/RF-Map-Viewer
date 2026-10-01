@@ -1,12 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
   aggregateHdCounts,
+  aggregateHdRates,
   centerHdCurveOnZero,
   headDirectionUnitVector,
   normalizeHdBinCount,
   processHdUnit,
   sharedHdPeak,
   smoothCircular,
+  smoothCircularMissingAware,
   tuningSmoothingSigma,
 } from "./hdMath";
 import type { HdUnitArtifact } from "./types";
@@ -47,6 +49,55 @@ describe("HD tuning math", () => {
       { unitId: 2, rates: raw(7), spikeCounts: raw(14), hdClass: 1 },
     ];
     expect(sharedHdPeak(units, raw(2), { displayBins: 30, smoothing: false, sigma: 1.5 })).toBe(7);
+  });
+
+  it("rebins rate-only curves using only observed rates", () => {
+    const rates: Array<number | null> = raw(2);
+    rates.splice(0, 12, null, 2, null, 4, null, null, ...Array.from({ length: 6 }, () => null));
+    const curve = aggregateHdRates(rates, 30);
+    expect(curve.angles.slice(0, 2)).toEqual([6, 18]);
+    expect(curve.rates.slice(0, 3)).toEqual([3, null, 2]);
+  });
+
+  it("processes legacy rates without fabricating counts or exposure", () => {
+    const unit: HdUnitArtifact = {
+      unitId: 7,
+      rates: Array.from({ length: 180 }, (_unused, index) => index % 6),
+      spikeCounts: null,
+      hdClass: null,
+    };
+    const curve = processHdUnit(unit, null, { displayBins: 30, smoothing: false, sigma: 1.5 });
+    expect(curve.rates).toEqual(Array.from({ length: 30 }, () => 2.5));
+    expect(unit.spikeCounts).toBeNull();
+  });
+
+  it("smooths missing rate bins with observed support instead of zero Hz", () => {
+    const rates: Array<number | null> = raw(4);
+    rates.splice(0, 6, ...Array.from({ length: 6 }, () => null));
+    const unit: HdUnitArtifact = { unitId: 7, rates, spikeCounts: null, hdClass: null };
+    const unsmoothed = processHdUnit(unit, null, { displayBins: 30, smoothing: false, sigma: 1.5 });
+    expect(unsmoothed.rates[0]).toBeNull();
+    const smoothed = processHdUnit(unit, null, { displayBins: 30, smoothing: true, sigma: 1.5 });
+    smoothed.rates.forEach((rate) => expect(rate).toBeCloseTo(4, 12));
+    expect(smoothCircularMissingAware([null, null, null, null], 1)).toEqual([null, null, null, null]);
+  });
+
+  it("shares a processed scale for rate-only files", () => {
+    const units: HdUnitArtifact[] = [
+      { unitId: 1, rates: raw(2), spikeCounts: null, hdClass: null },
+      { unitId: 2, rates: raw(7), spikeCounts: null, hdClass: null },
+    ];
+    expect(sharedHdPeak(units, null, { displayBins: 30, smoothing: true, sigma: 1.5 })).toBeCloseTo(7, 12);
+  });
+
+  it("smooths counts and occupancy together across an unoccupied bin", () => {
+    const counts = raw(2);
+    const occupancy = raw(1);
+    counts[0] = 0;
+    occupancy[0] = 0;
+    const unit: HdUnitArtifact = { unitId: 7, rates: counts, spikeCounts: counts, hdClass: 3 };
+    const curve = processHdUnit(unit, occupancy, { displayBins: 180, smoothing: true, sigma: 1.5 });
+    curve.rates.forEach((rate) => expect(rate).toBeCloseTo(2, 12));
   });
 
   it("keeps one fixed 18-degree smoothing width across display bins", () => {

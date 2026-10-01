@@ -1,7 +1,21 @@
 import { useEffect, useRef, useState } from "react";
-import type { DatasetMeta, ViewState } from "./types";
+import type { DatasetMeta, HdViewSettings, ViewState, WaveformChannelMode } from "./types";
 
-type StateKey = keyof ViewState;
+export type PairViewState = ViewState & {
+  hdSettings?: HdViewSettings;
+  showHd?: boolean;
+  showProbe?: boolean;
+  showWaveform?: boolean;
+  waveformChannelMode?: WaveformChannelMode;
+  hdLayout?: "side-by-side" | "stacked";
+  tuningSession?: number;
+  unitFilterEnabled?: boolean;
+  zeroSpikeSpatialBinThreshold?: number;
+  autoLoadHd?: boolean;
+  autoLoadProbe?: boolean;
+};
+
+type StateKey = keyof PairViewState;
 const FIELD_GROUPS: StateKey[][] = [
   ["clusterId"], ["valueMode"], ["activeTimeCenterMs"],
   ["timelineStartMs", "timelineEndMs", "timelineAnchorMs"],
@@ -11,11 +25,27 @@ const FIELD_GROUPS: StateKey[][] = [
   ["flipY"], ["palette"], ["polarRadius"], ["polarLayout"], ["rgbMode"],
   ["selectedCellYMidpoint", "selectedCellXMidpoint"],
   ["timelineScrollFraction"], ["selectedTab"],
+  ["hdSettings"], ["showHd", "showProbe", "showWaveform"],
+  ["waveformChannelMode"], ["hdLayout"],
+  ["tuningSession"], ["unitFilterEnabled", "zeroSpikeSpatialBinThreshold"],
+  ["autoLoadHd", "autoLoadProbe"],
 ];
 
-export function changedPairFields(before: ViewState, after: ViewState): Partial<ViewState> {
-  const entries = FIELD_GROUPS.filter((group) => group.some((key) => before[key] !== after[key]))
-    .flatMap((group) => group.map((key) => [key, after[key]]));
+function changedField(before: PairViewState, after: PairViewState, key: StateKey): boolean {
+  if (key !== "hdSettings") return before[key] !== after[key];
+  const previous = before.hdSettings;
+  const next = after.hdSettings;
+  if (!previous || !next) return previous !== next;
+  return previous.plotMode !== next.plotMode
+    || previous.displayBins !== next.displayBins
+    || previous.smoothing !== next.smoothing
+    || previous.sigmaDeg !== next.sigmaDeg
+    || previous.compareScale !== next.compareScale;
+}
+
+export function changedPairFields(before: PairViewState, after: PairViewState): Partial<PairViewState> {
+  const entries = FIELD_GROUPS.filter((group) => group.some((key) => changedField(before, after, key)))
+    .flatMap((group) => group.filter((key) => after[key] !== undefined).map((key) => [key, after[key]]));
   return Object.fromEntries(entries);
 }
 
@@ -25,7 +55,7 @@ export interface PairMessage {
   revision: number;
   kind: "join" | "presence" | "state" | "leave";
   units: number[];
-  patch?: Partial<ViewState>;
+  patch?: Partial<PairViewState>;
 }
 
 interface Peer { revision: number; seen: number; units: number[] }
@@ -40,26 +70,28 @@ export class PairSession {
 
   constructor(
     private readonly id: string,
-    private state: ViewState,
+    private state: PairViewState,
     private units: number[],
     private readonly send: (message: PairMessage) => void,
-    private readonly apply: (patch: Partial<ViewState>) => void,
+    private readonly apply: (patch: Partial<PairViewState>) => void,
     private readonly membership: (unitIDs: number[], peerCount: number) => void,
     private readonly now: () => number = Date.now,
   ) {}
 
-  private emit(kind: PairMessage["kind"], patch?: Partial<ViewState>) {
+  private emit(kind: PairMessage["kind"], patch?: Partial<PairViewState>) {
     this.send({ version: 1, sender: this.id, revision: ++this.revision, kind, units: this.units, patch });
   }
 
   join() {
-    this.emit("join", Object.fromEntries(FIELD_GROUPS.flat().map((key) => [key, this.state[key]])));
+    this.emit("join", Object.fromEntries(FIELD_GROUPS.flat()
+      .filter((key) => this.state[key] !== undefined)
+      .map((key) => [key, this.state[key]])));
     this.reportMembership();
   }
 
   leave() { this.emit("leave"); }
 
-  updateState(next: ViewState) {
+  updateState(next: PairViewState) {
     const patch = changedPairFields(this.state, next);
     this.state = next;
     // A receiver may clamp shared coordinates to its own axes. Do not echo
@@ -101,7 +133,7 @@ export class PairSession {
     if ((message.kind === "join" || message.kind === "state") && message.patch) {
       const patch = Object.fromEntries(FIELD_GROUPS.flat()
         .filter((key) => Object.prototype.hasOwnProperty.call(message.patch, key))
-        .map((key) => [key, message.patch![key]])) as Partial<ViewState>;
+        .map((key) => [key, message.patch![key]])) as Partial<PairViewState>;
       if (Object.keys(patch).length) {
         this.applyingRemote = true;
         this.apply(patch);
@@ -118,9 +150,9 @@ export class PairSession {
 
 export function usePairedWindows(
   meta: DatasetMeta | null,
-  state: ViewState | null,
+  state: PairViewState | null,
   unitIDs: number[],
-  onPatch: (patch: Partial<ViewState>) => void,
+  onPatch: (patch: Partial<PairViewState>) => void,
 ) {
   const supported = typeof BroadcastChannel !== "undefined";
   const [enabled, setEnabled] = useState(false);
