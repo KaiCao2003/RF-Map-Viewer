@@ -323,14 +323,14 @@ class TuningCurveModelTests(unittest.TestCase):
                         "unit_id": 8,
                         "spike_counts": second_counts,
                         "firing_rate_hz": second_rates,
-                        "hd_class": 2,
+                        "hd_class": 3,
                     },
                 ],
             }
         )
 
         self.assertEqual(data.hd_class_for(7), 1)
-        self.assertEqual(data.hd_class_for(8), 2)
+        self.assertEqual(data.hd_class_for(8), 3)
         self.assertIsNone(data.hd_class_for(99))
         self.assertIsNotNone(data.metadata)
         self.assertEqual(data.metadata.timestamp_reference, "Exposure TTL rising edge")
@@ -426,7 +426,7 @@ class TuningCurveModelTests(unittest.TestCase):
         }
 
         invalid_class = json.loads(json.dumps(payload))
-        invalid_class["units"][0]["hd_class"] = 3
+        invalid_class["units"][0]["hd_class"] = 4
         with self.assertRaisesRegex(ValueError, "hd_class"):
             self.load(invalid_class)
 

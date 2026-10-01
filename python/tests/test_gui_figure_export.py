@@ -1248,9 +1248,7 @@ def test_gui_shared_waveform_scale_is_selection_scoped_and_resolved_in_options(
     assert resolved_plot.options["show_colorbar"] is True
     assert resolved_plot.options["vmin"] == pytest.approx(-35.0)
     assert resolved_plot.options["vmax"] == pytest.approx(35.0)
-    assert resolved_plot.options["subtitle"] == (
-        "best + nearest 4; Same shank; baseline ≤ -0.25 ms"
-    )
+    assert "subtitle" not in resolved_plot.options
 
     shared_provider = GUIFigureDataProvider(
         data,

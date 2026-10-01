@@ -143,6 +143,227 @@ from rfmapping_viewer.tk_support import (
 from rfmapping_viewer.viewer_state import ViewerSyncState, WaveformLoadResult
 
 
+class ViewerApplication:
+    """Own application actions independently of any document window."""
+
+    def __init__(self, root: tk.Tk):
+        self.root = root
+        self.closing_all = False
+        root.bind_all("<Control-o>", self.open_json)
+        root.bind_all("<Control-comma>", self.show_settings)
+        if sys.platform == "darwin":
+            root.bind_all("<Command-o>", self.open_json)
+            root.bind_all("<Command-comma>", self.show_settings)
+            root.bind_all("<Command-Option-w>", self.close_all_windows)
+            root.bind_all("<Command-Option-KeyPress>", self.close_all_option_key)
+            for name, callback in (
+                ("OpenApplication", self.reopen),
+                ("ReopenApplication", self.reopen),
+                ("OpenDocument", self.open_documents),
+                ("Quit", self.quit),
+                ("ShowPreferences", self.show_settings),
+                ("ShowHelp", self.show_help),
+            ):
+                root.tk.createcommand(f"::tk::mac::{name}", callback)
+            # A root-owned menu remains valid when every Toplevel is closed.
+            self.menu = tk.Menu(root, tearoff=False)
+            self.add_utilities_menu(self.menu)
+            self.add_file_menu(self.menu, self.close_active_window)
+            root.configure(menu=self.menu)
+
+    def current_viewer(self) -> RFMViewer | None:
+        windows = self.root._rfm_viewer_windows
+        active = getattr(self.root, "_rfm_active_viewer", None)
+        return active if active in windows else (windows[-1] if windows else None)
+
+    def viewer(self) -> RFMViewer:
+        return self.current_viewer() or RFMViewer(master=self.root)
+
+    def reopen(self, *_args: object) -> None:
+        if self.root._rfm_quitting:
+            return
+        windows = [
+            window for window in self.root.winfo_children()
+            if isinstance(window, tk.Toplevel) and window.winfo_exists()
+        ]
+        window = self.current_viewer() or (windows[-1] if windows else self.viewer())
+        if isinstance(window, RFMViewer) and window._startup_chooser_frame is not None:
+            window._startup_chooser_frame.refresh_recent_documents(list_recent_documents())
+        window.deiconify()
+        window.lift()
+        window.focus_set()
+
+    def open_json(self, _event: object | None = None) -> None:
+        self.viewer()._open_json()
+
+    def open_documents(self, *paths: str) -> None:
+        self.viewer()._on_macos_open_documents(*paths)
+
+    def show_settings(self, _event: object | None = None) -> None:
+        self.viewer()._show_settings()
+
+    def show_help(self) -> None:
+        self.viewer()._open_support_documentation()
+
+    def add_utilities_menu(self, menu: tk.Menu) -> None:
+        parent = menu
+        if sys.platform == "darwin":
+            parent = tk.Menu(menu, name="apple", tearoff=False)
+            menu.add_cascade(label="RF Map Viewer", menu=parent)
+        utilities = tk.Menu(parent, tearoff=False)
+        utilities.add_command(label="Cross-correlogram…", command=self.open_crosscorrelogram)
+        parent.add_cascade(label="Utilities", menu=utilities)
+
+    def add_file_menu(self, menu: tk.Menu, close: Callable[[], None]) -> None:
+        file_menu = tk.Menu(menu, tearoff=False)
+        file_menu.add_command(
+            label="Open RF Map…",
+            accelerator="⌘O" if sys.platform == "darwin" else "Ctrl+O",
+            command=self.open_json,
+        )
+        self.add_recent_menu(file_menu)
+        file_menu.add_separator()
+        file_menu.add_command(
+            label="Close Window",
+            accelerator="⌘W" if sys.platform == "darwin" else "Ctrl+W",
+            command=close,
+        )
+        self.add_close_all_command(file_menu)
+        menu.add_cascade(label="File", menu=file_menu)
+
+    def add_close_all_command(self, menu: tk.Menu) -> None:
+        menu.add_command(
+            label="Close All Windows",
+            accelerator="Option-Command-w" if sys.platform == "darwin" else "",
+            command=self.close_all_windows,
+        )
+
+    def add_recent_menu(self, file_menu: tk.Menu) -> None:
+        recent = tk.Menu(file_menu, tearoff=False)
+        recent.configure(postcommand=lambda: self.populate_recent_menu(recent))
+        file_menu.add_cascade(label="Open Recent", menu=recent)
+
+    def populate_recent_menu(self, menu: tk.Menu) -> None:
+        menu.delete(0, "end")
+        paths = list_recent_documents()
+        for path in paths:
+            menu.add_command(
+                label=f"{path.name} — {path.parent}",
+                command=lambda selected=path: self.viewer()._open_document_path(selected),
+            )
+        if not paths:
+            menu.add_command(label="No Recent RF Maps", state="disabled")
+        menu.add_separator()
+        menu.add_command(
+            label="Clear Recent", command=self.clear_recent_documents,
+            state="normal" if paths else "disabled",
+        )
+
+    def clear_recent_documents(self) -> None:
+        clear_recent_documents()
+        for window in self.root._rfm_viewer_windows:
+            if window._startup_chooser_frame is not None:
+                window._startup_chooser_frame.refresh_recent_documents([])
+
+    def open_crosscorrelogram(self) -> None:
+        from rfmapping_viewer.crosscorrelogram_window import CrossCorrelogramWindow
+
+        window = self.root._rfm_crosscorrelogram_window
+        if window is not None and window.winfo_exists():
+            window.deiconify()
+            window.lift()
+            window.focus_set()
+            return
+        viewer = self.current_viewer()
+        session_dir, probe_name, unit_ids = None, "A", ()
+        if viewer is not None and viewer._viewer_ready:
+            session_dir = next(
+                (path for path in viewer.data.path.parents if _RECORDING_SESSION_RE.fullmatch(path.name)),
+                None,
+            )
+            probe_name = (probe_name_for_json(viewer.data.path) or "ProbeA")[-1]
+            selected = viewer._selected_unit_id_value()
+            if selected is not None:
+                unit_ids = (selected,)
+        window = CrossCorrelogramWindow(
+            self.root, session_dir=session_dir, probe_name=probe_name, unit_ids=unit_ids,
+        )
+        menu = tk.Menu(window, tearoff=False)
+        self.add_utilities_menu(menu)
+        self.add_file_menu(menu, window.destroy)
+        window.configure(menu=menu)
+        self.root._rfm_crosscorrelogram_window = window
+        window.bind("<Destroy>", self.utility_destroyed, add="+")
+        window.bind("<Command-w>" if sys.platform == "darwin" else "<Control-w>", lambda _event: window.destroy())
+        if sys.platform == "darwin":
+            window.bind("<Command-Option-w>", self.close_all_windows)
+            window.bind("<Command-Option-KeyPress>", self.close_all_option_key)
+        window.lift()
+        window.focus_set()
+
+    def utility_destroyed(self, event: tk.Event) -> None:
+        if event.widget is self.root._rfm_crosscorrelogram_window:
+            self.root._rfm_crosscorrelogram_window = None
+            if not self.root._rfm_quitting:
+                self.root._rfm_utility_close_after = self.root.after_idle(self.finish_utility_close)
+
+    def finish_utility_close(self) -> None:
+        self.root._rfm_utility_close_after = None
+        self.quit_if_no_windows()
+
+    def quit_if_no_windows(self) -> None:
+        if sys.platform == "darwin" or self.closing_all or self.root._rfm_quitting:
+            return
+        if any(isinstance(window, tk.Toplevel) for window in self.root.winfo_children()):
+            return
+        self.quit()
+
+    def close_active_window(self) -> None:
+        focused = self.root.focus_get()
+        window = focused.winfo_toplevel() if focused is not None else self.current_viewer()
+        if window is not None and window is not self.root:
+            window.destroy()
+
+    def close_all_windows(self, _event: object | None = None) -> str:
+        if self._export_is_running("closing all windows"):
+            return "break"
+        self.closing_all = True
+        try:
+            for window in tuple(self.root.winfo_children()):
+                if isinstance(window, tk.Toplevel):
+                    window.destroy()
+        finally:
+            self.closing_all = False
+        self.quit_if_no_windows()
+        return "break"
+
+    def close_all_option_key(self, event: tk.Event) -> str | None:
+        # Aqua may translate Option-W to ∑ without assigning a keysym.
+        if event.char == "∑":
+            return self.close_all_windows()
+        return None
+
+    def _export_is_running(self, action: str) -> bool:
+        if not _active_export_jobs(self.root):
+            return False
+        messagebox.showinfo(
+            "Export is running",
+            f"Wait for all figure exports to finish before {action}.",
+            parent=self.current_viewer() or self.root,
+        )
+        return True
+
+    def quit(self, _event: object | None = None) -> None:
+        if self.root._rfm_quitting or self._export_is_running("quitting RF Map Viewer"):
+            return
+        self.root._rfm_quitting = True
+        if self.root._rfm_utility_close_after is not None:
+            self.root.after_cancel(self.root._rfm_utility_close_after)
+            self.root._rfm_utility_close_after = None
+        _shutdown_export_executor(self.root)
+        self.root.destroy()
+
+
 class RFMViewer(tk.Toplevel):
     def __init__(
         self,
@@ -186,6 +407,7 @@ class RFMViewer(tk.Toplevel):
             self._app_root._rfm_pairing_state = None
             self._app_root._rfm_pairing_broadcasting = False
             self._app_root._rfm_quitting = False
+            self._app_root._rfm_application = ViewerApplication(self._app_root)
         self.settings: ViewerSettings = self._app_root._rfm_settings
         super().__init__(self._app_root)
         self.bind("<FocusIn>", self._on_window_focus, add="+")
@@ -526,7 +748,7 @@ class RFMViewer(tk.Toplevel):
             frame.columnconfigure(0, weight=1)
             ttk.Label(
                 frame,
-                text="Opening RF mapping data",
+                text="Opening…",
                 font=("TkDefaultFont", 15, "bold"),
             ).grid(row=0, column=0, sticky="w")
             self._startup_path_label = ttk.Label(
@@ -560,12 +782,11 @@ class RFMViewer(tk.Toplevel):
             self,
             open_document=self._open_json,
             open_recent=self._open_document_path,
-            close_window=self._close_window,
         )
         frame.pack(fill="both", expand=True)
         frame.refresh_recent_documents(list_recent_documents())
         self._startup_chooser_frame = frame
-        self.title("Welcome to RF Map Viewer")
+        self.title("RF Map Viewer")
         set_macos_welcome_chrome(self, True)
         self.deiconify()
         self.lift()
@@ -576,22 +797,7 @@ class RFMViewer(tk.Toplevel):
                 window._startup_chooser_frame.refresh_recent_documents(list_recent_documents())
 
     def _clear_recent_documents(self) -> None:
-        clear_recent_documents()
-        self._refresh_welcome_windows()
-
-    def _show_welcome_window(self) -> None:
-        welcome = next(
-            (window for window in self._app_root._rfm_viewer_windows
-             if window._startup_chooser_frame is not None),
-            None,
-        )
-        if welcome is None:
-            welcome = RFMViewer(master=self._app_root)
-        else:
-            welcome._startup_chooser_frame.refresh_recent_documents(list_recent_documents())
-        welcome.deiconify()
-        welcome.lift()
-        welcome.focus_set()
+        self._app_root._rfm_application.clear_recent_documents()
 
     def _remove_startup_chooser_shell(self) -> None:
         if self._startup_chooser_frame is not None:
@@ -716,6 +922,19 @@ class RFMViewer(tk.Toplevel):
         windows = self._app_root._rfm_viewer_windows
         if self in windows:
             windows.remove(self)
+        if getattr(self._app_root, "_rfm_active_viewer", None) is self:
+            self._app_root._rfm_active_viewer = windows[-1] if windows else None
+        settings_window = self._app_root._rfm_settings_window
+        if (
+            not self._app_root._rfm_quitting
+            and settings_window is not None
+            and settings_window.owner is self
+        ):
+            if windows:
+                settings_window.owner = windows[-1]
+                settings_window.transient(windows[-1])
+            else:
+                settings_window._close()
         if not self._app_root._rfm_quitting:
             self._pair_ready_viewer_set_changed()
         try:
@@ -730,15 +949,7 @@ class RFMViewer(tk.Toplevel):
         self._quit_if_no_windows()
 
     def _quit_if_no_windows(self) -> None:
-        if self._app_root._rfm_quitting or self._app_root._rfm_viewer_windows:
-            return
-        utility = self._app_root._rfm_crosscorrelogram_window
-        if utility is not None and utility.winfo_exists():
-            return
-        try:
-            self._quit_application()
-        except tk.TclError:
-            pass
+        self._app_root._rfm_application.quit_if_no_windows()
 
     def _build_style(self) -> None:
         style = ttk.Style(self)
@@ -748,18 +959,19 @@ class RFMViewer(tk.Toplevel):
             style.theme_use("clam")
         style.configure("TFrame", background="#f5f5f7")
         style.configure("Panel.TFrame", background="#ffffff")
-        style.configure("Sidebar.TFrame", background="#eef0f4")
+        style.configure("Sidebar.TFrame", background="#f0f1f4")
         style.configure("Toolbar.TFrame", background="#f5f5f7")
         style.configure("TLabel", background="#f5f5f7", foreground="#1d1d1f")
         style.configure("Panel.TLabel", background="#ffffff", foreground="#1d1d1f")
-        style.configure("Sidebar.TLabel", background="#eef0f4", foreground="#1d1d1f")
+        style.configure("Sidebar.TLabel", background="#f0f1f4", foreground="#1d1d1f")
         style.configure("Muted.TLabel", background="#ffffff", foreground="#6e6e73")
-        style.configure("SidebarMuted.TLabel", background="#eef0f4", foreground="#6e6e73")
+        style.configure("SidebarMuted.TLabel", background="#f0f1f4", foreground="#616168")
+        style.configure("Sidebar.TCheckbutton", background="#f0f1f4", foreground="#1d1d1f")
         style.configure(
             "Section.TLabel",
-            background="#eef0f4",
-            foreground="#6e6e73",
-            font=("TkDefaultFont", 10, "bold"),
+            background="#f0f1f4",
+            foreground="#616168",
+            font=("TkDefaultFont", 11, "bold"),
         )
         style.configure(
             "Title.TLabel",
@@ -769,7 +981,7 @@ class RFMViewer(tk.Toplevel):
         )
         style.configure(
             "SidebarTitle.TLabel",
-            background="#eef0f4",
+            background="#f0f1f4",
             foreground="#1d1d1f",
             font=("TkDefaultFont", 12, "bold"),
         )
@@ -799,7 +1011,14 @@ class RFMViewer(tk.Toplevel):
             font=("TkDefaultFont", 10, "bold"),
             padding=(6, 2),
         )
-        style.configure("TButton", padding=(7, 4))
+        style.configure(
+            "HDClass3.TLabel",
+            background="#dcecff",
+            foreground="#185da8",
+            font=("TkDefaultFont", 10, "bold"),
+            padding=(6, 2),
+        )
+        style.configure("TButton", padding=(7, 5))
         style.configure("TNotebook", background="#ffffff", borderwidth=0)
         style.configure("TNotebook.Tab", padding=(14, 7))
         self._pane_icons = {
@@ -840,7 +1059,6 @@ class RFMViewer(tk.Toplevel):
             command=self._open_json,
         )
         self._add_recent_menu(file_menu)
-        file_menu.add_command(label="Welcome to RF Map Viewer", command=self._show_welcome_window)
         self._discovered_json_menu = tk.Menu(file_menu, tearoff=False)
         file_menu.add_cascade(
             label="Open Discovered RF Map",
@@ -871,6 +1089,7 @@ class RFMViewer(tk.Toplevel):
             accelerator="⌘W" if sys.platform == "darwin" else "Ctrl+W",
             command=self._close_window,
         )
+        self._app_root._rfm_application.add_close_all_command(file_menu)
         menu.add_cascade(label="File", menu=file_menu)
         self._file_menu = file_menu
 
@@ -960,17 +1179,7 @@ class RFMViewer(tk.Toplevel):
         self._menu = menu
 
     def _add_utilities_menu(self, menu: tk.Menu) -> None:
-        parent = menu
-        if sys.platform == "darwin":
-            # Tk places the first .apple menu in the native application menu.
-            parent = tk.Menu(menu, name="apple", tearoff=False)
-            menu.add_cascade(label="RF Map Viewer", menu=parent)
-        utilities = tk.Menu(parent, tearoff=False)
-        utilities.add_command(
-            label="Cross-correlogram…",
-            command=self._open_crosscorrelogram,
-        )
-        parent.add_cascade(label="Utilities", menu=utilities)
+        self._app_root._rfm_application.add_utilities_menu(menu)
 
     def _build_startup_menu(self) -> None:
         menu = tk.Menu(self, tearoff=False)
@@ -980,98 +1189,20 @@ class RFMViewer(tk.Toplevel):
         self._menu = menu
 
     def _add_startup_file_menu(self, menu: tk.Menu, close: Callable[[], None]) -> None:
-        file_menu = tk.Menu(menu, tearoff=False)
-        file_menu.add_command(
-            label="Open RF Map…",
-            accelerator="⌘O" if sys.platform == "darwin" else "Ctrl+O",
-            command=self._dispatch_open_json,
-        )
-        self._add_recent_menu(file_menu)
-        file_menu.add_command(label="Welcome to RF Map Viewer", command=self._show_welcome_window)
-        file_menu.add_separator()
-        file_menu.add_command(
-            label="Close Window",
-            accelerator="⌘W" if sys.platform == "darwin" else "Ctrl+W",
-            command=close,
-        )
-        menu.add_cascade(label="File", menu=file_menu)
+        self._app_root._rfm_application.add_file_menu(menu, close)
 
     def _add_recent_menu(self, file_menu: tk.Menu) -> None:
-        recent = tk.Menu(file_menu, tearoff=False)
-        recent.configure(postcommand=lambda: self._populate_recent_menu(recent))
-        file_menu.add_cascade(label="Open Recent", menu=recent)
-
-    def _populate_recent_menu(self, menu: tk.Menu) -> None:
-        menu.delete(0, "end")
-        paths = list_recent_documents()
-        for path in paths:
-            menu.add_command(
-                label=f"{path.name} — {path.parent}",
-                command=lambda selected=path: self._active_viewer()._open_document_path(selected),
-            )
-        if not paths:
-            menu.add_command(label="No Recent RF Maps", state="disabled")
-        menu.add_separator()
-        menu.add_command(
-            label="Clear Recent",
-            command=self._clear_recent_documents,
-            state="normal" if paths else "disabled",
-        )
+        self._app_root._rfm_application.add_recent_menu(file_menu)
 
     def _open_crosscorrelogram(self) -> None:
-        from rfmapping_viewer.crosscorrelogram_window import CrossCorrelogramWindow
-
-        window = self._app_root._rfm_crosscorrelogram_window
-        if window is not None and window.winfo_exists():
-            window.deiconify()
-            window.lift()
-            window.focus_set()
-            return
-        viewer = self._active_viewer()
-        session_dir = None
-        probe_name = "A"
-        unit_ids = ()
-        if viewer._viewer_ready:
-            session_dir = next(
-                (path for path in viewer.data.path.parents if _RECORDING_SESSION_RE.fullmatch(path.name)),
-                None,
-            )
-            probe_name = (probe_name_for_json(viewer.data.path) or "ProbeA")[-1]
-            selected = viewer._selected_unit_id_value()
-            if selected is not None:
-                unit_ids = (selected,)
-        window = CrossCorrelogramWindow(
-            self._app_root,
-            session_dir=session_dir,
-            probe_name=probe_name,
-            unit_ids=unit_ids,
-        )
-        menu = tk.Menu(window, tearoff=False)
-        self._add_utilities_menu(menu)
-        self._add_startup_file_menu(menu, window.destroy)
-        window.configure(menu=menu)
-        self._app_root._rfm_crosscorrelogram_window = window
-        window.bind("<Destroy>", self._on_crosscorrelogram_destroyed, add="+")
-        window.bind("<Command-w>" if sys.platform == "darwin" else "<Control-w>", lambda _event: window.destroy())
-        window.lift()
-        window.focus_set()
-
-    def _on_crosscorrelogram_destroyed(self, event: tk.Event) -> None:
-        if event.widget is self._app_root._rfm_crosscorrelogram_window:
-            self._app_root._rfm_crosscorrelogram_window = None
-            if not self._app_root._rfm_quitting:
-                def finish_close() -> None:
-                    self._app_root._rfm_utility_close_after = None
-                    self._quit_if_no_windows()
-
-                self._app_root._rfm_utility_close_after = self._app_root.after_idle(finish_close)
+        self._app_root._rfm_application.open_crosscorrelogram()
 
     def _build_layout(self) -> None:
         self.columnconfigure(0, weight=0)
         self.columnconfigure(1, weight=1)
         self.rowconfigure(0, weight=1)
 
-        sidebar = ttk.Frame(self, style="Sidebar.TFrame", padding=(12, 10))
+        sidebar = ttk.Frame(self, style="Sidebar.TFrame", padding=(12, 16))
         sidebar.grid(row=0, column=0, sticky="nsew")
         sidebar.columnconfigure(0, weight=1)
         self.sidebar_panel = sidebar
@@ -1100,26 +1231,18 @@ class RFMViewer(tk.Toplevel):
 
     def _build_sidebar(self, parent: ttk.Frame) -> None:
         row = 0
-        ttk.Label(parent, text="Windows", style="Section.TLabel").grid(
-            row=row, column=0, sticky="w", pady=(0, 5)
-        )
-        row += 1
-
-        ttk.Label(parent, text="Window pairing", style="Panel.TLabel").grid(
-            row=row, column=0, sticky="w", pady=(2, 0)
-        )
-        row += 1
         self.pair_windows_toggle = ttk.Checkbutton(
             parent,
-            text="Sync viewer windows",
+            text="Sync windows",
             variable=self.pair_windows_var,
             command=self._on_pair_windows_toggled,
+            style="Sidebar.TCheckbutton",
         )
         self.pair_windows_toggle.grid(row=row, column=0, sticky="w", pady=(0, 5))
         row += 1
         self.pair_status_label = ttk.Label(
             parent,
-            text="Open another loaded viewer window to enable sync.",
+            text="",
             style="SidebarMuted.TLabel",
             wraplength=220,
             justify="left",
@@ -1169,7 +1292,7 @@ class RFMViewer(tk.Toplevel):
         self.probe_canvas.grid(row=1, column=0, sticky="nsew")
         self.probe_attach_button = ttk.Button(
             self.probe_canvas,
-            text="Choose positions.probe or .csv…",
+            text="Open…",
             command=self._attach_probe_geometry,
         )
         self.spatial_status_label = ttk.Label(
@@ -1192,7 +1315,7 @@ class RFMViewer(tk.Toplevel):
         self._waveform_section_row = row
 
     def _build_main(self, parent: ttk.Frame) -> None:
-        toolbar = ttk.Frame(parent, style="Toolbar.TFrame", padding=(10, 7))
+        toolbar = ttk.Frame(parent, style="Toolbar.TFrame", padding=(16, 10))
         toolbar.grid(row=0, column=0, sticky="ew")
         toolbar.columnconfigure(4, weight=1)
 
@@ -1227,7 +1350,7 @@ class RFMViewer(tk.Toplevel):
         self.open_toolbar_button.grid(row=0, column=5, padx=(8, 4))
         self.export_toolbar_button = ttk.Button(
             toolbar,
-            text="Figures…",
+            text="Export…",
             command=self._open_figure_exporter,
         )
         self.export_toolbar_button.grid(row=0, column=6)
@@ -1392,7 +1515,7 @@ class RFMViewer(tk.Toplevel):
                 self.tuning_curve_canvas.grid(row=1, column=0, sticky="nsew")
                 self.tuning_attach_button = ttk.Button(
                     self.tuning_curve_canvas,
-                    text="Choose tuning_curves.tc or .json…",
+                    text="Open…",
                     command=self._attach_tuning_curve,
                 )
                 self.tuning_curve_status_label = ttk.Label(
@@ -1488,7 +1611,7 @@ class RFMViewer(tk.Toplevel):
                 waveform_header.columnconfigure(0, weight=1)
                 ttk.Label(
                     waveform_header,
-                    text="Local Average Waveform",
+                    text="Waveform",
                     style="SidebarTitle.TLabel",
                 ).grid(row=0, column=0, sticky="w")
                 self.waveform_subtitle_label = ttk.Label(
@@ -1556,7 +1679,7 @@ class RFMViewer(tk.Toplevel):
         header.columnconfigure(0, weight=1)
         ttk.Label(
             header,
-            text="Local Average Waveform",
+            text="Waveform",
             style="Title.TLabel",
         ).grid(row=0, column=0, sticky="w")
         self.waveform_zoom_subtitle_label = ttk.Label(
@@ -1572,11 +1695,6 @@ class RFMViewer(tk.Toplevel):
             sticky="w",
             pady=(2, 0),
         )
-        ttk.Label(
-            header,
-            text="Double-click the waveform or press Esc to return",
-            style="Muted.TLabel",
-        ).grid(row=0, column=1, sticky="e", padx=(12, 10))
         self.waveform_zoom_done_button = ttk.Button(
             header,
             text="Done",
@@ -1807,7 +1925,7 @@ class RFMViewer(tk.Toplevel):
                 self._schedule_optional_redraw("tuning")
 
     def _build_plot_controls(self, parent: ttk.Frame) -> None:
-        controls = ttk.Frame(parent, style="Panel.TFrame", padding=(10, 6))
+        controls = ttk.Frame(parent, style="Panel.TFrame", padding=(10, 10))
         controls.grid(row=1, column=0, sticky="ew")
         controls.columnconfigure(6, weight=1)
         self.plot_controls_frame = controls
@@ -1828,7 +1946,7 @@ class RFMViewer(tk.Toplevel):
         ttk.Separator(controls, orient="vertical").grid(
             row=0, column=2, sticky="ns", padx=(0, 10)
         )
-        ttk.Label(controls, text="Target width", style="Panel.TLabel").grid(
+        ttk.Label(controls, text="Time bin", style="Panel.TLabel").grid(
             row=0, column=3, sticky="w", padx=(0, 6)
         )
         self.time_res_spin = ttk.Spinbox(
@@ -1936,13 +2054,13 @@ class RFMViewer(tk.Toplevel):
         self.timeline_context_frame = ttk.Frame(controls, style="Panel.TFrame")
         ttk.Label(
             self.timeline_context_frame,
-            text="Full physical time axis",
+            text="Full timeline",
             style="Panel.TLabel",
         ).grid(row=0, column=0, sticky="w")
 
         self.display_toggle_button = ttk.Button(
             controls,
-            text="Display Options (D)",
+            text="Display",
             command=self._toggle_display_controls,
         )
         self.display_toggle_button.grid(row=0, column=8, sticky="e", padx=(10, 0))
@@ -2114,7 +2232,7 @@ class RFMViewer(tk.Toplevel):
     def _sync_display_controls(self) -> None:
         expanded = self.display_expanded_var.get()
         self.display_toggle_button.configure(
-            text="Hide (D)" if expanded else "Display Options (D)"
+            text="Hide" if expanded else "Display"
         )
         self._view_menu.entryconfigure(
             self._display_options_menu_index,
@@ -2344,33 +2462,13 @@ class RFMViewer(tk.Toplevel):
     def _install_application_handlers(self) -> None:
         self.protocol("WM_DELETE_WINDOW", self._close_window)
         self.bind("<Command-w>" if sys.platform == "darwin" else "<Control-w>", self._close_window)
+        if sys.platform == "darwin":
+            self.bind("<Command-Option-w>", self._app_root._rfm_application.close_all_windows)
+            self.bind("<Command-Option-KeyPress>", self._app_root._rfm_application.close_all_option_key)
         self._app_root._rfm_active_viewer = self
-        # Application shortcuts must outlive the last RF window when a utility
-        # is still open. Register their Tcl commands on the application root.
-        self._app_root.bind_all("<Control-o>", self._dispatch_open_json)
-        self._app_root.bind_all("<Control-comma>", self._dispatch_settings)
-
-        if sys.platform != "darwin":
-            return
-        try:
-            self._app_root.bind_all("<Command-o>", self._dispatch_open_json)
-            self._app_root.bind_all("<Command-comma>", self._dispatch_settings)
-            self.tk.createcommand("::tk::mac::OpenApplication", self._dispatch_macos_open_application)
-            self.tk.createcommand("::tk::mac::OpenDocument", self._dispatch_macos_open_documents)
-            self.tk.createcommand("::tk::mac::Quit", self._quit_application)
-            self.tk.createcommand("::tk::mac::ShowPreferences", self._dispatch_settings)
-            self.tk.createcommand("::tk::mac::ShowHelp", self._open_support_documentation)
-        except tk.TclError:
-            # The in-app Open button and window close protocol remain usable
-            # if this Tk build does not expose the macOS application callbacks.
-            return
 
     def _active_viewer(self) -> RFMViewer:
-        active = getattr(self._app_root, "_rfm_active_viewer", None)
-        windows = self._app_root._rfm_viewer_windows
-        return active if active in windows else (
-            windows[-1] if windows else RFMViewer(master=self._app_root)
-        )
+        return self._app_root._rfm_application.viewer()
 
     def _ready_pairing_viewers(self) -> list[RFMViewer]:
         windows = self._app_root._rfm_viewer_windows
@@ -2583,20 +2681,13 @@ class RFMViewer(tk.Toplevel):
         active = bool(self._app_root._rfm_pairing_enabled and eligible)
         matching_units = self._unit_lists_match(ready)
         if len(ready) < 2:
-            status = "Open another loaded viewer window to enable sync."
+            status = ""
         elif not matching_units:
-            prefix = f"{len(ready)} windows paired. " if active else f"{len(ready)} windows ready. "
-            status = (
-                prefix
-                + "Unit lists differ; these files may be from different sessions. "
-                "Missing units display N/A."
-            )
+            status = f"{len(ready)} windows · Unit lists differ · Missing units: N/A"
         elif active:
-            status = (
-                f"{len(ready)} windows paired. Changes in any paired window sync to the others."
-            )
+            status = f"{len(ready)} windows synced"
         else:
-            status = f"{len(ready)} loaded windows have matching unit lists."
+            status = f"{len(ready)} windows · matching unit lists"
 
         windows = self._app_root._rfm_viewer_windows
         for window in windows:
@@ -3098,12 +3189,6 @@ class RFMViewer(tk.Toplevel):
         finally:
             self._app_root._rfm_pairing_broadcasting = False
 
-    def _dispatch_open_json(self, _event: object | None = None) -> None:
-        self._active_viewer()._open_json()
-
-    def _dispatch_settings(self, _event: object | None = None) -> None:
-        self._active_viewer()._show_settings()
-
     def _show_settings(self) -> None:
         active = self._active_viewer()
         if not getattr(active, "_viewer_ready", False):
@@ -3274,18 +3359,7 @@ class RFMViewer(tk.Toplevel):
         return True
 
     def _dispatch_macos_open_application(self) -> None:
-        viewer = self._active_viewer()
-        if (
-            not viewer._quitting
-            and viewer._startup_chooser_frame is not None
-            and viewer._startup_after is None
-        ):
-            viewer._startup_chooser_frame.refresh_recent_documents(list_recent_documents())
-            viewer.deiconify()
-            viewer.lift()
-
-    def _dispatch_macos_open_documents(self, *paths: str) -> None:
-        self._active_viewer()._on_macos_open_documents(*paths)
+        self._app_root._rfm_application.reopen()
 
     def _close_window(self, _event: object | None = None) -> None:
         if _active_export_jobs(self._app_root, self):
@@ -3298,22 +3372,7 @@ class RFMViewer(tk.Toplevel):
         self.destroy()
 
     def _quit_application(self, _event: object | None = None) -> None:
-        if self._app_root._rfm_quitting:
-            return
-        if _active_export_jobs(self._app_root):
-            messagebox.showinfo(
-                "Export is running",
-                "Wait for all figure exports to finish before quitting RF Map Viewer.",
-                parent=self,
-            )
-            return
-        self._quitting = True
-        self._app_root._rfm_quitting = True
-        if self._app_root._rfm_utility_close_after is not None:
-            self._app_root.after_cancel(self._app_root._rfm_utility_close_after)
-            self._app_root._rfm_utility_close_after = None
-        _shutdown_export_executor(self._app_root)
-        self._app_root.destroy()
+        self._app_root._rfm_application.quit()
 
     def _open_json_window(self, path: Path) -> RFMViewer | None:
         path = Path(path).expanduser()
@@ -4035,6 +4094,9 @@ class RFMViewer(tk.Toplevel):
         elif hd_class == 2:
             self.tuning_hd_class_label.configure(text="2", style="HDClass2.TLabel")
             self.tuning_hd_class_label.grid()
+        elif hd_class == 3:
+            self.tuning_hd_class_label.configure(text="3", style="HDClass3.TLabel")
+            self.tuning_hd_class_label.grid()
         else:
             self.tuning_hd_class_label.configure(text="", style="Panel.TLabel")
             self.tuning_hd_class_label.grid_remove()
@@ -4070,6 +4132,8 @@ class RFMViewer(tk.Toplevel):
                     rows.append(("Rayleigh α", f"{classification.rayleigh_alpha:g}"))
                 if classification.shuffle_alpha is not None:
                     rows.append(("Shuffle α", f"{classification.shuffle_alpha:g}"))
+                if classification.kappa_cutoff is not None:
+                    rows.append(("Class 3 κ cutoff", f"{classification.kappa_cutoff:g}"))
                 if classification.num_shuffle is not None:
                     rows.append(("Shuffles", str(classification.num_shuffle)))
             ttl_qc = metadata.ttl_qc
@@ -4146,18 +4210,20 @@ class RFMViewer(tk.Toplevel):
             fill="#1d1d1f",
             font=("TkDefaultFont", 13, "bold"),
         )
-        canvas.create_text(
-            width / 2,
-            height / 2 + 4 if offers_attach else height / 2 + 22,
-            text=detail,
-            justify="center",
-            fill="#6e6e73",
-            font=("TkDefaultFont", 10),
-        )
+        if detail:
+            canvas.create_text(
+                width / 2,
+                height / 2 + 4 if offers_attach else height / 2 + 22,
+                text=detail,
+                width=width - 32,
+                justify="center",
+                fill="#6e6e73",
+                font=("TkDefaultFont", 10),
+            )
         if offers_attach and hasattr(self, "tuning_attach_button"):
             canvas.create_window(
                 width / 2,
-                height / 2 + 48,
+                height / 2 + (48 if detail else 12),
                 window=self.tuning_attach_button,
             )
 
@@ -4187,20 +4253,10 @@ class RFMViewer(tk.Toplevel):
         if data is None:
             if hasattr(self, "tuning_provenance_button"):
                 self.tuning_provenance_button.grid_remove()
-            detail = (
-                "No tuning_curves.tc or tuning_curves.json was found automatically for this "
-                f"recording date in Tuning Curve Session "
-                f"{self.settings.tuning_curve_session}. Generate it with the analysis pipeline, "
-                "or attach a matching file.\nAttach head-direction data "
-                "for the selected RF unit."
-            )
-            if self._optional_drop_available:
-                detail += "\nYou can also drop a .tc or tuning JSON file here."
             if self._tuning_curve_error:
-                detail += f"\n\n{self._tuning_curve_error}"
-                self._draw_tuning_placeholder("Could not load tuning curves", detail)
+                self._draw_tuning_placeholder("Could not load tuning curves", self._tuning_curve_error)
             else:
-                self._draw_tuning_placeholder("No tuning curves", detail)
+                self._draw_tuning_placeholder("No tuning curves", "")
             return
 
         if hasattr(self, "tuning_provenance_button"):
@@ -4537,7 +4593,7 @@ class RFMViewer(tk.Toplevel):
             return
         geometry = self.probe_geometry
         compact = geometry is None
-        requested_height = 170 if compact else 330
+        requested_height = 120 if compact else 330
         self.probe_section.rowconfigure(1, weight=0 if compact else 1)
         self.sidebar_frame.rowconfigure(
             self._probe_section_row,
@@ -4546,42 +4602,30 @@ class RFMViewer(tk.Toplevel):
         if int(float(canvas.cget("height"))) != requested_height:
             canvas.configure(height=requested_height)
         width = max(canvas.winfo_width(), 220)
-        height = max(canvas.winfo_height(), 200)
+        height = max(canvas.winfo_height(), 120 if compact else 200)
         if geometry is None:
             self._probe_canvas_transform = None
-            detail = "Geometry is optional"
-            if getattr(self, "_optional_drop_available", False):
-                detail += " · drop is supported"
-            signature = ("missing", width, height, detail)
+            signature = ("missing", width, height)
             if signature != self._probe_static_signature:
                 canvas.delete("all")
                 canvas.create_text(
                     width / 2,
-                    height / 2 - 34,
+                    height / 2 - 18,
                     text="No probe geometry",
                     justify="center",
                     fill="#1d1d1f",
                     font=("TkDefaultFont", 12, "bold"),
                     tags=("probe-static",),
                 )
-                canvas.create_text(
-                    width / 2,
-                    height / 2 - 8,
-                    text=detail,
-                    justify="center",
-                    fill="#6e6e73",
-                    font=("TkDefaultFont", 10),
-                    tags=("probe-static",),
-                )
                 if hasattr(self, "probe_attach_button"):
                     canvas.create_window(
                         width / 2,
-                        height / 2 + 30,
+                        height / 2 + 20,
                         window=self.probe_attach_button,
                         tags=("probe-static",),
                     )
                 self._probe_static_signature = signature
-            self.spatial_status_label.configure(text="Geometry optional")
+            self.spatial_status_label.configure(text="")
             self.clear_spatial_button.state(["disabled"])
             return
 
@@ -5319,15 +5363,10 @@ class RFMViewer(tk.Toplevel):
             if key == "rf":
                 self._draw_tuning_curve()
             if self.show_waveform_var.get():
-                unavailable_text = (
-                    f"Cluster {self._selected_unit_id_value()} · waveform unavailable"
-                )
-                self.waveform_subtitle_label.configure(text=unavailable_text)
+                self.waveform_subtitle_label.configure(text="")
                 self._draw_unavailable_unit("waveform")
                 if self._waveform_zoomed:
-                    self.waveform_zoom_subtitle_label.configure(
-                        text=unavailable_text
-                    )
+                    self.waveform_zoom_subtitle_label.configure(text="")
                     self._draw_unavailable_unit(
                         "waveform",
                         canvas=self.waveform_zoom_canvas,
@@ -5429,7 +5468,7 @@ class RFMViewer(tk.Toplevel):
         else:
             self.waveform_payload = None
             self._waveform_payload_key = None
-            self._waveform_error = current.error or "Waveform data is unavailable."
+            self._waveform_error = current.error or "No waveform"
             self._waveform_error_key = current.key
         if self.show_waveform_var.get():
             self._draw_waveform()
@@ -5447,17 +5486,18 @@ class RFMViewer(tk.Toplevel):
             height / 2 - 14,
             text=heading,
             fill="#667085",
-            font=("TkDefaultFont", 16, "bold"),
+            font=("TkDefaultFont", 11),
         )
-        canvas.create_text(
-            width / 2,
-            height / 2 + 25,
-            text=detail,
-            fill="#667085",
-            font=("TkDefaultFont", 9),
-            width=max(180, width - 60),
-            justify="center",
-        )
+        if detail:
+            canvas.create_text(
+                width / 2,
+                height / 2 + 25,
+                text=detail,
+                fill="#667085",
+                font=("TkDefaultFont", 9),
+                width=max(180, width - 60),
+                justify="center",
+            )
 
     def _draw_waveform(self) -> None:
         self._request_waveform_payload()
@@ -5484,29 +5524,33 @@ class RFMViewer(tk.Toplevel):
         )
         if self._waveform_payload_key != key:
             if self._waveform_error_key == key:
-                subtitle_label.configure(
-                    text=f"Cluster {key[0]} · waveform unavailable"
-                )
+                subtitle_label.configure(text="")
+                error = self._waveform_error or "No waveform"
+                missing = error in {
+                    "No waveform",
+                    "No companion data/waveform/Probe*/manifest.json was found for this RF dataset.",
+                }
                 self._draw_waveform_message(
                     canvas,
-                    "N/A",
-                    self._waveform_error or "Waveform data is unavailable.",
+                    "No waveform" if missing else "Unavailable",
+                    "" if missing else error,
                 )
                 return
             subtitle_label.configure(
-                text=f"Cluster {key[0]} · loading waveform artifact…"
+                text=f"Cluster {key[0]}"
             )
             self._draw_waveform_message(
                 canvas,
                 "Loading…",
-                "Reading the selected unit's precomputed average template.",
+                "",
             )
             return
 
         payload = self.waveform_payload
         if payload is None:
+            subtitle_label.configure(text="")
             self._draw_waveform_message(
-                canvas, "N/A", "Waveform data is unavailable."
+                canvas, "No waveform", ""
             )
             return
         matrix_raw = payload.get("matrix")
@@ -5732,6 +5776,9 @@ class RFMViewer(tk.Toplevel):
         canvas.delete("all")
         if canvas is self.canvases.get(key):
             self._canvas_layouts.pop(key, None)
+        if key == "waveform":
+            self._draw_waveform_message(canvas, "Unavailable", "")
+            return
         if key == "timeline":
             self._timeline_cells = []
             self._timeline_cells_by_bin = {}

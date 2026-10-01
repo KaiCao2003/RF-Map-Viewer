@@ -55,6 +55,21 @@ def test_load_and_lookup_units(tmp_path: Path) -> None:
         data.by_unit_id(99)
 
 
+def test_loads_class_three_and_its_saved_provenance(tmp_path: Path) -> None:
+    payload = _payload()
+    payload["unit_data"]["hd_class"] = [3, 2]
+    payload["metadata"]["classification"] = {
+        "class_3": "rayleigh and shuffle significant; von Mises kappa >= cutoff",
+        "kappa_cutoff": 0.075,
+    }
+    data = load_hd_tuning(_write(tmp_path, payload))
+
+    assert data.hd_class_for(7) == 3
+    assert data.hd_class_for(42) == 2
+    assert data.metadata.classification.class_3 == payload["metadata"]["classification"]["class_3"]
+    assert data.metadata.classification.kappa_cutoff == 0.075
+
+
 def test_processed_curve_aggregates_counts_and_occupancy(tmp_path: Path) -> None:
     data = load_hd_tuning(_write(tmp_path))
 
@@ -120,8 +135,9 @@ def test_loads_legacy_unit_rate_mapping_and_preserves_missing_observation_mode(
     np.testing.assert_allclose(curve.rates_hz, np.full(30, 2.0))
 
 
+@pytest.mark.parametrize("hd_class", [2, 3])
 def test_loads_nested_schema_v2_and_keeps_zero_occupancy_missing(
-    tmp_path: Path,
+    tmp_path: Path, hd_class: int,
 ) -> None:
     occupancy = [1.0] * 180
     occupancy[1] = 0.0
@@ -141,7 +157,7 @@ def test_loads_nested_schema_v2_and_keeps_zero_occupancy_missing(
                     "unit_id": 99,
                     "spike_counts": counts,
                     "firing_rate_hz": rates,
-                    "hd_class": 2,
+                    "hd_class": hd_class,
                 }
             ],
         },
@@ -150,7 +166,7 @@ def test_loads_nested_schema_v2_and_keeps_zero_occupancy_missing(
     data = load_hd_tuning(path)
 
     assert data.unit_ids == (99,)
-    assert data.by_unit_id(99).hd_class == 2
+    assert data.by_unit_id(99).hd_class == hd_class
     assert np.isnan(data.by_unit_id(99).raw_rates_hz[1])
     curve = data.processed_curve(99, display_bins=180, smoothing=False)
     assert np.isnan(curve.rates_hz[1])
@@ -234,7 +250,7 @@ def test_columnar_validates_rates_counts_classes_and_metadata(tmp_path: Path) ->
         load_hd_tuning(_write(tmp_path, fractional_count))
 
     invalid_class = _payload()
-    invalid_class["unit_data"]["hd_class"][0] = 3  # type: ignore[index]
+    invalid_class["unit_data"]["hd_class"][0] = 4  # type: ignore[index]
     with pytest.raises(ValueError, match="hd_class"):
         load_hd_tuning(_write(tmp_path, invalid_class))
 

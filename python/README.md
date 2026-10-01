@@ -2,7 +2,7 @@
 
 This directory contains two separately versioned applications:
 
-- `rfmapping_gui.py`: the stable RF Map Viewer `1.10.4`;
+- `rfmapping_gui.py`: the stable RF Map Viewer `1.11.0`;
 - `rfmapping_fm_gui.py`: the Free-Moving RF Viewer `1.10.0-alpha.3`.
 
 They have distinct app names, bundle identifiers, release artifacts, and tags,
@@ -44,16 +44,17 @@ input is never edited; exports are created only when you request them.
    another recording while keeping the current window available.
 3. Wait for the first unit to appear. Large indexed .rfmap archives show a
    cache indicator while later units load. You can inspect units as they
-   become available; **Figures…** becomes available after the archive cache
+   become available; **Export…** becomes available after the archive cache
    finishes. If caching reports an error, use **Retry**.
 
 On macOS, recent documents use the application's native `NSDocumentController`
 history. Open one from the welcome window or **File → Open Recent**.
 **Clear Recent** clears that history without changing the files.
-**File → Welcome to RF Map Viewer** brings the welcome window back.
-Closing an RF document or the welcome window leaves an open Cross-correlogram
-utility running; close the utility separately or quit RF Map Viewer to close all
-windows. A missing or unreadable recent file returns to the welcome window.
+On macOS, **Close Window** and **Close All Windows** keep the app running.
+Click its Dock icon or launch it again with no open windows to show Welcome.
+Quit RF Map Viewer to exit the app. An open Cross-correlogram utility remains
+available when its RF document closes. A missing or unreadable recent file
+returns to the welcome window.
 
 The viewer reads the RF data without changing the source file. A version-2
 indexed archive can be named .rfmap or .json; the viewer detects its file
@@ -182,6 +183,9 @@ never required to open the RF map.
 
 - **HD tuning curve:** the viewer can discover a matching tuning_curves.tc
   or tuning_curves.json, or you can choose **File → Attach Tuning Curves…**.
+  Saved HD classes 0–3 are supported; Class 3 appears in the tuning-panel badge,
+  and its saved κ cutoff appears in provenance. The viewer browses all RF units
+  and does not apply an HD-class selection filter or recalculate classification.
   The **Tuning Curve Session** setting selects the exact positive session
   number used for discovery; it does not silently substitute another session.
   Use **Settings → Tuning Curve** to choose line or polar presentation,
@@ -215,24 +219,48 @@ display grouping, time resolution, RF window, smoothing, orientation, palette,
 and source identity. It represents the current displayed RF result; it is not
 a replacement for the original RF map.
 
-Use **Figures…** or **File → Export Figures…** (**⌘E**) to build a reusable
+Use **Export…** or **File → Export Figures…** (**⌘E**) to open Figure Studio and build a reusable
 multi-page figure layout:
 
-1. Choose **Current**, **All**, or individual units. The available unit list
+1. Choose **All** or individual units. The available unit list
    follows the active unit and Probe filters.
-2. Choose the output format: **PDF**, **PNG**, or **SVG (embedded raster)**.
+2. Choose the output format: **PDF**, **PNG**, or **SVG**.
 3. Add pages, give each page a clear name, and add the desired plot types.
-   Reorder pages and plots until the live preview matches the intended
-   reading order.
+   Drag a view on the page to move it. Drag its lower-right corner to resize,
+   or choose **Small**, **Wide**, **Tall**, **Large**, or **Full** from the
+   size menu. Frames snap to a shared grid; neighbouring views move when
+   needed to make room. Arrow keys move the selected view. **Arrange**
+   fills the page evenly. Each page supports up to nine views. **Option+↑/↓**
+   reorders the selected page.
 4. Choose the destination and select **Export**. Every selected unit receives
    the same page template. Check the page count and destination reported when
    the export finishes.
 
-Figure Composer freezes the current viewer settings and companion selection
+**Normalize per unit** is on by default. Each unit uses its own RF color range
+and waveform amplitude range, matching the main viewer; the numeric values and
+physical units stay unchanged. Turn it off to compare exported units with
+shared limits. The preview always uses the displayed unit's own scale, and
+shared limits are calculated when exporting.
+
+Use the preview's unit picker or arrows to inspect a unit without changing the
+export selection. **All** and **Clear** change only the output selection.
+Preview renders only the current unit and current page. Dragging and resizing
+track cached plot pixels immediately; a fresh render follows on release.
+
+Use **Layout → Save Layout…** (**⌘S**) to save a `.rfmlayout` file, and
+**Layout → Load Layout…** (**⌘⇧L**) to restore it. Layouts include page names,
+plot types, positions, sizes, normalization, output format, RF sum/subtraction
+ranges, Timeline range and active bin, time-bin grouping, spatial grouping,
+palette, smoothing, and HD display settings. Loading keeps the current source,
+attached companions, and selected units. The source's time and spatial axes
+must match the saved layout so a bin cannot silently refer to a different
+time or position. An incompatible layout leaves the current layout intact.
+
+Figure Studio freezes the current viewer settings and companion selection
 when it opens. Return to the main window and reopen the composer to capture a
-different state. Indexed RF maps must finish caching before multi-unit figure
-export is available. PDF creates a multi-page file; PNG and SVG create
-page-based output directories with a manifest.
+different state, or load saved layout settings. Indexed RF maps must finish
+caching before multi-unit figure export is available. PDF creates a multi-page file; PNG and SVG create
+page-based output directories with a manifest. SVG embeds a lossless PNG.
 
 ### Cross-correlogram utility
 
@@ -287,7 +315,13 @@ Open **Help → Keyboard Shortcuts** for the in-app list.
 
 ---
 
-## Stable viewer 1.10.4
+## Stable viewer 1.11.0
+
+Version 1.11.0 introduces movable, resizable figure widgets with preset frames,
+saved layouts that retain their rendering settings,
+per-unit normalization, and a current-unit preview independent of the output
+selection. On macOS, Close All Windows keeps the application running; reopening
+it from the Dock restores the welcome window when no other windows remain.
 
 HD tuning and RF azimuth both increase clockwise: RF −90° aligns with HD 270°,
 RF 90° with HD 90°, and 0° with 0°. Line plots wrap around zero without
@@ -445,7 +479,7 @@ Opening the app without a path shows the native file chooser. Release packages
 do not contain or auto-load sample RF data.
 
 Its macOS identity is `RF Map Viewer.app`, bundle ID
-`org.local.rfmapping.viewer`, and version/build `1.10.4` / `110004`. Build it with:
+`org.local.rfmapping.viewer`, and version/build `1.11.0` / `111000`. Build it with:
 
 ```sh
 script/build_python_stable_macos_app.sh

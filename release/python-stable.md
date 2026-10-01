@@ -1,3 +1,14 @@
+## Python 1.11.0: Figure Studio, saved layouts, and viewer lifecycle
+
+Version **1.11.0**. Target: macOS Apple Silicon (build **111000**).
+
+- Arrange scientific figures in Figure Studio using draggable, resizable frames, named size presets, and multiple pages. Save and restore compositions as `.rfmlayout` files.
+- Preview the current unit and page; export selected units with independent per-unit RF and waveform scaling, opaque white backgrounds, and recorded source provenance.
+- Save viewer defaults in General, RF Map, Waveform, and Tuning Curve settings. Display saved HD Class 3 classifications and accept legacy rate-only tuning files without inventing spike counts or occupancy.
+- Close Window and Close All Windows keep the app running. Reopening from the Dock with no open windows shows Welcome; Figure Studio can be reopened after closing.
+
+Windows remains available from Python 1.10.0; Swift and the Free-Moving alpha are unchanged. The Web source receives settings, HD compatibility, recent-file actions, Probe selection, and paired-tab synchronization; its Figure Studio/export and CCG updates are excluded.
+
 ## Python 1.10.4: welcome window, independent CCG, and clockwise alignment
 
 Version **1.10.4**. Target: macOS Apple Silicon (build **110004**).

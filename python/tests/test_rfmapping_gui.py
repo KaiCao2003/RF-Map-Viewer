@@ -49,6 +49,17 @@ class ShortcutModifierTests(unittest.TestCase):
 
 
 class MacOSLifecycleTests(unittest.TestCase):
+    def test_close_all_menu_uses_native_accelerator_tokens(self) -> None:
+        menu = mock.Mock()
+        application = SimpleNamespace(close_all_windows=mock.Mock())
+        with mock.patch.object(gui.sys, "platform", "darwin"):
+            gui.ViewerApplication.add_close_all_command(application, menu)
+        menu.add_command.assert_called_once_with(
+            label="Close All Windows",
+            accelerator="Option-Command-w",
+            command=application.close_all_windows,
+        )
+
     def test_no_argument_main_opens_welcome_without_sample_data(self) -> None:
         viewer = mock.Mock()
         with (
@@ -60,47 +71,32 @@ class MacOSLifecycleTests(unittest.TestCase):
         viewer_type.assert_called_once_with()
         viewer.mainloop.assert_called_once_with()
 
-    def test_macos_handlers_include_open_application_open_document_and_quit(self) -> None:
-        class FakeTk:
-            def __init__(self) -> None:
-                self.commands = {}
+    def test_macos_handlers_are_owned_by_application_not_document(self) -> None:
+        root = mock.Mock()
+        root.tk.commands = {}
+        root.tk.createcommand.side_effect = lambda name, callback: root.tk.commands.__setitem__(name, callback)
+        with (
+            mock.patch.object(gui.sys, "platform", "darwin"),
+            mock.patch.object(gui.tk, "Menu"),
+        ):
+            application = gui.ViewerApplication(root)
+        for name in ("OpenApplication", "ReopenApplication", "OpenDocument", "Quit", "ShowPreferences", "ShowHelp"):
+            self.assertIs(root.tk.commands[f"::tk::mac::{name}"].__self__, application)
+        self.assertEqual(root.tk.commands["::tk::mac::ReopenApplication"], application.reopen)
+        root.bind_all.assert_any_call("<Command-o>", application.open_json)
+        root.bind_all.assert_any_call("<Command-Option-w>", application.close_all_windows)
+        root.bind_all.assert_any_call("<Command-Option-KeyPress>", application.close_all_option_key)
 
-            def createcommand(self, name, callback) -> None:
-                self.commands[name] = callback
-
-        class FakeViewer:
-            def __init__(self) -> None:
-                self.tk = FakeTk()
-                self._app_root = mock.Mock()
-                self.protocols = {}
-                self.bindings = {}
-                self._quit_application = lambda *_args: None
-                self._close_window = lambda *_args: None
-                self._dispatch_open_json = lambda *_args: None
-                self._dispatch_settings = lambda *_args: None
-                self._dispatch_macos_open_application = lambda *_args: None
-                self._dispatch_macos_open_documents = lambda *_args: None
-                self._open_support_documentation = lambda *_args: None
-
-            def protocol(self, name, callback) -> None:
-                self.protocols[name] = callback
-
-            def bind(self, event, callback) -> None:
-                self.bindings[event] = callback
-
-        viewer = FakeViewer()
-        with mock.patch.object(gui.sys, "platform", "darwin"):
-            gui.RFMViewer._install_application_handlers(viewer)
-
-        self.assertIs(viewer.protocols["WM_DELETE_WINDOW"], viewer._close_window)
-        self.assertIs(viewer.tk.commands["::tk::mac::OpenApplication"], viewer._dispatch_macos_open_application)
-        self.assertIs(viewer.tk.commands["::tk::mac::OpenDocument"], viewer._dispatch_macos_open_documents)
-        self.assertIs(viewer.tk.commands["::tk::mac::Quit"], viewer._quit_application)
-        viewer._app_root.bind_all.assert_any_call("<Command-o>", viewer._dispatch_open_json)
-        self.assertIs(
-            viewer.tk.commands["::tk::mac::ShowHelp"],
-            viewer._open_support_documentation,
-        )
+    def test_option_close_all_accepts_observed_aqua_character_without_keysym(self) -> None:
+        application = SimpleNamespace(close_all_windows=mock.Mock(return_value="break"))
+        event = SimpleNamespace(keysym="??", char="∑", state=24, keycode=226501137)
+        self.assertEqual(gui.ViewerApplication.close_all_option_key(application, event), "break")
+        application.close_all_windows.assert_called_once_with()
+        application.close_all_windows.reset_mock()
+        for character in ("", "a", "π"):
+            event.char = character
+            self.assertIsNone(gui.ViewerApplication.close_all_option_key(application, event))
+        application.close_all_windows.assert_not_called()
 
     def test_open_document_creates_independent_windows(self) -> None:
         class FakeViewer:
@@ -168,25 +164,16 @@ class MacOSLifecycleTests(unittest.TestCase):
         self.assertEqual(viewer.loaded, Path("/tmp/requested.json"))
 
     def test_quit_is_idempotent_and_destroys_root(self) -> None:
-        class FakeRoot:
-            def __init__(self) -> None:
-                self._rfm_quitting = False
-                self._rfm_utility_close_after = None
-                self.destroy_calls = 0
-
-            def destroy(self) -> None:
-                self.destroy_calls += 1
-
-        class FakeViewer:
-            def __init__(self) -> None:
-                self._quitting = False
-                self._app_root = FakeRoot()
-
-        viewer = FakeViewer()
-        gui.RFMViewer._quit_application(viewer)
-        gui.RFMViewer._quit_application(viewer)
-        self.assertTrue(viewer._quitting)
-        self.assertEqual(viewer._app_root.destroy_calls, 1)
+        root = SimpleNamespace(
+            _rfm_quitting=False, _rfm_utility_close_after=None,
+            _rfm_viewer_windows=[], destroy=mock.Mock(),
+        )
+        application = gui.ViewerApplication.__new__(gui.ViewerApplication)
+        application.root = root
+        application.quit()
+        application.quit()
+        self.assertTrue(root._rfm_quitting)
+        root.destroy.assert_called_once_with()
 
     def test_bundle_prohibits_detached_duplicate_instances(self) -> None:
         build_script = Path(gui.__file__).resolve().parent / "script" / "build_python_macos_app.sh"

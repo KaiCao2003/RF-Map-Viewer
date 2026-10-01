@@ -26,14 +26,16 @@ class ComponentVersionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must be SemVer"):
             verify_manifest(invalid)
 
-    def test_one_feature_generation_behind_maps_to_1_9_series(self) -> None:
+    def test_one_feature_generation_behind_maps_to_previous_minor(self) -> None:
         candidate = copy.deepcopy(MANIFEST)
+        major, minor, _patch = map(int, candidate["reference"]["version"].split("."))
+        previous_version = f"{major}.{minor - 1}.4"
         swift = candidate["components"]["swift"]
-        swift["release_version"] = "1.9.4"
-        swift["marketing_version"] = "1.9.4"
+        swift["release_version"] = previous_version
+        swift["marketing_version"] = previous_version
         swift["feature_generation_offset"] = -1
-        swift["artifact"] = "RF_Map_Viewer-1.9.4-swift-macos-arm64.zip"
-        swift["tag"] = "swift-v1.9.4"
+        swift["artifact"] = f"RF_Map_Viewer-{previous_version}-swift-macos-arm64.zip"
+        swift["tag"] = f"swift-v{previous_version}"
         verify_manifest(candidate)
 
     def test_python_stable_windows_release_assets_are_canonical(self) -> None:

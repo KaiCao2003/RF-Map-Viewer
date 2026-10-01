@@ -43,9 +43,9 @@ class SettingsWindow(tk.Toplevel):
         self.owner = owner
         self._app_root = owner._app_root
         super().__init__(self._app_root)
-        self.title("RF Map Viewer Settings")
-        self.geometry("720x810")
-        self.minsize(680, 800)
+        self.title("Settings")
+        self.geometry("720x720")
+        self.minsize(720, 640)
         self.transient(owner)
         self.protocol("WM_DELETE_WINDOW", self._close)
         self._create_variables(owner._app_root._rfm_settings)
@@ -129,9 +129,15 @@ class SettingsWindow(tk.Toplevel):
         }
 
     def _build(self) -> None:
+        style = ttk.Style(self)
+        style.configure("Settings.TFrame", background="#ffffff")
+        style.configure("Settings.TLabel", background="#ffffff", foreground="#1d1d1f")
+        style.configure("Settings.TCheckbutton", background="#ffffff", foreground="#1d1d1f")
+        style.configure("SettingsSection.TLabel", background="#ffffff", foreground="#1d1d1f",
+                        font=("TkDefaultFont", 12, "bold"))
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
-        outer = ttk.Frame(self, padding=(16, 14, 16, 12))
+        outer = ttk.Frame(self, padding=(20, 18, 20, 16))
         outer.grid(row=0, column=0, sticky="nsew")
         outer.columnconfigure(0, weight=1)
         outer.rowconfigure(0, weight=1)
@@ -141,6 +147,7 @@ class SettingsWindow(tk.Toplevel):
         self.notebook.enable_traversal()
         self._tab_name_by_widget: dict[str, str] = {}
         self._tab_widget_by_name: dict[str, str] = {}
+        self._tab_canvases: dict[str, tk.Canvas] = {}
         general = self._new_tab("General")
         rf_map = self._new_tab("RF Map")
         waveform = self._new_tab("Waveform")
@@ -149,10 +156,16 @@ class SettingsWindow(tk.Toplevel):
         self._build_rf_tab(rf_map)
         self._build_waveform_tab(waveform)
         self._build_tuning_tab(tuning)
+        for tab in (general, rf_map, waveform, tuning):
+            self._style_form(tab)
         self.notebook.bind("<<NotebookTabChanged>>", self._remember_selected_tab)
+        self.bind("<MouseWheel>", self._scroll_form)
+        self.bind("<Button-4>", self._scroll_form)
+        self.bind("<Button-5>", self._scroll_form)
+        self.bind("<FocusIn>", self._reveal_form_control, add="+")
 
         footer = ttk.Frame(outer)
-        footer.grid(row=1, column=0, sticky="ew", pady=(12, 0))
+        footer.grid(row=1, column=0, sticky="ew", pady=(16, 0))
         footer.columnconfigure(0, weight=1)
         ttk.Label(
             footer,
@@ -164,7 +177,7 @@ class SettingsWindow(tk.Toplevel):
         ttk.Button(footer, text="Cancel", command=self._close).grid(
             row=0, column=1, padx=(12, 8)
         )
-        ttk.Button(footer, text="Save", command=self._save).grid(row=0, column=2)
+        ttk.Button(footer, text="Save", command=self._save, default="active").grid(row=0, column=2)
 
         for variable in (
             self.show_tuning_curve_var,
@@ -177,15 +190,27 @@ class SettingsWindow(tk.Toplevel):
             variable.trace_add("write", lambda *_args: self._sync_dependent_controls())
 
     def _new_tab(self, name: str) -> ttk.Frame:
-        tab = ttk.Frame(self.notebook, padding=(18, 16))
+        page = ttk.Frame(self.notebook, style="Settings.TFrame")
+        page.columnconfigure(0, weight=1)
+        page.rowconfigure(0, weight=1)
+        canvas = tk.Canvas(page, background="#ffffff", highlightthickness=0)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        scrollbar = ttk.Scrollbar(page, orient="vertical", command=canvas.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        tab = ttk.Frame(canvas, padding=(22, 18), style="Settings.TFrame")
+        item = canvas.create_window(0, 0, window=tab, anchor="nw")
+        canvas.bind("<Configure>", lambda event: canvas.itemconfigure(item, width=event.width))
+        tab.bind("<Configure>", lambda _event: canvas.configure(scrollregion=canvas.bbox("all")))
         # Keep forms anchored to the leading edge instead of centering their
         # controls in the available Settings width.
-        tab.columnconfigure(0, minsize=164)
+        tab.columnconfigure(0, minsize=210)
         tab.columnconfigure(1, weight=0)
         tab.columnconfigure(2, weight=1)
-        self.notebook.add(tab, text=name)
-        self._tab_name_by_widget[str(tab)] = name
-        self._tab_widget_by_name[name] = str(tab)
+        self.notebook.add(page, text=name)
+        self._tab_name_by_widget[str(page)] = name
+        self._tab_widget_by_name[name] = str(page)
+        self._tab_canvases[str(page)] = canvas
         ttk.Label(
             tab,
             textvariable=self._tab_error_vars[name],
@@ -195,48 +220,75 @@ class SettingsWindow(tk.Toplevel):
         ).grid(row=99, column=0, columnspan=2, sticky="w", pady=(16, 0))
         return tab
 
+    def _scroll_form(self, event: tk.Event) -> str | None:
+        if isinstance(event.widget, (ttk.Combobox, ttk.Spinbox)):
+            return None
+        canvas = self._tab_canvases[str(self.notebook.select())]
+        if canvas.yview() == (0.0, 1.0):
+            return None
+        if event.num in (4, 5):
+            units = -1 if event.num == 4 else 1
+        else:
+            delta = event.delta
+            units = -int(delta / 120) if abs(delta) >= 120 else -int(delta)
+        canvas.yview_scroll(units, "units")
+        return "break"
+
+    def _reveal_form_control(self, event: tk.Event) -> None:
+        if not isinstance(event.widget, (ttk.Entry, ttk.Combobox, ttk.Spinbox, ttk.Checkbutton)):
+            return
+        canvas = self._tab_canvases[str(self.notebook.select())]
+        if not str(event.widget).startswith(f"{canvas}."):
+            return
+        top = event.widget.winfo_rooty() - canvas.winfo_rooty()
+        bottom = top + event.widget.winfo_height()
+        overflow = min(top - 10, 0) or max(bottom - canvas.winfo_height() + 10, 0)
+        if overflow:
+            extent = canvas.bbox("all")[3]
+            canvas.yview_moveto((canvas.canvasy(0) + overflow) / extent)
+
     @staticmethod
     def _section_label(parent: ttk.Frame, text: str, row: int) -> None:
         ttk.Label(
             parent,
             text=text,
-            font=("TkDefaultFont", 11, "bold"),
-        ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(8 if row else 0, 8))
+            style="SettingsSection.TLabel",
+        ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(16 if row else 0, 10))
+
+    def _style_form(self, parent: tk.Misc) -> None:
+        for widget in parent.winfo_children():
+            if isinstance(widget, ttk.Frame):
+                widget.configure(style="Settings.TFrame")
+                self._style_form(widget)
+            elif isinstance(widget, ttk.Label) and not widget.cget("style"):
+                widget.configure(style="Settings.TLabel")
+            elif isinstance(widget, ttk.Checkbutton):
+                widget.configure(style="Settings.TCheckbutton")
 
     def _build_general_tab(self, tab: ttk.Frame) -> None:
-        self._section_label(tab, "Views and loading", 0)
+        self._section_label(tab, "Views", 0)
         ttk.Checkbutton(
             tab,
-            text="Show HD tuning curve beside the RF map",
+            text="HD tuning curve",
             variable=self.show_tuning_curve_var,
         ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 6))
         self.auto_tuning_check = ttk.Checkbutton(
             tab,
-            text="Automatically find and load tuning_curves.tc or .json",
+            text="Auto-load",
             variable=self.auto_load_tuning_curve_var,
         )
         self.auto_tuning_check.grid(row=2, column=0, columnspan=2, sticky="w", padx=(22, 0), pady=(0, 14))
         ttk.Checkbutton(
             tab,
-            text="Show probe layout in the sidebar",
+            text="Probe layout",
             variable=self.show_probe_layout_var,
         ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(0, 6))
         self.auto_probe_check = ttk.Checkbutton(
             tab,
-            text="Automatically find and load probe geometry",
+            text="Auto-load",
             variable=self.auto_load_probe_layout_var,
         )
         self.auto_probe_check.grid(row=4, column=0, columnspan=2, sticky="w", padx=(22, 0))
-        ttk.Label(
-            tab,
-            text=(
-                "Hidden views are not discovered, read, or rendered. Turning off automatic "
-                "loading does not remove a file that is already attached."
-            ),
-            foreground="#667085",
-            wraplength=500,
-            justify="left",
-        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(20, 0))
 
     def _labeled_entry(
         self,
@@ -275,18 +327,16 @@ class SettingsWindow(tk.Toplevel):
 
     def _build_rf_tab(self, tab: ttk.Frame) -> None:
         self._section_label(tab, "Timing", 0)
-        timing = ttk.Frame(tab)
-        timing.grid(row=1, column=0, columnspan=2, sticky="w")
-        self._labeled_combo(timing, 0, "Default RF mode", self.rf_window_mode_var, ("Sum", "A − B"), width=12)
-        range_frame = ttk.Frame(timing)
-        range_frame.grid(row=1, column=1, sticky="w", pady=5)
-        ttk.Label(timing, text="Sum defaults (ms)").grid(row=1, column=0, sticky="w", padx=(0, 16), pady=5)
+        self._labeled_combo(tab, 1, "Mode", self.rf_window_mode_var, ("Sum", "A − B"), width=12)
+        range_frame = ttk.Frame(tab)
+        range_frame.grid(row=2, column=1, sticky="w", pady=5)
+        ttk.Label(tab, text="Sum (ms)").grid(row=2, column=0, sticky="w", padx=(0, 16), pady=5)
         ttk.Entry(range_frame, textvariable=self.rf_sum_start_var, width=8).grid(row=0, column=0)
         ttk.Label(range_frame, text="to").grid(row=0, column=1, padx=6)
         ttk.Entry(range_frame, textvariable=self.rf_sum_end_var, width=8).grid(row=0, column=2)
-        ttk.Label(timing, text="A − B defaults (ms)").grid(row=2, column=0, sticky="w", padx=(0, 16), pady=5)
-        difference_frame = ttk.Frame(timing)
-        difference_frame.grid(row=2, column=1, sticky="w", pady=5)
+        ttk.Label(tab, text="A − B (ms)").grid(row=3, column=0, sticky="w", padx=(0, 16), pady=5)
+        difference_frame = ttk.Frame(tab)
+        difference_frame.grid(row=3, column=1, sticky="w", pady=5)
         for column, item in enumerate((
             "(", self.rf_difference_start_var, "–", self.rf_difference_end_var,
             ") − (", self.rf_subtract_start_var, "–", self.rf_subtract_end_var, ")",
@@ -295,50 +345,38 @@ class SettingsWindow(tk.Toplevel):
                 ttk.Entry(difference_frame, textvariable=item, width=6).grid(row=0, column=column)
             else:
                 ttk.Label(difference_frame, text=item).grid(row=0, column=column, padx=3)
-        self._labeled_entry(tab, 2, "Target time width (ms)", self.rf_time_resolution_var)
-        self._labeled_combo(tab, 3, "Value", self.rf_value_mode_var, VALUE_MODES)
+        self._labeled_entry(tab, 4, "Time bin (ms)", self.rf_time_resolution_var)
+        self._labeled_combo(tab, 5, "Value", self.rf_value_mode_var, VALUE_MODES)
 
-        self._section_label(tab, "Unit filtering", 4)
+        self._section_label(tab, "Unit filter · native bins in A", 6)
         ttk.Checkbutton(
             tab,
-            text="Hide units with zero-spike RF bins in the current RF window",
+            text="Hide units with zero-spike bins",
             variable=self.rf_filter_units_with_zero_bins_var,
-        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(0, 6))
-        ttk.Label(tab, text="Hide at this many zero bins").grid(
-            row=6, column=0, sticky="w", pady=5
+        ).grid(row=7, column=0, columnspan=2, sticky="w", pady=(0, 6))
+        ttk.Label(tab, text="Zero bins ≥").grid(
+            row=8, column=0, sticky="w", pady=5
         )
         self.rf_zero_bin_threshold_entry = ttk.Entry(
             tab,
             textvariable=self.rf_zero_bin_threshold_var,
             width=12,
         )
-        self.rf_zero_bin_threshold_entry.grid(row=6, column=1, sticky="w", pady=5)
-        ttk.Label(
-            tab,
-            text=(
-                "Counts native spatial RF bins before display rebinning or smoothing. "
-                "Uses window A in A − B mode. ⌘⇧. toggles this filter."
-            ),
-            foreground="#667085",
-            wraplength=440,
-            justify="left",
-        ).grid(row=7, column=0, columnspan=2, sticky="w", pady=(0, 10))
+        self.rf_zero_bin_threshold_entry.grid(row=8, column=1, sticky="w", pady=5)
 
-        self._section_label(tab, "Spatial display", 8)
+        self._section_label(tab, "Spatial display", 9)
         bins_frame = ttk.Frame(tab)
-        bins_frame.grid(row=9, column=1, sticky="w", pady=5)
-        ttk.Label(tab, text="Display bins").grid(row=9, column=0, sticky="w", pady=5)
+        bins_frame.grid(row=10, column=1, sticky="w", pady=5)
+        ttk.Label(tab, text="Display bins").grid(row=10, column=0, sticky="w", pady=5)
         ttk.Label(bins_frame, text="X").grid(row=0, column=0)
         ttk.Entry(bins_frame, textvariable=self.rf_x_bins_var, width=8).grid(row=0, column=1, padx=(4, 12))
         ttk.Label(bins_frame, text="Y").grid(row=0, column=2)
         ttk.Entry(bins_frame, textvariable=self.rf_y_bins_var, width=8).grid(row=0, column=3, padx=(4, 0))
-        ttk.Label(bins_frame, text="Native = all", foreground="#667085").grid(
-            row=0, column=4, padx=(12, 0)
-        )
-        self._labeled_combo(tab, 10, "Layout", self.rf_layout_var, ("Rectangle", "Polar"))
-        self._labeled_combo(tab, 11, "Palette", self.rf_palette_var, PALETTES)
-        self._labeled_combo(tab, 12, "Polar radius", self.rf_polar_radius_var, POLAR_RADIUS_MODES)
-        ttk.Label(tab, text="RF smoothing radius").grid(row=13, column=0, sticky="w", pady=5)
+
+        self._labeled_combo(tab, 11, "Layout", self.rf_layout_var, ("Rectangle", "Polar"))
+        self._labeled_combo(tab, 12, "Palette", self.rf_palette_var, PALETTES)
+        self._labeled_combo(tab, 13, "Polar radius", self.rf_polar_radius_var, POLAR_RADIUS_MODES)
+        ttk.Label(tab, text="RF smoothing radius").grid(row=14, column=0, sticky="w", pady=5)
         ttk.Spinbox(
             tab,
             from_=0,
@@ -346,14 +384,14 @@ class SettingsWindow(tk.Toplevel):
             increment=1,
             textvariable=self.rf_smooth_radius_var,
             width=10,
-        ).grid(row=13, column=1, sticky="w", pady=5)
+        ).grid(row=14, column=1, sticky="w", pady=5)
         toggles = ttk.Frame(tab)
-        toggles.grid(row=14, column=1, sticky="w", pady=5)
+        toggles.grid(row=15, column=1, sticky="w", pady=5)
         ttk.Checkbutton(toggles, text="Flip Y", variable=self.rf_flip_y_var).grid(row=0, column=0, padx=(0, 18))
         ttk.Checkbutton(toggles, text="RGB composite", variable=self.rf_rgb_mode_var).grid(row=0, column=1)
         self._labeled_combo(
             tab,
-            15,
+            16,
             "Initial tab",
             self.default_viewer_tab_var,
             ("RF", "Delay / RGB", "Timeline"),
@@ -363,19 +401,9 @@ class SettingsWindow(tk.Toplevel):
         self._section_label(tab, "Local average waveform", 0)
         ttk.Checkbutton(
             tab,
-            text="Show a compact waveform in the left sidebar",
+            text="Show waveform",
             variable=self.show_waveform_var,
         ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 8))
-        ttk.Label(
-            tab,
-            text=(
-                "Double-click the waveform to enlarge it; double-click again "
-                "or press Esc to return."
-            ),
-            foreground="#667085",
-            wraplength=500,
-            justify="left",
-        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(0, 8))
         self.waveform_channel_mode_combo = self._labeled_combo(
             tab,
             3,
@@ -383,36 +411,15 @@ class SettingsWindow(tk.Toplevel):
             self.waveform_channel_mode_var,
             tuple(WAVEFORM_CHANNEL_MODE_LABELS.values()),
         )
-        ttk.Label(
-            tab,
-            text=(
-                "The display follows the notebook: the best-PTP channel plus the "
-                "four nearest channels matching this rule, ordered from larger to "
-                "smaller probe Y. It is not forced to two channels above and two below."
-            ),
-            foreground="#667085",
-            wraplength=500,
-            justify="left",
-        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(12, 0))
 
     def _build_tuning_tab(self, tab: ttk.Frame) -> None:
         self._section_label(tab, "Data source", 0)
         self.tuning_curve_session_entry = self._labeled_entry(
             tab,
             1,
-            "Tuning Curve Session",
+            "Session",
             self.tuning_curve_session_var,
         )
-        ttk.Label(
-            tab,
-            text=(
-                "Automatic loading reads the same-date DATE_SESSION folder. "
-                "The session must be a positive integer."
-            ),
-            foreground="#667085",
-            wraplength=440,
-            justify="left",
-        ).grid(row=2, column=1, sticky="w", pady=(0, 12))
 
         self._section_label(tab, "Head-direction display", 3)
         self._labeled_combo(
@@ -422,35 +429,22 @@ class SettingsWindow(tk.Toplevel):
             self.tuning_plot_mode_var,
             TUNING_PLOT_MODES,
         )
-        ttk.Label(
-            tab,
-            text="Auto follows the RF map's Rectangle or Polar layout.",
-            foreground="#667085",
-            wraplength=440,
-        ).grid(row=5, column=1, sticky="w", pady=(0, 10))
         self._labeled_combo(
             tab,
             6,
-            "RF + tuning arrangement",
+            "Arrangement",
             self.tuning_layout_var,
             TUNING_LAYOUTS,
         )
-        self._labeled_entry(tab, 7, "Displayed HD bins", self.tuning_display_bins_var)
-        ttk.Label(
-            tab,
-            text="On Save, the value is rounded down to a divisor of 180 (for example, 8 → 6).",
-            foreground="#667085",
-            wraplength=440,
-            justify="left",
-        ).grid(row=8, column=1, sticky="w", pady=(0, 12))
+        self._labeled_entry(tab, 7, "HD bins (divisors of 180)", self.tuning_display_bins_var)
         ttk.Checkbutton(
             tab,
-            text="Compare cells in this file on one shared 0–peak Hz scale",
+            text="Shared 0–peak Hz scale",
             variable=self.tuning_compare_scale_var,
         ).grid(row=9, column=0, columnspan=2, sticky="w", pady=(0, 10))
         ttk.Checkbutton(
             tab,
-            text="Smooth the 180-bin source curve",
+            text="Smooth source curve (180 bins)",
             variable=self.tuning_smoothing_var,
         ).grid(row=10, column=0, columnspan=2, sticky="w", pady=(0, 6))
         ttk.Label(tab, text="Gaussian σ (degrees)").grid(
@@ -465,16 +459,6 @@ class SettingsWindow(tk.Toplevel):
             width=12,
         )
         self.tuning_sigma_entry.grid(row=11, column=1, sticky="w", pady=5)
-        ttk.Label(
-            tab,
-            text=(
-                "Circular Gaussian smoothing uses mode=wrap on the raw 180-bin curve "
-                "before display aggregation, preserving one angular width at every resolution."
-            ),
-            foreground="#667085",
-            wraplength=440,
-            justify="left",
-        ).grid(row=12, column=0, columnspan=2, sticky="w", pady=(14, 0))
 
     def _select_remembered_tab(self) -> None:
         remembered = getattr(self._app_root, "_rfm_settings_tab", "General")
@@ -536,6 +520,7 @@ class SettingsWindow(tk.Toplevel):
         tab_id = self._tab_widget_by_name[tab_name]
         self.notebook.tab(tab_id, text=f"{tab_name} •")
         self.notebook.select(tab_id)
+        self.after_idle(lambda: self._tab_canvases[tab_id].yview_moveto(1.0))
 
     def _sync_dependent_controls(self) -> None:
         self.auto_tuning_check.state(
@@ -781,9 +766,12 @@ class SettingsWindow(tk.Toplevel):
         self._commit(close=True)
 
     def _close(self) -> None:
-        if getattr(self._app_root, "_rfm_settings_window", None) is self:
-            self._app_root._rfm_settings_window = None
         try:
             self.destroy()
         except tk.TclError:
             pass
+
+    def destroy(self) -> None:
+        if getattr(self._app_root, "_rfm_settings_window", None) is self:
+            self._app_root._rfm_settings_window = None
+        super().destroy()

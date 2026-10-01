@@ -88,7 +88,7 @@ class WindowPairingTests(unittest.TestCase):
         gui.RFMViewer._refresh_pairing_controls(first)
         self.assertEqual(
             first.pair_status_label.text,
-            "Open another loaded viewer window to enable sync.",
+            "",
         )
         self.assertEqual(first.pair_windows_toggle.states[-1], ["disabled"])
 
@@ -98,7 +98,7 @@ class WindowPairingTests(unittest.TestCase):
         gui.RFMViewer._refresh_pairing_controls(first)
         self.assertEqual(
             first.pair_status_label.text,
-            "2 loaded windows have matching unit lists.",
+            "2 windows · matching unit lists",
         )
         self.assertEqual(second.pair_windows_toggle.states[-1], ["!disabled"])
 
@@ -112,15 +112,14 @@ class WindowPairingTests(unittest.TestCase):
         gui.RFMViewer._refresh_pairing_controls(first)
         self.assertEqual(
             second.pair_status_label.text,
-            "2 windows paired. Changes in any paired window sync to the others.",
+            "2 windows synced",
         )
 
         second.data.unit_pool = [20, 30]
         gui.RFMViewer._refresh_pairing_controls(first)
         self.assertEqual(
             first.pair_status_label.text,
-            "2 windows paired. Unit lists differ; these files may be from different "
-            "sessions. Missing units display N/A.",
+            "2 windows · Unit lists differ · Missing units: N/A",
         )
         self.assertEqual(first.pair_windows_toggle.states[-1], ["!disabled"])
 

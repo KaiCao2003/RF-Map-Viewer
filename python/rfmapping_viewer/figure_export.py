@@ -39,6 +39,8 @@ from typing import Any, BinaryIO, TypeAlias
 
 from PIL import Image, ImageChops, ImageColor, ImageDraw, ImageFont
 
+from rfmapping_viewer.figure_layout import frame_pixel_box, validate_frames
+
 try:  # POSIX advisory locks used by the descriptor-pinned publication backend.
     import fcntl
 except ModuleNotFoundError:  # pragma: no cover - exercised on Windows CI.
@@ -152,7 +154,7 @@ _PLOT_DEFINITIONS = (
     PlotKindDefinition(PlotKind.RGB_CARTESIAN, "RGB map", "rgb_map"),
     PlotKindDefinition(PlotKind.RGB_POLAR, "RGB map (polar)", "rgb_map", True),
     PlotKindDefinition(
-        PlotKind.TIMELINE_CURRENT, "Timeline (current settings)", "timeline"
+        PlotKind.TIMELINE_CURRENT, "Timeline", "timeline"
     ),
     PlotKindDefinition(PlotKind.HD_LINE, "HD tuning curve", "line"),
     PlotKindDefinition(
@@ -228,6 +230,11 @@ class PlotSpec:
             raise FigureExportValidationError(
                 "plot subtitle must be a string or None"
             )
+        if "frame" in options:
+            try:
+                validate_frames((options["frame"],))
+            except ValueError as exc:
+                raise FigureExportValidationError(str(exc)) from exc
         object.__setattr__(self, "options", options)
 
 
@@ -250,6 +257,13 @@ class ExportPage:
             raise FigureExportValidationError(
                 f"all plots in export page {self.name!r} must be PlotSpec objects"
             )
+        if any("frame" in plot.options for plot in normalized):
+            if not all("frame" in plot.options for plot in normalized):
+                raise FigureExportValidationError("every plot on a custom page must have a frame")
+            try:
+                validate_frames(tuple(plot.options["frame"] for plot in normalized))
+            except ValueError as exc:
+                raise FigureExportValidationError(str(exc)) from exc
         object.__setattr__(self, "name", self.name.strip())
         object.__setattr__(self, "plots", normalized)
 
@@ -679,7 +693,7 @@ def _draw_scalar_colorbar(
         y1 = round(top + (bottom - top) * (index + 1) / steps)
         draw.rectangle((left, y0, right, y1), fill=_palette(value, low, high, palette))
     draw.rectangle(box, outline="#475467", width=1)
-    font = _font(max(8, round((bottom - top) * 0.055)))
+    font = _font(max(11, min(17, round((bottom - top) * 0.055))))
     suffix = f" {unit}" if unit else ""
     draw.text((right + 4, top), f"{high:.4g}{suffix}", fill="#475467", font=font, anchor="la")
     draw.text((right + 4, bottom), f"{low:.4g}{suffix}", fill="#475467", font=font, anchor="ld")
@@ -695,7 +709,7 @@ def _draw_cartesian_axes(
     y_unit: str,
 ) -> None:
     left, top, right, bottom = grid_box
-    font = _font(max(8, round(min(right - left, bottom - top) * 0.045)))
+    font = _font(max(11, min(17, round(min(right - left, bottom - top) * 0.045))))
     color = "#475467"
     for index in _tick_indices(len(x_values)):
         x = left + (index + 0.5) * (right - left) / len(x_values)
@@ -1041,8 +1055,8 @@ def _draw_waveform_heatmap(
 
     panel_width = right - left
     panel_height = bottom - top
-    axis_font = _font(max(8, round(panel_height * 0.035)))
-    best_axis_font = _font(max(8, round(panel_height * 0.035)), bold=True)
+    axis_font = _font(max(11, min(17, round(panel_height * 0.035))))
+    best_axis_font = _font(max(11, min(17, round(panel_height * 0.035))), bold=True)
     if show_axes:
         measured_label_width = max(
             (
@@ -1327,7 +1341,7 @@ def _draw_polar_map(
     if inner_blank_rows > 0.0:
         inner_radius = outer_radius * inner_blank_rows / radial_units
         inner_color = _color(
-            spec.options.get("inner_color", "#f8fafc"), label="inner_color"
+            spec.options.get("inner_color", "#ffffff"), label="inner_color"
         )
         draw.ellipse(
             (
@@ -1382,7 +1396,7 @@ def _draw_polar_map(
             str(spec.options.get("value_unit", "")),
         )
     if show_axes:
-        axis_font = _font(max(8, round(diameter * 0.035)))
+        axis_font = _font(max(11, min(17, round(diameter * 0.035))))
         axis_color = "#475467"
         x_values = _axis_values(spec, "x", columns)
         y_values = _axis_values(spec, "y", rows)
@@ -1436,17 +1450,6 @@ def _draw_polar_map(
                 font=axis_font,
                 anchor="ms",
             )
-        direction = "clockwise" if clockwise else "counterclockwise"
-        ring_note = "outer to inner" if reverse_rings else "inner to outer"
-        _draw_text_inside(
-            draw,
-            box,
-            ((left + right) / 2.0, bottom - 2),
-            f"angle: {direction}; rings: {ring_note}",
-            fill=axis_color,
-            font=axis_font,
-            anchor="md",
-        )
 
 
 def _xy_payload(data: Any) -> tuple[list[float], list[float]]:
@@ -1496,7 +1499,7 @@ def _draw_line(
     span = min(right - left, bottom - top)
     plot_box = (
         left + (max(46, round(span * 0.13)) if show_axes else 8),
-        top + 12,
+        top + (22 if show_axes else 12),
         right - 12,
         bottom - (max(38, round(span * 0.12)) if show_axes else 8),
     )
@@ -1529,7 +1532,7 @@ def _draw_line(
     else:
         draw.line(points, fill=str(spec.options.get("color", "#2563eb")), width=4)
     if show_axes:
-        axis_font = _font(max(8, round(span * 0.032)))
+        axis_font = _font(max(11, min(17, round(span * 0.032))))
         axis_color = "#475467"
         x_unit = str(
             spec.options.get(
@@ -1590,7 +1593,7 @@ def _draw_line(
         _draw_text_inside(
             draw,
             box,
-            (left + 2, top + 2),
+            (plot_box[0], top + 2),
             f"y ({y_unit})" if y_unit else "y",
             fill=axis_color,
             font=axis_font,
@@ -1779,7 +1782,7 @@ def _draw_timeline_curves(
             width=2,
         )
 
-    legend_font = _font(max(9, round((bottom - top) * 0.08)))
+    legend_font = _font(max(11, min(17, round((bottom - top) * 0.08))))
     legend_x = plot_box[0]
     curves: list[tuple[str, list[float], str, float]] = [
         ("all positions", totals, "#2563eb", max(max(totals), 1.0))
@@ -1816,7 +1819,8 @@ def _draw_timeline_curves(
         text_box = draw.textbbox((0, 0), label, font=legend_font)
         legend_x += 28 + text_box[2] - text_box[0]
 
-    axis_font = _font(max(8, round((bottom - top) * 0.065)))
+    axis_font = _font(max(11, min(17, round((bottom - top) * 0.065))))
+    time_unit = str(data.get("time_unit", "ms"))
     for index in _tick_indices(len(time_boundaries), maximum=5):
         tick_x = time_x(time_boundaries[index])
         draw.line(
@@ -1826,19 +1830,12 @@ def _draw_timeline_curves(
         )
         draw.text(
             (tick_x, plot_box[3] + 5),
-            f"{time_boundaries[index]:.4g}",
+            f"{time_boundaries[index]:.4g}"
+            + (f" {time_unit}" if time_unit and index == len(time_boundaries) - 1 else ""),
             fill="#475467",
             font=axis_font,
             anchor="ma",
         )
-    time_unit = str(data.get("time_unit", "ms"))
-    draw.text(
-        ((plot_box[0] + plot_box[2]) / 2.0, bottom),
-        f"time ({time_unit})" if time_unit else "time",
-        fill="#475467",
-        font=axis_font,
-        anchor="md",
-    )
     blue_maximum = curves[0][3]
     draw.text(
         (plot_box[2] + 4, plot_box[1]),
@@ -1930,7 +1927,7 @@ def _draw_polar_line(
             joint="curve",
         )
     if show_axes:
-        axis_font = _font(max(8, round(radius * 0.09)))
+        axis_font = _font(max(11, min(17, round(radius * 0.09))))
         axis_color = "#475467"
         for cardinal in (0, 90, 180, 270):
             theta = math.radians((cardinal if clockwise else -cardinal) - 90.0)
@@ -2065,12 +2062,11 @@ def _draw_timeline(
         )
     else:
         atlas_bounds = f"indices 0..{len(frame_list) - 1}"
-    caption_font = _font(max(8, round((bottom - top) * 0.025)))
+    caption_font = _font(max(11, min(17, round((bottom - top) * 0.025))))
     caption_height = max(14, int(getattr(caption_font, "size", 10)) + 4)
     draw.text(
         (left, top),
-        f"categorical time-bin atlas; bounds {atlas_bounds}; "
-        "equal-width tiles, row-major time order",
+        atlas_bounds,
         fill="#475467",
         font=caption_font,
         anchor="la",
@@ -2284,7 +2280,7 @@ def _draw_probe_layout(
     def point_y(value: float) -> float:
         return origin_y + (display_y_high - value) * pixels_per_unit
 
-    label_font = _font(max(10, round((bottom - top) * 0.035)))
+    label_font = _font(max(11, min(17, round((bottom - top) * 0.035))))
     for x, y, label, color in points:
         pixel_x = round(point_x(x))
         pixel_y = round(point_y(y))
@@ -2329,7 +2325,7 @@ def _draw_probe_layout(
     )
     if show_axes:
         draw.rectangle(axis_box, outline="#64748b", width=1)
-        axis_font = _font(max(8, round((bottom - top) * 0.03)))
+        axis_font = _font(max(11, min(17, round((bottom - top) * 0.03))))
         suffix = f" {unit}" if unit else ""
         draw.text(
             (axis_box[0], axis_box[3] + 5),
@@ -2509,6 +2505,8 @@ class PillowFigureRenderer:
                 + round((grid_bottom - grid_top) * (row + 1) / rows)
                 - gap // 2,
             )
+            if "frame" in template.options:
+                panel = frame_pixel_box(template.options["frame"], self.page_size)
             spec = self._resolved_spec(unit_id, template, data_provider)
             try:
                 self._draw_plot(draw, panel, spec)
@@ -2550,25 +2548,24 @@ class PillowFigureRenderer:
         left, top, right, bottom = panel
         if right - left < 40 or bottom - top < 40:
             raise FigureExportValidationError("page has too many plots for its size")
-        background = "#ffffff" if spec.kind in {PlotKind.HD_LINE, PlotKind.HD_POLAR} else "#f8fafc"
-        draw.rounded_rectangle(panel, radius=10, fill=background, outline="#cbd5e1", width=2)
+        draw.rounded_rectangle(panel, radius=10, fill="white", outline="#e5e7eb", width=1)
         definition = PLOT_KIND_REGISTRY[spec.kind.value]
         title = spec.title.strip() if spec.title and spec.title.strip() else definition.label
         subtitle = str(spec.options.get("subtitle", "")).strip()
-        title_line_height = max(30, round((bottom - top) * 0.11))
-        title_font = _font(max(13, round((bottom - top) * 0.048)), bold=True)
-        subtitle_font = _font(max(10, round((bottom - top) * 0.032)))
+        title_line_height = 32
+        title_font = _font(20, bold=True)
+        subtitle_font = _font(12)
         subtitle_lines = _wrapped_subtitle_lines(
             draw,
             subtitle,
             subtitle_font,
             max(1, right - left - 24),
         )
-        subtitle_line_height = max(18, round((bottom - top) * 0.055))
+        subtitle_line_height = 18
         title_height = title_line_height + subtitle_line_height * len(subtitle_lines)
         draw.text(
             (left + 12, top + title_line_height / 2),
-            title,
+            _ellipsize_text(draw, title, title_font, max(1, right - left - 24)),
             fill="#0f172a",
             font=title_font,
             anchor="lm",

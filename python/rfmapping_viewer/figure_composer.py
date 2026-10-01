@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import math
 import queue
 import threading
+from collections.abc import Mapping
 from concurrent.futures import Future
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -32,11 +34,11 @@ from rfmapping_viewer.constants import (
     DEFAULT_TUNING_CURVE_SESSION,
     INNER_BLANK_ROWS,
     POLAR_RADIUS_MODES,
-    WAVEFORM_CHANNEL_MODE_LABELS,
 )
 from rfmapping_viewer.display import (
     _nullable_array_list,
     format_ms,
+    palette_response_range,
     reduce_matrix_xy,
     rgb_response_color,
     smooth_matrix,
@@ -50,6 +52,11 @@ from rfmapping_viewer.export_inputs import (
     _submit_daemon_future,
     _unregister_export_job,
 )
+from rfmapping_viewer.figure_layout import (
+    FRAME_PRESETS, arrange_frames, automatic_frames, first_available_frame,
+)
+from rfmapping_viewer.figure_workspace import FigurePageCanvas
+from rfmapping_viewer.figure_recipe import make_figure_layout, parse_figure_layout
 from rfmapping_viewer.rf_model import RFMappingData
 from rfmapping_viewer.settings import normalize_hd_bin_count
 from rfmapping_viewer.tk_support import filedialog, messagebox, tk, ttk
@@ -257,6 +264,9 @@ class GUIFigureDataProvider:
         if kind in {PlotKind.RF_CARTESIAN, PlotKind.RF_POLAR}:
             payload = self._rf_matrix(unit_idx, polar=kind is PlotKind.RF_POLAR)
             bounds = self.shared_rf_scale
+            if options.get("normalize_per_unit", False):
+                bounds = palette_response_range(payload, self.snapshot.palette)
+                options["vmin"], options["vmax"] = bounds
             if self.snapshot.rf_subtract_source_range is not None:
                 options.setdefault("missing_color", "#e6e8eb")
                 edges = self.data.time_bin_edges
@@ -306,6 +316,7 @@ class GUIFigureDataProvider:
                 limit = (
                     self.shared_waveform_limit
                     if self.shared_waveform_limit is not None
+                    and not options.get("normalize_per_unit", False)
                     else local_limit
                 )
                 options["vmin"] = -abs(float(limit))
@@ -893,11 +904,13 @@ class FigureExportWindow(tk.Toplevel):
             selected_unit_id if selected_unit_id in self.unit_ids else self.unit_ids[0]
         )
         self._provider_lock = threading.Lock()
+        self._preview_provider_lock = threading.Lock()
+        self._preview_data_provider: GUIFigureDataProvider | None = None
         self._base_data_provider: GUIFigureDataProvider | None = None
         self._provenance_metadata: dict[str, object] | None = None
         self._context_cache: dict[tuple[object, ...], tuple[tuple[ExportPage, ...], dict[str, object], GUIFigureDataProvider]] = {}
         self.pages: list[dict[str, object]] = [
-            {"name": "Page 1", "plots": [self._current_plot_kind()]}
+            {"name": "Page 1", "plots": [self._current_plot_kind()], "frames": list(automatic_frames(1))}
         ]
         self._preview_photo = None
         self._preview_after: str | None = None
@@ -912,12 +925,16 @@ class FigureExportWindow(tk.Toplevel):
         self._export_busy = False
         self._export_future: Future | None = None
         self._export_poll_after: str | None = None
-        self.title("Export Figures — RF Map Viewer")
-        self.geometry("1380x840")
+        self._layout_path: Path | None = None
+        self.title("Figure Studio — RF Map Viewer")
+        self.geometry("1120x760")
         self.minsize(1050, 680)
         self.transient(viewer)
         self.protocol("WM_DELETE_WINDOW", self._close)
         self._build()
+        modifier = "Command" if self.tk.call("tk", "windowingsystem") == "aqua" else "Control"
+        self.bind(f"<{modifier}-s>", self._save_layout)
+        self.bind(f"<{modifier}-Shift-L>", self._load_layout)
         self._populate_units()
         self._refresh_pages(select=0)
         self._refresh_current_plots()
@@ -935,175 +952,213 @@ class FigureExportWindow(tk.Toplevel):
         return PlotKind.TIMELINE_CURRENT
 
     def _build(self) -> None:
-        self.columnconfigure(0, weight=0)
+        style = ttk.Style(self)
+        style.configure("Studio.TFrame", background="#f5f5f5")
+        style.configure("Studio.TLabel", background="#f5f5f5", foreground="#242424")
+        style.configure("StudioSection.TLabel", background="#f5f5f5",
+                        foreground="#666666", font=("TkDefaultFont", 11))
+        style.configure("StudioMuted.TLabel", background="#f5f5f5", foreground="#666666")
+        self.configure(background="#f5f5f5")
         self.columnconfigure(1, weight=1)
-        self.columnconfigure(2, weight=0)
-        self.rowconfigure(1, weight=1)
-        ttk.Label(
-            self,
-            text="Export Figures",
-            font=("TkDefaultFont", 17, "bold"),
-        ).grid(row=0, column=0, columnspan=3, sticky="w", padx=16, pady=(14, 4))
-        ttk.Label(
-            self,
-            text=(
-                "Each selected unit receives every page below. Preview and final "
-                "files use the same renderer; SVG embeds a lossless raster."
-            ),
-            foreground="#667085",
-        ).grid(row=0, column=1, columnspan=2, sticky="e", padx=16, pady=(14, 4))
-
-        left = ttk.Frame(self, padding=14)
-        left.grid(row=1, column=0, sticky="nsew")
-        center = ttk.Frame(self, padding=(6, 14))
-        center.grid(row=1, column=1, sticky="nsew")
-        right = ttk.Frame(self, padding=14)
-        right.grid(row=1, column=2, sticky="nsew")
+        self.rowconfigure(0, weight=1)
+        left = ttk.Frame(self, padding=(16, 16, 14, 8), style="Studio.TFrame")
+        left.grid(row=0, column=0, sticky="nsew")
+        left.columnconfigure(0, weight=1)
+        left.rowconfigure(1, weight=3, minsize=90)
+        left.rowconfigure(4, weight=2, minsize=65)
+        center = ttk.Frame(self, padding=(0, 12, 16, 8), style="Studio.TFrame")
+        center.grid(row=0, column=1, sticky="nsew")
         center.columnconfigure(0, weight=1)
-        center.rowconfigure(1, weight=1)
+        center.rowconfigure(2, weight=1)
 
-        ttk.Label(left, text="Figure type", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
-        self.format_var = tk.StringVar(value="PDF")
-        format_combo = ttk.Combobox(
-            left,
-            state="readonly",
-            values=("PDF", "PNG", "SVG (embedded raster)"),
-            textvariable=self.format_var,
-            width=24,
-        )
-        format_combo.pack(fill="x", pady=(5, 12))
-        format_combo.bind("<<ComboboxSelected>>", lambda _event: self._on_format_changed())
-
-        ttk.Label(
-            left,
-            text="Units  (click · Shift-click · ⌘-click)",
-            font=("TkDefaultFont", 11, "bold"),
-        ).pack(anchor="w")
-        self.unit_list = tk.Listbox(left, selectmode="extended", exportselection=False, width=30, height=13)
-        self.unit_list.pack(fill="both", expand=True, pady=(5, 5))
-        try:
-            checkbox_width = int(
-                self.tk.call(
-                    "font",
-                    "measure",
-                    self.unit_list.cget("font"),
-                    "☑  ",
-                )
+        def listbox(parent, height):
+            return tk.Listbox(
+                parent, exportselection=False, width=22, height=height,
+                background="white", foreground="#242424",
+                selectbackground="#e6e6e6", selectforeground="#242424",
+                relief="flat", borderwidth=0, highlightthickness=0,
+                activestyle="none",
             )
-        except (tk.TclError, TypeError, ValueError):
-            checkbox_width = 24
-        self._unit_checkbox_hit_width = max(24, checkbox_width)
+
+        ttk.Label(left, text="Units", style="StudioSection.TLabel").grid(
+            row=0, column=0, sticky="w", pady=(0, 8))
+        self.unit_list = listbox(left, 8)
+        self.unit_list.configure(selectmode="extended")
+        self.unit_list.grid(row=1, column=0, sticky="nsew")
+        self._unit_checkbox_hit_width = max(
+            24, int(self.tk.call("font", "measure", self.unit_list.cget("font"), "☑  "))
+        )
+        self.unit_list.bind("<Button-1>", lambda event: self._on_unit_list_click(event))
         self.unit_list.bind(
-            "<Button-1>",
-            lambda event: self._on_unit_list_click(event),
-        )
+            "<Shift-Button-1>", lambda event: self._on_unit_list_click(event, shift=True))
+        modifier = "Command" if self.tk.call("tk", "windowingsystem") == "aqua" else "Control"
         self.unit_list.bind(
-            "<Shift-Button-1>",
-            lambda event: self._on_unit_list_click(event, shift=True),
-        )
-        if self.tk.call("tk", "windowingsystem") == "aqua":
-            self.unit_list.bind(
-                "<Command-Button-1>",
-                lambda event: self._on_unit_list_click(event, command=True),
-            )
-            self.unit_list.bind(
-                "<Command-Shift-Button-1>",
-                lambda event: self._on_unit_list_click(
-                    event,
-                    command=True,
-                    shift=True,
-                ),
-            )
-        else:
-            self.unit_list.bind(
-                "<Control-Button-1>",
-                lambda event: self._on_unit_list_click(event, command=True),
-            )
-            self.unit_list.bind(
-                "<Control-Shift-Button-1>",
-                lambda event: self._on_unit_list_click(
-                    event,
-                    command=True,
-                    shift=True,
-                ),
-            )
-        unit_buttons = ttk.Frame(left)
-        unit_buttons.pack(fill="x", pady=(0, 12))
-        ttk.Button(unit_buttons, text="Current", command=self._select_current_unit).pack(side="left")
-        ttk.Button(unit_buttons, text="All", command=self._select_all_units).pack(side="left", padx=5)
-        ttk.Button(unit_buttons, text="Clear", command=self._clear_units).pack(side="left")
+            f"<{modifier}-Button-1>",
+            lambda event: self._on_unit_list_click(event, command=True))
+        self.unit_list.bind(
+            f"<{modifier}-Shift-Button-1>",
+            lambda event: self._on_unit_list_click(event, command=True, shift=True))
+        self.unit_list.bind("<<ListboxSelect>>", self._on_unit_list_select)
+        unit_buttons = ttk.Frame(left, style="Studio.TFrame")
+        unit_buttons.grid(row=2, column=0, sticky="ew", pady=(6, 18))
+        for text, command in (("All", self._select_all_units), ("Clear", self._clear_units)):
+            ttk.Button(unit_buttons, text=text, width=6, command=command).pack(
+                side="left", padx=(0, 3))
 
-        ttk.Label(
-            left,
-            text="Pages per selected unit  (shared template)",
-            font=("TkDefaultFont", 11, "bold"),
-        ).pack(anchor="w")
-        self.page_list = tk.Listbox(left, exportselection=False, width=30, height=8)
-        self.page_list.pack(fill="both", expand=True, pady=(5, 5))
+        ttk.Label(left, text="Pages", style="StudioSection.TLabel").grid(
+            row=3, column=0, sticky="w", pady=(0, 8))
+        self.page_list = listbox(left, 4)
+        self.page_list.grid(row=4, column=0, sticky="nsew")
         self.page_list.bind("<<ListboxSelect>>", lambda _event: self._on_page_selected())
-        page_buttons = ttk.Frame(left)
-        page_buttons.pack(fill="x")
-        ttk.Button(page_buttons, text="+ Page", command=self._add_page).pack(side="left")
-        ttk.Button(page_buttons, text="− Page", command=self._remove_page).pack(side="left", padx=5)
-        ttk.Button(
-            page_buttons,
-            text="↑",
-            width=3,
-            command=lambda: self._move_page(-1),
-        ).pack(side="left", padx=(0, 2))
-        ttk.Button(
-            page_buttons,
-            text="↓",
-            width=3,
-            command=lambda: self._move_page(1),
-        ).pack(side="left")
+        self.page_list.bind("<Alt-Up>", lambda _event: self._move_page(-1))
+        self.page_list.bind("<Alt-Down>", lambda _event: self._move_page(1))
+        self.page_buttons = ttk.Frame(left, style="Studio.TFrame")
+        self.page_buttons.grid(row=5, column=0, sticky="ew", pady=(6, 18))
+        for text, command in (("+", self._add_page), ("−", self._remove_page)):
+            ttk.Button(self.page_buttons, text=text, width=3, command=command).pack(
+                side="left", padx=(0, 3))
 
-        ttk.Label(center, text="Live preview", font=("TkDefaultFont", 11, "bold")).grid(row=0, column=0, sticky="w")
-        self.preview_label = ttk.Label(center, text="Preparing preview…", anchor="center", relief="solid")
-        self.preview_label.grid(row=1, column=0, sticky="nsew", pady=(6, 6))
-        self.preview_status = ttk.Label(center, text="", foreground="#667085")
-        self.preview_status.grid(row=2, column=0, sticky="w")
+        self.format_var = tk.StringVar(self, value="PDF")
+        format_combo = ttk.Combobox(left, state="readonly", values=("PDF", "PNG", "SVG"),
+                                    textvariable=self.format_var, width=18)
+        format_combo.grid(row=6, column=0, sticky="ew", pady=(0, 8))
+        format_combo.bind("<<ComboboxSelected>>", lambda _event: self._on_format_changed())
+        self.normalize_per_unit_var = tk.BooleanVar(self, value=True)
+        ttk.Checkbutton(left, text="Normalize per unit", variable=self.normalize_per_unit_var,
+                        command=self._on_normalization_changed).grid(
+                            row=7, column=0, sticky="w")
 
-        ttk.Label(right, text="Page name", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
-        self.page_name_var = tk.StringVar(value="Page 1")
-        page_name_entry = ttk.Entry(right, textvariable=self.page_name_var, width=34)
-        page_name_entry.pack(fill="x", pady=(5, 12))
+        navigation = ttk.Frame(center, style="Studio.TFrame")
+        navigation.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        ttk.Button(navigation, text="‹", width=3,
+                   command=lambda: self._step_preview_unit(-1)).pack(side="left")
+        self.preview_unit_var = tk.StringVar(self, value=f"Unit {self.current_unit_id}")
+        self.preview_unit_combo = ttk.Combobox(
+            navigation, state="readonly", values=tuple(f"Unit {uid}" for uid in self.unit_ids),
+            textvariable=self.preview_unit_var, width=13)
+        self.preview_unit_combo.pack(side="left", padx=3)
+        self.preview_unit_combo.bind("<<ComboboxSelected>>",
+            lambda _event: self._set_preview_unit(self.unit_ids[self.preview_unit_combo.current()]))
+        ttk.Button(navigation, text="›", width=3,
+                   command=lambda: self._step_preview_unit(1)).pack(side="left")
+        self.page_name_var = tk.StringVar(self, value="Page 1")
+        page_name_entry = ttk.Entry(navigation, textvariable=self.page_name_var, width=20)
+        page_name_entry.pack(side="right")
         page_name_entry.bind("<Return>", self._rename_page)
         page_name_entry.bind("<FocusOut>", self._rename_page)
 
-        ttk.Label(right, text="Available views", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
+        toolbar = ttk.Frame(center, style="Studio.TFrame")
+        toolbar.grid(row=1, column=0, sticky="ew", pady=(0, 10))
         self.available_kinds = [definition.kind for definition in PLOT_KIND_REGISTRY.values()]
-        self.available_list = tk.Listbox(right, exportselection=False, width=36, height=11)
-        for kind in self.available_kinds:
-            self.available_list.insert("end", PLOT_KIND_REGISTRY[kind.value].label)
-        self.available_list.selection_set(0)
-        self.available_list.pack(fill="both", expand=True, pady=(5, 5))
-        ttk.Button(right, text="Add view to page →", command=self._add_plot).pack(fill="x", pady=(0, 12))
+        self.view_combo = ttk.Combobox(toolbar, state="readonly", width=24,
+            values=tuple(PLOT_KIND_REGISTRY[kind.value].label for kind in self.available_kinds))
+        self.view_combo.current(0)
+        self.view_combo.pack(side="left")
+        ttk.Button(toolbar, text="Add", width=5, command=self._add_plot).pack(
+            side="left", padx=(6, 12))
+        self.remove_plot_button = ttk.Button(toolbar, text="Remove", width=7,
+                                              command=self._remove_plot)
+        self.remove_plot_button.pack(side="left")
+        self.frame_size_var = tk.StringVar(self, value="Full")
+        self.frame_size_combo = ttk.Combobox(toolbar, state="readonly", values=tuple(FRAME_PRESETS),
+                                             textvariable=self.frame_size_var, width=9)
+        self.frame_size_combo.pack(side="left", padx=(6, 0))
+        self.frame_size_combo.bind("<<ComboboxSelected>>", lambda _event: self._resize_selected_plot())
+        layout_button = ttk.Menubutton(toolbar, text="Layout", width=7)
+        self.layout_menu = tk.Menu(layout_button, tearoff=False)
+        self.layout_menu.add_command(label="Load Layout…", command=self._load_layout,
+                                     accelerator=f"{modifier}-Shift-l")
+        self.layout_menu.add_command(label="Save Layout…", command=self._save_layout,
+                                     accelerator=f"{modifier}-s")
+        layout_button.configure(menu=self.layout_menu)
+        layout_button.pack(side="right", padx=(6, 0))
+        ttk.Button(toolbar, text="Arrange", command=self._auto_arrange).pack(side="right")
 
-        ttk.Label(right, text="Views on current page", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
-        self.current_plot_list = tk.Listbox(right, exportselection=False, width=36, height=10)
-        self.current_plot_list.pack(fill="both", expand=True, pady=(5, 5))
-        plot_buttons = ttk.Frame(right)
-        plot_buttons.pack(fill="x")
-        ttk.Button(plot_buttons, text="Remove", command=self._remove_plot).pack(side="left")
-        ttk.Button(plot_buttons, text="↑", width=3, command=lambda: self._move_plot(-1)).pack(side="left", padx=(5, 2))
-        ttk.Button(plot_buttons, text="↓", width=3, command=lambda: self._move_plot(1)).pack(side="left")
+        self.preview_label = tk.Label(center, background="#eeeeee", borderwidth=0)
+        self.preview_label.grid(row=2, column=0, sticky="nsew")
+        self.page_canvas = FigurePageCanvas(self.preview_label, on_select=self._select_plot,
+            on_change=self._commit_frames,
+            on_error=lambda text: self.preview_status.configure(text=text))
+        self.page_canvas.pack(fill="both", expand=True)
+        self.preview_status = ttk.Label(center, text="", style="StudioMuted.TLabel")
+        self.preview_status.grid(row=3, column=0, sticky="w", pady=(4, 0))
 
-        footer = ttk.Frame(self, padding=(16, 8, 16, 14))
-        footer.grid(row=2, column=0, columnspan=3, sticky="ew")
-        footer.columnconfigure(1, weight=1)
-        ttk.Label(footer, text="Destination").grid(row=0, column=0, sticky="w")
-        self.destination_var = tk.StringVar(value="")
-        ttk.Entry(footer, textvariable=self.destination_var).grid(row=0, column=1, sticky="ew", padx=8)
-        ttk.Button(footer, text="Choose…", command=self._choose_destination).grid(row=0, column=2)
+        footer = ttk.Frame(self, padding=(16, 8, 16, 12), style="Studio.TFrame")
+        footer.grid(row=1, column=0, columnspan=2, sticky="ew")
+        footer.columnconfigure(0, weight=1)
+        self.destination_var = tk.StringVar(self, value="")
+        ttk.Entry(footer, textvariable=self.destination_var).grid(row=0, column=0, sticky="ew")
+        ttk.Button(footer, text="Save to…", command=self._choose_destination).grid(
+            row=0, column=1, padx=(8, 0))
         self.export_button = ttk.Button(footer, text="Export", command=self._start_export)
-        self.export_button.grid(row=0, column=3, padx=(12, 0))
-        ttk.Button(footer, text="Close", command=self._close).grid(row=0, column=4, padx=(6, 0))
-        self.export_status = ttk.Label(footer, text="", foreground="#475467")
-        self.export_status.grid(row=1, column=0, columnspan=5, sticky="w", pady=(7, 0))
+        self.export_button.grid(row=0, column=2, padx=(12, 0))
+        self.export_status = ttk.Label(footer, text="", style="StudioMuted.TLabel")
+        self.export_status.grid(row=1, column=0, columnspan=3, sticky="w", pady=(6, 0))
 
     def _populate_units(self) -> None:
         self._select_current_unit()
+
+    def _save_layout(self, _event=None) -> str:
+        self._rename_page()
+        destination = filedialog.asksaveasfilename(
+            parent=self, title="Save Layout", defaultextension=".rfmlayout",
+            filetypes=(("Figure layout", "*.rfmlayout"),),
+            initialfile=self._layout_path.stem if self._layout_path else "Figure layout",
+            **({"initialdir": str(self._layout_path.parent)} if self._layout_path else {}),
+        )
+        if not destination:
+            return "break"
+        try:
+            layout = make_figure_layout(
+                self.data, self.snapshot, self.pages,
+                bool(self.normalize_per_unit_var.get()), self.format_var.get(),
+            )
+            path = Path(destination)
+            path.write_text(json.dumps(layout, indent=2, allow_nan=False) + "\n", encoding="utf-8")
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("Cannot save layout", str(exc), parent=self)
+        else:
+            self._layout_path = path
+            self.preview_status.configure(text="Layout saved")
+        return "break"
+
+    def _load_layout(self, _event=None) -> str:
+        if self._export_busy:
+            messagebox.showinfo("Export is running", "Wait for the export to finish before loading a layout.", parent=self)
+            return "break"
+        source = filedialog.askopenfilename(
+            parent=self, title="Load Layout",
+            filetypes=(("All files", "*.*"),),
+            **({"initialdir": str(self._layout_path.parent)} if self._layout_path else {}),
+        )
+        if not source:
+            return "break"
+        try:
+            path = Path(source)
+            layout = json.loads(path.read_text(encoding="utf-8"))
+            snapshot, pages, normalize_per_unit, output_format = parse_figure_layout(
+                layout, self.data, self.snapshot,
+            )
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("Cannot load layout", str(exc), parent=self)
+            return "break"
+        # Keep providers paired with their captured settings while an old preview finishes.
+        with self._provider_lock, self._preview_provider_lock:
+            self.snapshot = snapshot
+            self._base_data_provider = None
+            self._preview_data_provider = None
+            self._provenance_metadata = None
+            self._context_cache.clear()
+        self.pages = pages
+        self.normalize_per_unit_var.set(normalize_per_unit)
+        if self.format_var.get() != output_format:
+            self.format_var.set(output_format)
+            self._on_format_changed()
+        self._layout_path = path
+        self._refresh_pages(select=0)
+        self._refresh_current_plots()
+        self._schedule_preview()
+        return "break"
 
     def _refresh_unit_rows(self, *, see_focus: bool = False) -> None:
         yview = self.unit_list.yview()
@@ -1113,17 +1168,24 @@ class FigureExportWindow(tk.Toplevel):
             checkbox = "☑" if index in self._selected_unit_indices else "☐"
             self.unit_list.insert(
                 "end",
-                f"{checkbox}  index {rf_map.unit_index:03d}  ·  unit {rf_map.unit_id}",
+                f"{checkbox}  Unit {rf_map.unit_id}",
             )
         self.unit_list.selection_clear(0, "end")
         for index in sorted(self._selected_unit_indices):
             self.unit_list.selection_set(index)
+        if self._unit_selection_anchor is not None:
+            self.unit_list.selection_anchor(self._unit_selection_anchor)
         if self._unit_selection_focus is not None:
             self.unit_list.activate(self._unit_selection_focus)
             if see_focus:
                 self.unit_list.see(self._unit_selection_focus)
             elif yview:
                 self.unit_list.yview_moveto(yview[0])
+        if not self._export_busy:
+            units, pages = len(self._selected_unit_indices), len(self.pages)
+            self.export_status.configure(
+                text=f"{units} unit{'s' if units != 1 else ''} · {pages} page{'s' if pages != 1 else ''}"
+            )
 
     def _unit_index_at_event(self, event) -> int | None:
         if not self.unit_ids:
@@ -1144,6 +1206,7 @@ class FigureExportWindow(tk.Toplevel):
         command: bool = False,
         shift: bool = False,
     ) -> str:
+        self.unit_list.focus_set()
         index = self._unit_index_at_event(event)
         if index is None:
             return "break"
@@ -1171,8 +1234,19 @@ class FigureExportWindow(tk.Toplevel):
         self._unit_selection_anchor = anchor
         self._unit_selection_focus = index
         self._refresh_unit_rows()
-        self._schedule_preview()
+        self._set_preview_unit(self.unit_ids[index])
         return "break"
+
+    def _on_unit_list_select(self, _event=None) -> None:
+        selected = set(self.unit_list.curselection())
+        focus = int(self.unit_list.index("active"))
+        if selected == self._selected_unit_indices and focus == self._unit_selection_focus:
+            return
+        self._selected_unit_indices = selected
+        self._unit_selection_anchor = int(self.unit_list.index("anchor"))
+        self._unit_selection_focus = focus
+        self._refresh_unit_rows()
+        self._set_preview_unit(self.unit_ids[focus])
 
     def _select_current_unit(self) -> None:
         try:
@@ -1183,7 +1257,6 @@ class FigureExportWindow(tk.Toplevel):
         self._unit_selection_anchor = index
         self._unit_selection_focus = index
         self._refresh_unit_rows(see_focus=True)
-        self._schedule_preview()
 
     def _select_all_units(self) -> None:
         self._selected_unit_indices = set(range(len(self.unit_ids)))
@@ -1194,14 +1267,25 @@ class FigureExportWindow(tk.Toplevel):
         self._unit_selection_anchor = focus
         self._unit_selection_focus = focus
         self._refresh_unit_rows(see_focus=True)
-        self._schedule_preview()
 
     def _clear_units(self) -> None:
         self._selected_unit_indices.clear()
         self._unit_selection_anchor = None
         self._unit_selection_focus = None
         self._refresh_unit_rows()
-        self._schedule_preview()
+
+    def _set_preview_unit(self, unit_id: int) -> None:
+        self.preview_unit_var.set(f"Unit {unit_id}")
+        if unit_id != self.current_unit_id:
+            self.current_unit_id = unit_id
+            self._schedule_preview()
+
+    def _step_preview_unit(self, delta: int) -> None:
+        index = self.unit_ids.index(self.current_unit_id)
+        self._set_preview_unit(self.unit_ids[(index + delta) % len(self.unit_ids)])
+
+    def _on_normalization_changed(self) -> None:
+        self.preview_status.configure(text="")
 
     def _selected_unit_ids(self) -> tuple[int, ...]:
         return tuple(
@@ -1218,8 +1302,7 @@ class FigureExportWindow(tk.Toplevel):
         current = self._selected_page_index() if select is None else select
         self.page_list.delete(0, "end")
         for index, page in enumerate(self.pages):
-            plots = page["plots"]
-            self.page_list.insert("end", f"{index + 1}. {page['name']}  ({len(plots)} views)")
+            self.page_list.insert("end", str(page["name"]))
         current = max(0, min(len(self.pages) - 1, current))
         self.page_list.selection_set(current)
         self.page_list.see(current)
@@ -1242,7 +1325,7 @@ class FigureExportWindow(tk.Toplevel):
         self._schedule_preview()
 
     def _add_page(self) -> None:
-        self.pages.append({"name": f"Page {len(self.pages) + 1}", "plots": []})
+        self.pages.append({"name": f"Page {len(self.pages) + 1}", "plots": [], "frames": []})
         self._refresh_pages(select=len(self.pages) - 1)
         self._refresh_current_plots()
         self._schedule_preview()
@@ -1272,56 +1355,124 @@ class FigureExportWindow(tk.Toplevel):
 
     def _refresh_current_plots(self, *, select: int | None = None) -> None:
         plots = self._current_plot_kinds()
-        self.current_plot_list.delete(0, "end")
-        for kind in plots:
-            self.current_plot_list.insert("end", PLOT_KIND_REGISTRY[kind.value].label)
-        if plots and select is not None:
-            index = max(0, min(len(plots) - 1, select))
-            self.current_plot_list.selection_set(index)
+        page = self.pages[self._selected_page_index()]
+        if "frames" not in page or len(page["frames"]) != len(plots):
+            page["frames"] = list(automatic_frames(len(plots)))
+        if select is not None:
+            select = max(0, min(len(plots) - 1, select)) if plots else None
         self._refresh_pages(select=self._selected_page_index())
+        self.page_canvas.set_frames(page["frames"],
+            [PLOT_KIND_REGISTRY[kind.value].label for kind in plots], select)
+        self._on_plot_selected()
+
+    def _select_plot(self, index: int) -> None:
+        self.page_canvas.selected = index
+        self._on_plot_selected()
+
+    def _on_plot_selected(self) -> None:
+        index = self.page_canvas.selected
+        self.page_canvas._draw_selection()
+        self.remove_plot_button.state(["disabled"] if index is None else ["!disabled"])
+        self.frame_size_combo.configure(state="disabled" if index is None else "readonly")
+        if index is not None:
+            frame = self.pages[self._selected_page_index()]["frames"][index]
+            self.frame_size_var.set(next(
+                (name for name, size in FRAME_PRESETS.items() if size == frame[2:]),
+                f"{frame[2]} × {frame[3]}"))
+
+    def _commit_frames(self, frames, selected: int) -> None:
+        self.pages[self._selected_page_index()]["frames"] = list(frames)
+        self._refresh_current_plots(select=selected)
+        self.preview_status.configure(text="")
+        self._schedule_preview()
+
+
+    def _resize_selected_plot(self) -> None:
+        index = self.page_canvas.selected
+        if index is None:
+            return
+        frames = self.pages[self._selected_page_index()]["frames"]
+        width, height = FRAME_PRESETS[self.frame_size_var.get()]
+        column, row, _width, _height = frames[index]
+        target = (min(column, 6 - width), min(row, 6 - height), width, height)
+        try:
+            arranged = arrange_frames(frames, index, target)
+        except ValueError as exc:
+            self.preview_status.configure(text=str(exc))
+            self._on_plot_selected()
+        else:
+            self._commit_frames(arranged, index)
+
+
+    def _auto_arrange(self) -> None:
+        self.pages[self._selected_page_index()]["frames"] = list(
+            automatic_frames(len(self._current_plot_kinds()))
+        )
+        self._refresh_current_plots(select=0 if self._current_plot_kinds() else None)
+        self._schedule_preview()
+
 
     def _add_plot(self) -> None:
-        selection = self.available_list.curselection()
-        if not selection:
+        index = self.view_combo.current()
+        if index < 0:
             return
         plots = self._current_plot_kinds()
-        plots.append(self.available_kinds[int(selection[0])])
+        if len(plots) >= 9:
+            self.preview_status.configure(
+                text="Page full"
+            )
+            return
+        page = self.pages[self._selected_page_index()]
+        frames = page["frames"]
+        try:
+            frames.append(first_available_frame(frames))
+        except ValueError:
+            page["frames"] = list(automatic_frames(len(plots) + 1))
+        plots.append(self.available_kinds[index])
         self._refresh_current_plots(select=len(plots) - 1)
         self._schedule_preview()
 
+
     def _remove_plot(self) -> None:
-        selection = self.current_plot_list.curselection()
-        if not selection:
+        index = self.page_canvas.selected
+        if index is None:
             return
-        index = int(selection[0])
         plots = self._current_plot_kinds()
         plots.pop(index)
+        self.pages[self._selected_page_index()]["frames"].pop(index)
         self._refresh_current_plots(select=max(0, index - 1))
         self._schedule_preview()
 
-    def _move_plot(self, delta: int) -> None:
-        selection = self.current_plot_list.curselection()
-        if not selection:
-            return
-        index = int(selection[0])
-        target = index + delta
-        plots = self._current_plot_kinds()
-        if not 0 <= target < len(plots):
-            return
-        plots[index], plots[target] = plots[target], plots[index]
-        self._refresh_current_plots(select=target)
-        self._schedule_preview()
 
-    def _export_pages(self) -> tuple[ExportPage, ...]:
+    def _export_pages(self, page_index: int | None = None) -> tuple[ExportPage, ...]:
         pages: list[ExportPage] = []
         for index, page in enumerate(self.pages):
+            if page_index is not None and index != page_index:
+                continue
             kinds: list[PlotKind] = page["plots"]  # type: ignore[assignment]
             if not kinds:
                 raise ValueError(f"Page {index + 1} ({page['name']}) has no views.")
             pages.append(
                 ExportPage(
                     str(page["name"]),
-                    tuple(PlotSpec(kind) for kind in kinds),
+                    tuple(
+                        PlotSpec(
+                            kind,
+                            options={
+                                "normalize_per_unit": (
+                                    bool(self.normalize_per_unit_var.get())
+                                    if hasattr(self, "normalize_per_unit_var")
+                                    else False
+                                ),
+                                **(
+                                    {"frame": page["frames"][plot_index]}
+                                    if "frames" in page
+                                    else {}
+                                ),
+                            },
+                        )
+                        for plot_index, kind in enumerate(kinds)
+                    ),
                 )
             )
         return tuple(pages)
@@ -1439,20 +1590,10 @@ class FigureExportWindow(tk.Toplevel):
                 end_ms = self.data.time_bin_edges[self.snapshot.rf_source_end + 1] * 1000.0
                 full_start_ms = self.data.time_bin_edges[0] * 1000.0
                 full_end_ms = self.data.time_bin_edges[-1] * 1000.0
-                grouping = (
-                    f"{self.data.n_x}x{self.data.n_y} to "
-                    f"{len(self.snapshot.x_groups)}x{len(self.snapshot.y_groups)}; "
-                    f"smooth r={self.snapshot.smooth_radius}"
-                )
                 if plot.kind in {PlotKind.RF_CARTESIAN, PlotKind.RF_POLAR}:
-                    window_context = (
-                        f"{format_ms(start_ms)} to {format_ms(end_ms)} ms; "
-                        if self.snapshot.rf_subtract_source_range is None else ""
-                    )
                     context = (
-                        f"{window_context}"
-                        f"{self.snapshot.value_mode} ({value_mode_unit(self.snapshot.value_mode)}); "
-                        f"{grouping}"
+                        f"{format_ms(start_ms)}–{format_ms(end_ms)} ms"
+                        if self.snapshot.rf_subtract_source_range is None else ""
                     )
                 elif plot.kind in {
                     PlotKind.DELAY_CARTESIAN,
@@ -1461,14 +1602,7 @@ class FigureExportWindow(tk.Toplevel):
                     PlotKind.RGB_POLAR,
                 }:
                     context = (
-                        f"full timeline {format_ms(full_start_ms)} to "
-                        f"{format_ms(full_end_ms)} ms; {grouping}"
-                    )
-                elif plot.kind is PlotKind.WAVEFORM_LOCAL_AVERAGE:
-                    context = (
-                        "best + nearest 4; "
-                        f"{WAVEFORM_CHANNEL_MODE_LABELS.get(self.snapshot.waveform_channel_mode, self.snapshot.waveform_channel_mode)}; "
-                        "baseline ≤ -0.25 ms"
+                        f"{format_ms(full_start_ms)}–{format_ms(full_end_ms)} ms"
                     )
                 else:
                     context = None
@@ -1504,10 +1638,23 @@ class FigureExportWindow(tk.Toplevel):
         unit_ids: tuple[int, ...],
         raw_pages: tuple[ExportPage, ...],
     ) -> tuple[object, ...]:
+        def option_key(value):
+            if isinstance(value, Mapping):
+                return tuple((name, option_key(item)) for name, item in sorted(value.items()))
+            if isinstance(value, tuple):
+                return tuple(option_key(item) for item in value)
+            return value
+
         return (
             unit_ids,
             tuple(
-                (page.name, tuple(plot.kind.value for plot in page.plots))
+                (
+                    page.name,
+                    tuple(
+                        (plot.kind.value, plot.title, option_key(plot.options))
+                        for plot in page.plots
+                    ),
+                )
                 for page in raw_pages
             ),
         )
@@ -1552,16 +1699,17 @@ class FigureExportWindow(tk.Toplevel):
                 for page in raw_pages
                 for plot in page.plots
             )
+            normalize_per_unit = bool(raw_pages[0].plots[0].options.get("normalize_per_unit", False))
             scale = (
                 self._base_data_provider.shared_rf_bounds(unit_ids, cancelled)
-                if has_rf
+                if has_rf and not normalize_per_unit
                 else None
             )
             waveform_limit = (
                 self._base_data_provider.shared_waveform_amplitude_limit(
                     unit_ids, cancelled
                 )
-                if has_waveform
+                if has_waveform and not normalize_per_unit
                 else None
             )
             pages = (
@@ -1578,6 +1726,36 @@ class FigureExportWindow(tk.Toplevel):
                 response_cache_lock=self._base_data_provider._response_cache_lock,
             )
             metadata = dict(self._provenance_metadata)
+            metadata["normalization"] = {
+                "perUnit": normalize_per_unit,
+                "scope": "each unit" if normalize_per_unit else "selected units",
+                "values": "original physical units; color limits only",
+                "rf": "palette range up to maximum response",
+                "waveform": "symmetric amplitude limits",
+            }
+            if normalize_per_unit:
+                unit_scales = []
+                for unit_id in unit_ids:
+                    if cancelled is not None and cancelled():
+                        raise RuntimeError("Preview superseded by a newer recipe")
+                    scales: dict[str, object] = {"unitId": unit_id}
+                    if has_rf:
+                        unit_idx = self.data.rf_map_by_unit_id(unit_id).unit_index
+                        low, high = palette_response_range(
+                            self._base_data_provider._rf_matrix(unit_idx, polar=False),
+                            self.snapshot.palette,
+                        )
+                        scales["rf"] = {
+                            "vmin": low,
+                            "vmax": high,
+                            "unit": value_mode_unit(self.snapshot.value_mode),
+                        }
+                    if has_waveform:
+                        limit = self._base_data_provider.shared_waveform_amplitude_limit((unit_id,), cancelled)
+                        if limit is not None:
+                            scales["waveform"] = {"vmin": -limit, "vmax": limit, "unit": "µV"}
+                    unit_scales.append(scales)
+                metadata["perUnitScales"] = unit_scales
             if scale is not None:
                 metadata["sharedRFScale"] = {
                     "vmin": scale[0],
@@ -1601,10 +1779,38 @@ class FigureExportWindow(tk.Toplevel):
             self._context_cache[key] = result
             return result
 
+    def _preview_context(
+        self,
+        unit_ids: tuple[int, ...],
+        raw_pages: tuple[ExportPage, ...],
+        cancelled: Callable[[], bool],
+    ) -> tuple[tuple[ExportPage, ...], dict[str, object], GUIFigureDataProvider]:
+        # Preview works only from the open dataset. Freezing and hashing every
+        # selected input is reserved for the final export.
+        with self._preview_provider_lock:
+            if cancelled():
+                raise RuntimeError("Preview superseded by a newer recipe")
+            if self._preview_data_provider is None:
+                self._preview_data_provider = GUIFigureDataProvider(self.data, self.snapshot)
+            provider = self._preview_data_provider
+            preview_pages = tuple(
+                ExportPage(
+                    page.name,
+                    tuple(
+                        replace(plot, options={**plot.options, "normalize_per_unit": True})
+                        for plot in page.plots
+                    ),
+                )
+                for page in raw_pages
+            )
+            pages = self._resolved_export_pages(preview_pages, None)
+        metadata = {"preview": {"unitId": unit_ids[0], "scaling": "per unit"}}
+        return pages, metadata, provider
+
     def _preview_request(self) -> tuple[tuple[int, ...], tuple[ExportPage, ...], int, int, int]:
-        unit_ids = self._selected_unit_ids() or (self.current_unit_id,)
-        pages = self._export_pages()
         page_index = self._selected_page_index()
+        unit_ids = (self.current_unit_id,)
+        pages = self._export_pages(page_index=page_index)
         available_width = max(480, self.preview_label.winfo_width() - 20)
         available_height = max(360, self.preview_label.winfo_height() - 20)
         return unit_ids, pages, page_index, available_width, available_height
@@ -1650,7 +1856,7 @@ class FigureExportWindow(tk.Toplevel):
         except Exception as exc:
             self._show_preview_error(exc)
             return
-        self.preview_status.configure(text="Preparing preview and provenance…")
+        self.preview_status.configure(text=f"Rendering unit {unit_ids[0]}…")
         cancel_event = threading.Event()
         with self._preview_futures_lock:
             self._preview_cancel_events[generation] = cancel_event
@@ -1659,7 +1865,7 @@ class FigureExportWindow(tk.Toplevel):
             return self._preview_shutdown.is_set() or cancel_event.is_set()
 
         def worker() -> tuple[int, int, object]:
-            pages, metadata, provider = self._freeze_context(
+            pages, metadata, provider = self._preview_context(
                 unit_ids,
                 raw_pages,
                 cancelled,
@@ -1670,13 +1876,12 @@ class FigureExportWindow(tk.Toplevel):
             image = render_live_preview(
                 plan,
                 unit_ids[0],
-                page_index,
+                0,
                 data_provider=provider,
             )
             if cancelled():
                 image.close()
                 raise RuntimeError("Preview superseded by a newer recipe")
-            image.thumbnail((width, height))
             return unit_ids[0], page_index, image
 
         future = _submit_daemon_future(worker, name="rfmap-preview")
@@ -1725,19 +1930,13 @@ class FigureExportWindow(tk.Toplevel):
                 self._show_preview_error(payload)
             else:
                 unit_id, page_index, image = payload
-                from PIL import ImageTk
-
                 try:
-                    self._preview_photo = ImageTk.PhotoImage(image)
+                    self.page_canvas.set_image(image)
+                    self._preview_photo = self.page_canvas._photo
                 finally:
                     image.close()
-                self.preview_label.configure(image=self._preview_photo, text="")
-                self.preview_status.configure(
-                    text=(
-                        f"Preview: unit {unit_id}, page {page_index + 1} "
-                        "· same renderer · provenance verified"
-                    )
-                )
+                self.preview_label.configure(text="")
+                self.preview_status.configure(text="")
         # A stale result may arrive before the latest worker. Keep polling until
         # the current generation has either rendered or produced an error.
         with self._preview_futures_lock:
@@ -1747,13 +1946,12 @@ class FigureExportWindow(tk.Toplevel):
 
     def _show_preview_error(self, exc: Exception) -> None:
         self._preview_photo = None
-        self.preview_label.configure(image="", text=f"Preview unavailable\n{exc}")
-        self.preview_status.configure(
-            text=(
-                "Export will re-verify this source and fail safely until it is "
-                "reopened or the page recipe is fixed."
-            )
+        self.preview_label.configure(text=f"Preview unavailable\n{exc}")
+        self.page_canvas.set_message(
+            "" if not self._current_plot_kinds()
+            else f"Preview unavailable\n{exc}"
         )
+        self.preview_status.configure(text="")
 
     def _on_format_changed(self) -> None:
         self.destination_var.set("")
@@ -1768,7 +1966,7 @@ class FigureExportWindow(tk.Toplevel):
         if figure_format is FigureFormat.PDF:
             path = filedialog.asksaveasfilename(
                 parent=self,
-                title="Export multi-page PDF",
+                title="Export PDF",
                 initialdir=initial_dir,
                 initialfile=f"{self._default_base_name()}.pdf",
                 defaultextension=".pdf",
@@ -1779,7 +1977,7 @@ class FigureExportWindow(tk.Toplevel):
             return
         parent = filedialog.askdirectory(
             parent=self,
-            title=f"Choose parent folder for {figure_format.value.upper()} pages",
+            title="Export folder",
             initialdir=initial_dir,
             mustexist=True,
         )
@@ -1826,7 +2024,7 @@ class FigureExportWindow(tk.Toplevel):
 
         self._export_busy = True
         self.export_button.state(["disabled"])
-        self.export_status.configure(text="Verifying provenance and freezing export plan…")
+        self.export_status.configure(text="Preparing…")
 
         def worker():
             pages, metadata, provider = self._freeze_context(unit_ids, raw_pages)
@@ -1893,7 +2091,6 @@ class FigureExportWindow(tk.Toplevel):
                 parent=self,
             )
             return
-        self.viewer.__dict__.pop("_figure_export_window", None)
         self.destroy()
 
     def destroy(self) -> None:
@@ -1907,6 +2104,8 @@ class FigureExportWindow(tk.Toplevel):
                 parent=self,
             )
             return
+        if self.viewer._figure_export_window is self:
+            self.viewer._figure_export_window = None
         self._preview_generation += 1
         self._preview_shutdown.set()
         with self._preview_futures_lock:

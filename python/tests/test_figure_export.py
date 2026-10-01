@@ -960,11 +960,8 @@ def test_real_shape_500_frame_timeline_is_one_quantitative_categorical_atlas(
     assert all(options["show_axes"] is False for options in observed_options)
     assert all(options["show_colorbar"] is False for options in observed_options)
     assert colorbar_units == ["spikes/s"]
-    assert any(
-        text.startswith("categorical time-bin atlas; bounds [0, 4.995) s")
-        for text in texts
-    )
-    assert any("equal-width tiles, row-major time order" in text for text in texts)
+    assert "[0, 4.995) s" in texts
+    assert not any("row-major" in text or "categorical" in text for text in texts)
 
 
 def test_timeline_selected_curve_uses_its_own_gui_axis() -> None:
@@ -1151,7 +1148,7 @@ def test_polar_singleton_y_spans_the_legacy_seven_row_radius() -> None:
         rgb=True,
     )
 
-    assert image.getpixel((270, 210)) == (248, 250, 252)
+    assert image.getpixel((270, 210)) == (255, 255, 255)
     assert image.getpixel((290, 210)) == (255, 0, 0)
 
 
@@ -1209,7 +1206,7 @@ def test_polar_maps_label_angle_and_radius_coordinates_inside_panel(
     assert "-90 deg" in texts
     assert "30 deg" in texts
     assert "90 deg" in texts
-    assert "angle: counterclockwise; rings: outer to inner" in texts
+    assert not any(text.startswith("angle:") for text in texts)
     assert any(text in {"5 deg", "15 deg"} for text in texts)
     for text, xy, font, anchor in rendered:
         if text not in {
@@ -1218,7 +1215,6 @@ def test_polar_maps_label_angle_and_radius_coordinates_inside_panel(
             "90 deg",
             "5 deg",
             "15 deg",
-            "angle: counterclockwise; rings: outer to inner",
         }:
             continue
         bounds = draw.textbbox(xy, text, font=font, anchor=anchor)

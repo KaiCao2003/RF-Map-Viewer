@@ -1,8 +1,8 @@
 # Component versioning and releases
 
 Python is the feature reference for this repository. The supported stable
-feature generation is `1.10.x`; an implementation one complete feature
-generation behind uses `1.9.x`. Patch numbers identify coordinated or
+feature generation is `1.11.x`; an implementation one complete feature
+generation behind uses `1.10.x`. Patch numbers identify coordinated or
 target-specific releases within that feature generation; supported input
 contracts are stated explicitly rather than inferred from the patch number.
 
@@ -18,7 +18,7 @@ component tag and artifact name:
 
 | Component | Release | Tag | Channel |
 | --- | --- | --- | --- |
-| Python stable (macOS) | `1.10.4` | `python-v1.10.4` | stable |
+| Python stable (macOS) | `1.11.0` | `python-v1.11.0` | stable |
 | Python Free-Moving | `1.10.0-alpha.3` | `python-v1.10.0-alpha.3` | alpha |
 | Swift | `1.10.3` | `swift-v1.10.3` | stable |
 | Web | `1.10.2` | `web-v1.10.2` | stable |
@@ -26,6 +26,12 @@ component tag and artifact name:
 Published downloads and checksums are available from the repository
 [Releases page](https://github.com/KaiCao2003/RF-Map-Viewer/releases). The root
 [`README.md`](../README.md#downloads) links directly to each component archive.
+
+Python stable 1.11.0 adds Figure Studio with draggable/resizable preset frames,
+saved `.rfmlayout` compositions, current-unit previews, and per-unit export
+scaling. It also updates saved settings, HD Class 3 compatibility, and the
+Close All/Welcome lifecycle. The Web source ports the non-export viewer updates;
+its published package remains at 1.10.2 until a separate Web release.
 
 Python stable 1.10.4, Swift 1.10.3, and Web 1.10.2 align HD tuning and RF azimuth
 as clockwise angles: RF −90° corresponds to HD 270°, RF 90° to HD 90°, and 0° to 0°.
@@ -86,9 +92,9 @@ selection, the schema-v4 SpikeInterface waveform viewer/exporter, and matching
 rectangle/polar and palette keyboard shortcuts.
 
 Each active component records a `feature_generation_offset` from the Python
-stable reference. The current Swift/Web offset is `0`, matching Python stable. A viewer verified
-to be one complete generation behind would use offset `-1` and therefore the
-`1.9.x` series. Free-Moving uses offset `0`, producing the `1.10.x` alpha series.
+stable reference. Swift, Web, and Free-Moving use offset `-1` from Python 1.11,
+retaining their `1.10.x` series. The manifest records their released versions
+independently of unreleased source updates.
 
 `versions.json` is the canonical machine-readable manifest. Validate every
 runtime, package, and build declaration from the repository root with:

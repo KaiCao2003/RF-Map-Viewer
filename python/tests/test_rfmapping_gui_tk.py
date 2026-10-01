@@ -7,6 +7,7 @@ import tempfile
 import threading
 import time
 import unittest
+from concurrent.futures import Future
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -83,7 +84,16 @@ class TkViewerTests(unittest.TestCase):
         path = Path(self.directory.name) / "viewer.json"
         path.write_text(json.dumps(payload), encoding="utf-8")
         settings_path = Path(self.directory.name) / "settings.json"
-        with mock.patch.object(gui, "viewer_settings_path", return_value=settings_path):
+        lifecycle_platform = "darwin" if self._testMethodName in {
+            "test_delayed_macos_document_open_never_opens_file_chooser",
+            "test_macos_application_open_shows_nonmodal_welcome",
+            "test_macos_application_open_does_not_interrupt_pending_document",
+            "test_macos_close_all_shortcut_checks_every_export_before_closing",
+        } else sys.platform
+        with (
+            mock.patch.object(gui, "viewer_settings_path", return_value=settings_path),
+            mock.patch.object(gui.sys, "platform", lifecycle_platform),
+        ):
             self.app = gui.RFMViewer(rf_model_module.RFMappingData(path))
         self.addCleanup(self._destroy_app)
         if self.app._optional_autoload_after is not None:
@@ -140,7 +150,7 @@ class TkViewerTests(unittest.TestCase):
             self.assertFalse(chooser._viewer_ready)
             self.assertIsNone(chooser._startup_after)
             self.assertIsNone(chooser.grab_current())
-            self.assertEqual(chooser.title(), "Welcome to RF Map Viewer")
+            self.assertEqual(chooser.title(), "RF Map Viewer")
             dialog.assert_not_called()
             chooser._startup_chooser_frame.open_button.invoke()
             dialog.assert_called_once()
@@ -203,7 +213,8 @@ class TkViewerTests(unittest.TestCase):
         self.assertEqual(utility.session_entry.get(), "/a/session/folder")
         menu = utility.nametowidget(utility.cget("menu"))
         file_menu = menu.nametowidget(menu.entrycget("File", "menu"))
-        file_menu.invoke("Welcome to RF Map Viewer")
+        with mock.patch.object(gui.filedialog, "askopenfilename", return_value=""):
+            file_menu.invoke("Open RF Map…")
         root.update()
         welcome = root._rfm_viewer_windows[0]
         self.assertIsNotNone(welcome._startup_chooser_frame)
@@ -224,13 +235,165 @@ class TkViewerTests(unittest.TestCase):
         root = welcome._app_root
         welcome._open_crosscorrelogram()
         utility = root._rfm_crosscorrelogram_window
-        welcome._startup_chooser_frame.close_button.invoke()
+        welcome.tk.call(welcome.protocol("WM_DELETE_WINDOW"))
         root.update()
         self.assertTrue(utility.winfo_exists())
         self.assertFalse(root._rfm_quitting)
         utility.destroy()
         root.update()
-        self.assertTrue(root._rfm_quitting)
+        self.assertEqual(root._rfm_quitting, sys.platform != "darwin")
+        if not root._rfm_quitting:
+            root._rfm_application.quit()
+
+    def test_macos_close_all_keeps_root_and_reopen_creates_welcome(self) -> None:
+        root = self.app._app_root
+        application = root._rfm_application
+        self.addCleanup(application.quit)
+        self.app._open_crosscorrelogram()
+        utility = root._rfm_crosscorrelogram_window
+        root.tk.createcommand("::rfmap_test_reopen", application.reopen)
+        with (
+            mock.patch.object(gui.sys, "platform", "darwin"),
+            mock.patch.object(gui, "set_macos_welcome_chrome", return_value=False),
+        ):
+            application.close_all_windows()
+            self.app = None
+            root.update()
+            self.assertFalse(root._rfm_quitting)
+            self.assertEqual(root._rfm_viewer_windows, [])
+            self.assertIsNone(root._rfm_active_viewer)
+            self.assertFalse(utility.winfo_exists())
+            root.tk.call("::rfmap_test_reopen")
+            root.update()
+            self.assertEqual(len(root._rfm_viewer_windows), 1)
+            welcome = root._rfm_viewer_windows[0]
+            self.assertIsNotNone(welcome._startup_chooser_frame)
+            root.tk.call("::rfmap_test_reopen")
+            self.assertEqual(root._rfm_viewer_windows, [welcome])
+
+    def test_close_all_leaves_every_window_open_while_exporting(self) -> None:
+        application = self.app._app_root._rfm_application
+        with (
+            mock.patch.object(gui, "_active_export_jobs", return_value=[object()]),
+            mock.patch.object(gui.messagebox, "showinfo") as notice,
+        ):
+            application.close_all_windows()
+        notice.assert_called_once()
+        self.assertTrue(self.app.winfo_exists())
+        self.assertFalse(self.app._app_root._rfm_quitting)
+
+    def test_macos_close_all_shortcut_checks_every_export_before_closing(self) -> None:
+        root = self.app._app_root
+        application = root._rfm_application
+        self.addCleanup(application.quit)
+        with mock.patch.object(gui.sys, "platform", "darwin"):
+            other = gui.RFMViewer(
+                rf_model_module.RFMappingData(self.app.data.path), master=root,
+            )
+            self.app._open_crosscorrelogram()
+            utility = root._rfm_crosscorrelogram_window
+            option_event = SimpleNamespace(
+                keysym="??", char="∑", state=24, keycode=226501137,
+            )
+            with (
+                mock.patch.object(
+                    gui, "_active_export_jobs",
+                    side_effect=lambda _root, owner=None: [object()] if owner in (None, other) else [],
+                ),
+                mock.patch.object(gui.messagebox, "showinfo") as notice,
+            ):
+                for window in (self.app, utility):
+                    self.assertTrue(window.bind("<Command-Option-KeyPress>"))
+                    window.focus_force()
+                    root.update()
+                    window.event_generate("<Command-Option-w>")
+                    root.update()
+                    self.assertEqual(application.close_all_option_key(option_event), "break")
+                    self.assertTrue(self.app.winfo_exists())
+                    self.assertTrue(other.winfo_exists())
+                    self.assertTrue(utility.winfo_exists())
+                self.assertEqual(notice.call_count, 4)
+            self.app.focus_force()
+            root.update()
+            with mock.patch.object(gui, "_active_export_jobs", return_value=[]) as exports:
+                self.assertEqual(application.close_all_option_key(option_event), "break")
+                root.update()
+            self.app = None
+            self.assertEqual(root._rfm_viewer_windows, [])
+            self.assertFalse(utility.winfo_exists())
+            self.assertFalse(root._rfm_quitting)
+            self.assertEqual(sum(len(call.args) == 1 for call in exports.call_args_list), 1)
+
+    def test_macos_reopen_raises_utility_without_extra_welcome(self) -> None:
+        root = self.app._app_root
+        application = root._rfm_application
+        self.addCleanup(application.quit)
+        self.app._open_crosscorrelogram()
+        utility = root._rfm_crosscorrelogram_window
+        with mock.patch.object(gui.sys, "platform", "darwin"):
+            self.app._close_window()
+            self.app = None
+            application.reopen()
+            root.update()
+        self.assertEqual(root._rfm_viewer_windows, [])
+        self.assertTrue(utility.winfo_exists())
+
+    def test_menus_offer_close_all_without_welcome_command(self) -> None:
+        windows = [self.app, gui.RFMViewer(master=self.app._app_root)]
+        self.addCleanup(windows[-1].destroy)
+        for window in windows:
+            menu = window._menu
+            file_menu = menu.nametowidget(menu.entrycget("File", "menu"))
+            labels = [
+                file_menu.entrycget(index, "label")
+                for index in range(file_menu.index("end") + 1)
+                if file_menu.type(index) != "separator"
+            ]
+            self.assertNotIn("Welcome to RF Map Viewer", labels)
+            self.assertIn("Close All Windows", labels)
+
+    def test_settings_closed_by_application_does_not_leave_stale_owner(self) -> None:
+        root = self.app._app_root
+        first = self.app
+        second = gui.RFMViewer(rf_model_module.RFMappingData(first.data.path), master=root)
+        self.app = second
+        root._rfm_active_viewer = first
+        first._show_settings()
+        settings = root._rfm_settings_window
+        with mock.patch.object(root, "focus_get", return_value=settings):
+            root._rfm_application.close_active_window()
+        self.assertIsNone(root._rfm_settings_window)
+        first._close_window()
+        root.update()
+        self.assertEqual(root._rfm_viewer_windows, [second])
+        second._step_unit(1)
+        self.assertEqual(second._selected_unit_id_value(), 8)
+
+    def test_settings_long_form_scrolls_at_minimum_height(self) -> None:
+        self.app._show_settings()
+        settings = self.app._app_root._rfm_settings_window
+        settings.geometry("720x640")
+        tab_id = settings._tab_widget_by_name["RF Map"]
+        settings.notebook.select(tab_id)
+        settings.update()
+        canvas = settings._tab_canvases[tab_id]
+        self.assertLess(canvas.yview()[1], 1.0)
+        canvas.event_generate("<MouseWheel>", delta=-120)
+        settings.update()
+        self.assertGreater(canvas.yview()[0], 0.0)
+        form = canvas.winfo_children()[0]
+        last_control = next(
+            child for child in form.winfo_children()
+            if isinstance(child, tk_support_module.ttk.Combobox)
+            and str(child.cget("textvariable")) == str(settings.default_viewer_tab_var)
+        )
+        last_control.focus_force()
+        settings.update()
+        self.assertGreaterEqual(last_control.winfo_rooty(), canvas.winfo_rooty())
+        self.assertLessEqual(
+            last_control.winfo_rooty() + last_control.winfo_height(),
+            canvas.winfo_rooty() + canvas.winfo_height(),
+        )
 
     def test_welcome_opens_selected_recent_and_records_success(self) -> None:
         self.recent_paths.extend([self.app.data.path, Path(self.directory.name) / "missing.rfmap"])
@@ -408,12 +571,12 @@ class TkViewerTests(unittest.TestCase):
         self.app.notebook.event_generate("<KeyPress-d>")
         self.app.update()
         self.assertTrue(self.app.display_expanded_var.get())
-        self.assertEqual(self.app.display_toggle_button.cget("text"), "Hide (D)")
+        self.assertEqual(self.app.display_toggle_button.cget("text"), "Hide")
         self.assertEqual(self.app._view_menu.entrycget(self.app._display_options_menu_index, "accelerator"), "D")
         self.app.notebook.event_generate("<KeyPress-d>")
         self.app.update()
         self.assertFalse(self.app.display_expanded_var.get())
-        self.assertEqual(self.app.display_toggle_button.cget("text"), "Display Options (D)")
+        self.assertEqual(self.app.display_toggle_button.cget("text"), "Display")
         self.app.range_start_spin.focus_force()
         self.app.update()
         self.assertIs(self.app.focus_get(), self.app.range_start_spin)
@@ -724,7 +887,7 @@ class TkViewerTests(unittest.TestCase):
         self.addCleanup(composer._close)
         self.assertEqual(composer.unit_ids, (20,))
         self.assertEqual(composer.unit_list.size(), 1)
-        self.assertIn("unit 20", composer.unit_list.get(0))
+        self.assertIn("Unit 20", composer.unit_list.get(0))
 
         filter_off = replace(
             self.app.settings,
@@ -856,7 +1019,7 @@ class TkViewerTests(unittest.TestCase):
 
     def _destroy_app(self) -> None:
         if self.app is not None:
-            self.app.destroy()
+            self.app._quit_application()
             self.app = None
         gc.collect()
 
@@ -940,11 +1103,138 @@ class TkViewerTests(unittest.TestCase):
         deadline = __import__("time").monotonic() + 5.0
         while __import__("time").monotonic() < deadline:
             self.app.update()
-            status = str(composer.preview_status.cget("text"))
-            if "provenance verified" in status or "disabled" in status:
+            if composer.page_canvas._photo is not None:
                 break
         self.assertNotIn("AttributeError", str(composer.preview_label.cget("text")))
-        self.assertIn("provenance verified", str(composer.preview_status.cget("text")))
+        self.assertIsNotNone(composer.page_canvas._photo)
+        self.assertEqual(composer.preview_status.cget("text"), "")
+
+    def test_figure_composer_reopens_after_native_and_direct_close(self) -> None:
+        root = self.app._app_root
+        callback_errors = []
+        previous = None
+        with (
+            mock.patch.object(figure_composer_module.FigureExportWindow, "_schedule_preview"),
+            mock.patch.object(root, "report_callback_exception", side_effect=lambda *exc: callback_errors.append(exc)),
+        ):
+            for iteration in range(4):
+                if iteration % 2:
+                    self.app._file_menu.invoke("Export Figures…")
+                else:
+                    self.app.export_toolbar_button.invoke()
+                self.assertEqual(callback_errors, [])
+                composer = self.app._figure_export_window
+                self.assertIsNotNone(composer)
+                self.assertIsNot(composer, previous)
+                self.assertTrue(composer.winfo_exists())
+                self.app.export_toolbar_button.invoke()
+                self.assertIs(self.app._figure_export_window, composer)
+                if iteration == 2:
+                    composer.destroy()
+                else:
+                    composer.tk.call(composer.protocol("WM_DELETE_WINDOW"))
+                self.assertFalse(composer.winfo_exists())
+                self.assertIsNone(self.app._figure_export_window)
+                self.assertTrue(self.app.winfo_exists())
+                previous = composer
+
+    def test_figure_composer_reopens_after_export_close_guard_finishes(self) -> None:
+        root = self.app._app_root
+        future = Future()
+        with (
+            mock.patch.object(figure_composer_module.FigureExportWindow, "_schedule_preview"),
+            mock.patch.object(figure_composer_module, "_export_executor") as executor,
+            mock.patch.object(tk_support_module.messagebox, "showinfo") as showinfo,
+        ):
+            executor.return_value.submit.return_value = future
+            self.app.export_toolbar_button.invoke()
+            composer = self.app._figure_export_window
+            composer._select_all_units()
+            destination = Path(self.directory.name) / "figures.pdf"
+            composer.destination_var.set(str(destination))
+            composer.export_button.invoke()
+            self.assertTrue(composer._export_busy)
+            self.assertTrue(export_inputs_module._active_export_jobs(root, self.app))
+
+            composer.tk.call(composer.protocol("WM_DELETE_WINDOW"))
+            composer.destroy()
+            self.app._close_window()
+            self.assertEqual(showinfo.call_count, 3)
+            self.assertTrue(self.app.winfo_exists())
+            self.assertTrue(composer.winfo_exists())
+            self.app.export_toolbar_button.invoke()
+            self.assertIs(self.app._figure_export_window, composer)
+
+            future.set_result(SimpleNamespace(page_count=2, destination=destination))
+            deadline = time.monotonic() + 2.0
+            while composer._export_busy and time.monotonic() < deadline:
+                root.update()
+                time.sleep(0.005)
+            self.assertFalse(composer._export_busy)
+            self.assertFalse(export_inputs_module._active_export_jobs(root, self.app))
+            composer.tk.call(composer.protocol("WM_DELETE_WINDOW"))
+            self.app._file_menu.invoke("Export Figures…")
+            replacement = self.app._figure_export_window
+            self.assertIsNot(replacement, composer)
+            self.assertTrue(replacement.winfo_exists())
+
+    def test_figure_composer_keeps_layout_controls_visible_at_minimum_size(self) -> None:
+        with mock.patch.object(figure_composer_module.FigureExportWindow, "_schedule_preview"):
+            composer = figure_composer_module.FigureExportWindow(self.app)
+        self.addCleanup(lambda: composer.winfo_exists() and composer.destroy())
+        composer.maxsize(1050, 680)
+        composer.geometry("1050x680")
+        self.app.update()
+        right = composer.winfo_rootx() + composer.winfo_width()
+        bottom = composer.winfo_rooty() + composer.winfo_height()
+        for widget in (composer.frame_size_combo, composer.export_button, *composer.page_buttons.winfo_children()):
+            self.assertTrue(widget.winfo_ismapped())
+            self.assertLessEqual(widget.winfo_rootx() + widget.winfo_width(), right)
+            self.assertLessEqual(widget.winfo_rooty() + widget.winfo_height(), bottom)
+
+    def test_figure_composer_keyboard_selection_updates_export_and_preview(self) -> None:
+        with mock.patch.object(figure_composer_module.FigureExportWindow, "_schedule_preview") as preview:
+            composer = figure_composer_module.FigureExportWindow(self.app)
+            self.addCleanup(lambda: composer.winfo_exists() and composer.destroy())
+            composer.unit_list.focus_force()
+            self.app.update()
+            preview.reset_mock()
+            for key, selected, current in (
+                ("<Down>", (8,), 8),
+                ("<Shift-Up>", (7, 8), 7),
+                ("<Shift-Down>", (8,), 8),
+            ):
+                composer.unit_list.event_generate(key)
+                self.app.update()
+                self.assertEqual(composer._selected_unit_ids(), selected)
+                self.assertEqual(composer.current_unit_id, current)
+                checked = tuple(
+                    unit_id for index, unit_id in enumerate(composer.unit_ids)
+                    if composer.unit_list.get(index).startswith("☑")
+                )
+                self.assertEqual(checked, selected)
+            self.assertEqual(preview.call_count, 3)
+
+    def test_figure_composer_mouse_selection_takes_focus_and_preserves_ranges(self) -> None:
+        with mock.patch.object(figure_composer_module.FigureExportWindow, "_schedule_preview"):
+            composer = figure_composer_module.FigureExportWindow(self.app)
+            self.addCleanup(lambda: composer.winfo_exists() and composer.destroy())
+            composer.preview_unit_combo.focus_force()
+            self.app.update()
+            x, y, _width, height = composer.unit_list.bbox(1)
+            composer.unit_list.event_generate("<Button-1>", x=x + 2, y=y + height // 2)
+            self.app.update()
+            self.assertIs(composer.focus_get(), composer.unit_list)
+            self.assertEqual(composer._selected_unit_ids(), (7, 8))
+            self.assertEqual(composer.current_unit_id, 8)
+            composer.unit_list.event_generate("<Up>")
+            self.app.update()
+            self.assertEqual(composer._selected_unit_ids(), (7,))
+            self.assertEqual(composer.current_unit_id, 7)
+            composer.unit_list.event_generate("<Shift-Down>")
+            self.app.update()
+            self.assertEqual(composer._selected_unit_ids(), (7, 8))
+            self.assertEqual(composer.current_unit_id, 8)
 
     def test_compact_waveform_settings_and_unit_selection_drive_live_canvas(self) -> None:
         hidden_settings = replace(
@@ -1130,7 +1420,7 @@ class TkViewerTests(unittest.TestCase):
             if composer._preview_after is not None:
                 composer.after_cancel(composer._preview_after)
                 composer._preview_after = None
-            composer._freeze_context = freeze_until_cancelled
+            composer._preview_context = freeze_until_cancelled
             composer._start_preview(composer._preview_generation)
             self.assertTrue(started.wait(timeout=1.0))
             preview_future = composer._preview_future
@@ -1943,7 +2233,7 @@ class TkViewerTests(unittest.TestCase):
             if self.app.tuning_curve_canvas.type(item) == "text"
         )
         self.assertIn("No tuning curves", text)
-        self.assertIn("Attach head-direction data", text)
+        self.assertEqual(text, "No tuning curves")
         self.assertTrue(
             any(
                 self.app.tuning_curve_canvas.type(item) == "window"
@@ -1952,7 +2242,7 @@ class TkViewerTests(unittest.TestCase):
         )
         self.assertEqual(
             self.app.tuning_attach_button.cget("text"),
-            "Choose tuning_curves.tc or .json…",
+            "Open…",
         )
         self.assertFalse(self.app.tuning_curve_status_label.winfo_ismapped())
         self.assertEqual(self.app.tuning_curve_status_label.cget("text"), "")
@@ -2072,6 +2362,16 @@ class TkViewerTests(unittest.TestCase):
         self.app._draw_tuning_curve()
         self.assertEqual(self.app.tuning_hd_class_label.cget("text"), "2")
         self.assertEqual(self.app.tuning_hd_class_label.cget("style"), "HDClass2.TLabel")
+
+        self.app.tuning_curve_data = companions_module.TuningCurveData(
+            tuning_path,
+            {7: curve, 8: curve},
+            hd_classes={7: 3, 8: 2},
+        )
+        self.app._set_selected_unit_id(7)
+        self.app._draw_tuning_curve()
+        self.assertEqual(self.app.tuning_hd_class_label.cget("text"), "3")
+        self.assertEqual(self.app.tuning_hd_class_label.cget("style"), "HDClass3.TLabel")
 
         self.app.tuning_curve_data = companions_module.TuningCurveData(
             tuning_path,

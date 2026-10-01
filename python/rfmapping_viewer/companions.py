@@ -33,7 +33,9 @@ class TuningCurveClassificationProvenance:
     class_0: str | None = None
     class_1: str | None = None
     class_2: str | None = None
+    class_3: str | None = None
     class_null: str | None = None
+    kappa_cutoff: float | None = None
     rayleigh_alpha: float | None = None
     rayleigh_test: str | None = None
     shuffle_alpha: float | None = None
@@ -245,6 +247,8 @@ class TuningCurveData:
                 class_0=cls._metadata_string(classification_raw, "class_0", context),
                 class_1=cls._metadata_string(classification_raw, "class_1", context),
                 class_2=cls._metadata_string(classification_raw, "class_2", context),
+                class_3=cls._metadata_string(classification_raw, "class_3", context),
+                kappa_cutoff=cls._metadata_float(classification_raw, "kappa_cutoff", context),
                 class_null=cls._metadata_string(
                     classification_raw, "class_null", context
                 ),
@@ -447,8 +451,8 @@ class TuningCurveData:
                 rates.append(rate)
 
             hd_class = raw_unit.get("hd_class")
-            if hd_class is not None and (type(hd_class) is not int or hd_class not in {0, 1, 2}):
-                raise ValueError(f"Unit {unit_id} hd_class must be 0, 1, 2, or null.")
+            if hd_class is not None and (type(hd_class) is not int or hd_class not in {0, 1, 2, 3}):
+                raise ValueError(f"Unit {unit_id} hd_class must be 0, 1, 2, 3, or null.")
             curves[unit_id] = tuple(rates)
             spike_counts[unit_id] = tuple(counts)
             hd_classes[unit_id] = hd_class

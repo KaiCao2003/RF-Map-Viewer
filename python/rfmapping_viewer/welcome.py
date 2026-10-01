@@ -30,36 +30,31 @@ def _rounded_rectangle(canvas, x1, y1, x2, y2, radius, *, fill):
 
 
 class WelcomeButton(ttk.Button):
-    def __init__(self, master, *, command, close=False):
+    def __init__(self, master, *, command):
         root = master._root()
         style = ttk.Style(root)
-        name = "WelcomeClose" if close else "WelcomeOpen"
+        name = "WelcomeOpen"
         element = name + ".border"
         if element not in style.element_names():
             # Skin only the bezel; ttk retains button semantics and bindings.
-            width = 36 if close else 360
+            width = 360
             images = []
             for pressed, focused in ((False, False), (True, False), (False, True)):
-                color = "#dedede" if pressed else "#f8f8f8" if close else "#ececec"
+                color = "#dedede" if pressed else "#ececec"
                 bitmap = Image.new("RGB", (width * 4, 144), "white")
                 draw = ImageDraw.Draw(bitmap)
                 draw.rounded_rectangle((0, 0, width * 4 - 1, 143), radius=72,
                                        fill=color, outline="#7ca8e8" if focused else color, width=6)
-                if close:
-                    draw.line((48, 48, 96, 96), fill="#a5a5a5", width=6)
-                    draw.line((96, 48, 48, 96), fill="#a5a5a5", width=6)
                 images.append(ImageTk.PhotoImage(bitmap.resize((width, 36), Image.Resampling.LANCZOS), master=root))
             setattr(root, "_" + name + "_images", images)
             style.element_create(element, "image", images[0], ("pressed", images[1]),
                                  ("focus", images[2]), sticky="nswe")
-            layout = {"sticky": "nswe"}
-            if not close:
-                layout["children"] = [("Button.label", {"sticky": "nswe"})]
+            layout = {"sticky": "nswe", "children": [("Button.label", {"sticky": "nswe"})]}
             style.layout(name + ".TButton", [(element, layout)])
             family = root.tk.call("font", "actual", "TkDefaultFont", "-family")
             style.configure(name + ".TButton", font=(family, -13), foreground="#242424", anchor="center")
             style.map(name + ".TButton", foreground=[("pressed", "#242424")])
-        super().__init__(master, text="Close Window" if close else "Open…", command=command,
+        super().__init__(master, text="Open…", command=command,
                          style=name + ".TButton", takefocus=True)
         self.bind("<Return>", lambda event: self.invoke())
 
@@ -211,12 +206,9 @@ class WelcomeFrame(tk.Frame):
         *,
         open_document: Callable[[], None],
         open_recent: Callable[[Path], None],
-        close_window: Callable[[], None],
     ) -> None:
         super().__init__(master, background="white")
         family = self.tk.call("font", "actual", "TkDefaultFont", "-family")
-        self.close_button = WelcomeButton(self, command=close_window, close=True)
-        self.close_button.place(x=20, y=20, width=36, height=36)
         bundled = getattr(sys, "frozen", False)
         icon_path = (Path(sys.executable).parent.parent / "Resources" / "RFMappingViewer.icns"
                      if bundled

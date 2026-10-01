@@ -70,7 +70,9 @@ class TuningCurveClassificationProvenance:
     class_0: str | None = None
     class_1: str | None = None
     class_2: str | None = None
+    class_3: str | None = None
     class_null: str | None = None
+    kappa_cutoff: float | None = None
     rayleigh_alpha: float | None = None
     rayleigh_test: str | None = None
     shuffle_alpha: float | None = None
@@ -238,7 +240,9 @@ def _load_metadata(raw_metadata: Any) -> TuningCurveMetadata | None:
             class_0=_metadata_string(classification_raw, "class_0", context),
             class_1=_metadata_string(classification_raw, "class_1", context),
             class_2=_metadata_string(classification_raw, "class_2", context),
+            class_3=_metadata_string(classification_raw, "class_3", context),
             class_null=_metadata_string(classification_raw, "class_null", context),
+            kappa_cutoff=_metadata_float(classification_raw, "kappa_cutoff", context),
             rayleigh_alpha=_metadata_float(
                 classification_raw, "rayleigh_alpha", context
             ),
@@ -710,8 +714,8 @@ def _nested_schema_v2_document(
             if hd_class_raw is None
             else _strict_integer(hd_class_raw, "hd_class")
         )
-        if hd_class not in {None, 0, 1, 2}:
-            raise ValueError("hd_class must be 0, 1, 2, or null")
+        if hd_class not in {None, 0, 1, 2, 3}:
+            raise ValueError("hd_class must be 0, 1, 2, 3, or null")
         seen.add(unit_id)
         counts.setflags(write=False)
         rates.setflags(write=False)
@@ -827,8 +831,8 @@ def _columnar_document(source: Path, raw: Mapping[str, Any]) -> HDTuningData:
             if hd_class_raw is None
             else _strict_integer(hd_class_raw, "hd_class value")
         )
-        if hd_class not in {None, 0, 1, 2}:
-            raise ValueError("hd_class must be 0, 1, 2, or null")
+        if hd_class not in {None, 0, 1, 2, 3}:
+            raise ValueError("hd_class must be 0, 1, 2, 3, or null")
         counts.setflags(write=False)
         rates.setflags(write=False)
         metrics = MappingProxyType(

@@ -38,7 +38,6 @@ class CrossCorrelogramWindow(tk.Toplevel):
         self.bin_var = tk.StringVar(self, value="1")
         self.window_var = tk.StringVar(self, value="50")
         self.status_var = tk.StringVar(self)
-        self.subtitle_var = tk.StringVar(self)
         self._results: queue.SimpleQueue = queue.SimpleQueue()
         self._poll_after: str | None = None
         self._busy = False
@@ -62,7 +61,6 @@ class CrossCorrelogramWindow(tk.Toplevel):
             style.configure(f"{name}.TLabel", background=background, foreground="#1d1d1f", font=body_font)
             style.configure(f"{name}.Muted.TLabel", background=background, foreground="#6e6e73", font=small_font)
             style.configure(f"{name}.Section.TLabel", background=background, foreground="#1d1d1f", font=(family, font_size, "bold"))
-        style.configure("CCG.Title.TLabel", background="white", foreground="#1d1d1f", font=(family, font_size + 6, "bold"))
         style.configure("CCG.TEntry", padding=(8, 6), fieldbackground="white", foreground="#1d1d1f", bordercolor="#d2d2d7", lightcolor="#d2d2d7", darkcolor="#d2d2d7")
         style.configure("CCG.TCombobox", padding=(8, 5), fieldbackground="white", foreground="#1d1d1f", background="white", arrowcolor="#6e6e73", bordercolor="#d2d2d7", lightcolor="#d2d2d7", darkcolor="#d2d2d7")
         style.map("CCG.TCombobox", fieldbackground=[("disabled", "#ececef"), ("readonly", "white")], foreground=[("disabled", "#86868b"), ("readonly", "#1d1d1f")])
@@ -86,8 +84,7 @@ class CrossCorrelogramWindow(tk.Toplevel):
         recording = ttk.Frame(inspector, style="CCG.Inspector.TFrame")
         recording.grid(row=0, column=0, sticky="ew")
         recording.columnconfigure(0, weight=1)
-        ttk.Label(recording, text="Recording", style="CCG.Inspector.Section.TLabel").grid(row=0, column=0, sticky="w", pady=(0, 12))
-        ttk.Label(recording, text="Session folder", style="CCG.Inspector.Muted.TLabel").grid(row=1, column=0, sticky="w", pady=(0, 6))
+        ttk.Label(recording, text="Session", style="CCG.Inspector.Section.TLabel").grid(row=0, column=0, sticky="w", pady=(0, 12))
         self.session_entry = ttk.Entry(recording, textvariable=self.session_var, style="CCG.TEntry", width=20)
         self.session_entry.grid(row=2, column=0, sticky="ew")
         self.session_entry.bind("<Return>", lambda _event: self._load_units())
@@ -96,7 +93,7 @@ class CrossCorrelogramWindow(tk.Toplevel):
         actions.columnconfigure((0, 1), weight=1)
         browse = ttk.Button(actions, text="Choose…", command=self._choose_session, style="CCG.TButton", width=8)
         browse.grid(row=0, column=0, sticky="ew", padx=(0, 6))
-        load_button = ttk.Button(actions, text="Load units", command=self._load_units, style="CCG.TButton", width=8)
+        load_button = ttk.Button(actions, text="Load", command=self._load_units, style="CCG.TButton", width=8)
         load_button.grid(row=0, column=1, sticky="ew")
         probe = ttk.Frame(recording, style="CCG.Inspector.TFrame")
         probe.grid(row=4, column=0, sticky="ew")
@@ -132,7 +129,7 @@ class CrossCorrelogramWindow(tk.Toplevel):
         bin_entry.grid(row=2, column=0, sticky="ew", padx=(0, 6))
         window_entry = ttk.Entry(timing, textvariable=self.window_var, width=7, style="CCG.TEntry")
         window_entry.grid(row=2, column=1, sticky="ew", padx=(6, 0))
-        self.plot_button = ttk.Button(inspector, text="Plot pairs", command=self._plot, style="CCG.Primary.TButton")
+        self.plot_button = ttk.Button(inspector, text="Plot", command=self._plot, style="CCG.Primary.TButton")
         self.plot_button.grid(row=6, column=0, sticky="ew", pady=(20, 0))
         if ttk.Style(self).theme_use() == "aqua":
             self.plot_button.configure(default="active")
@@ -141,13 +138,11 @@ class CrossCorrelogramWindow(tk.Toplevel):
         workspace.grid(row=0, column=2, sticky="nsew")
         workspace.columnconfigure(0, weight=1)
         workspace.rowconfigure(2, weight=1)
-        toolbar = ttk.Frame(workspace, padding=24, style="CCG.TFrame")
+        toolbar = ttk.Frame(workspace, padding=(20, 14), style="CCG.TFrame")
         toolbar.grid(row=0, column=0, sticky="ew")
         toolbar.columnconfigure(0, weight=1)
-        ttk.Label(toolbar, text="Cross-correlograms", style="CCG.Title.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Label(toolbar, textvariable=self.subtitle_var, style="CCG.Muted.TLabel").grid(row=1, column=0, sticky="w", pady=(6, 0))
-        self.save_button = ttk.Button(toolbar, text="Save figure…", command=self._save, state="disabled", style="CCG.TButton")
-        self.save_button.grid(row=0, column=1, rowspan=2, sticky="e", padx=(16, 0))
+        self.save_button = ttk.Button(toolbar, text="Save…", command=self._save, state="disabled", style="CCG.TButton")
+        self.save_button.grid(row=0, column=1, sticky="e", padx=(16, 0))
         tk.Frame(workspace, height=1, background="#e8e8ed").grid(row=1, column=0, sticky="ew")
         self._controls = [
             self.session_entry, browse, self.probe_combo, *self.unit_combos,
@@ -255,19 +250,14 @@ class CrossCorrelogramWindow(tk.Toplevel):
             if action == "units":
                 self._populate_units(result)
                 self.session_entry.xview_moveto(1.0)
-                self.status_var.set(f"{len(result)} units in {arguments[0].name} · Probe {arguments[1]}")
-                self.subtitle_var.set(f"{arguments[0].name}  ·  Probe {arguments[1]}")
+                self.status_var.set(f"{len(result)} units")
             else:
                 session_dir, probe_name, unit_ids, bin_size, window_size = arguments
                 figure = make_crosscorrelogram_figure(
                     result, session_dir, probe_name, bin_size, window_size,
                 )
                 self._show_figure(figure)
-                self.status_var.set(
-                    f"{session_dir.name} · Probe {probe_name} · Units {', '.join(map(str, unit_ids))}"
-                )
-                pair_label = "1 pair" if len(result.columns) == 1 else "3 pairs"
-                self.subtitle_var.set(f"{session_dir.name}  ·  Probe {probe_name}  ·  {pair_label}")
+                self.status_var.set("")
         except Exception as error:
             self.status_var.set("Could not load cross-correlograms.")
             messagebox.showerror("Cross-correlograms", str(error), parent=self)
