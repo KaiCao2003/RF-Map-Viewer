@@ -1450,7 +1450,7 @@ class RFMViewer(tk.Toplevel):
                     style="Panel.TFrame",
                 )
                 self.tuning_curve_section.columnconfigure(0, weight=1)
-                self.tuning_curve_section.rowconfigure(1, weight=1)
+                self.tuning_curve_section.rowconfigure(1, weight=1, minsize=180)
                 tuning_header = ttk.Frame(
                     self.tuning_curve_section,
                     style="Panel.TFrame",

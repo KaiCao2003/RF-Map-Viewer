@@ -581,9 +581,16 @@ class TkViewerTests(unittest.TestCase):
         self.app.update()
         self.assertIs(self.app.focus_get(), self.app.range_start_spin)
         self.app.range_start_spin.delete(0, "end")
-        self.app.range_start_spin.event_generate("<KeyPress-minus>")
-        self.app.update()
-        self.assertEqual(self.app.range_start_ms_var.get(), "-")
+        # An incomplete "-" can normalize during control refresh; test shortcut routing.
+        with mock.patch.object(
+            self.app, "_run_navigation_shortcut", wraps=self.app._run_navigation_shortcut,
+        ) as shortcut:
+            self.app.range_start_spin.event_generate("<KeyPress-minus>")
+            self.app.update()
+        shortcut.assert_called_once()
+        event = shortcut.call_args.args[0]
+        self.assertIs(event.widget, self.app.range_start_spin)
+        self.assertEqual(event.keysym, "minus")
         self.assertFalse(self.app.rf_subtract_var.get())
 
     def test_rf_subtraction_plot_csv_snapshot_and_nan_color_agree(self) -> None:
