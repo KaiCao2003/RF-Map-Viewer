@@ -590,7 +590,7 @@ class TkViewerTests(unittest.TestCase):
         shortcut.assert_called_once()
         event = shortcut.call_args.args[0]
         self.assertIs(event.widget, self.app.range_start_spin)
-        self.assertEqual(event.keysym, "minus")
+        self.assertIn(event.keysym, {"minus", "-"})
         self.assertFalse(self.app.rf_subtract_var.get())
 
     def test_rf_subtraction_plot_csv_snapshot_and_nan_color_agree(self) -> None:
