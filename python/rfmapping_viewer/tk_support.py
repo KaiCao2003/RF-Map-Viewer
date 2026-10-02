@@ -29,6 +29,19 @@ class _NSSize(ctypes.Structure):
     _fields_ = (("width", ctypes.c_double), ("height", ctypes.c_double))
 
 
+def scroll_canvas_precise(canvas: tk.Canvas, delta: int) -> None:
+    """Move a Canvas vertically by Tk 9's scaled trackpad pixel delta."""
+
+    _delta_x, delta_y = canvas.tk.splitlist(canvas.tk.call("tk::PreciseScrollDeltas", delta))
+    pixels = canvas.tk.getdouble(canvas.tk.call("tk::ScaleNum", -canvas.tk.getdouble(delta_y)))
+    if not pixels or canvas.yview() == (0.0, 1.0):
+        return
+    _left, top, _right, bottom = canvas.tk.splitlist(canvas.cget("scrollregion"))
+    height = canvas.tk.getdouble(bottom) - canvas.tk.getdouble(top)
+    # Canvas supports moveto fractions, but has no pixel scroll unit.
+    canvas.yview_moveto(canvas.yview()[0] + pixels / height)
+
+
 def set_macos_welcome_chrome(window: tk.Misc, enabled: bool) -> bool:
     """Extend Tk 9 welcome content through the native titlebar, then restore it."""
 

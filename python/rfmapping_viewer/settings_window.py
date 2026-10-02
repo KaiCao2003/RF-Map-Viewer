@@ -25,7 +25,7 @@ from rfmapping_viewer.settings import (
     is_hex_color,
     normalize_hd_bin_count,
 )
-from rfmapping_viewer.tk_support import tk, ttk
+from rfmapping_viewer.tk_support import scroll_canvas_precise, tk, ttk
 
 from typing import TYPE_CHECKING
 
@@ -261,12 +261,7 @@ class SettingsWindow(tk.Toplevel):
         if canvas.yview() == (0.0, 1.0):
             return "break"
         if precise:
-            _delta_x, delta_y = self.tk.splitlist(self.tk.call("tk::PreciseScrollDeltas", event.delta))
-            pixels = self.tk.getdouble(self.tk.call("tk::ScaleNum", -self.tk.getdouble(delta_y)))
-            if pixels:
-                _left, top, _right, bottom = self.tk.splitlist(canvas.cget("scrollregion"))
-                height = self.tk.getdouble(bottom) - self.tk.getdouble(top)
-                canvas.yview_moveto(canvas.yview()[0] + pixels / height)
+            scroll_canvas_precise(canvas, event.delta)
         elif event.num in (4, 5):
             units = -1 if event.num == 4 else 1
             canvas.yview_scroll(units, "units")

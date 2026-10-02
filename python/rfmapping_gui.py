@@ -139,6 +139,7 @@ from rfmapping_viewer.tk_support import (
     allow_macos_fullscreen_resize,
     filedialog,
     messagebox,
+    scroll_canvas_precise,
     set_macos_welcome_chrome,
     tk,
     ttk,
@@ -2154,6 +2155,10 @@ class RFMViewer(tk.Toplevel):
             canvas.bind("<Button-1>", lambda event, k=key: self._on_canvas_click(k, event))
             canvas.bind("<Leave>", lambda _event: self._clear_hover())
         self.canvases["timeline"].bind("<MouseWheel>", self._on_timeline_mousewheel)
+        if self.tk.call("info", "commands", "tk::PreciseScrollDeltas"):
+            self.canvases["timeline"].bind(
+                "<TouchpadScroll>", lambda event: self._on_timeline_mousewheel(event, precise=True),
+            )
         self.canvases["timeline"].bind("<Button-4>", self._on_timeline_mousewheel)
         self.canvases["timeline"].bind("<Button-5>", self._on_timeline_mousewheel)
         self.probe_canvas.bind(
@@ -5246,11 +5251,13 @@ class RFMViewer(tk.Toplevel):
         finally:
             self._restoring_timeline_scroll = False
 
-    def _on_timeline_mousewheel(self, event: tk.Event) -> str:
+    def _on_timeline_mousewheel(self, event: tk.Event, *, precise: bool = False) -> str:
         canvas = self.canvases.get("timeline")
         if canvas is None:
             return "break"
-        if getattr(event, "num", None) == 4:
+        if precise:
+            scroll_canvas_precise(canvas, event.delta)
+        elif getattr(event, "num", None) == 4:
             units = -3
         elif getattr(event, "num", None) == 5:
             units = 3
@@ -5260,7 +5267,8 @@ class RFMViewer(tk.Toplevel):
                 return "break"
             units = -1 * (delta // 120) if abs(delta) >= 120 else (-1 if delta > 0 else 1)
             units *= 3
-        canvas.yview_scroll(units, "units")
+        if not precise:
+            canvas.yview_scroll(units, "units")
         self._remember_timeline_scroll()
         self._publish_pairing_state_if_changed()
         return "break"

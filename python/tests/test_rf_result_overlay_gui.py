@@ -220,6 +220,55 @@ def test_settings_precise_scroll_moves_actual_canvas_by_scaled_pixels(app):
             app.tk.deletecommand(name)
 
 
+def test_timeline_precise_scroll_moves_canvas_and_preserves_viewport_state(app):
+    draw(app, "timeline")
+    canvas = app.canvases["timeline"]
+    canvas.configure(scrollregion=(0, 0, canvas.winfo_width(), canvas.winfo_height() * 3))
+    created = []
+    for name, function in (
+        ("tk::PreciseScrollDeltas", lambda _packed: (0, -20)),
+        ("tk::ScaleNum", lambda value: float(value) * 2),
+    ):
+        if not app.tk.call("info", "commands", name):
+            app.tk.createcommand(name, function)
+            created.append(name)
+    try:
+        canvas.yview_moveto(0)
+        before = canvas.canvasy(0)
+        expected = app.tk.getdouble(app.tk.call("tk::ScaleNum", 20))
+        with mock.patch.object(app, "_publish_pairing_state_if_changed") as publish:
+            event = SimpleNamespace(widget=canvas, delta=(-20 & 0xffff))
+            assert app._on_timeline_mousewheel(event, precise=True) == "break"
+            assert canvas.canvasy(0) - before == pytest.approx(expected, abs=1)
+            first, last = canvas.yview()
+            assert app._timeline_scroll_fraction == pytest.approx(gui.timeline_scroll_progress(first, last))
+            publish.assert_called_once_with()
+        canvas.event_generate("<MouseWheel>", delta=-120)
+        assert canvas.canvasy(0) > before + expected
+    finally:
+        for name in created:
+            app.tk.deletecommand(name)
+
+
+def test_timeline_native_touchpad_binding_scrolls_only_vertical_delta(app):
+    if not app.tk.call("info", "commands", "tk::PreciseScrollDeltas"):
+        pytest.skip("requires Tk 9 precise trackpad events")
+    draw(app, "timeline")
+    canvas = app.canvases["timeline"]
+    canvas.configure(scrollregion=(0, 0, canvas.winfo_width(), canvas.winfo_height() * 3))
+    canvas.yview_moveto(0)
+    canvas.event_generate("<TouchpadScroll>", delta=(-20 & 0xffff))
+    app.update_idletasks()
+    assert canvas.yview()[0] > 0
+    position = canvas.yview()
+    canvas.event_generate("<TouchpadScroll>", delta=(20 << 16))
+    app.update_idletasks()
+    assert canvas.yview() == position
+    canvas.event_generate("<TouchpadScroll>", delta=20)
+    app.update_idletasks()
+    assert canvas.yview()[0] < position[0]
+
+
 @pytest.mark.parametrize("polar,flip,grouped,expanded", [
     (False, False, False, False), (False, True, True, True),
     (True, False, False, True), (True, True, True, False),
