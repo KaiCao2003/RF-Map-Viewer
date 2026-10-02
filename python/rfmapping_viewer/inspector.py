@@ -17,7 +17,9 @@ class RFInspector(tk.Toplevel):
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
         tabs = ttk.Notebook(self)
+        self.notebook = tabs
         tabs.grid(row=0, column=0, sticky="nsew", padx=12, pady=12)
+        tabs.enable_traversal()
         selection = ttk.Frame(tabs, style="Panel.TFrame", padding=14)
         selection.columnconfigure(0, weight=1)
         tabs.add(selection, text="Selection")
@@ -58,7 +60,7 @@ class RFInspector(tk.Toplevel):
     def show(self):
         self.deiconify()
         self.lift()
-        self.focus_set()
+        self.notebook.focus_force()
 
     def _close(self, _event=None):
         self.withdraw()

@@ -3184,6 +3184,7 @@ class RFMViewer(tk.Toplevel):
         window = SettingsWindow(active)
         self._app_root._rfm_settings_window = window
         window.lift()
+        window.focus_force()
 
     def _apply_viewer_settings(
         self,
@@ -5111,6 +5112,9 @@ class RFMViewer(tk.Toplevel):
             if tab in {"rf", "results"}:
                 page = self.results_pane if results else self.rf_tab_frame
                 self.rf_split_container.grid(in_=page, row=0, column=0, sticky="nsew")
+                # The shared frame is a Notebook sibling of both pages. Keep
+                # it above the newly selected page as well as inside its grid.
+                self.rf_split_container.lift()
             else:
                 self.rf_split_container.grid_remove()
             if results:

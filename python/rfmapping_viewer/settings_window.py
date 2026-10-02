@@ -171,9 +171,7 @@ class SettingsWindow(tk.Toplevel):
         for tab in (general, rf_map, waveform, tuning):
             self._style_form(tab)
         self.notebook.bind("<<NotebookTabChanged>>", self._remember_selected_tab)
-        self.bind("<MouseWheel>", self._scroll_form)
-        self.bind("<Button-4>", self._scroll_form)
-        self.bind("<Button-5>", self._scroll_form)
+        self._install_form_scrolling()
         self.bind("<FocusIn>", self._reveal_form_control, add="+")
 
         footer = ttk.Frame(outer)
@@ -233,18 +231,46 @@ class SettingsWindow(tk.Toplevel):
         ).grid(row=99, column=0, columnspan=2, sticky="w", pady=(16, 0))
         return tab
 
-    def _scroll_form(self, event: tk.Event) -> str | None:
-        if isinstance(event.widget, (ttk.Combobox, ttk.Spinbox)):
+    def _install_form_scrolling(self) -> None:
+        # Handle form scrolling before control classes can consume the event
+        # or change a closed combobox/spinbox value.
+        self._form_scroll_tag = f"RFMSettingsScroll:{self}"
+        self._form_scroll_commands = []
+        self._form_scroll_sequences = ["<MouseWheel>"]
+        if self.tk.call("tk", "windowingsystem") == "x11":
+            self._form_scroll_sequences.extend(("<Button-4>", "<Button-5>"))
+        for sequence in self._form_scroll_sequences:
+            self._form_scroll_commands.append(self.bind_class(self._form_scroll_tag, sequence, self._scroll_form))
+        if self.tk.call("info", "commands", "tk::PreciseScrollDeltas"):
+            # Tk 9 sends precise trackpad input as TouchpadScroll, not MouseWheel.
+            self._form_scroll_sequences.append("<TouchpadScroll>")
+            self._form_scroll_commands.append(self.bind_class(
+                self._form_scroll_tag, "<TouchpadScroll>",
+                lambda event: self._scroll_form(event, precise=True),
+            ))
+        pending = [self.nametowidget(page) for page in self.notebook.tabs()]
+        while pending:
+            widget = pending.pop()
+            widget.bindtags((self._form_scroll_tag, *widget.bindtags()))
+            pending.extend(widget.winfo_children())
+
+    def _scroll_form(self, event: tk.Event, *, precise: bool = False) -> str | None:
+        if isinstance(event.widget, ttk.Combobox) and event.widget.instate(["pressed"]):
             return None
         canvas = self._tab_canvases[str(self.notebook.select())]
         if canvas.yview() == (0.0, 1.0):
-            return None
-        if event.num in (4, 5):
+            return "break"
+        if precise:
+            _delta_x, delta_y = self.tk.splitlist(self.tk.call("tk::PreciseScrollDeltas", event.delta))
+            pixels = self.tk.call("tk::ScaleNum", -self.tk.getdouble(delta_y))
+            canvas.yview_scroll(pixels, "pixels")
+        elif event.num in (4, 5):
             units = -1 if event.num == 4 else 1
+            canvas.yview_scroll(units, "units")
         else:
             delta = event.delta
             units = -int(delta / 120) if abs(delta) >= 120 else -int(delta)
-        canvas.yview_scroll(units, "units")
+            canvas.yview_scroll(units, "units")
         return "break"
 
     def _reveal_form_control(self, event: tk.Event) -> None:
@@ -857,6 +883,11 @@ class SettingsWindow(tk.Toplevel):
             pass
 
     def destroy(self) -> None:
+        for sequence in self._form_scroll_sequences:
+            self.unbind_class(self._form_scroll_tag, sequence)
+        for command in self._form_scroll_commands:
+            self._root().deletecommand(command)
+        self._form_scroll_commands.clear()
         if getattr(self._app_root, "_rfm_settings_window", None) is self:
             self._app_root._rfm_settings_window = None
         super().destroy()

@@ -12,7 +12,7 @@ from gui_test_support import current_rf_payload, tk_test_root
 from rfmapping_viewer.rf_model import RFMappingData
 from rfmapping_viewer.rf_results import RFResultSource
 from rfmapping_viewer.settings import ViewerSettings, save_viewer_settings
-from rfmapping_viewer.tk_support import TK_AVAILABLE, tk
+from rfmapping_viewer.tk_support import TK_AVAILABLE, tk, ttk
 from test_rf_results import write_result
 
 
@@ -92,6 +92,97 @@ def native_overlay(app):
 
 
 pytestmark = pytest.mark.skipif(not TK_AVAILABLE, reason="Tk is unavailable")
+
+
+def test_selected_rf_results_and_delay_canvases_are_visible_hit_targets(app):
+    for tab in ("rf", "results", "delay", "results", "rf"):
+        draw(app, tab)
+        app.lift()
+        app.update()
+        canvas = app.canvases["rf" if tab in {"rf", "results"} else "delay"]
+        assert canvas.winfo_ismapped()
+        x = canvas.winfo_rootx() + canvas.winfo_width() // 2
+        y = canvas.winfo_rooty() + canvas.winfo_height() // 2
+        assert app.winfo_containing(x, y) is canvas, f"{tab} canvas is covered by another notebook page"
+        if tab == "delay":
+            assert not app.rf_split_container.winfo_ismapped()
+
+
+def test_new_settings_window_takes_focus_and_supports_keyboard_traversal(app):
+    app.focus_force()
+    app.update()
+    app._show_settings()
+    app.update()
+    settings = app._app_root._rfm_settings_window
+    assert app.focus_get().winfo_toplevel() is settings
+    focused = settings.focus_get()
+    focused.event_generate("<Tab>")
+    settings.update()
+    focused = settings.focus_get()
+    assert focused is not settings
+    assert focused.winfo_toplevel() is settings
+    initial = settings.notebook.index("current")
+    focused.event_generate("<Control-Tab>")
+    settings.update()
+    assert settings.notebook.index("current") == (initial + 1) % len(settings.notebook.tabs())
+
+
+def test_settings_wheel_scrolls_over_form_controls_before_their_classes_and_cleans_up(app):
+    combo_binding = app.tk.call("bind", "TCombobox", "<MouseWheel>")
+    app._show_settings()
+    settings = app._app_root._rfm_settings_window
+    settings.geometry("720x640")
+    settings.notebook.select(settings._tab_widget_by_name["RF Map"])
+    settings.update()
+    canvas = settings._tab_canvases[str(settings.notebook.select())]
+    form = canvas.winfo_children()[0]
+    widgets = [canvas, form]
+    for kind in (ttk.Label, ttk.Entry, ttk.Combobox, ttk.Spinbox):
+        widgets.append(next(widget for widget in form.winfo_children() if isinstance(widget, kind)))
+    values = (settings.rf_palette_var.get(), settings.rf_smooth_radius_var.get())
+    for widget in widgets:
+        canvas.yview_moveto(0)
+        assert widget.bindtags()[0] == settings._form_scroll_tag
+        widget.event_generate("<MouseWheel>", delta=-120)
+        settings.update_idletasks()
+        assert canvas.yview()[0] > 0, f"Wheel over {widget.winfo_class()} did not scroll the form"
+        assert (settings.rf_palette_var.get(), settings.rf_smooth_radius_var.get()) == values
+    tag = settings._form_scroll_tag
+    sequences = settings._form_scroll_sequences.copy()
+    commands = settings._form_scroll_commands.copy()
+    assert tag not in app.value_mode_combo.bindtags()
+    assert app.tk.call("bind", "TCombobox", "<MouseWheel>") == combo_binding
+    settings.destroy()
+    assert all(not app.tk.call("bind", tag, sequence) for sequence in sequences)
+    assert all(not app.tk.call("info", "commands", command) for command in commands)
+    assert app.tk.call("bind", "TCombobox", "<MouseWheel>") == combo_binding
+
+
+def test_settings_precise_touchpad_scroll_uses_only_vertical_pixel_delta(app):
+    if not app.tk.call("info", "commands", "tk::PreciseScrollDeltas"):
+        pytest.skip("requires Tk 9 precise trackpad events")
+    app._show_settings()
+    settings = app._app_root._rfm_settings_window
+    settings.geometry("720x640")
+    settings.notebook.select(settings._tab_widget_by_name["RF Map"])
+    settings.update()
+    canvas = settings._tab_canvases[str(settings.notebook.select())]
+    form = canvas.winfo_children()[0]
+    combo = next(widget for widget in form.winfo_children() if isinstance(widget, ttk.Combobox))
+    value = combo.get()
+    canvas.yview_moveto(0)
+    # Tk packs signed x/y deltas into the high/low 16 bits respectively.
+    combo.event_generate("<TouchpadScroll>", delta=(-20 & 0xffff))
+    settings.update_idletasks()
+    assert canvas.yview()[0] > 0
+    assert combo.get() == value
+    position = canvas.yview()
+    combo.event_generate("<TouchpadScroll>", delta=(20 << 16))
+    settings.update_idletasks()
+    assert canvas.yview() == position
+    canvas.event_generate("<TouchpadScroll>", delta=20)
+    settings.update_idletasks()
+    assert canvas.yview()[0] < position[0]
 
 
 @pytest.mark.parametrize("polar,flip,grouped,expanded", [
@@ -202,8 +293,13 @@ def test_inspector_is_on_demand_reusable_and_closes_with_document(app):
     app.selected_cell = (0, 0, 0, 0)
     draw(app, "results")
     app._show_inspector()
-    app.update_idletasks()
+    app.update()
     assert inspector.state() == "normal"
+    assert app.focus_get().winfo_toplevel() is inspector
+    notebook = next(widget for widget in inspector.winfo_children() if isinstance(widget, ttk.Notebook))
+    inspector.focus_get().event_generate("<Control-Tab>")
+    inspector.update()
+    assert notebook.index("current") == 1
     assert "7" in inspector.unit_label.cget("text")
     assert "bin" in inspector.response_label.cget("text")
     details = inspector.result_text.get("1.0", "end")
