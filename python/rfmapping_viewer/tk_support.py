@@ -80,14 +80,15 @@ def set_macos_welcome_chrome(window: tk.Misc, enabled: bool) -> bool:
                 ),
                 "background": window.cget("background"),
             }
-        # Let Tk change the style so its own content geometry stays in sync.
-        mask = ("titled", "closable", "fullsizecontentview") if enabled else saved["stylemask"]
+        # Keep Tk's native window controls while extending the welcome content
+        # into the titlebar; Tk must own the style change to update its geometry.
+        mask = (*window.tk.splitlist(saved["stylemask"]), "fullsizecontentview") if enabled else saved["stylemask"]
         window.tk.call("wm", "attributes", window._w, "-stylemask", mask)
         set_integer(native_window, selector(b"setTitleVisibility:"), 1 if enabled else saved["title_visibility"])
         set_boolean(native_window, selector(b"setMovableByWindowBackground:"), enabled or saved["movable"])
         for index in range(3):
             button = get_button(native_window, selector(b"standardWindowButton:"), index)
-            set_boolean(button, selector(b"setHidden:"), enabled or saved["buttons"][index])
+            set_boolean(button, selector(b"setHidden:"), False if enabled else saved["buttons"][index])
         window.configure(background="white" if enabled else saved["background"])
         if enabled:
             window._rfm_welcome_chrome = saved
