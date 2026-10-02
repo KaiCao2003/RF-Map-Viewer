@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from types import SimpleNamespace
 from unittest import mock
 
 import numpy as np
@@ -183,6 +184,40 @@ def test_settings_precise_touchpad_scroll_uses_only_vertical_pixel_delta(app):
     canvas.event_generate("<TouchpadScroll>", delta=20)
     settings.update_idletasks()
     assert canvas.yview()[0] < position[0]
+
+
+def test_settings_precise_scroll_moves_actual_canvas_by_scaled_pixels(app):
+    app._show_settings()
+    settings = app._app_root._rfm_settings_window
+    settings.geometry("720x640")
+    settings.notebook.select(settings._tab_widget_by_name["RF Map"])
+    settings.update()
+    canvas = settings._tab_canvases[str(settings.notebook.select())]
+    form = canvas.winfo_children()[0]
+    combo = next(widget for widget in form.winfo_children() if isinstance(widget, ttk.Combobox))
+    created = []
+    # Exercise the real Canvas even on Tk 8.6, which has no native precise
+    # event/parser. Canvas accepts moveto fractions, not scroll "pixels".
+    for name, function in (
+        ("tk::PreciseScrollDeltas", lambda _packed: (0, -20)),
+        ("tk::ScaleNum", lambda value: float(value) * 2),
+    ):
+        if not app.tk.call("info", "commands", name):
+            app.tk.createcommand(name, function)
+            created.append(name)
+    try:
+        canvas.yview_moveto(0)
+        before = canvas.canvasy(0)
+        value = combo.get()
+        expected = app.tk.getdouble(app.tk.call("tk::ScaleNum", 20))
+        event = SimpleNamespace(widget=combo, delta=(-20 & 0xffff))
+        assert settings._scroll_form(event, precise=True) == "break"
+        settings.update_idletasks()
+        assert canvas.canvasy(0) - before == pytest.approx(expected, abs=1)
+        assert combo.get() == value
+    finally:
+        for name in created:
+            app.tk.deletecommand(name)
 
 
 @pytest.mark.parametrize("polar,flip,grouped,expanded", [

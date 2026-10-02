@@ -262,8 +262,11 @@ class SettingsWindow(tk.Toplevel):
             return "break"
         if precise:
             _delta_x, delta_y = self.tk.splitlist(self.tk.call("tk::PreciseScrollDeltas", event.delta))
-            pixels = self.tk.call("tk::ScaleNum", -self.tk.getdouble(delta_y))
-            canvas.yview_scroll(pixels, "pixels")
+            pixels = self.tk.getdouble(self.tk.call("tk::ScaleNum", -self.tk.getdouble(delta_y)))
+            if pixels:
+                _left, top, _right, bottom = self.tk.splitlist(canvas.cget("scrollregion"))
+                height = self.tk.getdouble(bottom) - self.tk.getdouble(top)
+                canvas.yview_moveto(canvas.yview()[0] + pixels / height)
         elif event.num in (4, 5):
             units = -1 if event.num == 4 else 1
             canvas.yview_scroll(units, "units")
