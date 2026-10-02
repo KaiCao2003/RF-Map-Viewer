@@ -1079,6 +1079,7 @@ class TkViewerTests(unittest.TestCase):
     def test_polar_timeline_preview_cache_and_hit_testing(self) -> None:
         self.app.polar_layout_var.set(True)
         self.app.notebook.select(2)
+        self.app.update()
         self.app._timeline_preview_cache_key = None
         self.app._draw_timeline()
         first_atlas = self.app._timeline_preview_images[-1]
@@ -1086,15 +1087,21 @@ class TkViewerTests(unittest.TestCase):
         self.assertIs(self.app._timeline_preview_images[-1], first_atlas)
 
         layout = self.app._timeline_cells[0]
+        canvas = self.app.canvases["timeline"]
         event = SimpleNamespace(
-            x=int(float(layout["cx"])),
-            y=int(
+            x=round(float(layout["cx"]) - canvas.canvasx(0)),
+            y=round(
                 float(layout["cy"])
                 - (constants_module.INNER_BLANK_ROWS + 0.5) * float(layout["scale"])
+                - canvas.canvasy(0)
             ),
         )
         hit = self.app._timeline_cell_at(event)
-        self.assertIsNotNone(hit)
+        self.assertIsNotNone(
+            hit,
+            f"event={(event.x, event.y)} content={(canvas.canvasx(event.x), canvas.canvasy(event.y))} "
+            f"origin={(canvas.canvasx(0), canvas.canvasy(0))} layout={layout}",
+        )
         self.assertEqual(hit[0], 0)
 
     def _destroy_app(self) -> None:
@@ -3285,12 +3292,34 @@ class TkViewerTests(unittest.TestCase):
 
     def test_manual_sidebar_restore_keeps_attach_and_hide_available(self) -> None:
         self.app._toggle_probe_collapsed()
-        self.app.update_idletasks()
-        self.app._draw_probe_canvas()
-        self.app.update_idletasks()
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            self.app.update()
+            if (
+                self.app._optional_redraw_after is None
+                and self.app.probe_attach_button.winfo_ismapped()
+            ):
+                break
+            time.sleep(0.004)
+        canvas = self.app.probe_canvas
+        button = self.app.probe_attach_button
+        diagnostic = (
+            f"canvas={(canvas.winfo_width(), canvas.winfo_height())} "
+            f"static_bbox={canvas.bbox('probe-static')} button_geometry={button.winfo_geometry()} "
+            f"button_state={button.state()} signature={self.app._probe_static_signature}"
+        )
         self.assertTrue(self.app.sidebar_panel.winfo_ismapped())
         self.assertTrue(self.app.probe_canvas.winfo_ismapped())
-        self.assertTrue(self.app.probe_attach_button.winfo_ismapped())
+        self.assertTrue(button.winfo_ismapped(), diagnostic)
+        attach_item = next(
+            item for item in canvas.find_all()
+            if canvas.type(item) == "window" and canvas.itemcget(item, "window") == str(button)
+        )
+        x0, y0, x1, y1 = canvas.bbox(attach_item)
+        self.assertGreaterEqual(x0, 0, diagnostic)
+        self.assertGreaterEqual(y0, 0, diagnostic)
+        self.assertLessEqual(x1, canvas.winfo_width(), diagnostic)
+        self.assertLessEqual(y1, canvas.winfo_height(), diagnostic)
         self.assertTrue(self.app.probe_fold_button.winfo_ismapped())
         self.assertFalse(self.app.waveform_host.winfo_ismapped())
 
