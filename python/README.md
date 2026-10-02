@@ -1,6 +1,6 @@
 # Python RF Map Viewers
 
-This directory contains the Python/Tk RF Map Viewer `1.11.1`, launched by
+This directory contains the Python/Tk RF Map Viewer `1.11.2`, launched by
 `rfmapping_gui.py` or the installed `rfmapping-viewer` command. The separate
 Free-Moving alpha and its HDF5 Square/Bar, 3D-sphere, and exposure-QA paths have
 been retired. The offline session/EBC HTML report script remains available.
@@ -337,7 +337,14 @@ Open **Help → Keyboard Shortcuts** for the in-app list.
 
 ---
 
-## Stable viewer 1.11.1
+## Stable viewer 1.11.2
+
+Version 1.11.2 restores native macOS welcome-window controls and trackpad
+scrolling in Settings and Timeline. Settings can overlay saved 2D, 1D, or both
+RF results using configurable bin borders and separate intersection colors.
+RF and RF Results keep the same plot geometry when switching tabs.
+Unit and response details are available from View → Inspector; unavailable
+probe, waveform, and tuning-curve panels start folded.
 
 Version 1.11.1 corrects RF Hz using saved presentation counts and the response
 window duration, adds the saved RF Results tab and tab visibility preferences,
@@ -511,7 +518,7 @@ Opening the app without a path shows the native file chooser. Release packages
 do not contain or auto-load sample RF data.
 
 Its macOS identity is `RF Map Viewer.app`, bundle ID
-`org.local.rfmapping.viewer`, and version/build `1.11.1` / `111001`. Build it with:
+`org.local.rfmapping.viewer`, and version/build `1.11.2` / `111002`. Build it with:
 
 ```sh
 script/build_python_stable_macos_app.sh

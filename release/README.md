@@ -10,6 +10,12 @@ The Free-Moving alpha application has been retired from the active source and
 release workflow. Its historical Git tags and published artifacts are retained.
 The Python package and generic launcher now identify the stable viewer.
 
+Python 1.11.2 adds configurable saved RF overlays and aligned RF/Results plots,
+restores native macOS welcome controls, and supports trackpad scrolling in
+Settings and Timeline. Unit and response details move to View → Inspector, and
+missing companion panels start folded. The macOS build is 111002; Windows
+remains at 1.11.1.
+
 Python 1.11.1 corrects RF Hz to counts divided by saved
 presentation counts and response-window seconds, adds the saved RF Results
 tab, and lets users choose visible tabs in Settings. The macOS build is 111001;
@@ -21,7 +27,7 @@ component tag and artifact name:
 
 | Component | Release | Tag | Channel |
 | --- | --- | --- | --- |
-| Python stable (macOS) | `1.11.1` | `python-v1.11.1` | stable |
+| Python stable (macOS) | `1.11.2` | `python-v1.11.2` | stable |
 | Python stable (Windows x64) | `1.11.1` | `python-v1.11.1` | stable |
 | Swift | `1.10.3` | `swift-v1.10.3` | stable |
 | Web | `1.10.2` | `web-v1.10.2` | stable |

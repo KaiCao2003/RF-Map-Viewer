@@ -17,8 +17,8 @@ through versioned file contracts, principally the RF formats described in
 
 ## Component versions
 
-The stable Python source and macOS/Windows packaging target `1.11.1` (macOS
-build `111001`, Windows build `11101`). Swift is `1.10.3`, and Web is `1.10.2`.
+The stable Python macOS release is `1.11.2` (build `111002`). Windows remains
+at `1.11.1` (build `11101`), Swift at `1.10.3`, and Web at `1.10.2`.
 Component identity belongs in release tags and artifact names, not in a fourth
 version component. See
 [`release/README.md`](release/README.md) for the canonical mapping and tag
@@ -29,7 +29,7 @@ policy.
 GitHub Actions builds the stable packages published on the
 [Releases page](https://github.com/KaiCao2003/RF-Map-Viewer/releases):
 
-- [Python 1.11.1 macOS app](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/python-v1.11.1)
+- [Python 1.11.2 macOS app](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/python-v1.11.2)
 - [Python 1.11.1 Windows installer and portable ZIP](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/python-v1.11.1)
 - [Swift 1.10.3 macOS app](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/swift-v1.10.3)
 - [Web 1.10.2 package](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/web-v1.10.2)

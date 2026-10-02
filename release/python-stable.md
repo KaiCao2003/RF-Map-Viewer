@@ -1,3 +1,17 @@
+## Python 1.11.2: RF overlays and native macOS interaction
+
+Version **1.11.2**. Target: macOS Apple Silicon (build **111002**, Full edition).
+
+- Configure saved RF overlays in **Settings → RF Map**: None, 2D, 1D, or Both, with adjustable border width and colors. Defaults are green for 2D, yellow for 1D, and orange for their intersection. Borders follow the original bins even when display bins are grouped.
+- Keep RF and RF Results plots at the same position and size for direct comparison when switching tabs. Preserve rectangle/polar coordinates and flips.
+- Restore the native macOS close, minimize, and zoom controls on Welcome. Support trackpad and mouse-wheel scrolling throughout Settings forms and in Timeline.
+- Open unit, response, and saved-result details from **View → Inspector…**. Start unavailable probe, waveform, and tuning-curve panels folded, and expand them when data is attached.
+- Remove duplicate plot headings and shorten the unavailable-Hz message to “Showing spike count as Hz is unavailable.”
+
+The implementation passed 831 native macOS tests and packaged loader, plot, and export smoke checks before this version bump. RF/Results alignment and overlays were checked with real recordings; Settings trackpad scrolling was confirmed on the local Mac. Inputs and saved analysis files remain read-only.
+
+This release updates Python macOS only. Windows remains at 1.11.1, Swift at 1.10.3, and Web at 1.10.2. Historical release notes follow.
+
 ## Python 1.11.1: RF rate correction and saved analysis results
 
 Version **1.11.1**, Full edition. Targets: macOS Apple Silicon (build **111001**)

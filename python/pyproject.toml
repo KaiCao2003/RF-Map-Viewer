@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rfmapping-viewer-python"
-version = "1.11.1"
+version = "1.11.2"
 description = "Native Python/Tk RF Map Viewer"
 requires-python = ">=3.11"
 dependencies = [
