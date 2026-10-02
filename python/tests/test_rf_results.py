@@ -212,7 +212,13 @@ def test_render_uses_saved_coordinates_and_opaque_white_background(source):
     figure.canvas.draw()
     assert figure.get_facecolor() == (1., 1., 1., 1.)
     assert figure.axes[0].get_facecolor() == (1., 1., 1., 1.)
+    assert figure.axes[0].get_box_aspect() == pytest.approx(2 / 3)
     np.testing.assert_allclose(figure.axes[0].collections[1].get_offsets(), [[90., 15.]])
+    for width, height in ((9, 3), (4, 8)):
+        figure.set_size_inches(width, height)
+        figure.canvas.draw()
+        box = figure.axes[0].get_window_extent()
+        assert box.height / box.width == pytest.approx(2 / 3)
     assert not draw_saved_rf_result(figure, result, 99)
     assert len(figure.axes[0].collections) == 0
 
@@ -238,3 +244,4 @@ def test_singleton_2d_and_one_dimensional_render(source):
     draw_saved_rf_result(figure, result, 42)
     figure.canvas.draw()
     assert figure.axes[0].get_ylim() == (-.5, .5)
+    assert figure.axes[0].get_box_aspect() == pytest.approx(7 / 30)

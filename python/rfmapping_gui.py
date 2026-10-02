@@ -18,6 +18,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 import numpy as np
+from rfmapping_viewer.inspector import RFInspector
 from rfmapping_viewer.figure_export import (
     ExportPage,
     ExportPlan,
@@ -323,7 +324,11 @@ class ViewerApplication:
     def close_active_window(self) -> None:
         focused = self.root.focus_get()
         window = focused.winfo_toplevel() if focused is not None else self.current_viewer()
-        if window is not None and window is not self.root:
+        if isinstance(window, RFInspector):
+            window.withdraw()
+        elif isinstance(window, RFMViewer):
+            window._close_window()
+        elif window is not None and window is not self.root:
             window.destroy()
 
     def close_all_windows(self, _event: object | None = None) -> str:
@@ -576,8 +581,11 @@ class RFMViewer(tk.Toplevel):
         self._probe_press_canvas: tuple[float, float] | None = None
         self._probe_drag_moved = False
         self._probe_canvas_transform: tuple[float, float, float, float] | None = None
-        self.probe_collapsed_var = tk.BooleanVar(value=False)
-        self.tuning_collapsed_var = tk.BooleanVar(value=False)
+        self.probe_collapsed_var = tk.BooleanVar(value=True)
+        self.tuning_collapsed_var = tk.BooleanVar(value=True)
+        self._sidebar_auto_visibility = True
+        self._tuning_auto_visibility = True
+        self._sidebar_companion_state: tuple[bool, bool, bool] | None = None
         self.display_expanded_var = tk.BooleanVar(value=False)
 
         self._build_style()
@@ -701,7 +709,7 @@ class RFMViewer(tk.Toplevel):
                 # The withdrawn Tk root or native file chooser can still own
                 # keyboard focus when the document's first plot appears.
                 if self._active_tab_key() == "results":
-                    self.results_pane.focus_set()
+                    self.canvases["rf"].focus_force()
                 else:
                     self.canvases[self._active_tab_key()].focus_force()
         except tk.TclError:
@@ -1093,7 +1101,7 @@ class RFMViewer(tk.Toplevel):
         file_menu.add_command(
             label="Close Window",
             accelerator="⌘W" if sys.platform == "darwin" else "Ctrl+W",
-            command=self._close_window,
+            command=self._app_root._rfm_application.close_active_window,
         )
         self._app_root._rfm_application.add_close_all_command(file_menu)
         menu.add_cascade(label="File", menu=file_menu)
@@ -1125,12 +1133,14 @@ class RFMViewer(tk.Toplevel):
         self._navigate_menu = navigate_menu
 
         view_menu = tk.Menu(menu, tearoff=False)
-        for tab_index, title in enumerate(("RF", "Delay / RGB", "Timeline")):
+        for tab_index, (key, title) in enumerate(VIEWER_TABS.items()):
             view_menu.add_command(
                 label=title,
                 accelerator=str(tab_index + 1),
-                command=lambda index=tab_index: self._select_tab(index),
+                command=lambda key=key: self._select_tab_key(key),
             )
+        view_menu.add_separator()
+        view_menu.add_command(label="Inspector…", command=self._show_inspector)
         view_menu.add_separator()
         view_menu.add_command(label="Invert Y", accelerator="F", command=self._toggle_flip_y)
         view_menu.add_command(
@@ -1237,14 +1247,25 @@ class RFMViewer(tk.Toplevel):
 
     def _build_sidebar(self, parent: ttk.Frame) -> None:
         row = 0
+        sidebar_header = ttk.Frame(parent, style="Sidebar.TFrame")
+        sidebar_header.grid(row=row, column=0, sticky="ew", pady=(0, 5))
+        sidebar_header.columnconfigure(1, weight=1)
+        self.probe_fold_button = ttk.Button(
+            sidebar_header,
+            image=self._pane_icons["leading"],
+            text="Hide sidebar",
+            width=2,
+            command=self._toggle_probe_collapsed,
+        )
+        self.probe_fold_button.grid(row=0, column=0, sticky="w", padx=(0, 5))
         self.pair_windows_toggle = ttk.Checkbutton(
-            parent,
+            sidebar_header,
             text="Sync windows",
             variable=self.pair_windows_var,
             command=self._on_pair_windows_toggled,
             style="Sidebar.TCheckbutton",
         )
-        self.pair_windows_toggle.grid(row=row, column=0, sticky="w", pady=(0, 5))
+        self.pair_windows_toggle.grid(row=0, column=1, sticky="w")
         row += 1
         self.pair_status_label = ttk.Label(
             parent,
@@ -1266,17 +1287,9 @@ class RFMViewer(tk.Toplevel):
 
         probe_header = ttk.Frame(self.probe_section, style="Sidebar.TFrame")
         probe_header.grid(row=0, column=0, sticky="ew", pady=(0, 5))
-        probe_header.columnconfigure(1, weight=1)
-        self.probe_fold_button = ttk.Button(
-            probe_header,
-            image=self._pane_icons["leading"],
-            text="Hide sidebar",
-            width=2,
-            command=self._toggle_probe_collapsed,
-        )
-        self.probe_fold_button.grid(row=0, column=0, sticky="w", padx=(0, 5))
+        probe_header.columnconfigure(0, weight=1)
         ttk.Label(probe_header, text="Probe", style="Section.TLabel").grid(
-            row=0, column=1, sticky="w"
+            row=0, column=0, sticky="w"
         )
         self.clear_spatial_button = ttk.Button(
             probe_header,
@@ -1284,7 +1297,7 @@ class RFMViewer(tk.Toplevel):
             width=6,
             command=self._clear_spatial_filter,
         )
-        self.clear_spatial_button.grid(row=0, column=2, sticky="e")
+        self.clear_spatial_button.grid(row=0, column=1, sticky="e")
         row += 1
 
         self.probe_canvas = tk.Canvas(
@@ -1404,8 +1417,8 @@ class RFMViewer(tk.Toplevel):
             frame.rowconfigure(0, weight=1)
             if key == "rf":
                 self.rf_tab_frame = frame
-                self.rf_split_container = ttk.Frame(frame)
-                self.rf_split_container.grid(row=0, column=0, sticky="nsew")
+                self.rf_split_container = ttk.Frame(self.notebook)
+                self.rf_split_container.grid(in_=frame, row=0, column=0, sticky="nsew")
                 self._rf_split_responsive_stacked = False
                 self.rf_split_container.bind(
                     "<Configure>",
@@ -1421,15 +1434,14 @@ class RFMViewer(tk.Toplevel):
                 rf_header = ttk.Frame(
                     self.rf_map_pane,
                     style="Panel.TFrame",
-                    padding=(12, 9),
+                    padding=(12, 6),
                 )
+                self.rf_map_header = rf_header
+                rf_header.configure(height=52)
+                rf_header.grid_propagate(False)
+                rf_header.rowconfigure(0, weight=1)
                 rf_header.grid(row=0, column=0, sticky="ew")
                 rf_header.columnconfigure(0, weight=1)
-                ttk.Label(
-                    rf_header,
-                    text="RF Map",
-                    style="Title.TLabel",
-                ).grid(row=0, column=0, sticky="w")
                 self.rf_map_subtitle_label = ttk.Label(
                     rf_header,
                     text="",
@@ -1437,7 +1449,7 @@ class RFMViewer(tk.Toplevel):
                     font=("TkDefaultFont", 10),
                 )
                 self.rf_map_subtitle_label.grid(
-                    row=1, column=0, sticky="w", pady=(2, 0)
+                    row=0, column=0, sticky="w"
                 )
                 canvas = tk.Canvas(
                     self.rf_map_pane,
@@ -1478,6 +1490,7 @@ class RFMViewer(tk.Toplevel):
                 self.tuning_cluster_label.grid(
                     row=1, column=0, sticky="w", pady=(2, 0)
                 )
+                self.tuning_cluster_label.grid_remove()
                 self.tuning_hd_class_label = ttk.Label(
                     tuning_header,
                     text="",
@@ -1532,75 +1545,10 @@ class RFMViewer(tk.Toplevel):
                     justify="left",
                 )
 
-                self.unit_info_pane = ttk.Frame(
-                    self.rf_split_container,
-                    style="Panel.TFrame",
-                )
-                self.unit_info_pane.columnconfigure(0, weight=1)
-                ttk.Separator(self.unit_info_pane, orient="horizontal").grid(
-                    row=0, column=0, sticky="ew"
-                )
-                unit_info_header = ttk.Frame(
-                    self.unit_info_pane,
-                    style="Panel.TFrame",
-                    padding=(12, 8),
-                )
-                unit_info_header.grid(row=1, column=0, sticky="ew")
-                ttk.Label(
-                    unit_info_header,
-                    text="Unit Info",
-                    style="Title.TLabel",
-                ).grid(row=0, column=0, sticky="w")
-                self.unit_stats_label = ttk.Label(
-                    self.unit_info_pane,
-                    text="",
-                    style="Muted.TLabel",
-                    font=("TkFixedFont", 9),
-                    wraplength=330,
-                    justify="left",
-                )
-                self.unit_stats_label.grid(
-                    row=2,
-                    column=0,
-                    sticky="ew",
-                    padx=12,
-                    pady=(0, 8),
-                )
-                ttk.Separator(self.unit_info_pane, orient="horizontal").grid(
-                    row=3, column=0, sticky="ew"
-                )
-                spike_time_header = ttk.Frame(
-                    self.unit_info_pane,
-                    style="Panel.TFrame",
-                    padding=(12, 8),
-                )
-                spike_time_header.grid(row=4, column=0, sticky="ew")
-                self.spike_time_title_label = ttk.Label(
-                    spike_time_header,
-                    text="Spike Time",
-                    style="Title.TLabel",
-                )
-                self.spike_time_title_label.grid(row=0, column=0, sticky="w")
-                self.cell_label = ttk.Label(
-                    self.unit_info_pane,
-                    text="",
-                    style="Muted.TLabel",
-                    font=("TkFixedFont", 9),
-                    wraplength=330,
-                    justify="left",
-                )
-                self.cell_label.grid(
-                    row=5,
-                    column=0,
-                    sticky="ew",
-                    padx=12,
-                    pady=(0, 10),
-                )
-                self.unit_info_pane.bind(
-                    "<Configure>",
-                    self._on_unit_info_pane_configure,
-                    add="+",
-                )
+                self.inspector_window = RFInspector(self)
+                self.unit_info_pane = self.inspector_window.selection
+                self.unit_stats_label = self.inspector_window.unit_label
+                self.cell_label = self.inspector_window.response_label
 
                 self.waveform_pane = ttk.Frame(
                     self.waveform_host,
@@ -1668,7 +1616,10 @@ class RFMViewer(tk.Toplevel):
             self.canvases[key] = canvas
             self._tab_keys[str(frame)] = key
 
-        self.results_pane = RFResultsPane(self.notebook, self.data)
+        self.results_pane = RFResultsPane(
+            self.notebook, self.data, controls_parent=self.rf_map_header,
+            on_change=self._on_saved_results_changed,
+        )
         self.notebook.add(self.results_pane, text=VIEWER_TABS["results"])
         self._tab_keys[str(self.results_pane)] = "results"
 
@@ -1739,7 +1690,7 @@ class RFMViewer(tk.Toplevel):
             return
         tuning_visible = bool(self.show_tuning_curve_var.get())
         tuning_collapsed = bool(self.tuning_collapsed_var.get())
-        waveform_visible = bool(self.show_waveform_var.get())
+        waveform_visible = self._waveform_companion_visible()
         self.tuning_curve_section.grid_remove()
         self.tuning_collapsed_rail.grid_remove()
         self.waveform_pane.grid_remove()
@@ -1771,94 +1722,37 @@ class RFMViewer(tk.Toplevel):
             )
 
     def _layout_rf_and_tuning(self) -> None:
-        """Place RF beside the optional tuning and unit-info stack."""
-
+        """Keep the same map and companion viewport on both spatial tabs."""
         if not hasattr(self, "rf_split_container"):
             return
         container = self.rf_split_container
         self.rf_map_pane.grid_forget()
         self.tuning_curve_pane.grid_forget()
-        self.unit_info_pane.grid_forget()
         for index in range(2):
             container.columnconfigure(index, weight=0, uniform="", minsize=0)
             container.rowconfigure(index, weight=0, uniform="", minsize=0)
-
-        container_width = max(1, int(container.winfo_width()))
-        responsive_stacked = self._should_responsively_stack_auxiliary(
-            container_width
-        )
-        self._rf_split_responsive_stacked = responsive_stacked
-        stacked = (
-            self.show_tuning_curve_var.get()
-            and not self.tuning_collapsed_var.get()
-            and (
-                self.tuning_layout_var.get() == "Stacked"
-                or responsive_stacked
-            )
-        )
-
+        visible = self.show_tuning_curve_var.get()
+        expanded = visible and not self.tuning_collapsed_var.get()
+        stacked = expanded and self.tuning_layout_var.get() == "Stacked"
+        self.rf_map_pane.grid(row=0, column=0, sticky="nsew")
+        container.columnconfigure(0, weight=5)
+        container.rowconfigure(0, weight=5)
         if stacked:
-            self.rf_map_pane.grid(
-                row=0, column=0, columnspan=2, sticky="nsew"
-            )
-            self.tuning_curve_pane.grid(
-                row=1, column=0, sticky="nsew", pady=(1, 0), padx=(0, 1)
-            )
-            self.unit_info_pane.grid(
-                row=1, column=1, sticky="nsew", pady=(1, 0)
-            )
-            container.columnconfigure(0, weight=5, uniform="rf-hd-columns")
-            container.columnconfigure(
-                1,
-                weight=2,
-                uniform="rf-hd-columns",
-                minsize=220,
-            )
-            container.rowconfigure(0, weight=5, uniform="rf-hd-rows")
-            container.rowconfigure(
-                1,
-                weight=3,
-                uniform="rf-hd-rows",
-                minsize=260,
-            )
-            self.tuning_fold_button.configure(
-                image=self._pane_icons["bottom"],
-                text="Collapse HD tuning curve",
-            )
-        else:
-            self.rf_map_pane.grid(
-                row=0, column=0, rowspan=2, sticky="nsew"
-            )
-            self.tuning_curve_pane.grid(
-                row=0, column=1, sticky="nsew", padx=(1, 0)
-            )
-            self.unit_info_pane.grid(
-                row=1, column=1, sticky="nsew", padx=(1, 0)
-            )
-            # At the minimum supported window width the two companion plots
-            # need a little more horizontal room, while retaining the usual
-            # 5:2 split on larger displays and for a single companion.
-            auxiliary_weight = self._responsive_auxiliary_column_weight(
-                container_width
-            )
-            self._rf_split_auxiliary_weight = auxiliary_weight
-            container.columnconfigure(0, weight=5, uniform="rf-hd-columns")
-            container.columnconfigure(
-                1,
-                weight=auxiliary_weight,
-                uniform="rf-hd-columns",
-                minsize=220,
-            )
-            container.rowconfigure(0, weight=1)
-            container.rowconfigure(1, weight=0, minsize=230)
-            self.tuning_fold_button.configure(
-                image=self._pane_icons["trailing"],
-                text="Collapse HD tuning curve",
-            )
+            self.tuning_curve_pane.grid(row=1, column=0, sticky="nsew", pady=(1, 0))
+            container.rowconfigure(1, weight=3, minsize=240)
+        elif visible:
+            self.tuning_curve_pane.grid(row=0, column=1, sticky="nsew", padx=(1, 0))
+            if expanded:
+                weight = self._responsive_auxiliary_column_weight(container.winfo_width())
+                container.columnconfigure(0, weight=5, uniform="rf-hd-columns")
+                container.columnconfigure(1, weight=weight, uniform="rf-hd-columns", minsize=220)
+        self.tuning_fold_button.configure(
+            image=self._pane_icons["bottom" if stacked else "trailing"],
+            text="Collapse HD tuning curve",
+        )
 
     def _should_responsively_stack_auxiliary(self, width: int) -> bool:
-        # Unit Info owns the bottom-right position. Keep the right-side stack
-        # beside RF unless the user explicitly selected Stacked in Settings.
+        # Preserve the user-selected companion arrangement during resizing.
         return False
 
     def _responsive_auxiliary_column_weight(self, width: int) -> int:
@@ -1896,8 +1790,48 @@ class RFMViewer(tk.Toplevel):
         self._layout_rf_and_tuning()
 
     def _toggle_probe_collapsed(self) -> None:
+        self._sidebar_auto_visibility = False
         self.probe_collapsed_var.set(not self.probe_collapsed_var.get())
+        self._sync_sidebar_companions()
         self._sync_probe_collapsed_state()
+
+    def _waveform_companion_visible(self) -> bool:
+        if not self.show_waveform_var.get():
+            return False
+        if self.waveform_payload is not None:
+            return True
+        # A malformed companion still needs its existing diagnostic pane.
+        return self._waveform_error is not None and self._waveform_error not in {
+            "No waveform",
+            "No companion data/waveform/Probe*/manifest.json was found for this RF dataset.",
+        }
+
+    def _sync_sidebar_companions(self) -> None:
+        if not hasattr(self, "probe_section"):
+            return
+        probe_available = bool(
+            self.show_probe_layout_var.get() and self.probe_geometry is not None
+        )
+        waveform_available = self._waveform_companion_visible()
+        if self._sidebar_auto_visibility:
+            self.probe_collapsed_var.set(not (probe_available or waveform_available))
+        manually_expanded = (
+            not self._sidebar_auto_visibility and not self.probe_collapsed_var.get()
+        )
+        probe_visible = bool(
+            self.show_probe_layout_var.get() and (probe_available or manually_expanded)
+        )
+        state = (probe_visible, waveform_available, bool(self.probe_collapsed_var.get()))
+        if state == self._sidebar_companion_state:
+            return
+        self._sidebar_companion_state = state
+        if probe_visible:
+            self.probe_section.grid()
+        else:
+            self.probe_section.grid_remove()
+            self.sidebar_frame.rowconfigure(self._probe_section_row, weight=0)
+        self._sync_auxiliary_sections()
+        self._sync_probe_collapsed_state(schedule_redraw=False)
 
     def _sync_probe_collapsed_state(self, *, schedule_redraw: bool = True) -> None:
         if not hasattr(self, "probe_canvas"):
@@ -1917,12 +1851,17 @@ class RFMViewer(tk.Toplevel):
                 self._schedule_optional_redraw("probe")
 
     def _toggle_tuning_collapsed(self) -> None:
+        self._tuning_auto_visibility = False
         self.tuning_collapsed_var.set(not self.tuning_collapsed_var.get())
         self._sync_tuning_collapsed_state()
 
     def _sync_tuning_collapsed_state(self, *, schedule_redraw: bool = True) -> None:
         if not hasattr(self, "tuning_curve_canvas"):
             return
+        if self._tuning_auto_visibility:
+            self.tuning_collapsed_var.set(
+                self.tuning_curve_data is None and self._tuning_curve_error is None
+            )
         collapsed = bool(self.tuning_collapsed_var.get())
         self._sync_auxiliary_sections()
         self._layout_rf_and_tuning()
@@ -2142,7 +2081,7 @@ class RFMViewer(tk.Toplevel):
         self.polar_layout_toggle.grid(row=1, column=4, sticky="w", pady=(8, 0))
         self.rate_notice_label = ttk.Label(
             controls,
-            text="Hz unavailable: this RF file has no stimulusPresentationCounts. Showing spike counts.",
+            text="Showing spike count as Hz is unavailable.",
             style="Muted.TLabel",
         )
 
@@ -2260,7 +2199,7 @@ class RFMViewer(tk.Toplevel):
         )
         if expanded:
             self.display_controls_frame.grid(
-                row=2 if self._rf_range_uses_second_row() and self._active_tab_key() == "rf" else 1,
+                row=2 if self._rf_range_uses_second_row() and self._active_tab_key() in {"rf", "results"} else 1,
                 column=0, columnspan=9, sticky="ew", pady=(7, 0)
             )
         else:
@@ -2954,6 +2893,11 @@ class RFMViewer(tk.Toplevel):
             if key not in visible:
                 self.notebook.hide(tab)
         self._select_tab_key(selected if selected in visible else visible[0])
+        for index, key in enumerate(VIEWER_TABS):
+            self._view_menu.entryconfigure(
+                index, state="normal" if key in visible else "disabled",
+                accelerator=str(visible.index(key) + 1) if key in visible else "",
+            )
 
     def _apply_pairing_state(
         self,
@@ -3310,7 +3254,7 @@ class RFMViewer(tk.Toplevel):
                 self.tuning_curve_data = None
                 self._tuning_curve_error = None
                 self._tuning_curve_candidate = None
-                self.tuning_collapsed_var.set(False)
+                self._tuning_auto_visibility = True
             mode_changed = (
                 self.waveform_channel_mode_var.get()
                 != settings.waveform_channel_mode
@@ -3584,7 +3528,7 @@ class RFMViewer(tk.Toplevel):
                 )
         if redraw:
             self._draw_probe_canvas()
-            if self._active_tab_key() == "rf":
+            if self._active_tab_key() in {"rf", "results"}:
                 self._draw_tuning_curve()
 
     def _autoload_optional_resources_deferred(self, generation: int) -> None:
@@ -3756,8 +3700,6 @@ class RFMViewer(tk.Toplevel):
                 self.tuning_curve_data = tuning_data
                 self._tuning_curve_error = None
                 self._tuning_scale_cache = None
-                self.tuning_collapsed_var.set(False)
-                self._sync_tuning_collapsed_state(schedule_redraw=False)
                 signature = current_result.get("tuning_signature")
                 if (
                     isinstance(signature, tuple)
@@ -3793,17 +3735,9 @@ class RFMViewer(tk.Toplevel):
                     self._tuning_processed_cache = (key, processed[0], processed[1])
             elif current_result.get("tuning_error"):
                 self._tuning_curve_error = str(current_result["tuning_error"])
-            elif (
-                self.settings.auto_load_tuning_curve
-                and current_result.get("tuning_path") is None
-            ):
-                # A missing optional file should not reserve two fifths of the
-                # RF tab. Keep a small, explicit HD restore control instead.
-                self.tuning_collapsed_var.set(True)
-                self._sync_tuning_collapsed_state(schedule_redraw=False)
-
+        self._sync_tuning_collapsed_state(schedule_redraw=False)
         self._draw_probe_canvas()
-        if self._active_tab_key() == "rf":
+        if self._active_tab_key() in {"rf", "results"}:
             self._draw_tuning_curve()
 
     def _schedule_optional_autoload(self) -> None:
@@ -3853,6 +3787,7 @@ class RFMViewer(tk.Toplevel):
                 self._tuning_curve_candidate = resolved
                 self._tuning_processed_cache = None
                 self._tuning_scale_cache = None
+                self._sync_tuning_collapsed_state(schedule_redraw=False)
             if redraw:
                 self._draw_tuning_curve()
             return False
@@ -3861,7 +3796,7 @@ class RFMViewer(tk.Toplevel):
         self._tuning_curve_candidate = resolved
         self._tuning_processed_cache = None
         self._tuning_scale_cache = None
-        self.tuning_collapsed_var.set(False)
+        self._tuning_auto_visibility = True
         self._sync_tuning_collapsed_state(schedule_redraw=False)
         if redraw:
             self._draw_tuning_curve()
@@ -3895,6 +3830,8 @@ class RFMViewer(tk.Toplevel):
         self._tuning_curve_candidate = None
         self._tuning_processed_cache = None
         self._tuning_scale_cache = None
+        self._tuning_auto_visibility = True
+        self._sync_tuning_collapsed_state(schedule_redraw=False)
         self._draw_tuning_curve()
 
     def _on_tuning_curve_click(self, _event: object | None = None) -> None:
@@ -3925,6 +3862,8 @@ class RFMViewer(tk.Toplevel):
         self.probe_geometry = geometry
         self._probe_static_signature = None
         self.spatial_region = None
+        self._sidebar_auto_visibility = True
+        self._sync_sidebar_companions()
         self._sync_unit_combo()
         if redraw:
             self._draw_probe_canvas()
@@ -4006,11 +3945,6 @@ class RFMViewer(tk.Toplevel):
             self.spatial_region = None
             self.probe_geometry = None
             self._probe_static_signature = None
-            self.probe_section.grid_remove()
-            self.sidebar_frame.rowconfigure(self._probe_section_row, weight=0)
-        else:
-            self.probe_section.grid()
-            self._sync_probe_collapsed_state(schedule_redraw=False)
 
         if not self.show_tuning_curve_var.get():
             self.tuning_curve_data = None
@@ -4041,7 +3975,7 @@ class RFMViewer(tk.Toplevel):
             self.waveform_canvas.delete("all")
             self.waveform_zoom_subtitle_label.configure(text="")
             self.waveform_zoom_canvas.delete("all")
-        self._sync_auxiliary_sections()
+        self._sync_sidebar_companions()
         self._sync_tuning_collapsed_state(schedule_redraw=False)
         self._layout_rf_and_tuning()
         self._sync_optional_menu_states()
@@ -4268,6 +4202,10 @@ class RFMViewer(tk.Toplevel):
             )
 
     def _draw_tuning_curve(self) -> None:
+        if self._tuning_auto_visibility and self.tuning_collapsed_var.get() != (
+            self.tuning_curve_data is None and self._tuning_curve_error is None
+        ):
+            self._sync_tuning_collapsed_state(schedule_redraw=False)
         if (
             not hasattr(self, "tuning_curve_canvas")
             or not self.show_tuning_curve_var.get()
@@ -4626,6 +4564,7 @@ class RFMViewer(tk.Toplevel):
     def _draw_probe_canvas(self) -> None:
         if not hasattr(self, "probe_canvas"):
             return
+        self._sync_sidebar_companions()
         if self.probe_collapsed_var.get():
             return
         canvas = self.probe_canvas
@@ -5131,7 +5070,7 @@ class RFMViewer(tk.Toplevel):
         self._timeline_preview_cache_key = None
         self._timeline_preview_images = {}
         self._on_control_changed()
-        if self._active_tab_key() == "rf" and self.tuning_plot_mode_var.get() == "Auto":
+        if self._active_tab_key() in {"rf", "results"} and self.tuning_plot_mode_var.get() == "Auto":
             self._draw_tuning_curve()
 
     def _on_tab_changed(self, _event: object | None = None) -> None:
@@ -5139,13 +5078,47 @@ class RFMViewer(tk.Toplevel):
             self._update_all()
             self._publish_pairing_state_if_changed()
 
+    def _on_saved_results_changed(self) -> None:
+        self._draw_active_tab(update_optional_views=False)
+
+    def _show_inspector(self) -> None:
+        self._update_cell_label()
+        self._sync_inspector_results()
+        self.inspector_window.show()
+
+    def _sync_inspector_results(self) -> None:
+        pane = self.results_pane
+        pane.unit_id = self._selected_unit_id_value() if self._selected_local_unit_index() is not None else None
+        if self._active_tab_key() == "rf" and self.settings.rf_result_overlay_mode != "None":
+            pane.update_details(mode=self.settings.rf_result_overlay_mode,
+                                rf_type=self.settings.rf_result_overlay_polarity)
+        else:
+            pane.update_details()
+        self.inspector_window.set_results(pane.details.get())
+
     def _sync_context_controls(self) -> None:
         if not hasattr(self, "rgb_mode_toggle"):
             return
-        if self._active_tab_key() == "results":
-            self.plot_controls_frame.grid_remove()
-            return
+        tab = self._active_tab_key()
+        results = tab == "results"
         self.plot_controls_frame.grid()
+        for widget in (self.value_mode_combo, self.time_res_spin,
+                       self.range_start_spin, self.range_end_spin,
+                       self.subtract_start_spin, self.subtract_end_spin,
+                       self.reset_plot_range_button, self.smooth_spin):
+            widget.state(["disabled"] if results else ["!disabled"])
+        if hasattr(self, "results_pane"):
+            if tab in {"rf", "results"}:
+                page = self.results_pane if results else self.rf_tab_frame
+                self.rf_split_container.grid(in_=page, row=0, column=0, sticky="nsew")
+            else:
+                self.rf_split_container.grid_remove()
+            if results:
+                self.rf_map_subtitle_label.grid_remove()
+                self.results_pane.controls.grid(row=0, column=0, sticky="ew")
+            else:
+                self.results_pane.controls.grid_remove()
+                self.rf_map_subtitle_label.grid()
         if self.data.supports_value_mode(VALUE_MODE_RATE):
             self.rate_notice_label.grid_remove()
         else:
@@ -5215,7 +5188,7 @@ class RFMViewer(tk.Toplevel):
         self._optional_redraw_dirty.clear()
         if "probe" in dirty:
             self._draw_probe_canvas()
-        if "tuning" in dirty and self._active_tab_key() == "rf":
+        if "tuning" in dirty and self._active_tab_key() in {"rf", "results"}:
             self._draw_tuning_curve()
 
     def _timeline_scroll_set(self, first: str, last: str) -> None:
@@ -5405,12 +5378,11 @@ class RFMViewer(tk.Toplevel):
 
     def _draw_active_tab(self, *, update_optional_views: bool = True) -> None:
         key = self._active_tab_key()
-        if key == "results":
-            self.results_pane.set_unit(self._selected_unit_id_value())
-            return
         if self._selected_local_unit_index() is None:
-            self._draw_unavailable_unit(key)
-            if key == "rf":
+            self._draw_unavailable_unit("rf" if key == "results" else key)
+            self.results_pane.set_unit(None)
+            self.inspector_window.set_results("")
+            if key in {"rf", "results"}:
                 self._draw_tuning_curve()
             if self.show_waveform_var.get():
                 self.waveform_subtitle_label.configure(text="")
@@ -5421,6 +5393,14 @@ class RFMViewer(tk.Toplevel):
                         "waveform",
                         canvas=self.waveform_zoom_canvas,
                     )
+            return
+        if key == "results":
+            self.results_pane.set_unit(self._selected_unit_id_value())
+            self._draw_rf()
+            self.inspector_window.set_results(self.results_pane.details.get())
+            if update_optional_views:
+                self._draw_tuning_curve()
+                self._draw_waveform()
             return
         if key == "rf":
             self._draw_rf()
@@ -5551,6 +5531,7 @@ class RFMViewer(tk.Toplevel):
 
     def _draw_waveform(self) -> None:
         self._request_waveform_payload()
+        self._sync_sidebar_companions()
         targets = [(self.waveform_canvas, self.waveform_subtitle_label)]
         if self._waveform_zoomed:
             targets.append(
@@ -5811,7 +5792,7 @@ class RFMViewer(tk.Toplevel):
         )
         subtitle_label.configure(
             text=(
-                f"Cluster {key[0]} · {mode_label} · "
+                f"{mode_label} · "
                 f"best + {len(matrix) - 1} nearest{ptp_text}"
             )
         )
@@ -5918,6 +5899,8 @@ class RFMViewer(tk.Toplevel):
         if update_optional_views:
             self._draw_probe_canvas()
         self._draw_active_tab(update_optional_views=update_optional_views)
+        if self.inspector_window.state() != "withdrawn":
+            self._sync_inspector_results()
 
     def _current_matrix(self) -> list[list[float | None]]:
         unit_idx = self._selected_local_unit_index()
@@ -6437,6 +6420,18 @@ class RFMViewer(tk.Toplevel):
 
     def _cell_tooltip_text(self, cell: CellRef, display_bin: int | None = None) -> str:
         y_start, y_end, x_start, x_end = cell
+        if self._active_tab_key() == "results":
+            pane = self.results_pane
+            overlay = pane.cache.get(self._selected_unit_id_value(), mode=pane.dimension.get(), rf_type=pane.rf_type.get())
+            lines = [self._y_group_text(y_start, y_end), self._x_group_text(x_start, x_end)]
+            if overlay.available:
+                flags = overlay.flags[y_start:y_end + 1, x_start:x_end + 1]
+                for bit, label in ((1, "2D"), (2, "1D")):
+                    if pane.dimension.get() in {label, "Both"}:
+                        lines.append(f"{label}: {int(((flags & bit) != 0).sum())} detected source bins")
+            if overlay.unavailable:
+                lines.append(" / ".join(overlay.unavailable) + " unavailable")
+            return "\n".join(lines)
         value_mode = self.value_mode_var.get()
         unit = value_mode_unit(value_mode)
         display_values = self._group_response_values(y_start, y_end, x_start, x_end)
@@ -6495,7 +6490,11 @@ class RFMViewer(tk.Toplevel):
         return difference if difference >= 0.0 else None
 
     def _draw_rf(self) -> None:
-        prepared = self._prepare_rf_plot_matrix()
+        if self._active_tab_key() == "results":
+            x_groups, y_groups = self._x_groups(), self._display_y_groups()
+            prepared = ([[1.0] * len(x_groups) for _ in y_groups], x_groups, y_groups)
+        else:
+            prepared = self._prepare_rf_plot_matrix()
         matrix = PreparedSpatialMatrix(*prepared)
         title = f"RF map - {self._current_matrix_label()}"
         if self.polar_layout_var.get():
@@ -6524,7 +6523,7 @@ class RFMViewer(tk.Toplevel):
             self._draw_polar_matrix(
                 "delay",
                 delay_matrix,
-                "Delay map - peak count-rate interval center",
+                "Peak response delay",
                 "Delay",
                 value_suffix=" ms",
                 fixed_range=self._time_axis_range_ms(),
@@ -6533,7 +6532,7 @@ class RFMViewer(tk.Toplevel):
             self._draw_heatmap(
                 "delay",
                 delay_matrix,
-                "Delay map - peak count-rate interval center",
+                "Peak response delay",
                 "Delay",
                 value_suffix=" ms",
                 fixed_range=self._time_axis_range_ms(),
@@ -6550,6 +6549,7 @@ class RFMViewer(tk.Toplevel):
     ) -> None:
         canvas = self.canvases[key]
         canvas.delete("all")
+        result_only = key == "rf" and self._active_tab_key() == "results"
         w, h = max(canvas.winfo_width(), 200), max(canvas.winfo_height(), 160)
         margin_l, margin_r, margin_t, margin_b = 78, 128, (22 if key == "rf" else 56), 72
         plot_w = max(10, w - margin_l - margin_r)
@@ -6571,13 +6571,9 @@ class RFMViewer(tk.Toplevel):
         else:
             low, high = fixed_range
 
-        unit_text = (
-            f"Unit {self.unit_idx.get():03d} · "
-            f"cluster {self.data.cluster_id(self.unit_idx.get())}"
-        )
         if key == "rf" and hasattr(self, "rf_map_subtitle_label"):
             summary = title.removeprefix("RF map - ").removeprefix("RF map – ")
-            self.rf_map_subtitle_label.configure(text=f"{summary} · {unit_text}")
+            self.rf_map_subtitle_label.configure(text=summary)
         else:
             canvas.create_text(
                 20,
@@ -6587,13 +6583,13 @@ class RFMViewer(tk.Toplevel):
                 font=("TkDefaultFont", 13, "bold"),
                 fill="#1d1d1f",
             )
-            canvas.create_text(20, 44, anchor="w", text=unit_text, fill="#6e6e73")
-
         for display_y, row in enumerate(disp):
             y = y0 + display_y * cell_y
             for x_idx, value in enumerate(row):
                 x = x0 + x_idx * cell_x
-                if palette == "Delay":
+                if result_only:
+                    fill = "#ffffff"
+                elif palette == "Delay":
                     fill = delay_color(value, low, high)
                 else:
                     fill = palette_color(value, low, high, palette)
@@ -6611,6 +6607,13 @@ class RFMViewer(tk.Toplevel):
                 ):
                     self._draw_missing_hatch(canvas, x, y, x + cell_x, y + cell_y)
 
+        self._canvas_layouts[key] = {
+            "geometry": "rectangle", "x0": x0, "y0": y0,
+            "cell": cell_x, "cell_y": cell_y, "grid_w": grid_w, "grid_h": grid_h,
+            "x_groups": x_groups, "y_groups": y_groups,
+        }
+        if key == "rf":
+            self._draw_saved_rf_overlay(result_only=result_only)
         self._draw_selection_outline(
             canvas,
             x0,
@@ -6631,18 +6634,135 @@ class RFMViewer(tk.Toplevel):
             x_groups,
             y_groups,
         )
-        self._draw_colorbar(canvas, x0 + grid_w + 36, y0, min(220, grid_h), low, high, palette, value_suffix)
-        self._canvas_layouts[key] = {
-            "geometry": "rectangle",
-            "x0": x0,
-            "y0": y0,
-            "cell": cell_x,
-            "cell_y": cell_y,
-            "grid_w": grid_w,
-            "grid_h": grid_h,
-            "x_groups": x_groups,
-            "y_groups": y_groups,
-        }
+        if not result_only:
+            self._draw_colorbar(canvas, x0 + grid_w + 36, y0, min(220, grid_h), low, high, palette, value_suffix,
+                                show_missing=any(value is None or not math.isfinite(float(value)) for row in disp for value in row))
+
+    def _draw_saved_rf_overlay(self, *, result_only: bool) -> None:
+        pane = self.results_pane
+        mode = pane.dimension.get() if result_only else self.settings.rf_result_overlay_mode
+        if mode == "None":
+            return
+        polarity = pane.rf_type.get() if result_only else self.settings.rf_result_overlay_polarity
+        unit_id = self._selected_unit_id_value()
+        overlay = pane.cache.get(unit_id, mode=mode, rf_type=polarity)
+        pane.unit_id = unit_id
+        pane.update_details(mode=mode, rf_type=polarity)
+        self.inspector_window.set_results(pane.details.get())
+        if not result_only and pane.status.get():
+            self.rf_map_subtitle_label.configure(
+                text=f"{self._current_matrix_label()} · Saved {pane.status.get()}"
+            )
+        canvas = self.canvases["rf"]
+        if overlay.unavailable:
+            self.status_label.configure(text=" / ".join(overlay.unavailable) + " saved results unavailable. See Inspector for details.")
+        if not overlay.available:
+            canvas.create_text(max(canvas.winfo_width(), 200) / 2, 12,
+                               text="No saved result for this unit", fill="#6e6e73",
+                               tags="rf-result-notice")
+            return
+        if result_only and not overlay.flags.any():
+            pane.status.set(pane.status.get() + " · No detected bins")
+        layout = self._canvas_layouts["rf"]
+        colors = {1: self.settings.rf_result_overlay_2d_color,
+                  2: self.settings.rf_result_overlay_1d_color,
+                  3: self.settings.rf_result_overlay_overlap_color}
+        border = self.settings.rf_result_overlay_width
+        x_groups, y_groups = layout["x_groups"], layout["y_groups"]
+        # Subdivide grouped display cells: a saved native bin keeps its mask
+        # and only a true native intersection receives the overlap color.
+        for display_y, (ys, ye) in enumerate(y_groups):
+            for display_x, (xs, xe) in enumerate(x_groups):
+                for source_y in range(ys, ye + 1):
+                    for source_x in range(xs, xe + 1):
+                        flag = int(overlay.flags[source_y, source_x])
+                        if not flag:
+                            continue
+                        color = colors[flag]
+                        options = dict(fill=color if result_only else "", outline=color,
+                                       width=border, tags=("rf-result-overlay", f"rf-result-{flag}",
+                                                           f"rf-source-{source_y}-{source_x}"))
+                        fx = (source_x - xs) / (xe - xs + 1)
+                        dx = 1 / (xe - xs + 1)
+                        if layout["geometry"] == "rectangle":
+                            row = ye - source_y if self.flip_y_var.get() else source_y - ys
+                            fy = row / (ye - ys + 1)
+                            x = layout["x0"] + (display_x + fx) * layout["cell"]
+                            y = layout["y0"] + (display_y + fy) * layout["cell_y"]
+                            canvas.create_rectangle(x, y, x + dx * layout["cell"],
+                                                    y + layout["cell_y"] / (ye - ys + 1), **options)
+                        else:
+                            ring = layout["ring_rows"].index(display_y)
+                            ascending = self.polar_radius_var.get() == POLAR_RADIUS_MODES[0] or self.flip_y_var.get()
+                            row = source_y - ys if ascending else ye - source_y
+                            inner = INNER_BLANK_ROWS + (ring + row / (ye - ys + 1)) * layout["ring_span"]
+                            outer = inner + layout["ring_span"] / (ye - ys + 1)
+                            theta0 = math.radians(90 + layout["total_deg"] / 2 - layout["total_deg"] * (display_x + fx) / len(x_groups))
+                            theta1 = math.radians(90 + layout["total_deg"] / 2 - layout["total_deg"] * (display_x + fx + dx) / len(x_groups))
+                            points = self._polar_cell_points(layout["cx"], layout["cy"], layout["scale"], inner, outer, theta0, theta1)
+                            canvas.create_polygon(points, **options)
+        if result_only:
+            self._draw_saved_rf_centers(layout, mode, polarity, unit_id)
+        x = 20
+        for flag, label in ((1, "2D"), (2, "1D"), (3, "Overlap")):
+            if (flag == 1 and mode == "1D") or (flag == 2 and mode == "2D") or (flag == 3 and mode != "Both"):
+                continue
+            canvas.create_rectangle(x, 6, x + 11, 17, outline=colors[flag], width=border,
+                                    fill=colors[flag] if result_only else "", tags="rf-result-legend")
+            canvas.create_text(x + 17, 12, anchor="w", text=label, fill="#475467", tags="rf-result-legend")
+            x += 82
+
+    def _saved_bin_center(self, layout, source_y, source_x):
+        column, (xs, xe) = next((index, group) for index, group in enumerate(layout["x_groups"])
+                                if group[0] <= source_x <= group[1])
+        row, (ys, ye) = next((index, group) for index, group in enumerate(layout["y_groups"])
+                             if group[0] <= source_y <= group[1])
+        x_fraction = (source_x - xs + .5) / (xe - xs + 1)
+        if layout["geometry"] == "rectangle":
+            offset = ye - source_y if self.flip_y_var.get() else source_y - ys
+            return (layout["x0"] + (column + x_fraction) * layout["cell"],
+                    layout["y0"] + (row + (offset + .5) / (ye - ys + 1)) * layout["cell_y"])
+        ascending = self.polar_radius_var.get() == POLAR_RADIUS_MODES[0] or self.flip_y_var.get()
+        offset = source_y - ys if ascending else ye - source_y
+        radius = (INNER_BLANK_ROWS + (layout["ring_rows"].index(row) + (offset + .5) / (ye - ys + 1)) * layout["ring_span"]) * layout["scale"]
+        theta = math.radians(90 + layout["total_deg"] / 2 - layout["total_deg"] * (column + x_fraction) / len(layout["x_groups"]))
+        return layout["cx"] + radius * math.cos(theta), layout["cy"] - radius * math.sin(theta)
+
+    def _draw_saved_rf_centers(self, layout, mode, polarity, unit_id):
+        canvas = self.canvases["rf"]
+        for dimension in (("2d", "1d") if mode == "Both" else (mode.lower(),)):
+            result = self.results_pane.cache.result(dimension, polarity)
+            saved = result.for_unit(unit_id) if result is not None else None
+            if saved is None:
+                continue
+            center = saved[1]
+            if dimension == "2d":
+                for source_y, source_x in zip(*center.nonzero()):
+                    x, y = self._saved_bin_center(layout, source_y, source_x)
+                    for color, width in (("white", 4), ("#1d1d1f", 2)):
+                        canvas.create_line(x - 4, y - 4, x + 4, y + 4, fill=color, width=width, tags="rf-center-2d")
+                        canvas.create_line(x - 4, y + 4, x + 4, y - 4, fill=color, width=width, tags="rf-center-2d")
+            else:
+                for index in center.nonzero()[0]:
+                    x, y = self._saved_bin_center(layout, 0 if result.axis == "x" else index,
+                                                  index if result.axis == "x" else 0)
+                    # A 1-D center is marked at the axis edge, not repeated as
+                    # a fictitious point center in every broadcast mask cell.
+                    if layout["geometry"] == "rectangle":
+                        if result.axis == "x":
+                            y = layout["y0"] + layout["grid_h"] + 7
+                        else:
+                            x = layout["x0"] - 7
+                    else:
+                        radius = math.hypot(x - layout["cx"], y - layout["cy"])
+                        theta = math.atan2(layout["cy"] - y, x - layout["cx"])
+                        if result.axis == "x":
+                            radius = (INNER_BLANK_ROWS + len(layout["y_groups"]) * layout["ring_span"]) * layout["scale"] + 7
+                        else:
+                            theta = math.radians(90 + layout["total_deg"] / 2)
+                        x, y = layout["cx"] + radius * math.cos(theta), layout["cy"] - radius * math.sin(theta)
+                    canvas.create_polygon(x, y - 4, x - 4, y + 3, x + 4, y + 3,
+                                          fill="white", outline="#1d1d1f", width=2, tags="rf-center-1d")
 
     @staticmethod
     def _draw_missing_hatch(
@@ -6724,6 +6844,8 @@ class RFMViewer(tk.Toplevel):
         high: float,
         palette: str,
         suffix: str,
+        *,
+        show_missing: bool = True,
     ) -> None:
         steps = 90
         width = 16
@@ -6761,6 +6883,8 @@ class RFMViewer(tk.Toplevel):
             font=("TkDefaultFont", 10),
         )
 
+        if not show_missing:
+            return
         legend_y = y + height + 17
         canvas.create_rectangle(
             x,
@@ -6845,6 +6969,7 @@ class RFMViewer(tk.Toplevel):
     ) -> None:
         canvas = self.canvases[key]
         canvas.delete("all")
+        result_only = key == "rf" and self._active_tab_key() == "results"
         w, h = max(canvas.winfo_width(), 200), max(canvas.winfo_height(), 160)
         disp, x_groups, y_groups = self._prepare_plot_matrix(matrix)
         low, high = (
@@ -6910,7 +7035,8 @@ class RFMViewer(tk.Toplevel):
             r_outer = r_inner + ring_span
             for col in range(len(x_groups)):
                 value = disp[display_row][col]
-                fill = delay_color(value, low, high) if palette == "Delay" else palette_color(value, low, high, palette)
+                fill = ("#ffffff" if result_only else
+                        delay_color(value, low, high) if palette == "Delay" else palette_color(value, low, high, palette))
                 points = self._polar_cell_points(cx, cy, scale, r_inner, r_outer, theta_edges[col], theta_edges[col + 1])
                 missing = value is None or not math.isfinite(float(value))
                 hatch_missing = missing and not (key == "rf" and self.rf_subtract_var.get())
@@ -6921,6 +7047,13 @@ class RFMViewer(tk.Toplevel):
                     stipple="gray25" if hatch_missing else "",
                 )
 
+        self._canvas_layouts[key] = {
+            "geometry": "polar", "cx": cx, "cy": cy, "scale": scale,
+            "total_deg": total_deg, "x_groups": x_groups, "y_groups": y_groups,
+            "ring_rows": ring_rows, "ring_span": ring_span,
+        }
+        if key == "rf":
+            self._draw_saved_rf_overlay(result_only=result_only)
         self._draw_polar_selection_outline(
             canvas,
             cx,
@@ -6939,30 +7072,14 @@ class RFMViewer(tk.Toplevel):
         canvas.create_text(
             cx,
             cy + outer_r + 22,
-            text=f"Values: {self.value_mode_var.get() if palette != 'Delay' else 'delay (ms)'}",
+            text=("Saved detection" if result_only else
+                  self.value_mode_var.get() if palette != "Delay" else "Delay (ms)"),
             fill="#475467",
         )
-        self._draw_colorbar(
-            canvas,
-            w - 124,
-            cy - min(220, 2 * outer_r) / 2,
-            min(220, 2 * outer_r),
-            low,
-            high,
-            palette,
-            value_suffix,
-        )
-        self._canvas_layouts[key] = {
-            "geometry": "polar",
-            "cx": cx,
-            "cy": cy,
-            "scale": scale,
-            "total_deg": total_deg,
-            "x_groups": x_groups,
-            "y_groups": y_groups,
-            "ring_rows": ring_rows,
-            "ring_span": ring_span,
-        }
+        if not result_only:
+            self._draw_colorbar(canvas, w - 124, cy - min(220, 2 * outer_r) / 2,
+                                min(220, 2 * outer_r), low, high, palette, value_suffix,
+                                show_missing=any(value is None or not math.isfinite(float(value)) for row in disp for value in row))
 
     def _draw_polar_selection_outline(
         self,
@@ -8457,6 +8574,9 @@ class RFMViewer(tk.Toplevel):
         self._pair_last_local_state = None
         self.probe_geometry = None
         self.tuning_curve_data = None
+        self._sidebar_auto_visibility = True
+        self._tuning_auto_visibility = True
+        self._sidebar_companion_state = None
         self._tuning_curve_error = None
         self._tuning_curve_candidate = None
         self._tuning_processed_cache = None
@@ -8491,6 +8611,9 @@ class RFMViewer(tk.Toplevel):
         self._start_unit_cache()
 
     def _open_figure_exporter(self) -> None:
+        if self._active_tab_key() == "results":
+            messagebox.showinfo("Saved RF results", "Switch to RF to export response figures.", parent=self)
+            return
         archive = self.data.unit_archive
         if archive is not None and archive.cache_count < self.data.n_units:
             self.status_label.configure(text="Figures will be available when all units finish loading.")
@@ -8518,7 +8641,7 @@ class RFMViewer(tk.Toplevel):
         if self._active_tab_key() == "results":
             messagebox.showinfo(
                 "Saved RF results",
-                "This tab shows saved analysis masks. Switch to RF to export the displayed RF matrix.",
+                "Switch to RF to export the response matrix.",
                 parent=self,
             )
             return
@@ -8735,7 +8858,7 @@ def run_self_test(path: Path, *, isolated: bool = False) -> None:
 
 
 def run_tkdnd_self_test() -> None:
-    """Verify packaged TkDND and the saved-results Matplotlib/Tk runtime."""
+    """Verify packaged TkDND, saved-results controls and Matplotlib/Tk runtime."""
 
     if not TK_AVAILABLE:
         raise RuntimeError("tkinter is not available")
@@ -8749,9 +8872,14 @@ def run_tkdnd_self_test() -> None:
         root.withdraw()
         version = TkinterDnD.require(root)
         results = RFResultsPane(root)
-        results.figure.text(.5, .5, "RF Results", ha="center", color="black")
-        results.canvas.draw()
+        from matplotlib.figure import Figure
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+        figure = Figure(facecolor="white")
+        figure.text(.5, .5, "RF Results", ha="center", color="black")
+        canvas = FigureCanvasTkAgg(figure, master=results)
+        canvas.draw()
         root.update_idletasks()
+        canvas.get_tk_widget().destroy()
         results.destroy()
     finally:
         root.destroy()

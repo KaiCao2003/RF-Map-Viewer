@@ -118,22 +118,33 @@ and presentation-based exposure separately. Files without presentation counts
 open in Spike count mode and explain why Hz is unavailable.
 
 **RF Results** reads the saved analysis sidecars beside the open RF document.
-Choose **1d / 2d** and **excitatory / inhibitory** to inspect the current unit's
-saved mask, center, analysis parameters and available QC. Unit matching uses
-recorded IDs. This tab does not run detection. Legacy 1D projections require
-their saved analysis provenance. Missing or incompatible sidecars are reported in the pane; use
-**Reload saved results** after the analysis producer updates the files.
+Choose **2D / 1D / Both** and **excitatory / inhibitory** to inspect the current
+unit's saved masks and centers. RF and RF Results share the same plot size,
+coordinates, spatial grouping and polar/Cartesian layout, so switching tabs
+keeps corresponding bins aligned. Saved 2D centers use crosses; 1D centers use
+triangles at the axis edge. Unit matching uses recorded IDs. This tab does not
+run detection. Legacy 1D projections require their saved analysis provenance.
+Use **Reload** after the analysis producer updates the files.
+
+**Settings → RF Map → Saved RF overlay** adds saved detections to RF as colored
+bin borders. Choose **None / 2D / 1D / Both**, the detection polarity, border
+width and colors. Defaults are green for 2D, yellow for 1D and orange for their
+intersection. Borders retain the original detection bins when the RF display
+combines bins; orange marks only an actual original-bin intersection. The saved
+detection interval appears beside the RF response interval.
 
 In **Settings → General → Visible tabs**, show or hide RF, Delay / RGB,
 Timeline and RF Results. At least one tab must remain visible. The preference
 persists and applies to open and new document windows. **Initial tab** selects
 the starting page; if that page is hidden, the first visible page is used.
 
-Click a map cell to inspect it. The **Selected cell** section reports its
+Click a map cell and open **View → Inspector…** to inspect it. **Selection** reports its
 spatial indices and positions, value in the selected time bin, value over the
 RF window, value over the full time support, peak response and peak interval,
 and count-rate peak delay. If display bins combine multiple source cells, the
-reported index ranges describe that group.
+reported index ranges describe that group. **Saved results** contains detection
+parameters, QC, source paths and compatibility diagnostics. Closing Inspector
+keeps the document open.
 
 **Delay / RGB** summarizes response timing over the full recorded time axis.
 The Delay map colors each spatial location by the center of its peak
@@ -428,8 +439,10 @@ testing, and figure exports.
 
 The RF tab can show a compact **Local Average Waveform** panel in the left
 sidebar. Double-clicking the waveform opens a large, in-window view; another
-double-click, **Esc**, or **Done** restores the compact panel. **Unit Info** and
-**Spike Time** share the bottom-right inspector below the HD tuning curve. The
+double-click, **Esc**, or **Done** restores the compact panel. Unit information
+and response timing are available in **View → Inspector…**. The probe/waveform
+sidebar and HD pane start folded when their companion data are absent; attaching
+data expands the corresponding pane. A manually folded pane stays folded. The
 viewer auto-discovers the read-only schema-v4 SpikeInterface
 artifact at `data/waveform/ProbeA` or `ProbeB` and shows the selected unit's
 baseline-corrected average template on the best-PTP channel plus the four

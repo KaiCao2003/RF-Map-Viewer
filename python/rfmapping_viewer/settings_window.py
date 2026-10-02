@@ -18,7 +18,13 @@ from rfmapping_viewer.constants import (
     WAVEFORM_CHANNEL_MODE_LABELS,
 )
 from rfmapping_viewer.display import format_ms
-from rfmapping_viewer.settings import ViewerSettings, normalize_hd_bin_count
+from rfmapping_viewer.settings import (
+    RF_RESULT_OVERLAY_MODES,
+    RF_RESULT_OVERLAY_POLARITIES,
+    ViewerSettings,
+    is_hex_color,
+    normalize_hd_bin_count,
+)
 from rfmapping_viewer.tk_support import tk, ttk
 
 from typing import TYPE_CHECKING
@@ -102,6 +108,12 @@ class SettingsWindow(tk.Toplevel):
             value="Polar" if settings.rf_polar_layout else "Rectangle"
         )
         self.rf_rgb_mode_var = tk.BooleanVar(value=settings.rf_rgb_mode)
+        self.rf_result_overlay_mode_var = tk.StringVar(value=settings.rf_result_overlay_mode)
+        self.rf_result_overlay_polarity_var = tk.StringVar(value=settings.rf_result_overlay_polarity)
+        self.rf_result_overlay_width_var = tk.StringVar(value=f"{settings.rf_result_overlay_width:g}")
+        self.rf_result_overlay_2d_color_var = tk.StringVar(value=settings.rf_result_overlay_2d_color)
+        self.rf_result_overlay_1d_color_var = tk.StringVar(value=settings.rf_result_overlay_1d_color)
+        self.rf_result_overlay_overlap_color_var = tk.StringVar(value=settings.rf_result_overlay_overlap_color)
         self.default_viewer_tab_var = tk.StringVar(
             value=VIEWER_TABS[settings.default_viewer_tab]
         )
@@ -186,6 +198,7 @@ class SettingsWindow(tk.Toplevel):
             self.show_probe_layout_var,
             self.rf_filter_units_with_zero_bins_var,
             self.tuning_smoothing_var,
+            self.rf_result_overlay_mode_var,
         ):
             variable.trace_add("write", lambda *_args: self._sync_dependent_controls())
 
@@ -357,7 +370,7 @@ class SettingsWindow(tk.Toplevel):
         self._labeled_entry(tab, 4, "Time bin (ms)", self.rf_time_resolution_var)
         self._labeled_combo(tab, 5, "Value", self.rf_value_mode_var, VALUE_MODES)
 
-        self._section_label(tab, "Unit filter · native bins in A", 6)
+        self._section_label(tab, "Unit filter", 6)
         ttk.Checkbutton(
             tab,
             text="Hide units with zero-spike bins",
@@ -399,6 +412,42 @@ class SettingsWindow(tk.Toplevel):
         ttk.Checkbutton(toggles, text="Flip Y", variable=self.rf_flip_y_var).grid(row=0, column=0, padx=(0, 18))
         ttk.Checkbutton(toggles, text="RGB composite", variable=self.rf_rgb_mode_var).grid(row=0, column=1)
 
+        self._section_label(tab, "Saved RF overlay", 16)
+        self._labeled_combo(tab, 17, "Show", self.rf_result_overlay_mode_var, RF_RESULT_OVERLAY_MODES)
+        self.rf_result_overlay_polarity_combo = self._labeled_combo(
+            tab, 18, "Polarity", self.rf_result_overlay_polarity_var, RF_RESULT_OVERLAY_POLARITIES,
+        )
+        self.rf_result_overlay_width_entry = self._labeled_entry(
+            tab, 19, "Border width (px)", self.rf_result_overlay_width_var,
+        )
+        self._overlay_color_controls = []
+        for row, label, variable in (
+            (20, "2D color", self.rf_result_overlay_2d_color_var),
+            (21, "1D color", self.rf_result_overlay_1d_color_var),
+            (22, "Overlap color", self.rf_result_overlay_overlap_color_var),
+        ):
+            ttk.Label(tab, text=label).grid(row=row, column=0, sticky="w", pady=5)
+            color_row = ttk.Frame(tab)
+            color_row.grid(row=row, column=1, sticky="w", pady=5)
+            entry = ttk.Entry(color_row, textvariable=variable, width=12)
+            entry.grid(row=0, column=0, padx=(0, 8))
+            chooser = ttk.Button(
+                color_row, text="Choose…",
+                command=lambda value=variable, title=label: self._choose_overlay_color(value, title),
+            )
+            chooser.grid(row=0, column=1)
+            self._overlay_color_controls.extend((entry, chooser))
+
+    def _choose_overlay_color(self, variable: tk.StringVar, title: str) -> None:
+        from tkinter import colorchooser
+
+        _rgb, color = colorchooser.askcolor(
+            color=variable.get() if is_hex_color(variable.get()) else None,
+            parent=self, title=title,
+        )
+        if color:
+            variable.set(color)
+
     def _build_waveform_tab(self, tab: ttk.Frame) -> None:
         self._section_label(tab, "Local average waveform", 0)
         ttk.Checkbutton(
@@ -438,7 +487,7 @@ class SettingsWindow(tk.Toplevel):
             self.tuning_layout_var,
             TUNING_LAYOUTS,
         )
-        self._labeled_entry(tab, 7, "HD bins (divisors of 180)", self.tuning_display_bins_var)
+        self._labeled_entry(tab, 7, "HD bins", self.tuning_display_bins_var)
         ttk.Checkbutton(
             tab,
             text="Shared 0–peak Hz scale",
@@ -446,7 +495,7 @@ class SettingsWindow(tk.Toplevel):
         ).grid(row=9, column=0, columnspan=2, sticky="w", pady=(0, 10))
         ttk.Checkbutton(
             tab,
-            text="Smooth source curve (180 bins)",
+            text="Smooth tuning curve",
             variable=self.tuning_smoothing_var,
         ).grid(row=10, column=0, columnspan=2, sticky="w", pady=(0, 6))
         ttk.Label(tab, text="Gaussian σ (degrees)").grid(
@@ -548,6 +597,13 @@ class SettingsWindow(tk.Toplevel):
         self.tuning_sigma_entry.state(
             ["!disabled"] if self.tuning_smoothing_var.get() else ["disabled"]
         )
+        overlay_state = ["!disabled"] if self.rf_result_overlay_mode_var.get() != "None" else ["disabled"]
+        for widget in (
+            self.rf_result_overlay_polarity_combo,
+            self.rf_result_overlay_width_entry,
+            *self._overlay_color_controls,
+        ):
+            widget.state(overlay_state)
 
     @staticmethod
     def _positive_float(raw: str, label: str) -> float:
@@ -605,6 +661,7 @@ class SettingsWindow(tk.Toplevel):
             x_bins = self._native_or_positive_int(self.rf_x_bins_var.get(), "X bins")
             y_bins = self._native_or_positive_int(self.rf_y_bins_var.get(), "Y bins")
             smooth_radius = max(0, min(3, int(self.rf_smooth_radius_var.get())))
+            overlay_width = self._positive_float(self.rf_result_overlay_width_var.get(), "Overlay border width")
         except (tk.TclError, ValueError) as exc:
             raise SettingsValidationError("RF Map", str(exc)) from exc
         try:
@@ -629,6 +686,22 @@ class SettingsWindow(tk.Toplevel):
         palette = self.rf_palette_var.get()
         polar_radius = self.rf_polar_radius_var.get()
         layout = self.rf_layout_var.get()
+        overlay_mode = self.rf_result_overlay_mode_var.get()
+        overlay_polarity = self.rf_result_overlay_polarity_var.get()
+        if overlay_mode not in RF_RESULT_OVERLAY_MODES:
+            raise SettingsValidationError("RF Map", "Choose None, 2D, 1D, or Both for the saved RF overlay.")
+        if overlay_polarity not in RF_RESULT_OVERLAY_POLARITIES:
+            raise SettingsValidationError("RF Map", "Choose excitatory or inhibitory overlay polarity.")
+        overlay_colors = {}
+        for name, label, variable in (
+            ("rf_result_overlay_2d_color", "2D color", self.rf_result_overlay_2d_color_var),
+            ("rf_result_overlay_1d_color", "1D color", self.rf_result_overlay_1d_color_var),
+            ("rf_result_overlay_overlap_color", "Overlap color", self.rf_result_overlay_overlap_color_var),
+        ):
+            color = variable.get().strip()
+            if not is_hex_color(color):
+                raise SettingsValidationError("RF Map", f"{label} must use a #RRGGBB hex color.")
+            overlay_colors[name] = color.lower()
         tab_keys = {label: key for key, label in VIEWER_TABS.items()}
         initial_tab = self.default_viewer_tab_var.get()
         visible_tabs = tuple(
@@ -734,6 +807,10 @@ class SettingsWindow(tk.Toplevel):
             rf_polar_radius=polar_radius,
             rf_polar_layout=layout == "Polar",
             rf_rgb_mode=bool(self.rf_rgb_mode_var.get()),
+            rf_result_overlay_mode=overlay_mode,
+            rf_result_overlay_polarity=overlay_polarity,
+            rf_result_overlay_width=overlay_width,
+            **overlay_colors,
             default_viewer_tab=initial_tab_key,
             visible_tabs=visible_tabs,
             waveform_channel_mode=waveform_channel_mode,

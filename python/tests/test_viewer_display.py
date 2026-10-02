@@ -71,6 +71,7 @@ class WaveformCanvasTests(unittest.TestCase):
             _selected_unit_id_value=lambda: 17,
         )
         viewer._request_waveform_payload = MethodType(gui.RFMViewer._request_waveform_payload, viewer)
+        viewer._sync_sidebar_companions = lambda: None
         viewer._draw_waveform_canvas = MethodType(gui.RFMViewer._draw_waveform_canvas, viewer)
 
         gui.RFMViewer._draw_waveform(viewer)
@@ -80,7 +81,7 @@ class WaveformCanvasTests(unittest.TestCase):
         self.assertTrue(
             any(call[1].get("text") == "★ ch 2" for call in canvas.texts)
         )
-        self.assertIn("Cluster 17", subtitle.text)
+        self.assertIn("max PTP 22.5 µV", subtitle.text)
         self.assertIn("Same x column", subtitle.text)
         self.assertIn("best + 4 nearest", subtitle.text)
 

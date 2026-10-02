@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import numpy as np
 
-from rfmapping_viewer.rf_results import RFResultSource, SavedRFResult, load_saved_rf_result
+from rfmapping_viewer.constants import SINGLETON_Y_REFERENCE_COLUMNS, SINGLETON_Y_REFERENCE_ROWS
+from rfmapping_viewer.rf_results import RFResultSource, SavedRFResult
+from rfmapping_viewer.rf_result_overlay import RFResultOverlayCache
 from rfmapping_viewer.tk_support import tk, ttk
 
 
@@ -51,8 +53,12 @@ def draw_saved_rf_result(figure, result: SavedRFResult, unit_id: int) -> bool:
     else:
         axes.pcolormesh(_cell_edges(result.source.x_positions), _cell_edges(result.source.y_positions), mask,
                         shading="flat", cmap=ListedColormap(["white", color]), vmin=0, vmax=1)
-        if mask.shape[0] == 1:
-            axes.set_box_aspect(7 / 30)
+        rows_count, columns_count = mask.shape
+        # Match RF's square display bins and its singleton-y presentation.
+        axes.set_box_aspect(
+            SINGLETON_Y_REFERENCE_ROWS / SINGLETON_Y_REFERENCE_COLUMNS
+            if rows_count == 1 else rows_count / columns_count
+        )
         rows, columns = np.nonzero(center)
         axes.scatter(np.asarray(result.source.x_positions)[columns], np.asarray(result.source.y_positions)[rows],
                      marker="x", s=90, linewidths=2, color="#1d1d1f", label="Saved center")
@@ -67,102 +73,98 @@ def draw_saved_rf_result(figure, result: SavedRFResult, unit_id: int) -> bool:
 
 
 class RFResultsPane(ttk.Frame):
-    def __init__(self, parent, data=None):
-        super().__init__(parent, padding=12)
-        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-        from matplotlib.figure import Figure
+    """Saved-result selectors for the viewer's shared spatial canvas."""
 
-        self.source = None
-        self.unit_id = None
-        self._results = {}
-        self.dimension = tk.StringVar(self, "2d")
-        self.rf_type = tk.StringVar(self, "excitatory")
-        self.status = tk.StringVar(self, "Open an RF document to inspect saved results.")
-        self.details = tk.StringVar(self)
+    def __init__(self, parent, data=None, *, controls_parent=None, on_change=None):
+        super().__init__(parent)
         self.columnconfigure(0, weight=1)
-        self.rowconfigure(2, weight=1)
-        controls = ttk.Frame(self)
-        controls.grid(row=0, column=0, sticky="ew", pady=(0, 8))
-        for label, variable, choices in (("Dimension", self.dimension, ("2d", "1d")),
-                                          ("Polarity", self.rf_type, ("excitatory", "inhibitory"))):
-            ttk.Label(controls, text=label).pack(side="left", padx=(0, 6))
-            control = ttk.Combobox(controls, textvariable=variable, values=choices, state="readonly", width=13)
-            control.pack(side="left", padx=(0, 16))
-            control.bind("<<ComboboxSelected>>", lambda _event: self._render())
-        ttk.Button(controls, text="Reload saved results", command=self.refresh).pack(side="right")
-        ttk.Label(self, textvariable=self.status, wraplength=850).grid(row=1, column=0, sticky="w", pady=(0, 6))
-        self.figure = Figure(figsize=(7, 4), dpi=100, facecolor="white", layout="constrained")
-        self.canvas = FigureCanvasTkAgg(self.figure, master=self)
-        self.canvas.get_tk_widget().configure(background="white", highlightthickness=0)
-        self.canvas.get_tk_widget().grid(row=2, column=0, sticky="nsew")
-        ttk.Label(self, textvariable=self.details, wraplength=850, justify="left").grid(
-            row=3, column=0, sticky="w", pady=(8, 0))
+        self.rowconfigure(0, weight=1)
+        self.on_change = on_change
+        self.source = None
+        self.cache = None
+        self.unit_id = None
+        self.dimension = tk.StringVar(self, "2D")
+        self.rf_type = tk.StringVar(self, "excitatory")
+        self.status = tk.StringVar(self)
+        self.details = tk.StringVar(self)
+        self.controls = ttk.Frame(controls_parent or self, style="Panel.TFrame")
+        for variable, choices, width in (
+            (self.dimension, ("2D", "1D", "Both"), 5),
+            (self.rf_type, ("excitatory", "inhibitory"), 12),
+        ):
+            control = ttk.Combobox(self.controls, textvariable=variable,
+                                  values=choices, state="readonly", width=width)
+            control.pack(side="left", padx=(0, 10))
+            control.bind("<<ComboboxSelected>>", self._selection_changed)
+        ttk.Label(self.controls, textvariable=self.status, style="Muted.TLabel").pack(side="left")
+        ttk.Button(self.controls, text="Reload", command=self.refresh).pack(side="right", padx=(10, 0))
         self.set_document(data)
 
-    def set_document(self, data) -> None:
+    def set_document(self, data):
         self.source = RFResultSource.from_document(data) if data is not None else None
+        self.cache = RFResultOverlayCache(self.source) if self.source is not None else None
         self.unit_id = None
-        self._results.clear()
-        self._render()
-
-    def set_unit(self, unit_id: int | None) -> None:
-        if unit_id != self.unit_id:
-            self.unit_id = unit_id
-            self._render()
-
-    def refresh(self) -> None:
-        self._results.clear()
-        self._render()
-
-    def destroy(self) -> None:
-        # TkAgg schedules renders on its widget; closing a document must cancel
-        # the callback before Tk deletes the registered Python command.
-        if self.canvas._idle_draw_id is not None:
-            self.canvas.get_tk_widget().after_cancel(self.canvas._idle_draw_id)
-            self.canvas._idle_draw_id = None
-        super().destroy()
-
-    def _empty(self, message: str) -> None:
-        self.status.set(message)
+        self.status.set("")
         self.details.set("")
-        self.figure.clear()
-        self.canvas.draw_idle()
 
-    def _render(self) -> None:
-        if self.source is None:
-            self._empty("Open an RF document to inspect saved results.")
+    def set_unit(self, unit_id):
+        self.unit_id = unit_id
+        self.update_details()
+
+    def _selection_changed(self, _event=None):
+        self.update_details()
+        if self.on_change is not None:
+            self.on_change()
+
+    def refresh(self):
+        if self.cache is not None:
+            self.cache.clear()
+        self._selection_changed()
+
+    def update_details(self, *, mode=None, rf_type=None):
+        if self.cache is None or self.unit_id is None:
+            self.status.set("No unit selected")
+            self.details.set("")
             return
-        if self.unit_id is None:
-            self._empty("Select a unit to inspect its saved RF result.")
-            return
-        key = (self.dimension.get(), self.rf_type.get())
-        if key not in self._results:
-            try:
-                self._results[key] = load_saved_rf_result(self.source, dimension=key[0], rf_type=key[1])
-            except FileNotFoundError as error:
-                self._results[key] = f"No saved {key[0].upper()} {key[1]} result: {error.filename}"
-            except (OSError, ValueError, TypeError, KeyError) as error:
-                self._results[key] = f"Saved RF result unavailable: {error}"
-        result = self._results[key]
-        if isinstance(result, str):
-            self._empty(result)
-            return
-        found = draw_saved_rf_result(self.figure, result, self.unit_id)
-        self.status.set(str(result.path) if found else f"Unit {self.unit_id} is absent from this saved result (it may have failed analysis QC).")
-        parameters = result.manifest["parameters"]
-        qc = result.unit_qc(self.unit_id)
-        qc_text = (f"QC: {qc['zero_bins']} zero bins; {qc['valid_bins']} valid bins; "
-                   f"{'kept' if qc['keep'] else 'excluded'}." if qc else "No saved per-unit QC summary.")
-        method = "Projection of saved 2-D detection" if result.projected_from_2d else result.manifest.get("detector_algorithm", "Saved detection")
-        provenance = f"Analysis source: {result.summary['source_path']}\n" if result.summary else ""
-        warning = f"{result.summary_warning}\n" if result.summary_warning else ""
-        self.details.set(
-            f"{method} · z={parameters.get('cluster_forming_z', '—')} · "
-            f"drop bins={parameters.get('drop_bins', '—')} · wrap X={parameters.get('wrap_x', '—')}\n"
-            f"{qc_text}  Saved schema v1 contains masks and centers, without response amplitudes.\n"
-            f"{provenance}"
-            f"{warning}"
-            "Unit IDs, grid size and time range checked. Physical axes use this RF document; "
-            "the saved result has no axes or source-file fingerprint to verify them."
-        )
-        self.canvas.draw_idle()
+        mode = self.dimension.get() if mode is None else mode
+        rf_type = self.rf_type.get() if rf_type is None else rf_type
+        dimensions = {"None": (), "2D": ("2d",), "1D": ("1d",), "Both": ("2d", "1d")}[mode]
+        intervals, unavailable, details = [], [], []
+        for dimension in dimensions:
+            result = self.cache.result(dimension, rf_type)
+            if result is None:
+                unavailable.append(dimension.upper())
+                details.append(self.cache.error(dimension, rf_type) or "No saved result")
+                continue
+            interval = result.manifest["time_range_s"]
+            text = f"{interval[0] * 1000:g}–{interval[1] * 1000:g} ms"
+            if text not in intervals:
+                intervals.append(text)
+            saved = result.for_unit(self.unit_id)
+            if saved is None:
+                unavailable.append(dimension.upper())
+            parameters = result.manifest["parameters"]
+            qc = result.unit_qc(self.unit_id)
+            details.append(f"{dimension.upper()} {rf_type} · {text}\n{result.path}")
+            details.append(f"Unit {self.unit_id}: " + (f"{int(saved[0].sum())} detected bins" if saved is not None else "not in saved results"))
+            if saved is not None:
+                if dimension == "2d":
+                    centers = [(self.source.x_positions[x], self.source.y_positions[y])
+                               for y, x in zip(*saved[1].nonzero())]
+                    details.append(f"Centers (x, y): {centers} · × on plot")
+                else:
+                    positions = self.source.x_positions if result.axis == "x" else self.source.y_positions
+                    centers = [positions[index] for index in saved[1].nonzero()[0]]
+                    details.append(f"Centers ({result.axis}): {centers} · △ at axis edge")
+            details.append(f"Method: {result.manifest.get('detector_algorithm', 'saved detection')}\nParameters: {parameters}")
+            if qc:
+                details.append(f"QC: {qc['zero_bins']} zero bins; {qc['valid_bins']} valid bins; " + ("kept" if qc['keep'] else "excluded"))
+            if result.summary_warning:
+                details.append(result.summary_warning)
+        if intervals:
+            details.append("Coordinates use this RF document; source fingerprint is unavailable.")
+        status = " · ".join(intervals)
+        if unavailable:
+            status += (" · " if status else "") + "/".join(unavailable) + " unavailable"
+        self.status.set(status)
+        self.details.set("\n\n".join(details))
