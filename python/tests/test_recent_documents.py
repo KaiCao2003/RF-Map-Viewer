@@ -63,10 +63,11 @@ class RecentDocumentsTests(unittest.TestCase):
         native._objc = mock.Mock()
         native._objc.objc_getClass.side_effect = lambda name: name
         native._send = mock.Mock(return_value="object")
-        native.record(Path("/data/记录 #1.rfmap"))
+        path = Path("/data/记录 #1.rfmap")
+        native.record(path)
         native._send.assert_any_call(
             b"NSString", b"stringWithUTF8String:", ctypes.c_void_p,
-            (ctypes.c_char_p,), "/data/记录 #1.rfmap".encode("utf-8"),
+            (ctypes.c_char_p,), str(path).encode("utf-8"),
         )
         native._send.assert_any_call(
             b"NSURL", b"fileURLWithPath:", ctypes.c_void_p,
