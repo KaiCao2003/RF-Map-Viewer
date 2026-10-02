@@ -34,6 +34,7 @@ _STRUCTURAL_JSON_FIELDS = {
     "yPositions",
     "timeBinEdges",
     "occupancyTimeSec",
+    "stimulusPresentationCounts",
 }
 
 
@@ -207,10 +208,12 @@ def _compact_spike_counts(
     return result
 
 
-def _occupancy_matrix(value: Any, n_y: int, n_x: int) -> NDArray[np.float64]:
+def _occupancy_matrix(
+    value: Any, n_y: int, n_x: int, *, label: str = "occupancyTimeSec"
+) -> NDArray[np.float64]:
     if isinstance(value, Real) and not isinstance(value, bool):
         if n_y != 1 or n_x != 1:
-            raise ValueError("occupancyTimeSec must be a y-by-x array")
+            raise ValueError(f"{label} must be a y-by-x array")
         rows: list[list[Any]] = [[value]]
     elif isinstance(value, list):
         if all(not isinstance(item, list) for item in value):
@@ -220,21 +223,21 @@ def _occupancy_matrix(value: Any, n_y: int, n_x: int) -> NDArray[np.float64]:
                 rows = [[item] for item in value]
             else:
                 raise ValueError(
-                    "occupancyTimeSec dimensions do not match "
+                    f"{label} dimensions do not match "
                     "unitsSpikeCountsSize"
                 )
         elif all(isinstance(item, list) for item in value):
             rows = value
         else:
             raise ValueError(
-                "occupancyTimeSec must be a rectangular y-by-x array"
+                f"{label} must be a rectangular y-by-x array"
             )
     else:
-        raise ValueError("occupancyTimeSec must be a y-by-x array")
+        raise ValueError(f"{label} must be a y-by-x array")
 
     if len(rows) != n_y or any(len(row) != n_x for row in rows):
         raise ValueError(
-            "occupancyTimeSec x dimension or row count is invalid; "
+            f"{label} x dimension or row count is invalid; "
             "dimensions do not match "
             "unitsSpikeCountsSize"
         )
@@ -244,10 +247,10 @@ def _occupancy_matrix(value: Any, n_y: int, n_x: int) -> NDArray[np.float64]:
         for x_index, item in enumerate(row):
             parsed = _number(
                 item,
-                f"occupancyTimeSec[{y_index}][{x_index}]",
+                f"{label}[{y_index}][{x_index}]",
             )
             if parsed < 0:
-                raise ValueError("occupancyTimeSec values must be non-negative")
+                raise ValueError(f"{label} values must be non-negative")
             result[y_index, x_index] = parsed
     result.setflags(write=False)
     return result
@@ -275,6 +278,7 @@ class RFMap:
     occupancy_time_s: NDArray[np.float64]
     metadata: Mapping[str, Any]
     source_path: Path
+    presentation_counts: NDArray[np.float64] | None = None
 
     @property
     def shape(self) -> tuple[int, int, int]:
@@ -340,6 +344,7 @@ class RFMap:
             y_positions=self.y_positions,
             time_bin_edges_s=edges,
             occupancy_time_s=self.occupancy_time_s,
+            presentation_counts=self.presentation_counts,
             metadata=self.metadata,
             source_path=self.source_path,
         )
@@ -434,6 +439,7 @@ def _make_rf_map(
     occupancy_time_s: NDArray[np.float64],
     metadata: Mapping[str, Any],
     source_path: str | Path,
+    presentation_counts: NDArray[np.float64] | None = None,
 ) -> RFMap:
     return RFMap(
         unit_index=int(unit_index),
@@ -445,6 +451,7 @@ def _make_rf_map(
         occupancy_time_s=occupancy_time_s,
         metadata=MappingProxyType(deepcopy(dict(metadata))),
         source_path=Path(source_path),
+        presentation_counts=presentation_counts,
     )
 
 
@@ -457,15 +464,21 @@ class RFHeader:
     time_edges: NDArray[np.float64]
     occupancy: NDArray[np.float64]
     metadata: Mapping[str, Any]
+    presentation_counts: NDArray[np.float64] | None = None
 
     def make_map(self, index: int, counts: NDArray[Any], path: Path) -> RFMap:
         if np.any(counts[self.occupancy == 0, :] != 0):
             raise ValueError("occupancyTimeSec is zero where unitsSpikeCounts is nonzero")
+        if self.presentation_counts is not None and np.any(
+            counts[self.presentation_counts == 0, :] != 0
+        ):
+            raise ValueError("stimulusPresentationCounts is zero where unitsSpikeCounts is nonzero")
         return _make_rf_map(
             unit_index=index, unit_id=self.unit_ids[index], spike_counts=counts,
             x_positions=self.x_positions, y_positions=self.y_positions,
             time_bin_edges_s=self.time_edges, occupancy_time_s=self.occupancy,
             metadata=self.metadata, source_path=path,
+            presentation_counts=self.presentation_counts,
         )
 
 
@@ -551,13 +564,21 @@ def _parse_rf_header(raw: Mapping[str, Any]) -> RFHeader:
     occupancy_time_s = _occupancy_matrix(raw["occupancyTimeSec"], n_y, n_x)
     if not np.any(occupancy_time_s > 0):
         raise ValueError("occupancyTimeSec must contain at least one positive value")
+    presentation_counts = None
+    if "stimulusPresentationCounts" in raw:
+        presentation_counts = _occupancy_matrix(
+            raw["stimulusPresentationCounts"], n_y, n_x,
+            label="stimulusPresentationCounts",
+        )
+        if np.any(presentation_counts != np.floor(presentation_counts)):
+            raise ValueError("stimulusPresentationCounts values must be non-negative integers")
     metadata = {
         key: deepcopy(value)
         for key, value in raw.items()
         if key not in _STRUCTURAL_JSON_FIELDS
     }
     return RFHeader(shape, unit_pool, x_positions, y_positions, time_edges,
-                    occupancy_time_s, metadata)
+                    occupancy_time_s, metadata, presentation_counts)
 
 
 def is_indexed_rfmap(path: str | Path) -> bool:

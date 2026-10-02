@@ -6,20 +6,21 @@ generation behind uses `1.10.x`. Patch numbers identify coordinated or
 target-specific releases within that feature generation; supported input
 contracts are stated explicitly rather than inferred from the patch number.
 
-The separate Free-Moving viewer uses the `1.10` feature generation and is
-currently an alpha. Its canonical release version is
-`1.10.0-alpha.3`. Python packaging represents the same release as
-`1.10.0a3`, while the macOS marketing version remains the Apple-compatible
-three-integer `1.10.0`. Alpha 3 adds the explicit pre-load Square/Bar choice
-and support for the latest `rfmapping_fm_bar_hdf5_v1` vertical-bar result.
+The Free-Moving alpha application has been retired from the active source and
+release workflow. Its historical Git tags and published artifacts are retained.
+The Python package and generic launcher now identify the stable viewer.
+
+Python 1.11.1 corrects RF Hz to counts divided by saved
+presentation counts and response-window seconds, adds the saved RF Results
+tab, and lets users choose visible tabs in Settings. The macOS build is 111001;
+Swift, Web, and Windows retain their existing release versions.
 
 Platform identity never becomes a fourth version component. It belongs in the
 component tag and artifact name:
 
 | Component | Release | Tag | Channel |
 | --- | --- | --- | --- |
-| Python stable (macOS) | `1.11.0` | `python-v1.11.0` | stable |
-| Python Free-Moving | `1.10.0-alpha.3` | `python-v1.10.0-alpha.3` | alpha |
+| Python stable (macOS) | `1.11.1` | `python-v1.11.1` | stable |
 | Swift | `1.10.3` | `swift-v1.10.3` | stable |
 | Web | `1.10.2` | `web-v1.10.2` | stable |
 
@@ -55,7 +56,7 @@ Swift also handles macOS URL-open events directly, so opening an RF document
 from Finder loads that document instead of leaving the initial file chooser open.
 Its waveform discovery stops at the filesystem root for Finder file-reference
 URLs, avoiding a loading freeze after document decoding.
-Windows remains at 1.10.0, and the Free-Moving alpha remains at 1.10.0-alpha.3.
+Windows remains at 1.10.0.
 
 Python and Swift 1.10.1 repair keyboard behavior, RF color scales, missing
 exposure during smoothing, and progressive-loading consistency and performance.
@@ -67,7 +68,7 @@ Those patch releases targeted macOS arm64; Windows and Web stayed at 1.10.0.
 Stable 1.10.0 aligns Python, Swift, and Web on indexed version-2 RF input,
 progressive unit caching, RF window subtraction, display shortcuts, and the
 shared Delay/RGB display and export semantics. Python ships macOS arm64 and
-Windows x64 packages. The separate Free-Moving alpha is unchanged.
+Windows x64 packages.
 
 Python 1.9.9 separates viewer responsibilities into focused modules, removes
 internal fallback branches, consolidates historical tests, and adds a macOS
@@ -75,8 +76,8 @@ Apple Silicon PR regression check for the stable viewer.
 
 Python 1.9.8 aligns exported Delay/RGB maps with the live GUI, shares and caches
 temporal display calculations, and limits waveform loading to one active
-read plus the latest pending selection. The stable macOS package explicitly
-excludes the separate Free-Moving/HDF5 modules.
+read plus the latest pending selection. The stable macOS package does not
+require HDF5.
 
 Python 1.9.7 added RF window subtraction with saved defaults, gray NaN display
 for negative differences, and shortcuts for display options and the zero-bin
@@ -92,7 +93,7 @@ selection, the schema-v4 SpikeInterface waveform viewer/exporter, and matching
 rectangle/polar and palette keyboard shortcuts.
 
 Each active component records a `feature_generation_offset` from the Python
-stable reference. Swift, Web, and Free-Moving use offset `-1` from Python 1.11,
+stable reference. Swift and Web use offset `-1` from Python 1.11,
 retaining their `1.10.x` series. The manifest records their released versions
 independently of unreleased source updates.
 
@@ -110,11 +111,4 @@ because each numeric VERSIONINFO component is limited to 16 bits; macOS uses
 build 110000. Both identify the same Python 1.10.0 source release.
 Manual workflow dispatch builds only the selected component candidate without
 publishing a tag or GitHub Release; selecting Python stable runs its macOS job, plus Windows only when the
-recorded versions match. Python alpha releases are marked as GitHub prereleases.
-
-The alpha is written as `1.10.0-alpha.3`, not `1.10.0.3`: SemVer represents
-preview status after a hyphen. Python package metadata uses the PEP 440 spelling
-`1.10.0a3`, and the macOS bundle uses marketing version `1.10.0` plus build
-`110003`; all three identify the same alpha release. Alpha 3 also gives a
-singleton-elevation 2D map the legacy `30:7` visual footprint while leaving
-the physical 3D sphere unchanged.
+recorded versions match.

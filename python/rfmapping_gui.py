@@ -65,6 +65,7 @@ from rfmapping_viewer.constants import (
     VALUE_MODES,
     VALUE_MODE_COUNT,
     VALUE_MODE_RATE,
+    VIEWER_TABS,
     WAVEFORM_CHANNEL_MODE_LABELS,
     _RECORDING_SESSION_RE,
 )
@@ -118,6 +119,7 @@ from rfmapping_viewer.paths import (
 )
 from rfmapping_viewer.rf_dataset import is_indexed_rfmap
 from rfmapping_viewer.rf_model import RFMappingData
+from rfmapping_viewer.rf_results_view import RFResultsPane
 from rfmapping_viewer.recent_documents import (
     clear_recent_documents,
     list_recent_documents,
@@ -494,7 +496,7 @@ class RFMViewer(tk.Toplevel):
         self._last_supported_unit_id = data.unit_pool[0]
         value_mode = self.settings.rf_value_mode
         if not data.supports_value_mode(value_mode):
-            value_mode = VALUE_MODE_RATE
+            value_mode = VALUE_MODE_COUNT
         self.value_mode_var = tk.StringVar(value=value_mode)
         self.bin_var = tk.IntVar(value=0)
         self.range_start_var = tk.IntVar(value=0)
@@ -585,6 +587,7 @@ class RFMViewer(tk.Toplevel):
         self._sync_optional_view_visibility(redraw=False)
         self._sync_json_menu()
         self._sync_unit_combo()
+        self._sync_tab_visibility()
         self._select_tab_key(self.settings.default_viewer_tab)
         self._update_all()
         self._viewer_ready = True
@@ -697,7 +700,10 @@ class RFMViewer(tk.Toplevel):
             if self.winfo_exists():
                 # The withdrawn Tk root or native file chooser can still own
                 # keyboard focus when the document's first plot appears.
-                self.canvases[self._active_tab_key()].focus_force()
+                if self._active_tab_key() == "results":
+                    self.results_pane.focus_set()
+                else:
+                    self.canvases[self._active_tab_key()].focus_force()
         except tk.TclError:
             pass
 
@@ -1662,6 +1668,10 @@ class RFMViewer(tk.Toplevel):
             self.canvases[key] = canvas
             self._tab_keys[str(frame)] = key
 
+        self.results_pane = RFResultsPane(self.notebook, self.data)
+        self.notebook.add(self.results_pane, text=VIEWER_TABS["results"])
+        self._tab_keys[str(self.results_pane)] = "results"
+
     def _build_waveform_zoom_overlay(self) -> None:
         """Build the reversible in-window waveform enlargement layer."""
 
@@ -1937,7 +1947,7 @@ class RFMViewer(tk.Toplevel):
         self.value_mode_combo = ttk.Combobox(
             controls,
             state="readonly",
-            values=VALUE_MODES,
+            values=tuple(mode for mode in VALUE_MODES if self.data.supports_value_mode(mode)),
             textvariable=self.value_mode_var,
             width=18,
         )
@@ -2130,6 +2140,11 @@ class RFMViewer(tk.Toplevel):
             command=self._on_spatial_format_changed,
         )
         self.polar_layout_toggle.grid(row=1, column=4, sticky="w", pady=(8, 0))
+        self.rate_notice_label = ttk.Label(
+            controls,
+            text="Hz unavailable: this RF file has no stimulusPresentationCounts. Showing spike counts.",
+            style="Muted.TLabel",
+        )
 
     def _wire_events(self) -> None:
         self.unit_combo.bind("<<ComboboxSelected>>", self._on_unit_selected)
@@ -2176,7 +2191,7 @@ class RFMViewer(tk.Toplevel):
             ("<question>", self._show_shortcuts, ()),
         ) + tuple(
             (f"<KeyPress-{index + 1}>", self._select_tab, (index,))
-            for index in range(3)
+            for index in range(len(VIEWER_TABS))
         )
         for sequence, action, args in navigation_shortcuts:
             callback = lambda event, action=action, args=args: self._run_navigation_shortcut(
@@ -2331,9 +2346,12 @@ class RFMViewer(tk.Toplevel):
     def _select_tab(self, tab_index: int) -> None:
         if not hasattr(self, "notebook"):
             return
-        tabs = self.notebook.tabs()
+        tabs = tuple(
+            tab for tab in self.notebook.tabs()
+            if self.notebook.tab(tab, "state") != "hidden"
+        )
         if 0 <= tab_index < len(tabs):
-            self.notebook.select(tab_index)
+            self.notebook.select(tabs[tab_index])
 
     def _toggle_flip_y(self) -> None:
         self.flip_y_var.set(not self.flip_y_var.get())
@@ -2418,7 +2436,7 @@ class RFMViewer(tk.Toplevel):
             "← / →   Previous / next unit\n"
             "↑ / ↓   Previous / next timeline bin\n"
             "Shift+, / Shift+.   Coarser / finer by one source bin\n"
-            "1–3   Switch plot tab\n"
+            "1–4   Switch visible plot tab\n"
             "F   Invert Y\n"
             "P   Toggle Rectangle / Polar layout\n"
             "Shift+P   Cycle palette\n"
@@ -2807,7 +2825,7 @@ class RFMViewer(tk.Toplevel):
 
         value_mode = self.value_mode_var.get()
         if value_mode not in VALUE_MODES or not self.data.supports_value_mode(value_mode):
-            value_mode = VALUE_MODE_RATE
+            value_mode = VALUE_MODE_COUNT
         palette = self.palette_var.get()
         if palette not in PALETTES:
             palette = PALETTES[0]
@@ -2815,7 +2833,7 @@ class RFMViewer(tk.Toplevel):
         if polar_radius not in POLAR_RADIUS_MODES:
             polar_radius = POLAR_RADIUS_MODES[1]
         selected_tab = self._active_tab_key()
-        if selected_tab not in {"rf", "delay", "timeline"}:
+        if selected_tab not in VIEWER_TABS:
             selected_tab = "rf"
 
         return ViewerSyncState(
@@ -2920,9 +2938,22 @@ class RFMViewer(tk.Toplevel):
         if not hasattr(self, "notebook"):
             return
         for tab in self.notebook.tabs():
-            if self._tab_keys.get(str(tab)) == key:
+            if self._tab_keys.get(str(tab)) == key and self.notebook.tab(tab, "state") != "hidden":
                 self.notebook.select(tab)
                 return
+
+    def _sync_tab_visibility(self) -> None:
+        selected = self._active_tab_key()
+        visible = self.settings.visible_tabs
+        # Show replacements before hiding the active tab so Notebook always
+        # has a selectable page, including when all old pages are hidden.
+        for tab, key in self._tab_keys.items():
+            if key in visible:
+                self.notebook.tab(tab, state="normal")
+        for tab, key in self._tab_keys.items():
+            if key not in visible:
+                self.notebook.hide(tab)
+        self._select_tab_key(selected if selected in visible else visible[0])
 
     def _apply_pairing_state(
         self,
@@ -2969,7 +3000,7 @@ class RFMViewer(tk.Toplevel):
                     value_mode not in VALUE_MODES
                     or not self.data.supports_value_mode(value_mode)
                 ):
-                    value_mode = VALUE_MODE_RATE
+                    value_mode = VALUE_MODE_COUNT
                 self.value_mode_var.set(value_mode)
             if "time_resolution" in fields:
                 self.time_res_ms_var.set(format_ms(state.time_resolution_ms))
@@ -3226,6 +3257,14 @@ class RFMViewer(tk.Toplevel):
                 return False
             self._app_root._rfm_settings = settings
         self.settings = settings
+        if persist:
+            for window in self._ready_pairing_viewers():
+                if window is not self:
+                    window.settings = replace(
+                        window.settings, visible_tabs=settings.visible_tabs,
+                        default_viewer_tab=settings.default_viewer_tab,
+                    )
+                    window._sync_tab_visibility()
 
         old_show_probe = bool(self.show_probe_layout_var.get())
         old_show_tuning = bool(self.show_tuning_curve_var.get())
@@ -3242,7 +3281,7 @@ class RFMViewer(tk.Toplevel):
             self.show_waveform_var.set(settings.show_waveform)
             value_mode = settings.rf_value_mode
             if not self.data.supports_value_mode(value_mode):
-                value_mode = VALUE_MODE_RATE
+                value_mode = VALUE_MODE_COUNT
             self.value_mode_var.set(value_mode)
             self._reset_rf_window_defaults()
             self.time_res_ms_var.set(format_ms(settings.rf_time_resolution_ms))
@@ -3290,6 +3329,7 @@ class RFMViewer(tk.Toplevel):
             self._tuning_scale_cache = None
 
             self._sync_optional_view_visibility(redraw=False)
+            self._sync_tab_visibility()
             if settings.show_probe_layout and self.probe_geometry is None:
                 should_load_probe = settings.auto_load_probe_layout and (
                     not old_show_probe or not previous.auto_load_probe_layout
@@ -5022,8 +5062,7 @@ class RFMViewer(tk.Toplevel):
     def _on_value_mode_changed(self, _event: object | None = None) -> None:
         value_mode = self.value_mode_var.get()
         if not self.data.supports_value_mode(value_mode):
-            self.value_mode_var.set(VALUE_MODE_RATE)
-            return
+            self.value_mode_var.set(VALUE_MODE_COUNT)
         self._update_all()
         self._publish_pairing_state_if_changed()
 
@@ -5103,6 +5142,14 @@ class RFMViewer(tk.Toplevel):
     def _sync_context_controls(self) -> None:
         if not hasattr(self, "rgb_mode_toggle"):
             return
+        if self._active_tab_key() == "results":
+            self.plot_controls_frame.grid_remove()
+            return
+        self.plot_controls_frame.grid()
+        if self.data.supports_value_mode(VALUE_MODE_RATE):
+            self.rate_notice_label.grid_remove()
+        else:
+            self.rate_notice_label.grid(row=3, column=0, columnspan=9, sticky="w", pady=(6, 0))
         for frame in (
             self.range_controls_frame,
             self.delay_controls_frame,
@@ -5358,6 +5405,9 @@ class RFMViewer(tk.Toplevel):
 
     def _draw_active_tab(self, *, update_optional_views: bool = True) -> None:
         key = self._active_tab_key()
+        if key == "results":
+            self.results_pane.set_unit(self._selected_unit_id_value())
+            return
         if self._selected_local_unit_index() is None:
             self._draw_unavailable_unit(key)
             if key == "rf":
@@ -8353,6 +8403,10 @@ class RFMViewer(tk.Toplevel):
         self.data.close()
         self.data = data
         self.settings = self._app_root._rfm_settings
+        self.results_pane.set_document(data)
+        self.value_mode_combo.configure(values=tuple(
+            mode for mode in VALUE_MODES if data.supports_value_mode(mode)
+        ))
         self.title(f"{self.data.path.name} — RF Map Viewer")
         self.unit_idx.set(0)
         self._selected_unit_id = self.data.unit_pool[0]
@@ -8371,7 +8425,7 @@ class RFMViewer(tk.Toplevel):
         self._reset_rf_window_defaults()
         value_mode = self.settings.rf_value_mode
         self.value_mode_var.set(
-            value_mode if self.data.supports_value_mode(value_mode) else VALUE_MODE_RATE
+            value_mode if self.data.supports_value_mode(value_mode) else VALUE_MODE_COUNT
         )
         self.flip_y_var.set(self.settings.rf_flip_y)
         self.palette_var.set(self.settings.rf_palette)
@@ -8427,6 +8481,7 @@ class RFMViewer(tk.Toplevel):
         self.x_bins_spin.configure(to=self.data.n_x)
         self.y_bins_spin.configure(to=self.data.n_y)
         self._sync_optional_view_visibility(redraw=False)
+        self._sync_tab_visibility()
         self._select_tab_key(self.settings.default_viewer_tab)
         self._sync_json_menu()
         self._sync_unit_combo()
@@ -8460,6 +8515,13 @@ class RFMViewer(tk.Toplevel):
         self._figure_export_window = FigureExportWindow(self)
 
     def _export_current_matrix(self) -> None:
+        if self._active_tab_key() == "results":
+            messagebox.showinfo(
+                "Saved RF results",
+                "This tab shows saved analysis masks. Switch to RF to export the displayed RF matrix.",
+                parent=self,
+            )
+            return
         if self._selected_local_unit_index() is None:
             messagebox.showinfo(
                 "Unit unavailable",
@@ -8642,13 +8704,17 @@ def run_self_test(path: Path, *, isolated: bool = False) -> None:
     else:
         assert count_response[y_idx][x_idx] == range_sum[y_idx][x_idx]
     occupancy_time_s = data.occupancy_time_s[y_idx][x_idx]
-    if occupancy_time_s > 0:
-        expected_rate = sum(hist[: test_range_end + 1]) / occupancy_time_s
+    if occupancy_time_s > 0 and data.supports_value_mode(VALUE_MODE_RATE):
+        exposure = data.presentation_counts[y_idx][x_idx] * data.time_span_seconds(0, test_range_end)
+        expected_rate = sum(hist[: test_range_end + 1]) / exposure if exposure > 0 else None
         firing_rate = data.response_value(
             unit_idx, y_idx, x_idx, 0, test_range_end, VALUE_MODE_RATE
         )
-        assert firing_rate is not None
-        assert abs(firing_rate - expected_rate) < 1e-9
+        if expected_rate is None:
+            assert firing_rate is None
+        else:
+            assert firing_rate is not None
+            assert abs(firing_rate - expected_rate) < 1e-9
     assert 0.0 <= metrics.entropy[y_idx][x_idx] <= 1.0
     inferred_total_deg = data.infer_total_deg()
     assert math.isfinite(inferred_total_deg) and inferred_total_deg > 0
@@ -8669,7 +8735,7 @@ def run_self_test(path: Path, *, isolated: bool = False) -> None:
 
 
 def run_tkdnd_self_test() -> None:
-    """Verify that the optional-file drop runtime is usable in a frozen app."""
+    """Verify packaged TkDND and the saved-results Matplotlib/Tk runtime."""
 
     if not TK_AVAILABLE:
         raise RuntimeError("tkinter is not available")
@@ -8682,10 +8748,15 @@ def run_tkdnd_self_test() -> None:
     try:
         root.withdraw()
         version = TkinterDnD.require(root)
+        results = RFResultsPane(root)
+        results.figure.text(.5, .5, "RF Results", ha="center", color="black")
+        results.canvas.draw()
         root.update_idletasks()
+        results.destroy()
     finally:
         root.destroy()
     _cli_print(f"TkDND self-test passed: {version}")
+    _cli_print("RF Results TkAgg self-test passed")
 
 
 def run_figure_export_self_test(output_root: Path) -> None:
@@ -8844,7 +8915,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--self-test-dnd",
         action="store_true",
-        help="Load the bundled TkDND runtime and exit.",
+        help="Check the bundled TkDND and RF Results TkAgg runtimes, then exit.",
     )
     parser.add_argument(
         "--self-test-export",

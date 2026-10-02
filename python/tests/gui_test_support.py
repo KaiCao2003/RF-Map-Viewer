@@ -85,6 +85,7 @@ def write_payload(payload: dict) -> tuple[tempfile.TemporaryDirectory, Path]:
 def current_rf_payload(
     payload: dict,
     occupancy_time_s: list[list[float]] | float | None = None,
+    presentation_counts: list[list[int]] | int | None = None,
 ) -> dict:
     n_y, n_x = payload["unitsSpikeCountsSize"][1:3]
     if occupancy_time_s is None:
@@ -100,6 +101,9 @@ def current_rf_payload(
         occupancyTimeSecSize=[n_y, n_x],
         occupancyTimeDefinition="sum_of_qualifying_trial_durations_per_final_spatial_bin",
     )
+    if presentation_counts is None:
+        presentation_counts = [[10 for _x in range(n_x)] for _y in range(n_y)]
+    payload.setdefault("stimulusPresentationCounts", presentation_counts)
     return payload
 
 
@@ -111,4 +115,4 @@ def base_payload() -> dict:
         "xPositions": [-1, 1],
         "yPositions": [0],
         "timeBinEdges": [-0.1, 0.0, 0.05, 0.2],
-    }, [[1.0, 0.75]])
+    }, [[1.0, 0.75]], [[10, 5]])

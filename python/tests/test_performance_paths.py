@@ -155,7 +155,9 @@ def test_waveform_loading_keeps_one_worker_and_only_latest_pending_request(inval
 
 @pytest.mark.parametrize("mode", constants_module.VALUE_MODES)
 def test_local_queries_match_frames_without_building_full_grid(tmp_path, mode):
-    data = rf_model_module.RFMappingData(_write_dataset(tmp_path))
+    data = rf_model_module.RFMappingData(
+        _write_dataset(tmp_path, stimulusPresentationCounts=[[2, 5]])
+    )
     windows = [(0, 0), (1, 1), (1, 0), (-5, 9)]
     expected = data.spatial_group_response_frames(
         0, windows, mode, [(0, 0)], [(1, 0)]
@@ -165,7 +167,7 @@ def test_local_queries_match_frames_without_building_full_grid(tmp_path, mode):
         assert data.spatial_group_response_value(0, (0, 0), (1, 0), 1, 0, mode) == expected[2]
         assert data.spatial_group_response_values(0, (0, 0), (0, 0), [], mode) == []
         assert data.response_value(0, 0, 0, 0, 1, mode) == (
-            3 if mode == constants_module.VALUE_MODE_COUNT else 15
+            3 if mode == constants_module.VALUE_MODE_COUNT else 7.5
         )
 
 
@@ -173,6 +175,7 @@ def test_local_queries_preserve_unavailable_cells_and_unsigned_window_sums(tmp_p
     path = _write_dataset(
         tmp_path,
         occupancyTimeSec=[[0, 1]],
+        stimulusPresentationCounts=[[0, 5]],
         unitsSpikeCounts=[[[[0, 0], [2**63, 2**63 - 1]]], [[[0, 0], [1, 2]]]],
     )
     data = rf_model_module.RFMappingData(path)

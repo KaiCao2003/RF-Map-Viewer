@@ -38,11 +38,18 @@ top-level fields are metadata and do not invalidate an otherwise valid
 document. Geometry-specific fields written for vertical bars remain metadata
 in the shared base contract.
 
-For a selected half-open time window, firing rate is the summed raw spike count
-divided by `occupancyTimeSec`. A zero-occupancy cell is unavailable. When a
-viewer combines or smooths spatial cells, it combines or smooths the raw count
-and occupancy matrices separately before division; it never averages
-already-normalized rates.
+The Python viewer uses `stimulusPresentationCounts`, a non-negative integer
+matrix with axes `(y, x)`, for firing rate. For a selected half-open lag window,
+Hz is the summed raw spike count divided by the presentation count times the
+window duration in seconds. Combining time bins uses their actual edge widths,
+including nonuniform bins. `occupancyTimeSec` describes stimulus display time;
+it is not the denominator for an arbitrary response lag window.
+
+Python combines or smooths counts and presentation-based exposure separately
+before division. A zero-occupancy or zero-presentation cell is unavailable in
+rate mode. Legacy files without `stimulusPresentationCounts` remain viewable
+as counts; Python does not infer presentation counts from occupancy. This rate
+correction is specific to Python; Swift and Web need separate updates.
 
 Version 1.9.5 intentionally does not support earlier RF payloads that omit this
 occupancy-aware contract or store already-normalized values in
@@ -74,11 +81,12 @@ preserves display order. Keys are accessed without the `.npy` suffix.
 | `xPositions`, `yPositions` | One-dimensional spatial coordinates |
 | `timeBinEdges` | One-dimensional bin edges in seconds |
 | `occupancyTimeSec` | `(y, x)` occupancy seconds |
+| `stimulusPresentationCounts` | `(y, x)` non-negative integer presentations; required for Python Hz display |
 | `unit_<ID>` | `(y, x, time)` raw counts, written as lossless `float64` |
 
 The declared overall shape still includes the unit axis, but there is no
 `unitsSpikeCounts` entry. NPY preserves MATLAB's array order and singleton
 dimensions; do not transpose or reshape unit arrays. Reading retains the full
-time axis and the same occupancy normalization and half-open window semantics
+time axis and the same presentation-based normalization and half-open window semantics
 as JSON. Python validates each unit when loaded and caches a losslessly compact
 unsigned-integer copy. The viewer never rewrites input files.

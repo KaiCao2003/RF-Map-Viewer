@@ -95,7 +95,6 @@ class ComponentVersionTests(unittest.TestCase):
         verifier = ROOT / "release/verify_versions.py"
         for tag in (
             MANIFEST["components"]["python_stable"]["tag"],
-            "python-v1.10.0-alpha.3",
             MANIFEST["components"]["swift"]["tag"],
             MANIFEST["components"]["web"]["tag"],
         ):
@@ -105,14 +104,16 @@ class ComponentVersionTests(unittest.TestCase):
                 capture_output=True,
                 text=True,
             )
-        rejected = subprocess.run(
-            [sys.executable, str(verifier), "--tag", "python-v1.10.0.2"],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        self.assertNotEqual(rejected.returncode, 0)
-        self.assertIn("is not canonical", rejected.stderr)
+        for tag in ("python-v1.10.0.2", "python-v1.10.0-alpha.3"):
+            with self.subTest(tag=tag):
+                rejected = subprocess.run(
+                    [sys.executable, str(verifier), "--tag", tag],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertNotEqual(rejected.returncode, 0)
+                self.assertIn("is not canonical", rejected.stderr)
 
 
 if __name__ == "__main__":

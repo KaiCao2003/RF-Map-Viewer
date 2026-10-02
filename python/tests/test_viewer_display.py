@@ -371,6 +371,7 @@ class RFPlotRangeTests(unittest.TestCase):
             timeBinEdges=[-0.1, 0.0, 0.01, 0.02, 0.03],
             occupancyTimeSec=[[0.4]],
             occupancyTimeSecSize=[1, 1],
+            stimulusPresentationCounts=[[10]],
         )
         directory, path = write_payload(payload)
         self.addCleanup(directory.cleanup)

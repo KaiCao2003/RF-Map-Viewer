@@ -340,8 +340,6 @@ run_pyinstaller() {
     --specpath "$WORK_DIR" \
     --additional-hooks-dir "$PYINSTALLER_HOOKS" \
     --hidden-import matplotlib.backends.backend_tkagg \
-    --exclude-module rfmapping_fm_gui \
-    --exclude-module rfmapping_viewer.fm_dataset \
     --exclude-module h5py \
     --add-data "$SUPPORT_DOCUMENTATION:." \
     "$@" \

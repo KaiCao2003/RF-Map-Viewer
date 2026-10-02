@@ -176,7 +176,7 @@ class MacOSLifecycleTests(unittest.TestCase):
         root.destroy.assert_called_once_with()
 
     def test_bundle_prohibits_detached_duplicate_instances(self) -> None:
-        build_script = Path(gui.__file__).resolve().parent / "script" / "build_python_macos_app.sh"
+        build_script = Path(gui.__file__).resolve().parent / "script" / "build_python_stable_macos_app.sh"
         source = build_script.read_text(encoding="utf-8")
         self.assertIn('Add :LSMultipleInstancesProhibited bool true', source)
         self.assertNotIn('Add :LSMultipleInstancesProhibited bool false', source)

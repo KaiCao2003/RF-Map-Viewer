@@ -26,6 +26,7 @@ def write_pair(directory: Path, shape=(4, 2, 3, 5)):
         yPositions=list(range(y)),
         timeBinEdges=np.linspace(-0.1, 0.4, t + 1).tolist(),
         occupancyTimeSec=np.full((y, x), 0.75).tolist(),
+        stimulusPresentationCounts=np.full((y, x), 6).tolist(),
         responseUnits="spike_count",
         responseNormalization="none",
         spikeCountDefinition="each_qualifying_trial_contributes_once_per_final_spatial_bin",
@@ -43,6 +44,7 @@ def write_pair(directory: Path, shape=(4, 2, 3, 5)):
             "yPositions",
             "timeBinEdges",
             "occupancyTimeSec",
+            "stimulusPresentationCounts",
         )
     }
     raw.update(
@@ -90,6 +92,7 @@ def test_both_formats_match_counts_rates_axes_and_windows(tmp_path, shape):
                 "y_positions",
                 "time_bin_edges_s",
                 "occupancy_time_s",
+                "presentation_counts",
             ):
                 np.testing.assert_array_equal(getattr(a, attr), getattr(b, attr))
             assert b.shape == shape[1:] and not b.spike_counts.flags.writeable
@@ -103,6 +106,36 @@ def test_both_formats_match_counts_rates_axes_and_windows(tmp_path, shape):
         assert full.unit_ids == expected.unit_pool
     finally:
         actual.close()
+
+
+def test_legacy_archive_without_presentations_stays_count_only(tmp_path):
+    _, path, arrays = write_pair(tmp_path)
+    arrays.pop("stimulusPresentationCounts")
+    with path.open("wb") as stream:
+        np.savez_compressed(stream, **arrays)
+    data = RFMappingData(path)
+    try:
+        assert data.presentation_counts is None
+        assert data.supports_value_mode("Spike count")
+        assert not data.supports_value_mode("Mean firing rate (Hz)")
+        with pytest.raises(ValueError, match="stimulusPresentationCounts"):
+            data.response_matrix(0, 0, 1, "Mean firing rate (Hz)")
+        assert data.response_matrix(0, 0, 1, "Spike count")[0][0] == 3.0
+    finally:
+        data.close()
+
+
+@pytest.mark.parametrize("presentations", [
+    np.ones((2, 3), dtype=bool), np.ones((3, 2)), np.full((2, 3), 1.5),
+    np.full((2, 3), np.nan), np.zeros((2, 3)),
+])
+def test_invalid_indexed_presentations_are_rejected(tmp_path, presentations):
+    _, path, arrays = write_pair(tmp_path)
+    arrays["stimulusPresentationCounts"] = presentations
+    with path.open("wb") as stream:
+        np.savez_compressed(stream, **arrays)
+    with pytest.raises(ValueError, match="stimulusPresentationCounts"):
+        IndexedRFMapList(path)
 
 
 def test_archive_reads_only_first_unit_and_reuses_cached_objects(tmp_path, monkeypatch):

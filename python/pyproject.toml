@@ -3,13 +3,15 @@ requires = ["setuptools>=75"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "rfmapping-freemoving-viewer-python"
-version = "1.10.0a3"
-description = "Native Python/Tk alpha viewer for free-moving RF maps"
+name = "rfmapping-viewer-python"
+version = "1.11.1"
+description = "Native Python/Tk RF Map Viewer"
 requires-python = ">=3.11"
 dependencies = [
-  "h5py>=3.16,<4",
   "numpy>=2,<3",
+  "matplotlib>=3.11,<4",
+  "pandas>=2,<4",
+  "pynapple>=0.11.3,<0.12",
   "Pillow>=10,<13",
   "tkinterdnd2==0.6.2",
 ]
@@ -21,11 +23,10 @@ test = [
 ]
 
 [project.scripts]
-rfmapping-viewer = "rfmapping_fm_gui:main"
-rfmapping-fm-viewer = "rfmapping_fm_gui:main"
+rfmapping-viewer = "rfmapping_gui:main"
 
 [tool.setuptools]
-py-modules = ["rfmapping_fm_gui"]
+py-modules = ["rfmapping_gui"]
 
 [tool.setuptools.packages.find]
 where = ["."]

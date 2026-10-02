@@ -13,6 +13,7 @@ from rfmapping_viewer.constants import (
     TUNING_LAYOUTS,
     TUNING_PLOT_MODES,
     VALUE_MODES,
+    VIEWER_TABS,
     WAVEFORM_CHANNEL_MODE_BY_LABEL,
     WAVEFORM_CHANNEL_MODE_LABELS,
 )
@@ -101,14 +102,13 @@ class SettingsWindow(tk.Toplevel):
             value="Polar" if settings.rf_polar_layout else "Rectangle"
         )
         self.rf_rgb_mode_var = tk.BooleanVar(value=settings.rf_rgb_mode)
-        viewer_tab_labels = {
-            "rf": "RF",
-            "delay": "Delay / RGB",
-            "timeline": "Timeline",
-        }
         self.default_viewer_tab_var = tk.StringVar(
-            value=viewer_tab_labels.get(settings.default_viewer_tab, "RF")
+            value=VIEWER_TABS[settings.default_viewer_tab]
         )
+        self.visible_tab_vars = {
+            key: tk.BooleanVar(value=key in settings.visible_tabs)
+            for key in VIEWER_TABS
+        }
         self.waveform_channel_mode_var = tk.StringVar(
             value=WAVEFORM_CHANNEL_MODE_LABELS.get(
                 settings.waveform_channel_mode,
@@ -289,6 +289,15 @@ class SettingsWindow(tk.Toplevel):
             variable=self.auto_load_probe_layout_var,
         )
         self.auto_probe_check.grid(row=4, column=0, columnspan=2, sticky="w", padx=(22, 0))
+        self._section_label(tab, "Visible tabs", 5)
+        for row, (key, label) in enumerate(VIEWER_TABS.items(), start=6):
+            ttk.Checkbutton(
+                tab, text=label, variable=self.visible_tab_vars[key],
+            ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 6))
+        self._labeled_combo(
+            tab, 10, "Initial tab", self.default_viewer_tab_var,
+            tuple(VIEWER_TABS.values()),
+        )
 
     def _labeled_entry(
         self,
@@ -389,13 +398,6 @@ class SettingsWindow(tk.Toplevel):
         toggles.grid(row=15, column=1, sticky="w", pady=5)
         ttk.Checkbutton(toggles, text="Flip Y", variable=self.rf_flip_y_var).grid(row=0, column=0, padx=(0, 18))
         ttk.Checkbutton(toggles, text="RGB composite", variable=self.rf_rgb_mode_var).grid(row=0, column=1)
-        self._labeled_combo(
-            tab,
-            16,
-            "Initial tab",
-            self.default_viewer_tab_var,
-            ("RF", "Delay / RGB", "Timeline"),
-        )
 
     def _build_waveform_tab(self, tab: ttk.Frame) -> None:
         self._section_label(tab, "Local average waveform", 0)
@@ -627,12 +629,13 @@ class SettingsWindow(tk.Toplevel):
         palette = self.rf_palette_var.get()
         polar_radius = self.rf_polar_radius_var.get()
         layout = self.rf_layout_var.get()
-        tab_keys = {
-            "RF": "rf",
-            "Delay / RGB": "delay",
-            "Timeline": "timeline",
-        }
+        tab_keys = {label: key for key, label in VIEWER_TABS.items()}
         initial_tab = self.default_viewer_tab_var.get()
+        visible_tabs = tuple(
+            key for key, variable in self.visible_tab_vars.items() if variable.get()
+        )
+        if not visible_tabs:
+            raise SettingsValidationError("General", "Keep at least one tab visible.")
         waveform_channel_mode = WAVEFORM_CHANNEL_MODE_BY_LABEL.get(
             self.waveform_channel_mode_var.get()
         )
@@ -645,7 +648,11 @@ class SettingsWindow(tk.Toplevel):
         if layout not in {"Rectangle", "Polar"}:
             raise SettingsValidationError("RF Map", "Choose Rectangle or Polar layout.")
         if initial_tab not in tab_keys:
-            raise SettingsValidationError("RF Map", "Choose a supported initial tab.")
+            raise SettingsValidationError("General", "Choose a supported initial tab.")
+        initial_tab_key = tab_keys[initial_tab]
+        if initial_tab_key not in visible_tabs:
+            initial_tab_key = visible_tabs[0]
+            self.default_viewer_tab_var.set(VIEWER_TABS[initial_tab_key])
         if waveform_channel_mode is None:
             raise SettingsValidationError(
                 "Waveform", "Choose Same x column or Same shank."
@@ -727,7 +734,8 @@ class SettingsWindow(tk.Toplevel):
             rf_polar_radius=polar_radius,
             rf_polar_layout=layout == "Polar",
             rf_rgb_mode=bool(self.rf_rgb_mode_var.get()),
-            default_viewer_tab=tab_keys[initial_tab],
+            default_viewer_tab=initial_tab_key,
+            visible_tabs=visible_tabs,
             waveform_channel_mode=waveform_channel_mode,
             tuning_plot_mode=tuning_mode,
             tuning_layout=tuning_layout,

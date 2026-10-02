@@ -1,5 +1,4 @@
-"""Implementation-local support package shared by the independent viewers."""
+"""Implementation-local data, display, and UI support for RF Map Viewer."""
 
-# Import concrete modules explicitly. Keeping the package root empty prevents
-# the stable JSON viewer from loading the Free-Moving HDF5 stack at startup.
+# Import concrete modules explicitly so data consumers do not load the GUI.
 __all__: list[str] = []

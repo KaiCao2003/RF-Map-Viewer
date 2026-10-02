@@ -26,6 +26,7 @@ from rfmapping_viewer.constants import (
     TUNING_PLOT_MODES,
     VALUE_MODES,
     VALUE_MODE_RATE,
+    VIEWER_TABS,
     WAVEFORM_CHANNEL_MODES,
 )
 
@@ -88,6 +89,7 @@ class ViewerSettings:
     rf_polar_layout: bool = False
     rf_rgb_mode: bool = False
     default_viewer_tab: str = "rf"
+    visible_tabs: tuple[str, ...] = tuple(VIEWER_TABS)
     waveform_channel_mode: str = "same_x_column"
     tuning_plot_mode: str = "Auto"
     tuning_layout: str = TUNING_LAYOUTS[0]
@@ -153,8 +155,16 @@ class ViewerSettings:
         if polar_radius not in POLAR_RADIUS_MODES:
             polar_radius = defaults.rf_polar_radius
         viewer_tab = payload.get("default_viewer_tab", defaults.default_viewer_tab)
-        if viewer_tab not in {"rf", "delay", "timeline"}:
+        if viewer_tab not in VIEWER_TABS:
             viewer_tab = defaults.default_viewer_tab
+        requested_tabs = payload.get("visible_tabs", defaults.visible_tabs)
+        visible_tabs = (
+            tuple(key for key in VIEWER_TABS if key in requested_tabs)
+            if isinstance(requested_tabs, (list, tuple))
+            else defaults.visible_tabs
+        ) or defaults.visible_tabs
+        if viewer_tab not in visible_tabs:
+            viewer_tab = visible_tabs[0]
         waveform_channel_mode = payload.get(
             "waveform_channel_mode", defaults.waveform_channel_mode
         )
@@ -198,6 +208,7 @@ class ViewerSettings:
             rf_polar_layout=boolean("rf_polar_layout"),
             rf_rgb_mode=boolean("rf_rgb_mode"),
             default_viewer_tab=viewer_tab,
+            visible_tabs=visible_tabs,
             waveform_channel_mode=waveform_channel_mode,
             tuning_plot_mode=tuning_mode,
             tuning_layout=tuning_layout,

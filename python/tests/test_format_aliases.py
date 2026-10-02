@@ -13,7 +13,7 @@ from rfmapping_viewer.hd_tuning import discover_hd_tuning_path, load_hd_tuning
 from rfmapping_viewer.rf_dataset import load_rf_maps
 
 
-def test_stable_support_modules_do_not_import_freemoving_hdf5() -> None:
+def test_stable_support_modules_do_not_require_hdf5() -> None:
     script = """
 import importlib.abc
 import sys

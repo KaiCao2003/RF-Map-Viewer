@@ -1,21 +1,19 @@
 # Python RF Map Viewers
 
-This directory contains two separately versioned applications:
-
-- `rfmapping_gui.py`: the stable RF Map Viewer `1.11.0`;
-- `rfmapping_fm_gui.py`: the Free-Moving RF Viewer `1.10.0-alpha.3`.
-
-They have distinct app names, bundle identifiers, release artifacts, and tags,
-so the alpha can be installed and released without replacing the stable app.
+This directory contains the Python/Tk RF Map Viewer `1.11.1`, launched by
+`rfmapping_gui.py` or the installed `rfmapping-viewer` command. The separate
+Free-Moving alpha and its HDF5 Square/Bar, 3D-sphere, and exposure-QA paths have
+been retired. The offline session/EBC HTML report script remains available.
 
 ## User Guide — Stable RF Map Viewer
 
 This guide is for the read-only Python/Tk RF Map Viewer. It walks through a
 typical session from opening an RF map to inspecting units and exporting the
-current view. The separate Free-Moving alpha viewer has its own section below.
+current view.
 
 **At a glance:** open an RF map, choose a unit, select an RF time window, then
-use the RF, Delay / RGB, or Timeline view to inspect the response. Companion
+use the RF, Delay / RGB, or Timeline view to inspect the response, or RF Results
+to inspect saved detections. Companion
 files add probe positions, head-direction tuning, and local waveforms. The RF
 input is never edited; exports are created only when you request them.
 
@@ -24,7 +22,7 @@ input is never edited; exports are created only when you request them.
 - [Open an RF map](#open-an-rf-map)
 - [Find your way around](#find-your-way-around)
 - [Choose units and use the Probe layout](#choose-units-and-use-the-probe-layout)
-- [Read the three views](#read-the-three-views)
+- [Read the views](#read-the-views)
 - [Set the response window and display](#set-the-response-window-and-display)
 - [Add head-direction and waveform companions](#add-head-direction-and-waveform-companions)
 - [Compare viewer windows](#compare-viewer-windows)
@@ -110,13 +108,26 @@ The Probe view shows channels and units with known positions:
 Units without usable positions remain part of the RF data but cannot be
 selected by clicking or included by a Probe-region filter.
 
-### Read the three views
+### Read the views
 
 **RF** shows the selected unit's spatial response over the RF window. **Mean
 firing rate (Hz)** is the default metric; choose **Spike count** to show the
-raw count total. For rate, counts are divided by spatial occupancy time.
-When several source cells are grouped into one display cell, counts and
-occupancy are pooled before the rate is calculated.
+raw count total. Hz divides counts by `stimulusPresentationCounts` times the
+selected response-window duration. Spatial grouping and smoothing pool counts
+and presentation-based exposure separately. Files without presentation counts
+open in Spike count mode and explain why Hz is unavailable.
+
+**RF Results** reads the saved analysis sidecars beside the open RF document.
+Choose **1d / 2d** and **excitatory / inhibitory** to inspect the current unit's
+saved mask, center, analysis parameters and available QC. Unit matching uses
+recorded IDs. This tab does not run detection. Legacy 1D projections require
+their saved analysis provenance. Missing or incompatible sidecars are reported in the pane; use
+**Reload saved results** after the analysis producer updates the files.
+
+In **Settings → General → Visible tabs**, show or hide RF, Delay / RGB,
+Timeline and RF Results. At least one tab must remain visible. The preference
+persists and applies to open and new document windows. **Initial tab** selects
+the starting page; if that page is hidden, the first visible page is used.
 
 Click a map cell to inspect it. The **Selected cell** section reports its
 spatial indices and positions, value in the selected time bin, value over the
@@ -287,7 +298,7 @@ Open **Help → Keyboard Shortcuts** for the in-app list.
 | ← / → or [ / ] | Previous / next available unit |
 | ↑ / ↓ | Previous / next timeline bin |
 | Shift+, / Shift+. | Coarser / finer target time width |
-| 1 / 2 / 3 | RF / Delay-RGB / Timeline |
+| 1 / 2 / 3 / 4 | Switch between visible tabs in order |
 | F | Invert Y |
 | P / Shift+P | Toggle Polar layout / cycle palette |
 | - | Toggle RF Sum / A − B |
@@ -315,7 +326,11 @@ Open **Help → Keyboard Shortcuts** for the in-app list.
 
 ---
 
-## Stable viewer 1.11.0
+## Stable viewer 1.11.1
+
+Version 1.11.1 corrects RF Hz using saved presentation counts and the response
+window duration, adds the saved RF Results tab and tab visibility preferences,
+and retires the separate Free-Moving alpha application.
 
 Version 1.11.0 introduces movable, resizable figure widgets with preset frames,
 saved layouts that retain their rendering settings,
@@ -370,7 +385,7 @@ Composer, preserving the first equal peak after smoothing and distinguishing
 black zero-response cells from gray, marked cells with no occupancy. Temporal
 results use a bounded cache, spatial display controls avoid redrawing companion
 panels, and waveform navigation keeps one active read plus the latest pending
-unit. The stable macOS package excludes the separate Free-Moving/HDF5 modules.
+unit. The stable macOS package does not require HDF5.
 
 The stable viewer accepts legacy JSON `.rfmap`/`.json` files and version-2
 indexed NPZ `.rfmap` files. It detects the file signature rather than requiring
@@ -401,8 +416,10 @@ per final spatial bin, and occupancy sums the qualifying trial durations.
 At least one spatial cell must have positive occupancy.
 
 The default RF value is mean firing rate in Hz: counts in the selected response
-window are divided by spatial occupancy seconds. Spatial rebinning and
-smoothing pool counts and occupancy independently before division. Raw spike
+window are divided by presentations times the window duration in seconds.
+Spatial rebinning and smoothing pool counts and presentation-based exposure
+independently before division. Legacy files without presentation counts are
+viewable in count mode. Raw spike
 count remains available as the other value mode. MATLAB `jsonencode` numeric
 scalars are restored for singleton `unitPool`, `xPositions`, `yPositions`, and
 `occupancyTimeSec` dimensions. A singleton-y RF map keeps the `30:7` Cartesian
@@ -479,7 +496,7 @@ Opening the app without a path shows the native file chooser. Release packages
 do not contain or auto-load sample RF data.
 
 Its macOS identity is `RF Map Viewer.app`, bundle ID
-`org.local.rfmapping.viewer`, and version/build `1.11.0` / `111000`. Build it with:
+`org.local.rfmapping.viewer`, and version/build `1.11.1` / `111001`. Build it with:
 
 ```sh
 script/build_python_stable_macos_app.sh
@@ -517,7 +534,7 @@ code lives in `rfmapping_viewer/`:
 | `figure_composer.py`, `export_inputs.py` | Figure composition, input identity, and CSV publication |
 | `constants.py`, `paths.py`, `tk_support.py` | Stable identity, discovery, and native integration |
 
-Data and display modules can be imported without Tk or the alpha HDF5 stack.
+Data and display modules can be imported without Tk or HDF5.
 Tests import each function from its owning module and share synthetic fixtures
 in `tests/gui_test_support.py`.
 
@@ -534,82 +551,36 @@ the Tk runtime. A missing Tk runtime fails the suite. `pytest-stable.ini`
 selects stable tests, including all window interactions. The macOS PR check
 and stable release job use the same test script without Xvfb.
 
-## Free-Moving alpha 1.10.0-alpha.3
+## Install and launch
 
-> **freemoving rf viewer alpha**
-
-This Python/Tk application is a read-only viewer for the HDF5 `.rfmap` files
-written by `RFmapping_core_fm.m` and `rfmapping_core_fm_bar.m`. Version
-**1.10.0-alpha.3** is intentionally a separate alpha application: it does not
-open legacy RF JSON, tuning curves, probe files, or head-direction companions.
-
-### What it shows
-
-- one unit at a time from `/rf/rate_hz`;
-- an explicit **Square / Bar** choice before any file is loaded;
-- strict matching of Square `rfmapping_fm_hdf5_v1` and vertical-Bar
-  `rfmapping_fm_bar_hdf5_v1` files;
-- head-centric azimuth `[-180, 180)` and elevation `[-90, 90]`;
-- switchable 2D equirectangular and interactive 3D spherical RF views;
-- a legacy `30:7` visual footprint for singleton-elevation 2D maps, without
-  changing the physical 3D sphere;
-- drag-to-rotate 3D navigation with a deterministic front-view reset;
-- a continuously adjustable half-open response window;
-- time-weighted mean firing rate in Hz;
-- exposure and effective-trial QA maps;
-- a spatial-mean response timeline; and
-- embedded cylinder, rigid-body, viewpoint, and input provenance.
-
-The Bar loader additionally validates
-`stimulus_geometry=vertical_bar_full_source_height`, pooled recorded bar
-widths, and the latest Bar format contract. Both loaders validate
-`logical_dimension_order=unit,elevation,azimuth,time`, the completion marker,
-the embedded `rf-calib-1.0` document, and MATLAB's reversed on-disk HDF5
-dimension order. Only the selected unit is read from the large rate dataset.
-
-### Install and run from source
-
-Project validation is performed on `RFMAPPING_REMOTE_HOST` from your untracked `.env.local`:
+Install the stable viewer on the configured execution host:
 
 ```sh
 ssh "$RFMAPPING_REMOTE_HOST"
 cd ~/Developer/rfmapping_gui/python
 ~/.virtualenvs/rfmapping/bin/pip install -e '.[test]'
-~/.virtualenvs/rfmapping/bin/python rfmapping_fm_gui.py /path/to/result.rfmap
+~/.virtualenvs/rfmapping/bin/rfmapping-viewer /path/to/result.rfmap
 ```
 
-The app asks **Square or Bar** before opening a file selected from the picker,
-Finder Open With, or drag-and-drop. For an explicit noninteractive launch, pass
-`--stimulus square` or `--stimulus bar` with the path.
-
-### Validate
+The macOS app uses the stable release metadata and build script:
 
 ```sh
-cd ~/Developer/rfmapping_gui/python
-PYTHONDONTWRITEBYTECODE=1 ~/.virtualenvs/rfmapping/bin/python -m pytest -q \
-  --ignore=tests/test_rfmapping_gui_tk.py
-PYTHONDONTWRITEBYTECODE=1 ~/.virtualenvs/rfmapping/bin/python \
-  rfmapping_fm_gui.py --stimulus square --self-test /path/to/result.rfmap
-```
-
-The remote Linux host validates the HDF5 model and non-GUI behavior. A complete
-release additionally requires the Tk/TkDND smoke test on the Apple-silicon
-build host.
-
-### macOS alpha identity
-
-- App: `Free-Moving RF Viewer.app`
-- Bundle ID: `org.local.rfmapping.viewer.freemoving`
-- Release: `1.10.0-alpha.3`
-- Apple version/build: `1.10.0` / `110003`
-- Python package version: `1.10.0a3`
-- Edition: `FreeMovingAlpha`
-- Minimum system: macOS 14.0, Apple silicon
-
-The distinct name and bundle ID allow this alpha to be installed alongside
-the stable full RF Map Viewer. Build and inspect it with:
-
-```sh
-script/build_python_macos_app.sh
+script/build_python_stable_macos_app.sh
 script/install_python_macos_app.sh --preflight
+```
+
+`script/build_and_run.sh` also targets this stable application. The default
+installer action remains a read-only preflight; installation requires
+`--install`.
+
+## Offline session/EBC report
+
+`script/render_session_overlay.py` remains a standalone renderer for exported
+session-overlay JSON. Its self-contained HTML report includes session playback,
+world geometry, stimulus timing, EBC maps, spike timelines, and PNG snapshots.
+It is separate from the retired Free-Moving HDF5 viewer.
+
+```sh
+~/.virtualenvs/rfmapping/bin/python script/render_session_overlay.py \
+  /path/to/session-overlay.json /path/to/session-overlay.html
 ```

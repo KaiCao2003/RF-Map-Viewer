@@ -130,13 +130,61 @@ class TkViewerTests(unittest.TestCase):
             self.assertEqual(pooling.call_count, 1)
 
     def test_combined_tabs_and_default_rf_sum_range(self) -> None:
-        self.assertEqual(len(self.app.notebook.tabs()), 3)
+        self.assertEqual(len(self.app.notebook.tabs()), 4)
         self.assertEqual(
             [self.app.notebook.tab(tab, "text") for tab in self.app.notebook.tabs()],
-            ["RF", "Delay / RGB", "Timeline"],
+            ["RF", "Delay / RGB", "Timeline", "RF Results"],
         )
         self.assertEqual(float(self.app.range_start_ms_var.get()), 0.0)
         self.assertEqual(float(self.app.range_end_ms_var.get()), 30.0)
+
+    def test_tab_visibility_persists_and_shortcuts_skip_hidden_pages(self) -> None:
+        settings = replace(
+            self.app.settings, visible_tabs=("delay", "results"),
+            default_viewer_tab="results",
+        )
+        self.assertTrue(self.app._apply_viewer_settings(settings, persist=True, broadcast=True))
+        self.app.update()
+        self.assertEqual(self.app._active_tab_key(), "delay")
+        self.app._select_tab(1)
+        self.app.update()
+        self.assertEqual(self.app._active_tab_key(), "results")
+        self.assertFalse(self.app.plot_controls_frame.winfo_ismapped())
+        self.app._select_tab_key("rf")
+        self.assertEqual(self.app._active_tab_key(), "results")
+        loaded = settings_module.load_viewer_settings(self.app._app_root._rfm_settings_path)
+        self.assertEqual(loaded.visible_tabs, ("delay", "results"))
+        other = self.app._open_json_window(self.app.data.path)
+        self.addCleanup(other.destroy)
+        other.update()
+        self.assertEqual(other._active_tab_key(), "results")
+        self.assertEqual(other.notebook.tab(next(
+            tab for tab, key in other._tab_keys.items() if key == "rf"
+        ), "state"), "hidden")
+
+    def test_settings_reject_hiding_every_tab(self) -> None:
+        window = settings_window_module.SettingsWindow(self.app)
+        self.addCleanup(window.destroy)
+        for variable in window.visible_tab_vars.values():
+            variable.set(False)
+        with self.assertRaisesRegex(settings_window_module.SettingsValidationError, "at least one"):
+            window._validated_settings()
+        window.visible_tab_vars["results"].set(True)
+        settings = window._validated_settings()
+        self.assertEqual(settings.visible_tabs, ("results",))
+        self.assertEqual(settings.default_viewer_tab, "results")
+
+    def test_legacy_file_without_presentations_opens_as_counts(self) -> None:
+        payload = json.loads(self.app.data.path.read_text())
+        payload.pop("stimulusPresentationCounts", None)
+        legacy_path = self.app.data.path.with_name("legacy.json")
+        legacy_path.write_text(json.dumps(payload))
+        self.app._load_json_path(legacy_path)
+        self.app.update()
+        self.assertEqual(self.app.value_mode_var.get(), constants_module.VALUE_MODE_COUNT)
+        self.assertEqual(tuple(self.app.value_mode_combo["values"]), (constants_module.VALUE_MODE_COUNT,))
+        self.assertIn("stimulusPresentationCounts", self.app.rate_notice_label.cget("text"))
+        self.assertTrue(self.app.rate_notice_label.winfo_ismapped())
 
     def test_no_document_window_waits_for_an_explicit_open(self) -> None:
         with mock.patch.object(gui.filedialog, "askopenfilename", return_value="") as dialog:
@@ -384,8 +432,8 @@ class TkViewerTests(unittest.TestCase):
         form = canvas.winfo_children()[0]
         last_control = next(
             child for child in form.winfo_children()
-            if isinstance(child, tk_support_module.ttk.Combobox)
-            and str(child.cget("textvariable")) == str(settings.default_viewer_tab_var)
+            if isinstance(child, tk_support_module.ttk.Spinbox)
+            and str(child.cget("textvariable")) == str(settings.rf_smooth_radius_var)
         )
         last_control.focus_force()
         settings.update()
@@ -602,7 +650,7 @@ class TkViewerTests(unittest.TestCase):
         self.app.subtract_start_ms_var.set("1")
         self.app.subtract_end_ms_var.set("2")
         self.app._on_range_changed()
-        expected = [[None, None, None], [None, None, 3.0]]
+        expected = [[None, None, None], [None, None, 300.0]]
         self.assertEqual(self.app._current_matrix(), expected)
         self.assertEqual(self.app._prepare_rf_plot_matrix()[0], expected)
         self.assertIn("NaN", self.app._cell_tooltip_text((0, 0, 0, 0)))
@@ -621,7 +669,7 @@ class TkViewerTests(unittest.TestCase):
             self.app._export_current_matrix()
         with destination.open(newline="") as handle:
             rows = list(csv.DictReader(handle))
-        self.assertEqual([row["value"] for row in rows], ["", "", "", "", "", "3.0"])
+        self.assertEqual([row["value"] for row in rows], ["", "", "", "", "", "300.0"])
         self.assertTrue(all(row["rf_window_operation"] == "A - B" for row in rows))
         self.assertEqual((rows[0]["rf_subtract_start_ms"], rows[0]["rf_subtract_end_ms"]), ("1.0", "2.0"))
 

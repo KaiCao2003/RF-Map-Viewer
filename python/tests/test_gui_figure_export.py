@@ -178,6 +178,7 @@ def _write_fixture(tmp_path: Path) -> Path:
             "each_qualifying_trial_contributes_once_per_final_spatial_bin"
         ),
         "occupancyTimeSec": [[0.2, 0.2, 0.2], [0.2, 0.2, 0.2]],
+        "stimulusPresentationCounts": [[4, 4, 4], [4, 4, 4]],
         "occupancyTimeSecSize": [2, 3],
         "occupancyTimeDefinition": (
             "sum_of_qualifying_trial_durations_per_final_spatial_bin"
@@ -435,7 +436,7 @@ def test_rgb_export_preserves_gui_zero_and_missing_cells(tmp_path: Path, kind: P
     assert spec.options["hatch_missing"] is True
 
 
-@pytest.mark.parametrize("value_mode,positive", [(VALUE_MODE_COUNT, 4.0), (constants_module.VALUE_MODE_RATE, 20.0)])
+@pytest.mark.parametrize("value_mode,positive", [(VALUE_MODE_COUNT, 4.0), (constants_module.VALUE_MODE_RATE, 5.0)])
 def test_rf_window_difference_masks_negatives_and_preserves_zero(
     tmp_path: Path, value_mode: str, positive: float,
 ) -> None:
@@ -449,7 +450,10 @@ def test_rf_window_difference_masks_negatives_and_preserves_zero(
     expected = [[positive, positive, 0.0], [None, 0.0, 0.0]]
     for kind in (PlotKind.RF_CARTESIAN, PlotKind.RF_POLAR):
         spec = provider(17, PlotSpec(kind))
-        assert spec.data == expected
+        np.testing.assert_allclose(
+            np.asarray(spec.data, dtype=float), np.asarray(expected, dtype=float),
+            equal_nan=True, atol=1e-12,
+        )
         assert spec.options["subtitle"] == "(100–300 ms) − (-100–100 ms)"
         assert spec.options["missing_color"] == "#e6e8eb"
     ordinary = GUIFigureDataProvider(data, replace(snapshot, rf_subtract_source_range=None))
@@ -462,7 +466,7 @@ def test_rf_window_difference_masks_negatives_and_preserves_zero(
     np.testing.assert_array_equal(data.counts, original)
 
 
-@pytest.mark.parametrize("value_mode,expected", [(VALUE_MODE_COUNT, 4.0 / 6.0), (constants_module.VALUE_MODE_RATE, 4.0 / 1.2)])
+@pytest.mark.parametrize("value_mode,expected", [(VALUE_MODE_COUNT, 4.0 / 6.0), (constants_module.VALUE_MODE_RATE, 4.0 / (24 * 0.2))])
 def test_rf_window_difference_pools_before_masking_negative_cells(
     tmp_path: Path, value_mode: str, expected: float,
 ) -> None:

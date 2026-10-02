@@ -52,6 +52,42 @@ def test_load_lookup_and_half_open_sum(tmp_path: Path) -> None:
     assert not maps[0].spike_counts.flags.writeable
     np.testing.assert_array_equal(maps[0].occupancy_time_s, [[0.2, 0.4]])
     assert not maps[0].occupancy_time_s.flags.writeable
+    assert maps[0].presentation_counts is None
+
+
+def test_presentations_survive_half_open_sum_and_isolated_loading(tmp_path: Path) -> None:
+    from rfmapping_viewer.rf_loading import load_rf_maps_isolated
+
+    path = _write_dataset(tmp_path, stimulusPresentationCounts=[2, 5])
+    for maps in (load_rf_maps(path), load_rf_maps_isolated(path)):
+        np.testing.assert_array_equal(maps[0].presentation_counts, [[2, 5]])
+        assert not maps[0].presentation_counts.flags.writeable
+        assert "stimulusPresentationCounts" not in maps[0].metadata
+        summed = maps[0].sum(-0.1, 0.1)
+        np.testing.assert_array_equal(summed.presentation_counts, [[2, 5]])
+        np.testing.assert_array_equal(summed.spike_counts[..., 0], [[3, 7]])
+
+
+@pytest.mark.parametrize("presentations", [None, [[2]], [[2, -1]], [[2, 1.5]],
+                                           [[2, True]], [[2, float("nan")]],
+                                           [[2, float("inf")]]])
+def test_invalid_presentation_counts_are_rejected(tmp_path: Path, presentations) -> None:
+    with pytest.raises(ValueError, match="stimulusPresentationCounts"):
+        load_rf_maps(_write_dataset(tmp_path, stimulusPresentationCounts=presentations))
+
+
+def test_zero_presentations_require_zero_spikes(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="stimulusPresentationCounts is zero"):
+        load_rf_maps(_write_dataset(tmp_path, stimulusPresentationCounts=[[2, 0]]))
+
+
+def test_scalar_presentation_count_restores_singleton_axes(tmp_path: Path) -> None:
+    maps = load_rf_maps(_write_dataset(
+        tmp_path, unitsSpikeCounts=[[[[3, 6]]]], unitsSpikeCountsSize=[1, 1, 1, 2],
+        unitPool=[41], xPositions=[0], yPositions=[0], occupancyTimeSec=0.4,
+        stimulusPresentationCounts=3,
+    ))
+    np.testing.assert_array_equal(maps[0].presentation_counts, [[3]])
 
 
 @pytest.mark.parametrize(

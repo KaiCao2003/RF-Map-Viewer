@@ -11,8 +11,8 @@ if [[ -n "${RF_MAPPING_RELEASE_CONFIG:-}" ]]; then
   # shellcheck disable=SC1090
   source "$RF_MAPPING_RELEASE_CONFIG"
 else
-  # shellcheck source=python_macos_release.env
-  source "$SCRIPT_DIR/python_macos_release.env"
+  # shellcheck source=python_stable_macos_release.env
+  source "$SCRIPT_DIR/python_stable_macos_release.env"
 fi
 
 APP_NAME="$RF_MAPPING_APP_NAME"
@@ -272,10 +272,6 @@ validate_document_contract() {
   verify_plist_value "$bundle" UTExportedTypeDeclarations:0:UTTypeIdentifier org.local.rfmapping.rfmap
 
   case "$EXPECTED_EDITION" in
-    FreeMovingAlpha)
-      verify_plist_missing "$bundle" CFBundleDocumentTypes:1
-      verify_plist_missing "$bundle" UTExportedTypeDeclarations:1
-      ;;
     Full)
       verify_plist_value "$bundle" CFBundleDocumentTypes:1:CFBundleTypeRole Viewer
       verify_plist_value "$bundle" CFBundleDocumentTypes:1:LSHandlerRank Alternate

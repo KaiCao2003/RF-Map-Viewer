@@ -76,6 +76,11 @@ class IndexedRFMapList(Sequence[RFMap]):
                 if key == "unitPool" and value.dtype.kind not in "ui":
                     raise ValueError("unitPool must contain integer unit IDs")
                 raw[key] = value.tolist()
+            if "stimulusPresentationCounts" in self._archive.files:
+                value = self._archive["stimulusPresentationCounts"]
+                if value.ndim != 2 or value.dtype.kind not in "uif":
+                    raise ValueError("stimulusPresentationCounts must be a 2-dimensional numeric array")
+                raw["stimulusPresentationCounts"] = value.tolist()
             self.header = _parse_rf_header(raw)
             keys = self._archive.files
             if len(set(keys)) != len(keys):

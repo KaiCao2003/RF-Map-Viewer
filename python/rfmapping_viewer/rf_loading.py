@@ -30,6 +30,7 @@ def _decode_worker(path: str, connection: Connection) -> None:
             (
                 len(maps), first.x_positions, first.y_positions,
                 first.time_bin_edges_s, first.occupancy_time_s, dict(first.metadata),
+                first.presentation_counts,
             ),
         ))
         for unit in maps:
@@ -88,8 +89,10 @@ def load_rf_maps_isolated(
     try:
         process.start()
         sender.close()
-        n_units, x, y, edges, occupancy, metadata = receive("header")
+        n_units, x, y, edges, occupancy, metadata, presentations = receive("header")
         occupancy = _readonly_array(occupancy)
+        if presentations is not None:
+            presentations = _readonly_array(presentations)
         maps = []
         for _ in range(n_units):
             index, unit_id, shape, dtype = receive("unit")
@@ -109,6 +112,7 @@ def load_rf_maps_isolated(
                     y_positions=y,
                     time_bin_edges_s=edges,
                     occupancy_time_s=occupancy,
+                    presentation_counts=presentations,
                     metadata=metadata,
                     source_path=path,
                 )

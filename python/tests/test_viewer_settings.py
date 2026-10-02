@@ -191,6 +191,25 @@ class WaveformSettingsTests(unittest.TestCase):
 
 
 class ViewerSettingsTests(unittest.TestCase):
+    def test_visible_tabs_round_trip_and_hidden_initial_tab_is_replaced(self) -> None:
+        settings = replace(
+            settings_module.ViewerSettings(), visible_tabs=("timeline", "results"),
+            default_viewer_tab="results",
+        )
+        serialized = json.loads(json.dumps(settings.to_mapping()))
+        self.assertEqual(settings_module.ViewerSettings.from_mapping(serialized), settings)
+        serialized["default_viewer_tab"] = "rf"
+        self.assertEqual(
+            settings_module.ViewerSettings.from_mapping(serialized).default_viewer_tab,
+            "timeline",
+        )
+
+    def test_invalid_visible_tabs_recover_without_empty_notebook(self) -> None:
+        for value in ([], ["unknown"], "rf", None):
+            with self.subTest(value=value):
+                settings = settings_module.ViewerSettings.from_mapping({"visible_tabs": value})
+                self.assertEqual(settings.visible_tabs, tuple(constants_module.VIEWER_TABS))
+
     def test_platform_settings_paths_use_native_locations_and_fallbacks(self) -> None:
         home = Path("/Users/tester")
         self.assertEqual(

@@ -34,6 +34,7 @@ from rfmapping_viewer.constants import (
     DEFAULT_TUNING_CURVE_SESSION,
     INNER_BLANK_ROWS,
     POLAR_RADIUS_MODES,
+    VALUE_MODE_RATE,
 )
 from rfmapping_viewer.display import (
     _nullable_array_list,
@@ -828,6 +829,10 @@ def _figure_snapshot_metadata(data: RFMappingData, snapshot: FigureViewerSnapsho
         "selectedCell": list(snapshot.selected_cell) if snapshot.selected_cell is not None else None,
         "occupancyTimeSecAvailable": True,
         "occupancyTimeSecSize": [data.n_y, data.n_x],
+        "rateNormalization": (
+            "presentation_count_time" if snapshot.value_mode == VALUE_MODE_RATE else "none"
+        ),
+        "stimulusPresentationCountsAvailable": data.presentation_counts is not None,
         "unitFilter": {
             "enabled": snapshot.unit_filter_enabled,
             "zeroSpikeSpatialBinThreshold": snapshot.zero_bin_threshold,
@@ -943,7 +948,7 @@ class FigureExportWindow(tk.Toplevel):
     def _current_plot_kind(self) -> PlotKind:
         tab = self.viewer._active_tab_key()
         polar = bool(self.viewer.polar_layout_var.get())
-        if tab == "rf":
+        if tab in {"rf", "results"}:
             return PlotKind.RF_POLAR if polar else PlotKind.RF_CARTESIAN
         if tab == "delay":
             if self.viewer.rgb_mode_var.get():

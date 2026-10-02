@@ -119,7 +119,7 @@ def verify_manifest(manifest: dict[str, Any]) -> None:
     )
 
     tags: set[str] = set()
-    for name in ("python_stable", "python_freemoving", "swift", "web"):
+    for name in ("python_stable", "swift", "web"):
         entry = component(manifest, name)
         release_version = entry.get("release_version")
         if (
@@ -202,47 +202,6 @@ def verify_manifest(manifest: dict[str, Any]) -> None:
         "Python stable Windows checksum",
     )
 
-    python_fm = component(manifest, "python_freemoving")
-    expect(python_fm.get("channel"), "alpha", "Python FM channel")
-    python_fm_core = semver_core(python_fm["release_version"])
-    python_fm_offset = python_fm.get("feature_generation_offset")
-    if not isinstance(python_fm_offset, int):
-        raise ValueError("Python FM feature_generation_offset must be an integer")
-    expect(
-        python_fm_core[:2],
-        (stable_core[0], stable_core[1] + python_fm_offset),
-        "Python FM feature generation",
-    )
-    marketing_version = python_fm.get("marketing_version")
-    if (
-        not isinstance(marketing_version, str)
-        or APPLE_VERSION_PATTERN.fullmatch(marketing_version) is None
-    ):
-        raise ValueError("Python FM marketing_version must be three integers")
-    expect(
-        python_fm.get("release_version"),
-        f"{marketing_version}-{python_fm.get('prerelease')}",
-        "Python FM release version",
-    )
-    python_release = python_fm["release_version"]
-    python_flavor = python_fm["artifact_flavor"]
-    expect(
-        python_fm.get("tag"),
-        f"python-v{python_release}",
-        "Python FM tag",
-    )
-    expect(
-        python_fm.get("artifact"),
-        "Free_Moving_RF_Viewer-"
-        f"python-{python_release}-{python_flavor}-macos-arm64.zip",
-        "Python FM artifact",
-    )
-    expect(
-        python_fm.get("checksum"),
-        f"SHA256SUMS-python-{python_release}-{python_flavor}.txt",
-        "Python FM checksum",
-    )
-
     swift = component(manifest, "swift")
     expect(swift.get("channel"), "stable", "Swift channel")
     swift_offset = swift.get("feature_generation_offset")
@@ -293,7 +252,6 @@ def verify_manifest(manifest: dict[str, Any]) -> None:
 
 def verify_sources(root: Path, manifest: dict[str, Any]) -> None:
     python_stable = component(manifest, "python_stable")
-    python_fm = component(manifest, "python_freemoving")
     swift = component(manifest, "swift")
     web = component(manifest, "web")
 
@@ -362,55 +320,21 @@ def verify_sources(root: Path, manifest: dict[str, Any]) -> None:
         "Python stable Inno Setup build",
     )
     expect(
-        literal_assignment(root / "python/rfmapping_fm_gui.py", "APP_VERSION"),
-        python_fm["marketing_version"],
-        "Python FM APP_VERSION",
-    )
-    expect(
-        literal_assignment(root / "python/rfmapping_fm_gui.py", "APP_PRERELEASE"),
-        python_fm["prerelease"],
-        "Python FM APP_PRERELEASE",
-    )
-    expect(
-        literal_assignment(root / "python/rfmapping_fm_gui.py", "APP_EDITION"),
-        python_fm["edition"],
-        "Python FM APP_EDITION",
-    )
-    expect(
         toml_project_version(root / "python/pyproject.toml"),
-        python_fm["package_version"],
-        "Python FM package version",
+        python_stable["package_version"],
+        "Python stable package version",
     )
-    python_env = root / "python/script/python_macos_release.env"
+    with (root / "python/pyproject.toml").open("rb") as stream:
+        python_package = tomllib.load(stream)
     expect(
-        shell_assignment(python_env, "RF_MAPPING_APP_VERSION"),
-        python_fm["marketing_version"],
-        "Python macOS marketing version",
-    )
-    expect(
-        shell_assignment(python_env, "RF_MAPPING_APP_PRERELEASE"),
-        python_fm["prerelease"],
-        "Python macOS prerelease",
+        python_package["project"].get("scripts"),
+        {"rfmapping-viewer": "rfmapping_gui:main"},
+        "Python stable command entry point",
     )
     expect(
-        shell_assignment(python_env, "RF_MAPPING_PACKAGE_VERSION"),
-        python_fm["package_version"],
-        "Python package release version",
-    )
-    expect(
-        shell_assignment(python_env, "RF_MAPPING_APP_BUILD"),
-        python_fm["build"],
-        "Python macOS build",
-    )
-    expect(
-        shell_assignment(python_env, "RF_MAPPING_RELEASE_EDITION"),
-        python_fm["edition"],
-        "Python macOS release edition",
-    )
-    expect(
-        shell_assignment(python_env, "RF_MAPPING_RELEASE_FLAVOR"),
-        python_fm["artifact_flavor"],
-        "Python artifact flavor",
+        python_package["tool"]["setuptools"].get("py-modules"),
+        ["rfmapping_gui"],
+        "Python stable packaged application module",
     )
 
     swift_script = root / "swift/script/build_macos_app.sh"
@@ -477,7 +401,7 @@ def main() -> int:
     if args.tag is not None:
         expected_tags = {
             component(manifest, name)["tag"]
-            for name in ("python_stable", "python_freemoving", "swift", "web")
+            for name in ("python_stable", "swift", "web")
         }
         if args.tag not in expected_tags:
             expected = ", ".join(sorted(expected_tags))
@@ -485,11 +409,10 @@ def main() -> int:
 
     versions = ", ".join(
         f"{name}={component(manifest, name)['release_version']}"
-        for name in ("python_stable", "python_freemoving", "swift", "web")
+        for name in ("python_stable", "swift", "web")
     )
     if args.github_output is not None:
         python_stable = component(manifest, "python_stable")
-        python_fm = component(manifest, "python_freemoving")
         swift = component(manifest, "swift")
         web = component(manifest, "web")
         outputs = {
@@ -507,10 +430,6 @@ def main() -> int:
                 "windows_installer_artifact"
             ],
             "python_stable_windows_checksum": python_stable["windows_checksum"],
-            "python_fm_release": python_fm["release_version"],
-            "python_fm_tag": python_fm["tag"],
-            "python_fm_artifact": python_fm["artifact"],
-            "python_fm_checksum": python_fm["checksum"],
             "swift_release": swift["release_version"],
             "swift_tag": swift["tag"],
             "swift_artifact": swift["artifact"],

@@ -16,7 +16,7 @@ class RFMappingRateTests(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         return rf_model_module.RFMappingData(path)
 
-    def test_count_and_rate_use_occupancy_seconds(self) -> None:
+    def test_rate_uses_presentations_and_actual_lag_duration(self) -> None:
         data = self.load(base_payload())
 
         self.assertEqual(data.response_value(0, 0, 0, 0, 0, constants_module.VALUE_MODE_COUNT), 10)
@@ -26,11 +26,11 @@ class RFMappingRateTests(unittest.TestCase):
         )
         self.assertAlmostEqual(
             data.response_value(0, 0, 0, 1, 1, constants_module.VALUE_MODE_RATE),
-            20.0,
+            40.0,
         )
         self.assertAlmostEqual(
             data.response_value(0, 0, 0, 0, 1, constants_module.VALUE_MODE_RATE),
-            30.0,
+            20.0,
         )
         self.assertAlmostEqual(
             data.response_value(0, 0, 1, 0, 1, constants_module.VALUE_MODE_RATE),
@@ -143,6 +143,7 @@ class RFMappingRateTests(unittest.TestCase):
             timeBinEdges=[-0.1, 0.0, 0.1, 0.2, 0.3],
             occupancyTimeSec=[[1.0, 2.0, 0.0], [0.5, 1.5, 2.5]],
             occupancyTimeSecSize=[2, 3],
+            stimulusPresentationCounts=[[4, 8, 0], [2, 6, 10]],
         )
         data = self.load(payload)
         time_groups = [(0, 0), (1, 2), (3, 3)]
@@ -191,9 +192,9 @@ class RFMappingRateTests(unittest.TestCase):
                 ]
                 for row in observations
             ]
-            occupancy_matrix = [
+            exposure_matrix = [
                 [
-                    value.occupancy_time_s
+                    value.rate_exposure_s
                     if value.source_pixel_count > 0
                     else None
                     for value in row
@@ -201,16 +202,16 @@ class RFMappingRateTests(unittest.TestCase):
                 for row in observations
             ]
             count_matrix = display_module.smooth_matrix(count_matrix, 1)
-            occupancy_matrix = display_module.smooth_matrix(occupancy_matrix, 1)
+            exposure_matrix = display_module.smooth_matrix(exposure_matrix, 1)
             reference.append(
                 [
                     [
-                        None if count is None or occupancy is None else count / occupancy
-                        for count, occupancy in zip(count_row, occupancy_row)
+                        None if count is None or exposure is None else count / exposure
+                        for count, exposure in zip(count_row, exposure_row)
                     ]
-                    for count_row, occupancy_row in zip(
+                    for count_row, exposure_row in zip(
                         count_matrix,
-                        occupancy_matrix,
+                        exposure_matrix,
                     )
                 ]
             )
@@ -307,7 +308,7 @@ class RFMappingRateTests(unittest.TestCase):
                 self.assertAlmostEqual(entropy[y_idx, x_idx], metrics.entropy)
 
 
-    def test_spatial_groups_pool_counts_and_unequal_occupancy(self) -> None:
+    def test_spatial_groups_pool_counts_and_unequal_presentations(self) -> None:
         payload = current_rf_payload({
             "unitsSpikeCounts": [[[[100, 0], [0, 9]]]],
             "unitsSpikeCountsSize": [1, 1, 2, 2],
@@ -315,7 +316,7 @@ class RFMappingRateTests(unittest.TestCase):
             "xPositions": [-1, 1],
             "yPositions": [0],
             "timeBinEdges": [0, 0.1, 0.2],
-        }, [[100.0, 1.0]])
+        }, [[100.0, 1.0]], [[20, 3]])
         data = self.load(payload)
 
         self.assertAlmostEqual(
@@ -327,7 +328,7 @@ class RFMappingRateTests(unittest.TestCase):
                 1,
                 constants_module.VALUE_MODE_RATE,
             ),
-            109 / 101,
+            109 / (23 * 0.2),
         )
         self.assertEqual(
             data.spatial_group_response_value(
@@ -427,7 +428,7 @@ class RFMappingRateTests(unittest.TestCase):
             "xPositions": [-1, 1],
             "yPositions": [0],
             "timeBinEdges": [0, 0.1],
-        }, [[100.0, 1.0]])
+        }, [[100.0, 1.0]], [[20, 3]])
         data = self.load(payload)
         viewer = SimpleNamespace(
             data=data,
@@ -445,9 +446,9 @@ class RFMappingRateTests(unittest.TestCase):
             smooth=True,
         )
 
-        self.assertAlmostEqual(matrix[0][0], (4 * 100 + 2 * 9) / (4 * 100 + 2 * 1))
-        self.assertAlmostEqual(matrix[0][1], (4 * 9 + 2 * 100) / (4 * 1 + 2 * 100))
-        self.assertNotAlmostEqual(matrix[0][0], (4 * 1 + 2 * 9) / 6)
+        self.assertAlmostEqual(matrix[0][0], (4 * 100 + 2 * 9) / ((4 * 20 + 2 * 3) * 0.1))
+        self.assertAlmostEqual(matrix[0][1], (4 * 9 + 2 * 100) / ((4 * 3 + 2 * 20) * 0.1))
+        self.assertNotAlmostEqual(matrix[0][0], (4 * 50 + 2 * 30) / 6)
 
     def test_best_cell_does_not_force_full_metrics(self) -> None:
         data = self.load(base_payload())
@@ -455,7 +456,7 @@ class RFMappingRateTests(unittest.TestCase):
         self.assertEqual(data._metrics_cache, {})
         self.assertEqual(data.best_cell(0), (0, 0))
 
-    def test_best_cell_uses_occupancy_normalized_strength(self) -> None:
+    def test_best_cell_uses_presentation_normalized_strength(self) -> None:
         payload = current_rf_payload(
             {
                 "unitsSpikeCounts": [[[[100], [9]]]],
@@ -465,12 +466,79 @@ class RFMappingRateTests(unittest.TestCase):
                 "yPositions": [0],
                 "timeBinEdges": [0, 0.1],
             },
-            [[100.0, 1.0]],
+            [[1.0, 100.0]],
+            [[100, 1]],
         )
         data = self.load(payload)
 
         self.assertEqual(data.best_cell(0), (0, 1))
         self.assertEqual(data.metrics(0).best_x, 1)
+        del payload["stimulusPresentationCounts"]
+        count_only = self.load(payload)
+        self.assertEqual(count_only.best_cell(0), (0, 0))
+        self.assertEqual(count_only.metrics(0).best_x, 0)
+
+    def test_missing_presentations_keep_counts_and_disable_every_rate_path(self) -> None:
+        payload = base_payload()
+        del payload["stimulusPresentationCounts"]
+        data = self.load(payload)
+        count, rate = constants_module.VALUE_MODE_COUNT, constants_module.VALUE_MODE_RATE
+        self.assertTrue(data.supports_value_mode(count))
+        self.assertFalse(data.supports_value_mode(rate))
+        self.assertEqual(data.response_matrix(0, 0, 2, count), [[60.0, 30.0]])
+        self.assertEqual(data.best_cell(0), (0, 0))
+        self.assertEqual(data.metrics(0).best_x, 0)
+        calls = (
+            lambda: data.response_value(0, 0, 0, 0, 2, rate),
+            lambda: data.response_matrix(0, 0, 2, rate),
+            lambda: data.spatial_group_response_value(0, (0, 0), (0, 1), 0, 2, rate),
+            lambda: data.spatial_group_response_values(0, (0, 0), (0, 1), [(0, 2)], rate),
+            lambda: data.spatial_group_response_frames(0, [(0, 2)], rate, [(0, 0)], [(0, 1)]),
+            lambda: data.all_positions_timeline_values(0, [(0, 2)], rate),
+        )
+        for call in calls:
+            with self.assertRaisesRegex(ValueError, "stimulusPresentationCounts"):
+                call()
+
+    def test_nonuniform_timeline_rates_match_duration_weighted_window(self) -> None:
+        data = self.load(base_payload())
+        rate = constants_module.VALUE_MODE_RATE
+        groups = [(0, 0), (1, 1), (2, 2)]
+        widths = np.array([0.1, 0.05, 0.15])
+        expected = np.array([15, 30, 45]) / (15 * widths)
+        np.testing.assert_allclose(data.all_positions_timeline_values(0, groups, rate), expected)
+        np.testing.assert_allclose(
+            data.spatial_group_response_values(0, (0, 0), (0, 1), groups, rate), expected,
+        )
+        np.testing.assert_allclose(
+            data.spatial_group_response_frames(0, groups, rate, [(0, 0)], [(0, 1)])[:, 0, 0],
+            expected,
+        )
+        window_rate = data.spatial_group_response_value(0, (0, 0), (0, 1), 0, 2, rate)
+        self.assertAlmostEqual(window_rate, float(np.average(expected, weights=widths)))
+        self.assertAlmostEqual(window_rate, 20.0)
+
+    def test_rate_is_independent_of_stimulus_display_duration(self) -> None:
+        payload = base_payload()
+        payload["occupancyTimeSec"] = [[100.0, 0.001]]
+        data = self.load(payload)
+        np.testing.assert_allclose(
+            data.response_matrix(0, 0, 2, constants_module.VALUE_MODE_RATE), [[20.0, 20.0]],
+        )
+
+    def test_zero_presentations_preserve_counts_but_have_no_rate(self) -> None:
+        payload = base_payload()
+        payload["unitsSpikeCounts"][0][0][1] = [0, 0, 0]
+        payload["stimulusPresentationCounts"][0][1] = 0
+        data = self.load(payload)
+        self.assertEqual(data.response_value(0, 0, 1, 0, 2, constants_module.VALUE_MODE_COUNT), 0)
+        self.assertIsNone(data.response_value(0, 0, 1, 0, 2, constants_module.VALUE_MODE_RATE))
+        frames = data.spatial_group_response_frames(
+            0, [(0, 2)], constants_module.VALUE_MODE_RATE,
+            [(0, 0)], [(0, 0), (1, 1)], smooth_radius=1,
+        )
+        self.assertAlmostEqual(frames[0, 0, 0], 20.0)
+        self.assertTrue(np.isnan(frames[0, 0, 1]))
 
     def test_zero_occupancy_stays_missing_after_display_smoothing(self) -> None:
         payload = base_payload()

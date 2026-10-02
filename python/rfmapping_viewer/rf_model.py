@@ -69,6 +69,7 @@ class SpatialGroupObservations:
     count: float
     occupancy_time_s: float
     source_pixel_count: int
+    rate_exposure_s: float | None = None
 
 
 @dataclass(frozen=True)
@@ -122,13 +123,17 @@ class RFMappingData:
         self.time_bin_edges = first.time_bin_edges_s.tolist()
         self.occupancy_time_s = first.occupancy_time_s.tolist()
         self._occupancy_array = first.occupancy_time_s
+        self._presentation_array = first.presentation_counts
+        self.presentation_counts = (
+            None if first.presentation_counts is None else first.presentation_counts.tolist()
+        )
         self._count_prefix_cache: dict[int, np.ndarray] = {}
         self._count_window_cache: dict[
             tuple[int, tuple[AxisGroup, ...]], np.ndarray
         ] = {}
         self._spatial_exposure_cache: dict[
             tuple[tuple[AxisGroup, ...], tuple[AxisGroup, ...]],
-            tuple[np.ndarray, np.ndarray],
+            tuple[np.ndarray, np.ndarray, np.ndarray | None],
         ] = {}
         self._count_cache_lock = threading.Lock()
         self._temporal_array_cache: dict[
@@ -509,9 +514,7 @@ class RFMappingData:
         max_peak = 0.0
         max_bin_count = 0.0
         total_spikes = 0.0
-        best_y = 0
-        best_x = 0
-        best_rate = -1.0
+        best_y, best_x = self.best_cell(unit_idx)
 
         for y_idx in range(self.n_y):
             total_row: list[float] = []
@@ -544,12 +547,6 @@ class RFMappingData:
 
                 if cell_total > max_total:
                     max_total = cell_total
-                occupancy = self.occupancy_time_s[y_idx][x_idx]
-                cell_rate = cell_total / occupancy if occupancy > 0.0 else -1.0
-                if cell_rate > best_rate:
-                    best_rate = cell_rate
-                    best_y = y_idx
-                    best_x = x_idx
                 if cell_peak > max_peak:
                     max_peak = cell_peak
 
@@ -585,12 +582,12 @@ class RFMappingData:
         return metrics
 
     def best_cell(self, unit_idx: int) -> tuple[int, int]:
-        """Return the strongest occupancy-normalized cell without full metrics.
+        """Return the strongest rate cell, or count cell without presentations.
 
         RF navigation only needs a sensible default cell.  Keeping this path
         separate avoids calculating every cell's peak, delay, and entropy the
         first time each unit is visited, while avoiding a bias toward cells
-        with longer stimulus occupancy.
+        with more stimulus presentations when that metadata is available.
         """
 
         cached = self._best_cell_cache.get(unit_idx)
@@ -600,13 +597,15 @@ class RFMappingData:
         totals = source.sum(
             axis=-1, dtype=_count_sum_dtype(source, self.n_bins)
         ).astype(np.float64)
-        rates = np.divide(
-            totals,
-            self._occupancy_array,
-            out=np.full(totals.shape, -1.0),
-            where=self._occupancy_array > 0.0,
-        )
-        best_y, best_x = np.unravel_index(np.argmax(rates), rates.shape)
+        strength = np.where(self._occupancy_array > 0.0, totals, -1.0)
+        if self._presentation_array is not None:
+            strength = np.divide(
+                totals,
+                self._presentation_array * self.time_span_seconds(0, self.n_bins - 1),
+                out=np.full(totals.shape, -1.0),
+                where=(self._occupancy_array > 0.0) & (self._presentation_array > 0.0),
+            )
+        best_y, best_x = np.unravel_index(np.argmax(strength), strength.shape)
         result = (int(best_y), int(best_x))
         self._best_cell_cache[unit_idx] = result
         return result
@@ -643,7 +642,18 @@ class RFMappingData:
         raise ValueError(f"Unknown RF mode: {mode}")
 
     def supports_value_mode(self, value_mode: str) -> bool:
-        return value_mode in VALUE_MODES
+        return value_mode == VALUE_MODE_COUNT or (
+            value_mode == VALUE_MODE_RATE and self._presentation_array is not None
+        )
+
+    def _require_value_mode(self, value_mode: str) -> None:
+        if value_mode not in VALUE_MODES:
+            raise ValueError(f"Unknown value mode: {value_mode}")
+        if not self.supports_value_mode(value_mode):
+            raise ValueError("Mean firing rate requires saved stimulusPresentationCounts")
+
+    def _time_group_durations(self, time_groups: Sequence[AxisGroup]) -> np.ndarray:
+        return np.asarray([self.time_span_seconds(start, end) for start, end in time_groups])
 
     def time_span_seconds(self, start: int, end: int) -> float:
         requested_start, requested_end = min(start, end), max(start, end)
@@ -695,8 +705,8 @@ class RFMappingData:
         self,
         y_groups: Sequence[AxisGroup],
         x_groups: Sequence[AxisGroup],
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """Return pooled occupancy and valid-pixel counts for one layout.
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
+        """Return pooled occupancy, valid-pixel counts, and presentations.
 
         There are few spatial groups compared with timeline frames, so this
         one-time calculation retains the original row-major Python summation
@@ -730,6 +740,7 @@ class RFMappingData:
             dtype=np.float64,
         )
         source_pixel_counts = np.zeros_like(occupancy)
+        presentations = None if self._presentation_array is None else np.zeros_like(occupancy)
         for y_group_index, (y_start, y_end) in enumerate(normalized_y):
             for x_group_index, (x_start, x_end) in enumerate(normalized_x):
                 positive = [
@@ -740,9 +751,18 @@ class RFMappingData:
                 ]
                 occupancy[y_group_index, x_group_index] = sum(positive)
                 source_pixel_counts[y_group_index, x_group_index] = len(positive)
+                if presentations is not None:
+                    presentations[y_group_index, x_group_index] = sum(
+                        float(self._presentation_array[y_index, x_index])
+                        for y_index in range(y_start, y_end + 1)
+                        for x_index in range(x_start, x_end + 1)
+                        if self.occupancy_time_s[y_index][x_index] > 0.0
+                    )
         occupancy.setflags(write=False)
         source_pixel_counts.setflags(write=False)
-        result = (occupancy, source_pixel_counts)
+        if presentations is not None:
+            presentations.setflags(write=False)
+        result = (occupancy, source_pixel_counts, presentations)
         with self._count_cache_lock:
             existing = self._spatial_exposure_cache.pop(key, None)
             if existing is not None:
@@ -821,15 +841,14 @@ class RFMappingData:
     ) -> np.ndarray:
         """Pool and normalize all requested timeline frames in one array pass."""
 
-        if value_mode not in VALUE_MODES:
-            raise ValueError(f"Unknown value mode: {value_mode}")
+        self._require_value_mode(value_mode)
         window_counts = self.count_windows_array(unit_idx, time_groups)
         grouped_counts = _rectangular_group_sums(
             window_counts,
             y_groups,
             x_groups,
         )
-        grouped_occupancy, source_pixel_counts = (
+        _grouped_occupancy, source_pixel_counts, presentations = (
             self._spatial_group_exposure_arrays(y_groups, x_groups)
         )
         valid = source_pixel_counts > 0.0
@@ -843,21 +862,23 @@ class RFMappingData:
             )
             return _smooth_matrix_array(response, smooth_radius)
 
+        valid = valid & (presentations > 0.0)
         counts_for_smoothing = np.where(valid, grouped_counts, np.nan)
-        occupancy_for_smoothing = np.where(valid, grouped_occupancy, np.nan)
+        presentations_for_smoothing = np.where(valid, presentations, np.nan)
         counts_for_smoothing = _smooth_matrix_array(
             counts_for_smoothing,
             smooth_radius,
         )
-        occupancy_for_smoothing = _smooth_matrix_array(
-            occupancy_for_smoothing,
+        presentations_for_smoothing = _smooth_matrix_array(
+            presentations_for_smoothing,
             smooth_radius,
         )
+        exposure = presentations_for_smoothing * self._time_group_durations(time_groups)[:, None, None]
         return np.divide(
             counts_for_smoothing,
-            occupancy_for_smoothing,
+            exposure,
             out=np.full_like(counts_for_smoothing, np.nan),
-            where=valid & (occupancy_for_smoothing > 0.0),
+            where=valid & (exposure > 0.0),
         )
 
     def spatial_group_histograms_array(
@@ -880,7 +901,7 @@ class RFMappingData:
             0,
             -1,
         )
-        _grouped_occupancy, source_pixel_counts = (
+        _grouped_occupancy, source_pixel_counts, _presentations = (
             self._spatial_group_exposure_arrays(y_groups, x_groups)
         )
         grouped = np.divide(
@@ -958,23 +979,17 @@ class RFMappingData:
         time_groups: Sequence[AxisGroup],
         value_mode: str,
     ) -> list[float]:
-        if value_mode not in VALUE_MODES:
-            raise ValueError(f"Unknown value mode: {value_mode}")
+        self._require_value_mode(value_mode)
         windows = self.count_windows_array(unit_idx, time_groups)
         totals = windows.sum(
             axis=(1, 2),
             dtype=_count_sum_dtype(windows, self.n_y * self.n_x),
         ).astype(np.float64)
         if value_mode == VALUE_MODE_RATE:
-            occupancy_total = sum(
-                float(duration)
-                for row in self.occupancy_time_s
-                for duration in row
-                if duration > 0.0
-            )
-            if occupancy_total <= 0.0:
+            presentation_total = float(self._presentation_array[self._occupancy_array > 0.0].sum())
+            if presentation_total <= 0.0:
                 return [0.0 for _group in time_groups]
-            totals /= occupancy_total
+            totals /= presentation_total * self._time_group_durations(time_groups)
         return totals.tolist()
 
     def spatial_group_response_values(
@@ -985,14 +1000,13 @@ class RFMappingData:
         time_groups: Sequence[AxisGroup],
         value_mode: str,
     ) -> list[float | None]:
-        if value_mode not in VALUE_MODES:
-            raise ValueError(f"Unknown value mode: {value_mode}")
+        self._require_value_mode(value_mode)
         groups = self._normalized_time_groups(time_groups)
         if not groups:
             return []
-        occupancy, pixels = self._spatial_group_exposure_arrays([y_group], [x_group])
+        _occupancy, pixels, presentations = self._spatial_group_exposure_arrays([y_group], [x_group])
         denominator = float(
-            pixels[0, 0] if value_mode == VALUE_MODE_COUNT else occupancy[0, 0]
+            pixels[0, 0] if value_mode == VALUE_MODE_COUNT else presentations[0, 0]
         )
         if denominator <= 0:
             return [None] * len(groups)
@@ -1010,7 +1024,11 @@ class RFMappingData:
             prefix[..., 0] = 0
             np.cumsum(source, axis=-1, dtype=dtype, out=prefix[..., 1:])
             windows = prefix[..., stops] - prefix[..., starts]
-        values = windows.sum(axis=(0, 1), dtype=np.float64) / denominator
+        values = windows.sum(axis=(0, 1), dtype=np.float64)
+        if value_mode == VALUE_MODE_RATE:
+            values /= denominator * self._time_group_durations(groups)
+        else:
+            values /= denominator
         return values.tolist()
 
     def _spatial_group_slice(
@@ -1033,6 +1051,7 @@ class RFMappingData:
         end: int,
         value_mode: str,
     ) -> float | None:
+        self._require_value_mode(value_mode)
         requested_start, requested_end = min(start, end), max(start, end)
         start = max(0, min(self.n_bins - 1, requested_start))
         end = max(0, min(self.n_bins - 1, requested_end))
@@ -1043,11 +1062,8 @@ class RFMappingData:
             return None
         if value_mode == VALUE_MODE_COUNT:
             return count
-        if value_mode not in VALUE_MODES:
-            raise ValueError(f"Unknown value mode: {value_mode}")
-        if value_mode == VALUE_MODE_RATE:
-            return count / occupancy_time_s
-        raise ValueError(f"Unknown value mode: {value_mode}")
+        exposure = self._presentation_array[y_idx, x_idx] * self.time_span_seconds(start, end)
+        return count / exposure if exposure > 0.0 else None
 
     def response_matrix(
         self,
@@ -1059,8 +1075,7 @@ class RFMappingData:
         requested_start, requested_end = min(start, end), max(start, end)
         start = max(0, min(self.n_bins - 1, requested_start))
         end = max(0, min(self.n_bins - 1, requested_end))
-        if value_mode not in VALUE_MODES:
-            raise ValueError(f"Unknown value mode: {value_mode}")
+        self._require_value_mode(value_mode)
         counts = self.count_windows_array(unit_idx, [(start, end)])[0].astype(
             np.float64,
             copy=False,
@@ -1069,11 +1084,12 @@ class RFMappingData:
         if value_mode == VALUE_MODE_COUNT:
             values = np.where(valid, counts, np.nan)
         else:
+            exposure = self._presentation_array * self.time_span_seconds(start, end)
             values = np.divide(
                 counts,
-                self._occupancy_array,
+                exposure,
                 out=np.full_like(counts, np.nan),
-                where=valid,
+                where=valid & (exposure > 0.0),
             )
         return _nullable_array_list(values)
 
@@ -1087,10 +1103,9 @@ class RFMappingData:
     ) -> SpatialGroupObservations:
         """Pool raw observations for one displayed spatial cell.
 
-        ``occupancyTimeSec`` is exposure metadata for each source position. A
-        displayed cell that combines positions therefore has one pooled
-        numerator and one pooled exposure; averaging already-normalized source
-        rates would give briefly occupied positions too much weight.
+        Rate exposure pools presentation counts and multiplies by this lag
+        window's duration. Occupancy remains display-duration metadata and
+        controls the existing unavailable-position mask.
         """
 
         start, end = self._normalized_time_groups([(start, end)])[0]
@@ -1098,13 +1113,17 @@ class RFMappingData:
         grouped_count = source.sum(
             axis=-1, dtype=_count_sum_dtype(source, end - start + 1)
         ).sum(dtype=np.float64)
-        grouped_occupancy, source_pixel_counts = (
+        grouped_occupancy, source_pixel_counts, presentations = (
             self._spatial_group_exposure_arrays([y_group], [x_group])
         )
         return SpatialGroupObservations(
             count=float(grouped_count),
             occupancy_time_s=float(grouped_occupancy[0, 0]),
             source_pixel_count=int(source_pixel_counts[0, 0]),
+            rate_exposure_s=(
+                None if presentations is None
+                else float(presentations[0, 0]) * self.time_span_seconds(start, end)
+            ),
         )
 
     def spatial_group_response_value(
@@ -1116,6 +1135,7 @@ class RFMappingData:
         end: int,
         value_mode: str,
     ) -> float | None:
+        self._require_value_mode(value_mode)
         observations = self.spatial_group_observations(
             unit_idx,
             y_group,
@@ -1127,11 +1147,9 @@ class RFMappingData:
             if observations.source_pixel_count <= 0:
                 return None
             return observations.count / observations.source_pixel_count
-        if value_mode not in VALUE_MODES:
-            raise ValueError(f"Unknown value mode: {value_mode}")
-        if observations.occupancy_time_s <= 0:
+        if observations.rate_exposure_s <= 0:
             return None
-        return observations.count / observations.occupancy_time_s
+        return observations.count / observations.rate_exposure_s
 
     def spatial_group_response_matrix(
         self,

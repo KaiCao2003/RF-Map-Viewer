@@ -36,7 +36,7 @@ PROBE_POSITION_FILETYPES = (
     ("CSV document", "*.csv"),
     ("All files", "*.*"),
 )
-APP_VERSION = "1.11.0"
+APP_VERSION = "1.11.1"
 APP_EDITION = "Full"
 APP_DISPLAY_VERSION = APP_VERSION
 INNER_BLANK_ROWS = 4
@@ -63,6 +63,12 @@ TUNING_LAYOUTS = ("Side by side", "Stacked")
 VALUE_MODE_COUNT = "Spike count"
 VALUE_MODE_RATE = "Mean firing rate (Hz)"
 VALUE_MODES = (VALUE_MODE_COUNT, VALUE_MODE_RATE)
+VIEWER_TABS = {
+    "rf": "RF",
+    "delay": "Delay / RGB",
+    "timeline": "Timeline",
+    "results": "RF Results",
+}
 PALETTES = ("Gray", "Viridis", "Inferno")
 POLAR_RADIUS_MODES = ("MATLAB row 1 inner", "Display bottom inner")
 WAVEFORM_CHANNEL_MODE_LABELS = {

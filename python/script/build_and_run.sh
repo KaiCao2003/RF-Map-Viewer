@@ -3,8 +3,8 @@ set -euo pipefail
 
 MODE="${1:-run}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=python_macos_release.env
-source "$SCRIPT_DIR/python_macos_release.env"
+# shellcheck source=python_stable_macos_release.env
+source "$SCRIPT_DIR/python_stable_macos_release.env"
 
 APP_NAME="$RF_MAPPING_APP_NAME"
 EXECUTABLE_NAME="$RF_MAPPING_EXECUTABLE_NAME"
@@ -14,7 +14,7 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 DIST_DIR="$ROOT_DIR/dist/python"
 APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
 APP_BINARY="$APP_BUNDLE/Contents/MacOS/$EXECUTABLE_NAME"
-BUILD_SCRIPT="$ROOT_DIR/script/build_python_macos_app.sh"
+BUILD_SCRIPT="$ROOT_DIR/script/build_python_stable_macos_app.sh"
 
 case "$MODE" in
   run|--bundle|bundle|--debug|debug|--logs|logs|--verify|verify)
