@@ -1,13 +1,21 @@
 ## Python 1.11.1: RF rate correction and saved analysis results
 
-Version **1.11.1**. Target: macOS Apple Silicon (build **111001**, Full edition).
+Version **1.11.1**, Full edition. Targets: macOS Apple Silicon (build **111001**)
+and Windows x64 (build **11101**).
 
 - Correct RF firing rate to `counts / (stimulusPresentationCounts × response-window seconds)`, including timeline frames, spatial pooling, smoothing, and exports. Files without saved presentation counts open in Spike count mode and explain why Hz is unavailable.
 - Add **RF Results** for saved 1D/2D excitatory/inhibitory masks, centers, parameters, and available QC. Results are matched by recorded unit ID and read without rerunning analysis or modifying inputs.
 - Choose visible tabs and the initial tab in **Settings → General**. Preferences persist and apply to open and new document windows; number shortcuts follow the visible tabs.
 - Retire the separate Free-Moving alpha app, its HDF5 Square/Bar and spherical 3D views, exposure/trial and geometry QA, and alpha packaging. The stable viewer and standalone session/EBC HTML report remain available.
 
-This release updates Python macOS only. Windows remains at 1.10.0, Swift at 1.10.3, and Web at 1.10.2. Historical release notes follow.
+The Windows update also includes the Figure Studio, saved layouts, and viewer
+improvements introduced since Windows 1.10.0. Its portable ZIP and Inno Setup
+installer use the same Python viewer source. The Windows packages are built
+from a packaging-only follow-up commit; the GitHub release body records that
+commit when the verified artifacts are uploaded. The existing `python-v1.11.1`
+tag and macOS assets remain unchanged.
+
+Swift remains at 1.10.3 and Web at 1.10.2. Historical release notes follow.
 
 ## Python 1.11.0: Figure Studio, saved layouts, and viewer lifecycle
 

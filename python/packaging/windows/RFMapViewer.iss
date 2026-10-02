@@ -3,11 +3,11 @@
 #define MyAppExecutable "RF Map Viewer.exe"
 
 #ifndef MyAppVersion
-  #define MyAppVersion "1.10.0"
+  #define MyAppVersion "1.11.1"
 #endif
 
 #ifndef MyAppBuild
-  #define MyAppBuild "11000"
+  #define MyAppBuild "11101"
 #endif
 
 #ifndef SourceRoot

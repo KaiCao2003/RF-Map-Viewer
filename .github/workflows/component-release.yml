@@ -10,6 +10,7 @@ on:
         type: choice
         options:
           - python-stable
+          - python-stable-windows
           - swift
           - web
   pull_request:
@@ -90,7 +91,7 @@ jobs:
 
   build-python-stable-windows:
     name: Build Python stable (Windows x64)
-    if: needs.validate-versions.outputs.python_stable_build_windows == 'true' && ((github.event_name == 'workflow_dispatch' && inputs.component == 'python-stable') || github.ref_name == needs.validate-versions.outputs.python_stable_tag)
+    if: needs.validate-versions.outputs.python_stable_build_windows == 'true' && ((github.event_name == 'workflow_dispatch' && (inputs.component == 'python-stable' || inputs.component == 'python-stable-windows')) || github.ref_name == needs.validate-versions.outputs.python_stable_tag)
     needs: validate-versions
     runs-on: windows-2025
     steps:
@@ -112,7 +113,7 @@ jobs:
         working-directory: python
         shell: pwsh
         run: |
-          python -m pytest -q --ignore=tests/test_full_legacy_tk.py
+          python -m pytest -q
       - name: Build and smoke-test stable Python Windows artifacts
         working-directory: python
         shell: pwsh

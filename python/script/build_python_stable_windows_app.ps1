@@ -11,9 +11,9 @@ $ProgressPreference = "SilentlyContinue"
 
 $AppName = "RF Map Viewer"
 $ExecutableName = "RF Map Viewer.exe"
-$AppVersion = "1.10.0"
-# Windows VERSIONINFO components are 16-bit; macOS uses build 110000.
-$AppBuild = "11000"
+$AppVersion = "1.11.1"
+# Windows VERSIONINFO components are 16-bit; macOS uses build 111001.
+$AppBuild = "11101"
 $ReleaseEdition = "Full"
 $ReleaseFlavor = "full"
 $Architecture = "x64"
@@ -22,6 +22,10 @@ $PyInstallerVersion = "6.21.0"
 $NumpyVersion = "2.4.6"
 $PillowVersion = "12.3.0"
 $TkinterDnD2Version = "0.6.2"
+$MatplotlibVersion = "3.11.0"
+$PynappleVersion = "0.11.3"
+$NumbaVersion = "0.66.0"
+$PandasVersion = "3.0.3"
 
 $ScriptDir = Split-Path -Parent $PSCommandPath
 $RootDir = (Resolve-Path (Join-Path $ScriptDir "..")).Path
@@ -33,6 +37,7 @@ $SmokeJson = Join-Path $RootDir "tests\fixtures\release_smoke_rf.json"
 $IconPath = Join-Path $RootDir "assets\rf-mapping-viewer-icon-1024.png"
 $HooksDir = Join-Path $RootDir "packaging\pyinstaller-hooks"
 $TkinterDnDHook = Join-Path $HooksDir "hook-tkinterdnd2.py"
+$PynappleHook = Join-Path $HooksDir "hook-pynapple.py"
 $TkinterRuntimeHookBackport = Join-Path $HooksDir "rthooks\pyi_rth__tkinter.py"
 $TkinterRuntimeHookPatcher = Join-Path $ScriptDir "patch_pyinstaller_tk9_runtime_hook.py"
 $InstallerScript = Join-Path $RootDir "packaging\windows\RFMapViewer.iss"
@@ -223,7 +228,7 @@ function Invoke-FrozenSmoke(
     Invoke-WindowedSmoke `
         $Executable `
         @("--self-test-dnd") `
-        "$Label TkDND self-test" `
+        "$Label TkDND and RF Results TkAgg self-test" `
         "$ExportRoot-tkdnd-smoke-report.json"
     Invoke-WindowedSmoke `
         $Executable `
@@ -264,6 +269,7 @@ foreach ($Required in @(
     $SmokeJson,
     $IconPath,
     $TkinterDnDHook,
+    $PynappleHook,
     $TkinterRuntimeHookBackport,
     $TkinterRuntimeHookPatcher,
     $InstallerScript,
@@ -319,33 +325,39 @@ Assert-File $BuildPython "build Python"
     "pyinstaller==$PyInstallerVersion" `
     "numpy==$NumpyVersion" `
     "pillow==$PillowVersion" `
-    "tkinterdnd2==$TkinterDnD2Version"
+    "tkinterdnd2==$TkinterDnD2Version" `
+    "matplotlib==$MatplotlibVersion" `
+    "pynapple==$PynappleVersion" `
+    "numba==$NumbaVersion" `
+    "pandas==$PandasVersion"
 Assert-NativeSuccess "pinned Windows packaging dependency installation"
 
-$DependencyProbe = @'
+$DependencyProbe = @"
 import importlib.metadata as metadata
 import platform
 import PyInstaller
 import numpy
 import PIL
+import pynapple
 import tkinter
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 expected = {
-    "PyInstaller": "6.21.0",
-    "numpy": "2.4.6",
-    "Pillow": "12.3.0",
-    "tkinterdnd2": "0.6.2",
+    "PyInstaller": "$PyInstallerVersion",
+    "numpy": "$NumpyVersion",
+    "Pillow": "$PillowVersion",
+    "tkinterdnd2": "$TkinterDnD2Version",
+    "matplotlib": "$MatplotlibVersion",
+    "pynapple": "$PynappleVersion",
+    "numba": "$NumbaVersion",
+    "pandas": "$PandasVersion",
 }
-actual = {
-    "PyInstaller": PyInstaller.__version__,
-    "numpy": numpy.__version__,
-    "Pillow": PIL.__version__,
-    "tkinterdnd2": metadata.version("tkinterdnd2"),
-}
+actual = {name: metadata.version(name) for name in expected}
 if actual != expected or platform.machine() != "AMD64":
     raise SystemExit(f"unexpected Windows build environment: {actual}, {platform.machine()}")
 print("Tk runtime:", tkinter.TkVersion)
-'@
+print("Pynapple runtime:", pynapple.__version__)
+"@
 & $BuildPython -c $DependencyProbe
 Assert-NativeSuccess "pinned Windows packaging dependency verification"
 
@@ -357,11 +369,12 @@ Assert-NativeSuccess "pinned Windows packaging dependency verification"
 Assert-NativeSuccess "PyInstaller Tcl/Tk 9 runtime-hook backport"
 
 $VersionFile = Join-Path $BuildRoot "RFMapViewer-version-info.txt"
+$VersionTuple = $AppVersion.Replace(".", ", ")
 $VersionResource = @"
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 10, 0, 11000),
-    prodvers=(1, 10, 0, 0),
+    filevers=($VersionTuple, $AppBuild),
+    prodvers=($VersionTuple, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -427,6 +440,7 @@ $ReadmeDataArgument = "$ReadmePath;."
     --workpath $PyInstallerWork `
     --specpath $PyInstallerSpec `
     --additional-hooks-dir $HooksDir `
+    --hidden-import matplotlib.backends.backend_tkagg `
     --add-data $ReadmeDataArgument `
     $GuiPath
 Assert-NativeSuccess "PyInstaller onedir build"
