@@ -1,3 +1,17 @@
+## Windows 1.11.2 follow-up: shortcuts and RF orientation
+
+Version **1.11.2**. Target: Windows x64 (build **11102**, Full edition).
+
+- Keep unit, timeline, and view shortcuts working with NumLock or ScrollLock enabled; preserve Ctrl/Alt chords and text editing.
+- Accept CapsLock for Open, Export, CSV Export, and Close. Use **Ctrl+Shift+.** to show or hide filtered units in the viewer and Settings.
+- Bring the shared RF/Results canvas and saved overlays to Windows. Match the RF map's source-row order, explicit Y flip, and plot proportions; preserve recorded mask and center coordinates.
+
+The Windows packages use a follow-up commit to the existing `python-v1.11.2`
+tag. Their source commit and native Windows validation are recorded in the
+GitHub release body when the verified assets are published. The original tag
+and macOS assets are preserved. The macOS notes below describe that earlier
+build; its validation does not establish Windows package validation.
+
 ## Python 1.11.2: RF overlays and native macOS interaction
 
 Version **1.11.2**. Target: macOS Apple Silicon (build **111002**, Full edition).
@@ -10,7 +24,9 @@ Version **1.11.2**. Target: macOS Apple Silicon (build **111002**, Full edition)
 
 The implementation passed 831 native macOS tests and packaged loader, plot, and export smoke checks before this version bump. RF/Results alignment and overlays were checked with real recordings; Settings trackpad scrolling was confirmed on the local Mac. Inputs and saved analysis files remain read-only.
 
-This release updates Python macOS only. Windows remains at 1.11.1, Swift at 1.10.3, and Web at 1.10.2. Historical release notes follow.
+The initial 1.11.2 release updated Python macOS only; the Windows follow-up is
+described above. Swift remains at 1.10.3 and Web at 1.10.2. Historical release
+notes follow.
 
 ## Python 1.11.1: RF rate correction and saved analysis results
 

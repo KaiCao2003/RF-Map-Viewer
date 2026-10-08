@@ -59,8 +59,7 @@ class SettingsWindow(tk.Toplevel):
         self._build()
         self._select_remembered_tab()
         self._sync_dependent_controls()
-        if sys.platform == "darwin":
-            owner._bind_unit_filter_shortcut(self)
+        owner._bind_unit_filter_shortcut(self)
 
     def transient(self, master: tk.Misc | None = None) -> str | None:
         """Normalize Tk's queried window object to its stable path string."""

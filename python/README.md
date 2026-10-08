@@ -302,7 +302,9 @@ document.
 
 ### Keyboard shortcuts
 
-Open **Help → Keyboard Shortcuts** for the in-app list.
+Open **Help → Keyboard Shortcuts** for the in-app list. Use **Ctrl** in place
+of **⌘** on Windows. NumLock and ScrollLock do not disable viewer shortcuts;
+Open, Export, CSV Export, and Close also work with CapsLock enabled.
 
 | Shortcut | Action |
 | --- | --- |
@@ -346,11 +348,16 @@ RF and RF Results keep the same plot geometry when switching tabs.
 Unit and response details are available from View → Inspector; unavailable
 probe, waveform, and tuning-curve panels start folded.
 
+The Windows 1.11.2 follow-up adds NumLock-aware navigation, CapsLock-safe
+application shortcuts, and **Ctrl+Shift+.** unit filtering in the viewer and
+Settings. RF Results follows the RF map's source-row order and explicit Y
+flip. Saved-result plots retain their recorded coordinates and centers.
+
 Version 1.11.1 corrects RF Hz using saved presentation counts and the response
 window duration, adds the saved RF Results tab and tab visibility preferences,
 and retires the separate Free-Moving alpha application.
-The Windows 1.11.1 packaging target brings these changes and the Figure Studio
-features below to Windows x64, using the same Python viewer source.
+Windows 1.11.1 brought these changes and the Figure Studio features below to
+Windows x64, using the same Python viewer source.
 
 Version 1.11.0 introduces movable, resizable figure widgets with preset frames,
 saved layouts that retain their rendering settings,
@@ -524,8 +531,8 @@ Its macOS identity is `RF Map Viewer.app`, bundle ID
 script/build_python_stable_macos_app.sh
 ```
 
-Stable 1.11.1 targets Windows x64 as a portable ZIP and an Inno Setup installer
-(Windows build 11101). On a Windows build host with Python 3.14, PyInstaller,
+Stable 1.11.2 targets Windows x64 as a portable ZIP and an Inno Setup installer
+(Windows build 11102). On a Windows build host with Python 3.14, PyInstaller,
 and Inno Setup 6 installed, build and smoke-test both artifacts with:
 
 ```powershell
@@ -534,9 +541,9 @@ script/build_python_stable_windows_app.ps1
 
 The Windows artifacts are:
 
-- `RF_Map_Viewer-python-1.11.1-full-windows-x64-portable.zip`
-- `RF_Map_Viewer-python-1.11.1-full-windows-x64-setup.exe`
-- `SHA256SUMS-python-1.11.1-full-windows-x64.txt`
+- `RF_Map_Viewer-python-1.11.2-full-windows-x64-portable.zip`
+- `RF_Map_Viewer-python-1.11.2-full-windows-x64-setup.exe`
+- `SHA256SUMS-python-1.11.2-full-windows-x64.txt`
 
 The versioned outputs are written under `dist/windows/`; the builder verifies
 the portable executable and a silent temporary installation with the RF
@@ -546,7 +553,9 @@ document loader inside the packaged executable.
 
 The release workflow also accepts `python-stable-windows` to build only a
 Windows candidate without publishing. See [release instructions](../release/README.md)
-for the Windows follow-up to the existing `python-v1.11.1` release.
+for the Windows follow-up to the existing `python-v1.11.2` release. Its source
+commit and native validation are recorded separately when the Windows assets
+are published; the original tag and macOS assets are preserved.
 
 Windows and macOS use the same Python viewer source, including cancellable
 large-file loading, compact count storage, cached time-window calculations,

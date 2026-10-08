@@ -21,8 +21,8 @@ def _cell_edges(positions) -> np.ndarray:
                  values[-1] + (values[-1] - midpoints[-1])]
 
 
-def draw_saved_rf_result(figure, result: SavedRFResult, unit_id: int) -> bool:
-    """Plot one saved detection in physical source coordinates, without analysis."""
+def draw_saved_rf_result(figure, result: SavedRFResult, unit_id: int, *, flip_y: bool = False) -> bool:
+    """Plot saved coordinates in the viewer's source-row order, without analysis."""
     import matplotlib as mpl
     from matplotlib.colors import ListedColormap
 
@@ -51,9 +51,16 @@ def draw_saved_rf_result(figure, result: SavedRFResult, unit_id: int) -> bool:
         axes.set(xlabel=f"{result.axis.upper()} position", ylabel="RF membership", ylim=(-.08, 1.18), yticks=[0, 1])
         axes.legend(facecolor="white", framealpha=1, edgecolor="#d2d2d7", labelcolor="#1d1d1f", loc="upper right")
     else:
-        axes.pcolormesh(_cell_edges(result.source.x_positions), _cell_edges(result.source.y_positions), mask,
+        x_edges = _cell_edges(result.source.x_positions)
+        y_edges = _cell_edges(result.source.y_positions)
+        axes.pcolormesh(x_edges, y_edges, mask,
                         shading="flat", cmap=ListedColormap(["white", color]), vmin=0, vmax=1)
         rows_count, columns_count = mask.shape
+        axes.set_xlim(x_edges[0], x_edges[-1])
+        if rows_count > 1:
+            # The Tk RF canvas starts with source row 0 at the top. Numeric
+            # autoscaling would silently reverse ascending source Y positions.
+            axes.set_ylim((y_edges[0], y_edges[-1]) if flip_y else (y_edges[-1], y_edges[0]))
         # Match RF's square display bins and its singleton-y presentation.
         axes.set_box_aspect(
             SINGLETON_Y_REFERENCE_ROWS / SINGLETON_Y_REFERENCE_COLUMNS

@@ -812,7 +812,8 @@ class TkViewerTests(unittest.TestCase):
         settings.rf_subtract_end_var.set("50")  # An unrelated, unsaved edit.
         self.app._bind_unit_filter_shortcut()
         canvas = self.app.canvases["rf"]
-        sequences = ["<Command-Shift-period>", "<Command-Shift-greater>"]
+        primary = "Command" if sys.platform == "darwin" else "Control"
+        sequences = [f"<{primary}-Shift-period>", f"<{primary}-Shift-greater>"]
         # Xvfb cannot map kana_fullstop to a keycode and generates "??".
         # Exercise the IME keysym on Aqua, where the physical key reports it.
         if self.app.tk.call("tk", "windowingsystem") == "aqua":
@@ -1868,9 +1869,38 @@ class TkViewerTests(unittest.TestCase):
                 self.assertEqual(self.app.palette_var.get(), "Viridis")
                 self.assertEqual(self.app.polar_layout_var.get(), before)
 
+    def test_caps_lock_preserves_open_export_and_close_shortcuts(self) -> None:
+        canvas = self.app.canvases["timeline"]
+        canvas.focus_force()
+        self.app.update()
+        primary = "Command" if sys.platform == "darwin" else "Control"
+        primary_state = 0x0008 if primary == "Command" else 0x0004
+        for lock_state in (0, 0x0002):
+            for key, action_name in (
+                ("o", "_open_json"), ("e", "_open_figure_exporter"),
+                ("w", "_close_window"),
+            ):
+                with self.subTest(key=key, lock_state=lock_state):
+                    with mock.patch.object(self.app, action_name) as action:
+                        canvas.event_generate("<KeyPress>", keysym=key, state=primary_state | lock_state)
+                        self.app.update()
+                        action.assert_called_once_with()
+            with self.subTest(key="Shift+e", lock_state=lock_state):
+                with (
+                    mock.patch.object(self.app, "_export_current_matrix") as matrix,
+                    mock.patch.object(self.app, "_open_figure_exporter") as figure,
+                ):
+                    canvas.event_generate("<KeyPress>", keysym="e", state=primary_state | lock_state | 0x0001)
+                    self.app.update()
+                    matrix.assert_called_once_with()
+                    figure.assert_not_called()
+
     def test_native_arrow_flags_work_through_tk_bindings(self) -> None:
-        # Cocoa marks arrows as keypad/function keys even without a held Fn key.
-        state = 0x0060 if self.app.tk.call("tk", "windowingsystem") == "aqua" else 0x0010
+        # Windows uses an extended-key flag for arrows and Mod1 for NumLock;
+        # Cocoa uses keypad/function flags, while X11 uses Mod2 for NumLock.
+        state = {"aqua": 0x0060, "win32": 0x40008, "x11": 0x0010}[
+            self.app.tk.call("tk", "windowingsystem")
+        ]
         self.app.notebook.focus_force()
         self.app.update()
         self.app.notebook.event_generate("<KeyPress-Right>", state=state)
@@ -1934,9 +1964,9 @@ class TkViewerTests(unittest.TestCase):
                 self.assertTrue(self.app.polar_layout_var.get())
 
     def test_modified_keys_do_not_trigger_plain_view_shortcuts(self) -> None:
-        modifiers = ["Control", "Command", "Alt"]
+        modifiers = ["Control", "Alt"]
         if self.app.tk.call("tk", "windowingsystem") == "aqua":
-            modifiers.append("Option")
+            modifiers.extend(("Command", "Option"))
         for widget in (self.app.canvases["timeline"], self.app.notebook):
             widget.focus_force()
             self.app.update()

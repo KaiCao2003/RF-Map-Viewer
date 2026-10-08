@@ -13,13 +13,14 @@ The Python package and generic launcher now identify the stable viewer.
 Python 1.11.2 adds configurable saved RF overlays and aligned RF/Results plots,
 restores native macOS welcome controls, and supports trackpad scrolling in
 Settings and Timeline. Unit and response details move to View → Inspector, and
-missing companion panels start folded. The macOS build is 111002; Windows
-remains at 1.11.1.
+missing companion panels start folded. The macOS build is 111002. The Windows
+1.11.2 follow-up targets build 11102 and adds Windows shortcut fixes and
+source-order alignment for saved RF plots.
 
 Python 1.11.1 corrects RF Hz to counts divided by saved
 presentation counts and response-window seconds, adds the saved RF Results
-tab, and lets users choose visible tabs in Settings. The macOS build is 111001;
-the Windows x64 packaging target is 1.11.1, build 11101. Swift and Web retain
+tab, and lets users choose visible tabs in Settings. Its macOS build is 111001;
+its Windows x64 build is 11101. Swift and Web retain
 their existing release versions.
 
 Platform identity never becomes a fourth version component. It belongs in the
@@ -28,7 +29,7 @@ component tag and artifact name:
 | Component | Release | Tag | Channel |
 | --- | --- | --- | --- |
 | Python stable (macOS) | `1.11.2` | `python-v1.11.2` | stable |
-| Python stable (Windows x64) | `1.11.1` | `python-v1.11.1` | stable |
+| Python stable (Windows x64) | `1.11.2` | `python-v1.11.2` | stable |
 | Swift | `1.10.3` | `swift-v1.10.3` | stable |
 | Web | `1.10.2` | `web-v1.10.2` | stable |
 
@@ -114,9 +115,9 @@ python3 release/verify_versions.py
 
 Pushing one exact component tag invokes only that component's release jobs.
 The Python stable jobs build and smoke-test the macOS arm64 archive, Windows
-x64 portable ZIP, and Windows installer. Windows 1.11.1 uses build 11101
+x64 portable ZIP, and Windows installer. Windows 1.11.2 uses build 11102
 because each numeric VERSIONINFO component is limited to 16 bits; macOS uses
-build 111001.
+build 111002.
 
 Manual workflow dispatch builds candidates without publishing a tag or GitHub
 Release. Selecting `python-stable` runs its macOS job, plus Windows when the
@@ -128,9 +129,9 @@ gh workflow run component-release.yml --ref <packaging-branch> \
   -f component=python-stable-windows
 ```
 
-The Windows 1.11.1 follow-up is a packaging-only commit after the existing
-`python-v1.11.1` tag. Validate the candidate before attaching its portable ZIP,
-installer, and Windows checksum file to that release. Preserve the tag and
+The Windows 1.11.2 follow-up includes shortcut and saved-RF display fixes after
+the existing `python-v1.11.2` tag. Validate the candidate before attaching its
+portable ZIP, installer, and Windows checksum file to that release. Preserve the tag and
 all existing macOS assets; do not replace attachments. Record the Windows
 build commit in the GitHub release body so both platforms' provenance remains
 explicit.
