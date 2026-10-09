@@ -127,6 +127,7 @@ from rfmapping_viewer.recent_documents import (
     record_recent_document,
 )
 from rfmapping_viewer.settings import (
+    RF_RESULT_OVERLAY_MODES,
     ViewerSettings,
     load_viewer_settings,
     normalize_hd_bin_count,
@@ -518,6 +519,7 @@ class RFMViewer(tk.Toplevel):
         self.palette_var = tk.StringVar(value=self.settings.rf_palette)
         self.polar_radius_var = tk.StringVar(value=self.settings.rf_polar_radius)
         self.polar_layout_var = tk.BooleanVar(value=self.settings.rf_polar_layout)
+        self.rf_result_overlay_mode_var = tk.StringVar(value=self.settings.rf_result_overlay_mode)
         self.rgb_mode_var = tk.BooleanVar(value=self.settings.rf_rgb_mode)
         self.pair_windows_var = tk.BooleanVar(
             value=bool(self._app_root._rfm_pairing_enabled)
@@ -2080,6 +2082,19 @@ class RFMViewer(tk.Toplevel):
             command=self._on_spatial_format_changed,
         )
         self.polar_layout_toggle.grid(row=1, column=4, sticky="w", pady=(8, 0))
+        ttk.Label(display, text="RF overlap", style="Panel.TLabel").grid(
+            row=2, column=0, sticky="w", pady=(8, 0)
+        )
+        self.rf_result_overlay_mode_combo = ttk.Combobox(
+            display,
+            state="readonly",
+            values=RF_RESULT_OVERLAY_MODES,
+            textvariable=self.rf_result_overlay_mode_var,
+            width=12,
+        )
+        self.rf_result_overlay_mode_combo.grid(
+            row=2, column=1, sticky="w", padx=(6, 18), pady=(8, 0)
+        )
         self.rate_notice_label = ttk.Label(
             controls,
             text="Showing spike count as Hz is unavailable.",
@@ -2089,6 +2104,10 @@ class RFMViewer(tk.Toplevel):
     def _wire_events(self) -> None:
         self.unit_combo.bind("<<ComboboxSelected>>", self._on_unit_selected)
         self.value_mode_combo.bind("<<ComboboxSelected>>", self._on_value_mode_changed)
+        self.rf_result_overlay_mode_combo.bind(
+            "<<ComboboxSelected>>",
+            lambda _event: self._set_rf_result_overlay_mode(self.rf_result_overlay_mode_var.get()),
+        )
         for spin in (
             self.range_start_spin, self.range_end_spin,
             self.subtract_start_spin, self.subtract_end_spin,
@@ -2132,6 +2151,12 @@ class RFMViewer(tk.Toplevel):
         ) + tuple(
             (f"<KeyPress-{index + 1}>", self._select_tab, (index,))
             for index in range(len(VIEWER_TABS))
+        ) + tuple(
+            (f"<Shift-KeyPress-{keysym}>", self._set_rf_result_overlay_mode, (mode,))
+            for digit, shifted, mode in (
+                ("1", "exclam", "1D"), ("2", "at", "2D"), ("0", "parenright", "None"),
+            )
+            for keysym in (digit, shifted)
         )
         for sequence, action, args in navigation_shortcuts:
             callback = lambda event, action=action, args=args: self._run_navigation_shortcut(
@@ -2366,6 +2391,11 @@ class RFMViewer(tk.Toplevel):
         self.polar_layout_var.set(not self.polar_layout_var.get())
         self._on_spatial_format_changed()
 
+    def _set_rf_result_overlay_mode(self, mode: str) -> None:
+        self.settings = replace(self.settings, rf_result_overlay_mode=mode)
+        self.rf_result_overlay_mode_var.set(mode)
+        self._on_control_changed()
+
     def _cycle_palette(self) -> None:
         try:
             index = PALETTES.index(self.palette_var.get())
@@ -2381,6 +2411,7 @@ class RFMViewer(tk.Toplevel):
             "↑ / ↓   Previous / next timeline bin\n"
             "Shift+, / Shift+.   Coarser / finer by one source bin\n"
             "1–4   Switch visible plot tab\n"
+            "Shift+1 / Shift+2 / Shift+0   RF overlap: 1D / 2D / None\n"
             "F   Invert Y\n"
             "P   Toggle Rectangle / Polar layout\n"
             "Shift+P   Cycle palette\n"
@@ -3242,6 +3273,7 @@ class RFMViewer(tk.Toplevel):
             self.palette_var.set(settings.rf_palette)
             self.polar_radius_var.set(settings.rf_polar_radius)
             self.polar_layout_var.set(settings.rf_polar_layout)
+            self.rf_result_overlay_mode_var.set(settings.rf_result_overlay_mode)
             self.rgb_mode_var.set(settings.rf_rgb_mode)
             self.tuning_plot_mode_var.set(settings.tuning_plot_mode)
             self.tuning_layout_var.set(settings.tuning_layout)
@@ -8560,6 +8592,7 @@ class RFMViewer(tk.Toplevel):
         self.palette_var.set(self.settings.rf_palette)
         self.polar_radius_var.set(self.settings.rf_polar_radius)
         self.polar_layout_var.set(self.settings.rf_polar_layout)
+        self.rf_result_overlay_mode_var.set(self.settings.rf_result_overlay_mode)
         self.rgb_mode_var.set(self.settings.rf_rgb_mode)
         self.smooth_radius_var.set(self.settings.rf_smooth_radius)
         self.show_probe_layout_var.set(self.settings.show_probe_layout)

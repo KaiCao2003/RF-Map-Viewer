@@ -1,6 +1,6 @@
 # Python RF Map Viewers
 
-This directory contains the Python/Tk RF Map Viewer `1.11.2`, launched by
+This directory contains the Python/Tk RF Map Viewer `1.11.3`, launched by
 `rfmapping_gui.py` or the installed `rfmapping-viewer` command. The separate
 Free-Moving alpha and its HDF5 Square/Bar, 3D-sphere, and exposure-QA paths have
 been retired. The offline session/EBC HTML report script remains available.
@@ -310,6 +310,7 @@ Open **Help → Keyboard Shortcuts** for the in-app list.
 | ↑ / ↓ | Previous / next timeline bin |
 | Shift+, / Shift+. | Coarser / finer target time width |
 | 1 / 2 / 3 / 4 | Switch between visible tabs in order |
+| Shift+1 / Shift+2 / Shift+0 | Set RF overlap to 1D / 2D / None |
 | F | Invert Y |
 | P / Shift+P | Toggle Polar layout / cycle palette |
 | - | Toggle RF Sum / A − B |
@@ -337,7 +338,11 @@ Open **Help → Keyboard Shortcuts** for the in-app list.
 
 ---
 
-## Stable viewer 1.11.2
+## Stable viewer 1.11.3
+
+Version 1.11.3 adds **RF overlap** to the foldable Display options. Choose
+None, 2D, 1D, or Both, or press **Shift+1 / Shift+2 / Shift+0** for 1D / 2D /
+None. The shortcuts also work while Display is folded and preserve text editing.
 
 Version 1.11.2 restores native macOS welcome-window controls and trackpad
 scrolling in Settings and Timeline. Settings can overlay saved 2D, 1D, or both
@@ -501,6 +506,11 @@ Press **D** to show or hide **Display Options**; the expanded button reads
 **Hide (D)**. These shortcuts leave text entry, including negative time
 values, available while an input has focus.
 
+**Display → RF overlap** selects **None**, **2D**, **1D**, or **Both** for
+the saved RF outlines on the RF map. **Shift+1**, **Shift+2**, and **Shift+0**
+select **1D**, **2D**, and **None**, even while Display is folded. These
+controls apply to the current window; save defaults in **Settings → RF Map**.
+
 Press **Command+Shift+.** (or use **View → Show Filtered Units / Hide Units
 with Zero RF Bins**) to toggle the Settings zero-bin unit filter. It restores
 or hides the affected units while preserving the current time windows,
@@ -518,7 +528,7 @@ Opening the app without a path shows the native file chooser. Release packages
 do not contain or auto-load sample RF data.
 
 Its macOS identity is `RF Map Viewer.app`, bundle ID
-`org.local.rfmapping.viewer`, and version/build `1.11.2` / `111002`. Build it with:
+`org.local.rfmapping.viewer`, and version/build `1.11.3` / `111003`. Build it with:
 
 ```sh
 script/build_python_stable_macos_app.sh

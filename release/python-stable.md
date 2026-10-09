@@ -1,3 +1,12 @@
+## Python 1.11.3: RF overlap controls and shortcuts
+
+Version **1.11.3**. Target: macOS Apple Silicon (build **111003**, Full edition).
+
+- Choose RF overlap directly from the folded **Display** toolbar, including None, 1D, 2D, and Both.
+- Press **Shift+1** for 1D overlap, **Shift+2** for 2D overlap, or **Shift+0** to turn overlap off. Shortcuts work with Display folded and preserve text-field editing.
+
+Windows remains available from `python-v1.11.2`, Swift from `swift-v1.10.3`, and Web from `web-v1.10.2`. Historical release notes follow.
+
 ## Python 1.11.2: RF overlays and native macOS interaction
 
 Version **1.11.2**. Target: macOS Apple Silicon (build **111002**, Full edition).

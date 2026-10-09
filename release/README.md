@@ -10,6 +10,11 @@ The Free-Moving alpha application has been retired from the active source and
 release workflow. Its historical Git tags and published artifacts are retained.
 The Python package and generic launcher now identify the stable viewer.
 
+Python 1.11.3 adds an RF overlap control to the folded Display toolbar and
+Shift+1, Shift+2, and Shift+0 shortcuts for 1D, 2D, and no overlap. This release
+targets macOS Apple Silicon, build 111003. The published Windows release remains
+1.11.2, build 11102, from its separate packaging commit.
+
 Python 1.11.2 adds configurable saved RF overlays and aligned RF/Results plots,
 restores native macOS welcome controls, and supports trackpad scrolling in
 Settings and Timeline. Unit and response details move to View → Inspector, and
@@ -27,8 +32,8 @@ component tag and artifact name:
 
 | Component | Release | Tag | Channel |
 | --- | --- | --- | --- |
-| Python stable (macOS) | `1.11.2` | `python-v1.11.2` | stable |
-| Python stable (Windows x64) | `1.11.1` | `python-v1.11.1` | stable |
+| Python stable (macOS) | `1.11.3` | `python-v1.11.3` | stable |
+| Python stable (Windows x64) | `1.11.2` | `python-v1.11.2` | stable |
 | Swift | `1.10.3` | `swift-v1.10.3` | stable |
 | Web | `1.10.2` | `web-v1.10.2` | stable |
 
@@ -104,6 +109,11 @@ Each active component records a `feature_generation_offset` from the Python
 stable reference. Swift and Web use offset `-1` from Python 1.11,
 retaining their `1.10.x` series. The manifest records their released versions
 independently of unreleased source updates.
+
+The Windows 1.11.2 packages were published from commit
+[`2e517d0`](https://github.com/KaiCao2003/RF-Map-Viewer/commit/2e517d05737cf297704c7e3df9ac735d09f42e1c).
+This macOS release branch retains the prior Windows packaging declarations;
+they do not describe those separately published assets.
 
 `versions.json` is the canonical machine-readable manifest. Validate every
 runtime, package, and build declaration from the repository root with:
