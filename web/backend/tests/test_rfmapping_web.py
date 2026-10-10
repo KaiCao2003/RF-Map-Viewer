@@ -1570,7 +1570,9 @@ def test_displayed_csv_is_written_on_linux_with_exact_tk_schema(
 def test_csv_export_normalization_and_output_path_confinement(
     app, settings: Settings, tmp_path: Path
 ) -> None:
-    source = write_json(settings.rf_root / "rf.json")
+    payload = sample_payload()
+    payload["stimulusPresentationCounts"] = [[2, 3], [4, 5]]
+    source = write_json(settings.rf_root / "rf.json", payload)
     outside = tmp_path / "outside"
     outside.mkdir()
     (settings.output_root / "escape-link").symlink_to(outside, target_is_directory=True)
@@ -1591,7 +1593,7 @@ def test_csv_export_normalization_and_output_path_confinement(
             row = next(csv.DictReader(handle))
         assert row["value_mode"] == "Mean firing rate (Hz)"
         assert row["value_unit"] == "Hz"
-        assert float(row["value"]) == pytest.approx(136.0 / 1.4)
+        assert float(row["value"]) == pytest.approx(136.0 / (14 * .2))
 
         for output_path in (
             "../outside.csv",

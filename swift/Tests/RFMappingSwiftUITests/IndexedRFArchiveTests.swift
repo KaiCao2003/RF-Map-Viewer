@@ -41,8 +41,10 @@ final class IndexedRFArchiveTests: XCTestCase {
         XCTAssertEqual(data.rfMaps.originalIndices, [0, 1, 2])
         XCTAssertEqual(data.cachedUnitCount, 3)
         XCTAssertEqual(try data.rfMap(byOriginalIndex: 0).spikeCounts, original.spikeCounts)
+        XCTAssertFalse(data.supportsMeanFiringRate)
+        XCTAssertThrowsError(try data.responseMatrix(unitIndex: 1, start: 0, end: 2, valueMode: .meanFiringRate))
         XCTAssertEqual(try data.responseMatrix(unitIndex: 1, start: 0, end: 2,
-                                               valueMode: .meanFiringRate), [[7.5, 24], [nil, 8.25]])
+                                               valueMode: .spikeCount), [[15, 24], [nil, 33]])
         try data.cacheUnit(second)
         XCTAssertEqual(data.cachedUnitCount, 3)
     }
@@ -244,6 +246,9 @@ final class IndexedRFArchiveTests: XCTestCase {
             ("occupancyTimeSec", npy(dtype: "<f8", shape: Array(shape.prefix(2)),
                 bytes: doubles(occupancy ?? Array(repeating: 1, count: shape[0] * shape[1])))),
         ]
+        // Synthetic fixtures use 10 presentations per occupied second and 100-ms bins.
+        entries.append(("stimulusPresentationCounts", npy(dtype: "<f8", shape: Array(shape.prefix(2)),
+            bytes: doubles((occupancy ?? Array(repeating: 1, count: shape[0] * shape[1])).map { $0 * 10 }))))
         entries += unitValues.enumerated().map { index, values in
             ("unit_\(41 + index)", npy(dtype: "<f8", shape: shape, bytes: doubles(values)))
         }
@@ -258,7 +263,7 @@ final class IndexedRFArchiveTests: XCTestCase {
 
     private func npy(dtype: String, shape: [Int], bytes: Data) -> Data {
         var header = "{'descr': '\(dtype)', 'fortran_order': False, 'shape': ("
-            + shape.map(String.init).joined(separator: ", ") + ",), }"
+            + shape.map(String.init).joined(separator: ", ") + (shape.isEmpty ? "), }" : ",), }")
         header += String(repeating: " ", count: (64 - (10 + header.utf8.count + 1) % 64) % 64) + "\n"
         var result = Data([0x93, 0x4e, 0x55, 0x4d, 0x50, 0x59, 1, 0])
         result.appendLE(UInt16(header.utf8.count))
@@ -341,5 +346,123 @@ private extension Data {
         for index in 0..<MemoryLayout<T>.size {
             append(UInt8(truncatingIfNeeded: value >> (index * 8)))
         }
+    }
+}
+
+extension IndexedRFArchiveTests {
+    func testSavedResultsMatchRecordedIDsAndNativeAxes() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = try savedSource(directory)
+        let path = SavedRFResult.resultURL(source: source.url)
+        try savedArchive(shape: [1, 2, 2], mask: [1, 1, 0, 0], center: [0, 1, 0, 0]).write(to: path)
+        let result = try SavedRFResult.load(source: source)
+        XCTAssertNil(result.forUnit(17))
+        XCTAssertEqual(result.forUnit(42)?.mask, [[true, true], [false, false]])
+        XCTAssertEqual(result.nativeCenter(for: 42), [[false, true], [false, false]])
+        XCTAssertEqual(result.timeRangeSeconds, [0, 0.2])
+        XCTAssertNil(result.summaryWarning)
+        XCTAssertTrue(result.diagnostics(for: 42).contains("fixture-key"))
+    }
+
+    func testNativeOneDimensionalResultsExpandAlongTheirDeclaredAxis() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = try savedSource(directory)
+        let path = SavedRFResult.resultURL(source: source.url, dimension: "1d", polarity: "inhibitory")
+        try savedArchive(shape: [1, 1, 2], mask: [1, 0], center: [1, 0], axis: "x", polarity: "inhibitory").write(to: path)
+        let result = try SavedRFResult.load(source: source, dimension: "1d", polarity: "inhibitory")
+        XCTAssertEqual(result.nativeMask(for: 42), [[true, false], [true, false]])
+        XCTAssertEqual(result.forUnit(42)?.mask, [[true, false]])
+        XCTAssertFalse(result.projectedFrom2D)
+    }
+
+    func testSavedResultRejectsMisalignedIDsAxesCentersAndTiming() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = try savedSource(directory)
+        let path = SavedRFResult.resultURL(source: source.url)
+        for candidate in [
+            try savedArchive(shape: [1, 2, 2], mask: [1, 0, 0, 0], center: [0, 1, 0, 0]),
+            try savedArchive(shape: [1, 1, 4], mask: [1, 0, 0, 0], center: [1, 0, 0, 0]),
+            try savedArchive(shape: [1, 2, 2], mask: [1, 0, 0, 0], center: [1, 0, 0, 0], unitID: 99),
+            try savedArchive(shape: [1, 2, 2], mask: [1, 0, 0, 0], center: [1, 0, 0, 0], timeRange: [0.01, 0.2]),
+        ] {
+            try candidate.write(to: path)
+            XCTAssertThrowsError(try SavedRFResult.load(source: source))
+        }
+    }
+
+    func testLegacyOneDimensionalProjectionRequiresMatchingSummary() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = try savedSource(directory)
+        let path = SavedRFResult.resultURL(source: source.url, dimension: "1d")
+        try savedArchive(shape: [1, 2, 2], mask: [0, 0, 1, 0], center: [0, 0, 1, 0]).write(to: path)
+        XCTAssertThrowsError(try SavedRFResult.load(source: source, dimension: "1d"))
+        var summary: [String: Any] = [
+            "source_path": "/original/location/fixture.rfmap",
+            "parameters": ["rf_type": "excitatory", "time_range_s": [0, 0.2], "collapse_from_2d": true,
+                           "cluster_forming_z_1d": 2.0],
+            "kept_unit_ids": [42], "output_paths": ["result_1d": path.path],
+            "bin_qc": ["unit_ids": [17, 42], "zero_bins": [1, 0], "valid_bins": [3, 4], "keep": [false, true]],
+        ]
+        let summaryURL = directory.appendingPathComponent("fixture_analysis.json")
+        try JSONSerialization.data(withJSONObject: summary).write(to: summaryURL)
+        let result = try SavedRFResult.load(source: source, dimension: "1d")
+        XCTAssertTrue(result.projectedFrom2D)
+        XCTAssertEqual(result.forUnit(42)?.mask, [[true, false]])
+        XCTAssertTrue(result.diagnostics(for: 42).contains("Saved QC"))
+        summary["kept_unit_ids"] = [17]
+        try JSONSerialization.data(withJSONObject: summary).write(to: summaryURL)
+        XCTAssertThrowsError(try SavedRFResult.load(source: source, dimension: "1d"))
+    }
+
+    func testIndexedPresentationExposureAndInvalidPresentationCounts() throws {
+        let source = try RFMappingData(data: makeArchive(unitValues: [[2, 6]], shape: [1, 1, 2]), url: url)
+        XCTAssertEqual(source.stimulusPresentationCounts, [[10]])
+        XCTAssertEqual(try source.responseValue(unitIndex: 0, yIndex: 0, xIndex: 0, start: 0, end: 1,
+                                                valueMode: .meanFiringRate), 4)
+        var entries = try makeEntries(unitValues: [[2]])
+        let index = try XCTUnwrap(entries.firstIndex { $0.0 == "stimulusPresentationCounts" })
+        entries[index].1 = npy(dtype: "<f8", shape: [1, 1], bytes: doubles([0.5]))
+        XCTAssertThrowsError(try RFMappingData(data: zip(entries), url: url))
+    }
+
+    private func savedSource(_ directory: URL) throws -> RFMappingData {
+        let payload = currentRFSchemaPayload([
+            "unitsSpikeCounts": [[[[1, 2], [2, 3]], [[3, 4], [4, 5]]], [[[2, 1], [3, 2]], [[4, 3], [5, 4]]]],
+            "unitsSpikeCountsSize": [2, 2, 2, 2], "unitPool": [17, 42],
+            "xPositions": [-10, 10], "yPositions": [5, 15], "timeBinEdges": [0, 0.1, 0.2],
+            "stimulusPresentationCounts": [[2, 4], [6, 8]],
+        ], occupancyTimeSec: [[1, 1], [1, 1]], occupancyTimeSecSize: [2, 2])
+        return try RFMappingData(data: JSONSerialization.data(withJSONObject: payload), url: directory.appendingPathComponent("fixture.rfmap"))
+    }
+
+    private func savedArchive(shape: [Int], mask: [UInt8], center: [UInt8], axis: String? = nil,
+                              polarity: String = "excitatory", unitID: Int = 42, timeRange: [Double] = [0, 0.2]) throws -> Data {
+        var manifest: [String: Any] = ["schema_name": "rfmapping-rf-result", "grid_shape": Array(shape.dropFirst()),
+            "storage_shape": shape, "time_range_s": timeRange,
+            "parameters": ["alternative": polarity == "inhibitory" ? "less" : "greater", "cluster_forming_z": 2.0]]
+        if let axis { manifest["collapse_axis"] = axis }
+        let manifestData = try JSONSerialization.data(withJSONObject: manifest, options: [.sortedKeys, .withoutEscapingSlashes])
+        func textArray(_ string: String) -> Data {
+            var bytes = Data()
+            for scalar in string.unicodeScalars { bytes.appendLE(scalar.value) }
+            return npy(dtype: "<U\(string.unicodeScalars.count)", shape: [], bytes: bytes)
+        }
+        var id = Data(); id.appendLE(Int64(unitID))
+        return zip([
+            ("schema_version", npy(dtype: "|u1", shape: [], bytes: Data([1]))),
+            ("mask_2d", npy(dtype: "|b1", shape: shape, bytes: Data(mask))),
+            ("center_2d", npy(dtype: "|u1", shape: shape, bytes: Data(center))),
+            ("unit_ids", npy(dtype: "<i8", shape: [1], bytes: id)),
+            ("manifest_json", textArray(String(data: manifestData, encoding: .utf8)!)),
+            ("cache_key", textArray("fixture-key")),
+        ])
     }
 }

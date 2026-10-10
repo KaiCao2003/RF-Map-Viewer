@@ -248,6 +248,16 @@ export function countInRange(
   return total;
 }
 
+export function supportsFiringRate(meta: DatasetMeta): boolean {
+  return meta.stimulusPresentationCounts != null;
+}
+
+export function responseDurationSeconds(meta: DatasetMeta, start: number, end: number): number {
+  const lower = clamp(Math.min(start, end), 0, meta.shape[3] - 1);
+  const upper = clamp(Math.max(start, end), 0, meta.shape[3] - 1);
+  return meta.timeBinEdges[upper + 1] - meta.timeBinEdges[lower];
+}
+
 export function responseValue(
   counts: Float64Array,
   meta: DatasetMeta,
@@ -263,7 +273,8 @@ export function responseValue(
   const occupancySeconds = meta.occupancyTimeSec[y]?.[x] ?? 0;
   if (occupancySeconds <= 0) return null;
   if (valueMode === "Spike count") return count;
-  return count / occupancySeconds;
+  const exposure = (meta.stimulusPresentationCounts?.[y]?.[x] ?? 0) * responseDurationSeconds(meta, lower, upper);
+  return exposure > 0 ? count / exposure : null;
 }
 
 export function responseMatrix(
@@ -301,6 +312,7 @@ export function prepareMatrix(
 export interface SpatialGroupObservations {
   count: number;
   occupancySeconds: number;
+  rateExposureSeconds: number;
   sourcePixelCount: number;
 }
 
@@ -340,6 +352,7 @@ export function spatialGroupObservations(
   const rangeEnd = clamp(Math.max(start, end), 0, meta.shape[3] - 1);
   let count = 0;
   let occupancySeconds = 0;
+  let presentations = 0;
   let sourcePixelCount = 0;
   for (let y = yStart; y <= yEnd; y += 1) {
     for (let x = xStart; x <= xEnd; x += 1) {
@@ -347,12 +360,14 @@ export function spatialGroupObservations(
       if (exposure <= 0) continue;
       count += countInRange(counts, meta, y, x, rangeStart, rangeEnd);
       occupancySeconds += exposure;
+      presentations += meta.stimulusPresentationCounts?.[y]?.[x] ?? 0;
       sourcePixelCount += 1;
     }
   }
   return {
     count,
     occupancySeconds,
+    rateExposureSeconds: presentations * responseDurationSeconds(meta, rangeStart, rangeEnd),
     sourcePixelCount,
   };
 }
@@ -397,15 +412,15 @@ export function prepareResponseMatrix(
   let pooledCounts: Matrix = observations.map((row) => row.map((value) =>
     value.sourcePixelCount > 0 ? value.count : null,
   ));
-  let pooledOccupancy: Matrix = observations.map((row) => row.map((value) =>
-    value.sourcePixelCount > 0 ? value.occupancySeconds : null,
+  let pooledExposure: Matrix = observations.map((row) => row.map((value) =>
+    value.sourcePixelCount > 0 ? value.rateExposureSeconds : null,
   ));
   if (smoothRadius > 0) {
     pooledCounts = smoothMatrix(pooledCounts, smoothRadius);
-    pooledOccupancy = smoothMatrix(pooledOccupancy, smoothRadius);
+    pooledExposure = smoothMatrix(pooledExposure, smoothRadius);
   }
   const matrix: Matrix = pooledCounts.map((row, y) => row.map((count, x) => {
-    const exposure = pooledOccupancy[y][x];
+    const exposure = pooledExposure[y][x];
     if (!valid[y][x] || count == null || exposure == null || exposure <= 0) return null;
     return count / exposure;
   }));
@@ -442,7 +457,8 @@ export function unitMetrics(counts: Float64Array, meta: DatasetMeta): UnitMetric
   let totalSpikes = 0;
   let bestY = 0;
   let bestX = 0;
-  let bestRateHz = -1;
+  let bestStrength = -1;
+  let bestRateHz: number | null = null;
   for (let y = 0; y < meta.shape[1]; y += 1) {
     const totalRow: Array<number | null> = [];
     const peakRow: Array<number | null> = [];
@@ -482,8 +498,10 @@ export function unitMetrics(counts: Float64Array, meta: DatasetMeta): UnitMetric
       entropyRow.push(normalizedEntropy);
       totalSpikes += cellTotal;
       const occupancySeconds = meta.occupancyTimeSec[y]?.[x] ?? 0;
-      const cellRateHz = occupancySeconds > 0 ? cellTotal / occupancySeconds : -1;
-      if (cellRateHz > bestRateHz) {
+      const cellRateHz = responseValue(counts, meta, y, x, 0, meta.shape[3] - 1, "Mean firing rate (Hz)");
+      const strength = supportsFiringRate(meta) ? (cellRateHz ?? -1) : occupancySeconds > 0 ? cellTotal : -1;
+      if (strength > bestStrength) {
+        bestStrength = strength;
         bestRateHz = cellRateHz;
         bestY = y;
         bestX = x;
@@ -503,7 +521,7 @@ export function unitMetrics(counts: Float64Array, meta: DatasetMeta): UnitMetric
     totalSpikes,
     bestY,
     bestX,
-    bestRateHz: Math.max(0, bestRateHz),
+    bestRateHz,
   };
 }
 
@@ -686,8 +704,8 @@ export function groupResponseValue(
       ? observations.count / observations.sourcePixelCount
       : null;
   }
-  if (observations.occupancySeconds <= 0) return null;
-  return observations.count / observations.occupancySeconds;
+  if (observations.rateExposureSeconds <= 0) return null;
+  return observations.count / observations.rateExposureSeconds;
 }
 
 export function groupResponseValues(
@@ -715,17 +733,9 @@ export function allPositionsTimelineValues(
       return total;
     });
   }
-  const occupancySeconds = meta.occupancyTimeSec.flat().reduce(
-    (sum, value) => sum + (value > 0 ? value : 0),
-    0,
-  );
-  if (occupancySeconds <= 0) return groups.map(() => 0);
   return groups.map(([start, end]) => {
-    let count = 0;
-    for (let y = 0; y < meta.shape[1]; y += 1) {
-      for (let x = 0; x < meta.shape[2]; x += 1) count += countInRange(counts, meta, y, x, start, end);
-    }
-    return count / occupancySeconds;
+    const observations = spatialGroupObservations(counts, meta, [0, meta.shape[1] - 1], [0, meta.shape[2] - 1], start, end);
+    return observations.rateExposureSeconds > 0 ? observations.count / observations.rateExposureSeconds : 0;
   });
 }
 

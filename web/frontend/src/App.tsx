@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ApiError,
+  getSavedRfResult,
   getCacheProgress,
   getServerPaths,
   retryCache,
@@ -14,9 +15,12 @@ import {
   listRemoteFiles,
   openRemoteDataset,
 } from "./api";
+import RfInspector from "./components/RfInspector";
+import { resultDimensions, savedRfOverlay } from "./rfResults";
+import { supportsFiringRate } from "./math";
 import RfWindowInput from "./components/RfWindowInput";
 import ViewerSettingsDialog from "./components/ViewerSettingsDialog";
-import { loadViewerSettings, saveViewerSettings, viewerSettingsPatch, type ViewerSettings, type HdLayout } from "./viewerSettings";
+import { loadViewerSettings, saveViewerSettings, viewerSettingsPatch, RF_OVERLAY_MODES, type ViewerSettings, type HdLayout } from "./viewerSettings";
 import HdPanel from "./components/HdPanel";
 import FigureExportComposer from "./components/FigureExportComposer";
 import { SpatialPlot, TimelinePlot } from "./components/Plots";
@@ -66,6 +70,10 @@ import {
 } from "./unitFilter";
 import type {
   CellRef,
+  RfOverlaySettings,
+  RfOverlayMode,
+  RfResultPolarity,
+  SavedRfResult,
   CacheProgress,
   DatasetMeta,
   FsEntry,
@@ -215,6 +223,18 @@ export default function App() {
   const [sourceOpen, setSourceOpen] = useState(false);
   const [sourceBusy, setSourceBusy] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
+  const [inspectorOpen, setInspectorOpen] = useState(false);
+  const [rfOverlay, setRfOverlay] = useState<RfOverlaySettings>(settings.rfOverlay);
+  const [resultMode, setResultMode] = useState<RfOverlayMode>("2D");
+  const [resultPolarity, setResultPolarity] = useState<RfResultPolarity>("excitatory");
+  const [savedResults, setSavedResults] = useState<SavedRfResult[]>([]);
+  const [resultsLoading, setResultsLoading] = useState(false);
+  const [resultsError, setResultsError] = useState("");
+  const [resultsReload, setResultsReload] = useState(0);
+  const resultsCache = useRef(new Map<string, SavedRfResult>());
+  const forceResultsReload = useRef(false);
+  const sidebarAutomatic = useRef(true);
+  const hdAutomatic = useRef(true);
   const [messageDialog, setMessageDialog] = useState<MessageDialogState | null>(null);
   const [exportDialog, setExportDialog] = useState<ExportDialogState | null>(null);
   const [figureComposerOpen, setFigureComposerOpen] = useState(false);
@@ -226,14 +246,14 @@ export default function App() {
   const [probeBusy, setProbeBusy] = useState(false);
   const [probeChooserOpen, setProbeChooserOpen] = useState(false);
   const [probePositionsPath, setProbePositionsPath] = useState<string | null>(null);
-  const [probeCollapsed, setProbeCollapsed] = useState(false);
+  const [probeCollapsed, setProbeCollapsed] = useState(true);
   const [probeSelection, setProbeSelection] = useState<ProbeSelection | null>(null);
   const [hdArtifact, setHdArtifact] = useState<HdDatasetArtifact | null>(null);
   const [hdError, setHdError] = useState("");
   const [hdLoading, setHdLoading] = useState(false);
   const [hdPath, setHdPath] = useState<string | null>(null);
   const [hdChooserOpen, setHdChooserOpen] = useState(false);
-  const [hdCollapsed, setHdCollapsed] = useState(false);
+  const [hdCollapsed, setHdCollapsed] = useState(true);
   const [hdLayout, setHdLayout] = useState<HdLayout>(settings.hdLayout);
   const [hdSettings, setHdSettings] = useState<HdViewSettings>(settings.hd);
   const [hdRefresh, setHdRefresh] = useState(0);
@@ -250,15 +270,21 @@ export default function App() {
   const [showProbe, setShowProbe] = useState(settings.showProbe);
 
   const updateState = useCallback((patch: Partial<ViewState> | ((current: ViewState) => Partial<ViewState>)) => {
-    setViewState((current) => current ? { ...current, ...(typeof patch === "function" ? patch(current) : patch) } : current);
-  }, []);
+    setViewState((current) => {
+      if (!current) return current;
+      const next = { ...current, ...(typeof patch === "function" ? patch(current) : patch) };
+      if (meta && !supportsFiringRate(meta)) next.valueMode = "Spike count";
+      if (!settings.visibleTabs.includes(next.selectedTab)) next.selectedTab = settings.visibleTabs[0];
+      return next;
+    });
+  }, [meta, settings.visibleTabs]);
 
   const changeTuningSession = useCallback((session: number) => {
     if (session === tuningSession) return;
     setHdArtifact(null);
     setHdPath(null);
     setHdError("");
-    setHdCollapsed(false);
+
     setTuningSession(session);
   }, [tuningSession]);
 
@@ -304,6 +330,12 @@ export default function App() {
     countsCache.current.clear();
     setCounts(null);
     setMeta(next);
+    resultsCache.current.clear();
+    setSavedResults([]);
+    sidebarAutomatic.current = true;
+    hdAutomatic.current = true;
+    setProbeCollapsed(true);
+    setHdCollapsed(true);
     setCacheProgress(next.cacheProgress ?? null);
     setCacheProgressError("");
     setJsonChoices([{ path: next.sourcePath, mtime: null }]);
@@ -313,7 +345,7 @@ export default function App() {
       if (!current) return initial;
       return {
         ...initial,
-        valueMode: VALUE_MODES.includes(current.valueMode) ? current.valueMode : DEFAULT_VALUE_MODE,
+        valueMode: supportsFiringRate(next) && VALUE_MODES.includes(current.valueMode) ? current.valueMode : "Spike count",
         smoothRadius: current.smoothRadius,
         flipY: current.flipY,
         palette: current.palette,
@@ -395,6 +427,7 @@ export default function App() {
   const applySettings = (next: ViewerSettings) => {
     saveViewerSettings(window.localStorage, next);
     setSettings(next);
+    setRfOverlay(next.rfOverlay);
     setShowHd(next.showHd);
     setShowProbe(next.showProbe);
     if (!next.showProbe) setProbeSelection(null);
@@ -403,16 +436,17 @@ export default function App() {
     setWaveformChannelMode(next.waveformChannelMode);
     setHdLayout(next.hdLayout);
     setHdSettings(next.hd);
-    setHdCollapsed(false);
+
     setUnitFilterEnabled(next.filterUnits);
     setZeroSpikeSpatialBinThreshold(next.zeroBinThreshold);
     if (meta) updateState((current) => ({
       ...resolutionChangePatch(meta, current, next.timeResolutionMs), ...viewerSettingsPatch(meta, next),
+      selectedTab: next.visibleTabs.includes(current.selectedTab) ? current.selectedTab : next.visibleTabs[0],
     }));
     setSettingsOpen(false);
   };
 
-  const settingsDialog = settingsOpen && <ViewerSettingsDialog settings={{ ...settings, tuningSession, showHd, showProbe,
+  const settingsDialog = settingsOpen && <ViewerSettingsDialog settings={{ ...settings, rfOverlay, tuningSession, showHd, showProbe,
     showWaveform, waveformChannelMode, hdLayout, filterUnits: unitFilterEnabled, zeroBinThreshold: zeroSpikeSpatialBinThreshold }}
     onSave={applySettings} onClose={() => setSettingsOpen(false)} />;
 
@@ -717,6 +751,45 @@ export default function App() {
     return () => waveformReads.current.cancel();
   }, [meta, showWaveform, viewState?.clusterId, waveformChannelMode]);
 
+  useEffect(() => {
+    if (sidebarAutomatic.current) setProbeCollapsed(!(showProbe && (probe != null || Boolean(probeError)))
+      && !(showWaveform && (waveformArtifact?.available || Boolean(waveformError) || meta?.capabilities.waveform)));
+  }, [showProbe, probe, probeError, showWaveform, waveformArtifact, waveformError, meta?.capabilities.waveform]);
+  useEffect(() => {
+    if (hdAutomatic.current) setHdCollapsed(!hdArtifact?.available && !hdError);
+  }, [hdArtifact, hdError]);
+  useEffect(() => {
+    setViewState((current) => current && !settings.visibleTabs.includes(current.selectedTab)
+      ? { ...current, selectedTab: settings.visibleTabs[0] } : current);
+  }, [settings.visibleTabs]);
+
+  const effectiveResultMode = viewState?.selectedTab === "results" ? resultMode
+    : rfOverlay.mode !== "None" ? rfOverlay.mode : inspectorOpen ? resultMode : "None";
+  const effectiveResultPolarity = viewState?.selectedTab === "results" || rfOverlay.mode === "None" ? resultPolarity : rfOverlay.polarity;
+  useEffect(() => {
+    const controller = new AbortController();
+    const forceReload = forceResultsReload.current;
+    forceResultsReload.current = false;
+    setSavedResults([]);
+    setResultsError("");
+    if (!meta || effectiveResultMode === "None") { setResultsLoading(false); return; }
+    setResultsLoading(true);
+    Promise.all(resultDimensions(effectiveResultMode).map(async (dimension) => {
+      const key = `${meta.id}:${dimension}:${effectiveResultPolarity}`;
+      const cached = resultsCache.current.get(key);
+      if (cached && !forceReload) return cached;
+      const result = await getSavedRfResult(meta.id, dimension, effectiveResultPolarity, forceReload, controller.signal);
+      if (!controller.signal.aborted) resultsCache.current.set(key, result);
+      return result;
+    })).then((results) => { if (!controller.signal.aborted) setSavedResults(results); })
+      .catch((error) => { if (!controller.signal.aborted) setResultsError(error instanceof Error ? error.message : "Could not load saved RF results."); })
+      .finally(() => { if (!controller.signal.aborted) setResultsLoading(false); });
+    return () => controller.abort();
+  }, [meta, effectiveResultMode, effectiveResultPolarity, resultsReload]);
+  const savedOverlay = useMemo(() => meta && viewState ? savedRfOverlay(meta, savedResults, viewState.clusterId) : null,
+    [meta, savedResults, viewState?.clusterId]);
+  const reloadResults = () => { resultsCache.current.clear(); forceResultsReload.current = true; setResultsReload((value) => value + 1); };
+
   const probeFilter = useMemo(() => {
     if (!showProbe || probe == null || probeSelection == null) return null;
     return probeUnitsInRegion(probe, probeSelection, qualityVisibleUnitIds);
@@ -855,6 +928,7 @@ export default function App() {
   }, [activeGroup, selectedRfValue, selectedSeries]);
 
   const openExportDialog = useCallback(() => {
+    if (viewState?.selectedTab === "results") return;
     if (!meta || !viewState || !counts) {
       setMessageDialog({ title: "Unit unavailable", text: `Cluster ${viewState?.clusterId ?? ""} is not available in this session.` });
       return;
@@ -869,6 +943,7 @@ export default function App() {
   }, [counts, meta, viewState]);
 
   const openFigureComposer = useCallback(() => {
+    if (viewState?.selectedTab === "results") return;
     if (!meta || !viewState) return;
     if (cacheProgress && !cacheProgress.complete) {
       setMessageDialog({ title: "RF cache is loading", text: "Figure Composer is available after all units have been cached. Retry any cache error first." });
@@ -967,7 +1042,7 @@ export default function App() {
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
-      if (settingsOpen || sourceOpen || probeChooserOpen || hdChooserOpen || figureComposerOpen) return;
+      if (settingsOpen || inspectorOpen || sourceOpen || probeChooserOpen || hdChooserOpen || figureComposerOpen) return;
       if ((event.metaKey || event.ctrlKey) && event.key === ",") {
         event.preventDefault(); setSettingsOpen(true); return;
       }
@@ -992,6 +1067,10 @@ export default function App() {
       }
       if (editing || event.metaKey || event.ctrlKey || event.altKey || !meta || !viewState) return;
       if (picker && (target?.matches(":open") || event.key.toLowerCase() !== "p")) return;
+      if (event.shiftKey && ["Digit1", "Digit2", "Digit0"].includes(event.code)) {
+        event.preventDefault();
+        setRfOverlay((current) => ({ ...current, mode: event.code === "Digit1" ? "1D" : event.code === "Digit2" ? "2D" : "None" })); return;
+      }
       if (event.key === "-") { event.preventDefault(); updateState(toggleRfMode(meta, viewState)); return; }
       if (event.key.toLowerCase() === "d") { event.preventDefault(); setDisplayOptions((value) => !value); return; }
       if (event.key === "ArrowLeft" || event.key === "[") { event.preventDefault(); stepUnit(-1); }
@@ -1014,14 +1093,14 @@ export default function App() {
         }
       }
       else if (event.key === "?") setHelpOpen(true);
-      else if (/^[1-3]$/.test(event.key)) {
-        const tab = VIEWER_TABS[Number(event.key) - 1].key;
-        updateState({ selectedTab: tab });
+      else if (!event.shiftKey && /^[1-4]$/.test(event.key)) {
+        const tab = VIEWER_TABS.filter((item) => settings.visibleTabs.includes(item.key))[Number(event.key) - 1];
+        if (tab) updateState({ selectedTab: tab.key });
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [settingsOpen, sourceOpen, probeChooserOpen, hdChooserOpen, figureComposerOpen, meta, openChooser, openExportDialog, openFigureComposer, probeSelection, showFullTimeline, stepResolution, stepTimeline, stepUnit, updateState, viewState]);
+  }, [settings.visibleTabs, inspectorOpen, settingsOpen, sourceOpen, probeChooserOpen, hdChooserOpen, figureComposerOpen, meta, openChooser, openExportDialog, openFigureComposer, probeSelection, showFullTimeline, stepResolution, stepTimeline, stepUnit, updateState, viewState]);
 
   if (!meta || !viewState) {
     return (
@@ -1052,7 +1131,7 @@ export default function App() {
   const axisStartMs = meta.timeBinEdges[0] * 1000;
   const axisEndMs = meta.timeBinEdges.at(-1)! * 1000;
   const bestDelay = bestTemporal?.delayMs ?? null;
-  const visibleTabs = VIEWER_TABS;
+  const visibleTabs = VIEWER_TABS.filter((tab) => settings.visibleTabs.includes(tab.key));
   const noQualityMatches = unitFilterStatus === "ready"
     && unitFilterEnabled
     && qualityVisibleUnitIds.length === 0;
@@ -1076,6 +1155,21 @@ export default function App() {
   const unavailableView = <div className="view-empty"><strong>Cluster {viewState.clusterId}: N/A in this dataset</strong><span>{localIndex < 0 ? "This recorded unit is present in a paired viewer, but absent from this RF file." : "This unit is hidden by this dataset's native RF-bin filter."}</span></div>;
   const unit = valueModeUnit(viewState.valueMode);
 
+  const selectionDetails = !noNavigationUnits && selectedCell && selectedDetails ? (
+              <div className="selected-cell-text">
+                <span>cluster {viewState.clusterId}</span>
+                <span>yIdx {selectedCell[0] + 1}{selectedCell[1] !== selectedCell[0] ? `-${selectedCell[1] + 1}` : ""}; y {formatNumber(meta.yPositions[selectedCell[0]], 3)}{selectedCell[1] !== selectedCell[0] ? `..${formatNumber(meta.yPositions[selectedCell[1]], 3)}` : ""},</span>
+                <span>xIdx {selectedCell[2] + 1}{selectedCell[3] !== selectedCell[2] ? `-${selectedCell[3] + 1}` : ""}; x {formatNumber(meta.xPositions[selectedCell[2]], 3)}{selectedCell[3] !== selectedCell[2] ? `..${formatNumber(meta.xPositions[selectedCell[3]], 3)}` : ""}</span>
+                {(selectedCell[1] !== selectedCell[0] || selectedCell[3] !== selectedCell[2]) && <span>{viewState.valueMode === "Spike count" ? "mean" : "pooled"} over exposed source pixels</span>}
+                <span>bin {formatResponse(selectedDetails.activeValue, viewState.valueMode)} {unit} ({formatNumber(timeBounds(meta, groups[activeGroup])[0])}–{formatNumber(timeBounds(meta, groups[activeGroup])[1])} ms)</span>
+                <span>RF {rfWindowLabel(viewState)}: {formatResponse(selectedDetails.rfValue, viewState.valueMode)} {unit}</span>
+                <span>full window {formatResponse(selectedDetails.totalValue, viewState.valueMode)} {unit}</span>
+                <span>peak {formatResponse(selectedDetails.peakValue, viewState.valueMode)} {unit}</span>
+                <span>peak bin {selectedDetails.peakIndex < 0 ? "n/a" : `${selectedDetails.peakIndex + 1} (${formatNumber(timeBounds(meta, groups[selectedDetails.peakIndex])[0])}–${formatNumber(timeBounds(meta, groups[selectedDetails.peakIndex])[1])} ms)`}</span>
+                <span>count-rate peak delay {selectedDetails.delay == null ? "n/a" : `${formatNumber(selectedDetails.delay, 1)} ms`}, count entropy {selectedDetails.entropy.toFixed(3)}</span>
+              </div>
+            ) : <span className="muted-copy">N/A for this session</span>;
+
   return (
     <div className={`app-shell ${probeCollapsed ? "probe-collapsed" : ""}`}>
       {cacheProgress?.indexed && !cacheProgress.complete && <div className="cache-progress" role="status">
@@ -1084,13 +1178,13 @@ export default function App() {
         {cacheProgressError && <span>{cacheProgressError} Retrying…</span>}
         {cacheProgress.error && <><span>{cacheProgress.error}</span><button type="button" onClick={() => { void retryCache(meta.id).then(setCacheProgress).catch((caught) => setError(String(caught))); }}>Retry</button></>}
       </div>}
-      {probeCollapsed && <aside className="sidebar-rail"><button type="button" onClick={() => setProbeCollapsed(false)}>Show Probe & controls</button></aside>}
+      {probeCollapsed && <aside className="sidebar-rail"><button type="button" onClick={() => { sidebarAutomatic.current = false; setProbeCollapsed(false); }}>Show Probe & controls</button></aside>}
       {!probeCollapsed && <aside className="sidebar">
         <div className="sidebar-inner">
           <div className="sidebar-title-row">
             <h1 className="viewer-title">RF Map Viewer</h1>
             <button type="button" aria-label="Settings" title="Settings (⌘/Ctrl+,)" onClick={() => setSettingsOpen(true)}>⚙</button>
-            <button type="button" aria-label="Collapse Probe and controls sidebar" onClick={() => setProbeCollapsed(true)}>‹</button>
+            <button type="button" aria-label="Collapse Probe and controls sidebar" onClick={() => { sidebarAutomatic.current = false; setProbeCollapsed(true); }}>‹</button>
           </div>
           <p className="data-summary">
             <span title={meta.sourcePath}>{meta.sourcePath}</span>
@@ -1235,7 +1329,7 @@ export default function App() {
               {unitStatus === "error" && <><span>Unit data failed to load.</span><button type="button" onClick={() => setUnitRequestRetry((revision) => revision + 1)}>Retry unit</button></>}
               {metrics && !noNavigationUnits && <>
                 <span>Summed RF counts: {metrics.totalSpikes.toFixed(0)}</span>
-                <span>Strongest rate cell: yIdx {metrics.bestY + 1}, xIdx {metrics.bestX + 1} ({formatResponse(metrics.bestRateHz, "Mean firing rate (Hz)")} Hz)</span>
+                <span>Strongest {metrics.bestRateHz == null ? "count" : "rate"} cell: yIdx {metrics.bestY + 1}, xIdx {metrics.bestX + 1}{metrics.bestRateHz != null && ` (${formatResponse(metrics.bestRateHz, "Mean firing rate (Hz)")} Hz)`}</span>
                 <span>Count-rate peak delay: {bestDelay == null ? "n/a" : `${formatNumber(bestDelay, 1)} ms`}</span>
               </>}
             </div>
@@ -1263,6 +1357,7 @@ export default function App() {
             <label className="display-row"><span>Y bins</span><input type="number" min={1} max={meta.shape[1]} step={1} value={viewState.yBins} onChange={(event) => updateState({ yBins: clamp(Math.round(Number(event.target.value)), 1, meta.shape[1]) })} /></label>
             <label className="display-row"><span>Smooth</span><input type="number" min={0} max={3} step={1} value={viewState.smoothRadius} onChange={(event) => updateState({ smoothRadius: clamp(Math.round(Number(event.target.value)), 0, 3) })} /></label>
             <label className="display-row"><span>Palette</span><select value={viewState.palette} onChange={(event) => updateState({ palette: event.target.value as Palette })}>{PALETTES.map((palette) => <option key={palette}>{palette}</option>)}</select></label>
+            <label className="display-row"><span>RF overlap</span><select value={rfOverlay.mode} onChange={(event) => setRfOverlay((current) => ({ ...current, mode: event.target.value as RfOverlayMode }))}>{RF_OVERLAY_MODES.map((mode) => <option key={mode}>{mode}</option>)}</select></label>
             <label className="display-row"><span>Polar radius</span><select value={viewState.polarRadius} onChange={(event) => updateState({ polarRadius: event.target.value as PolarRadius })}>{POLAR_RADIUS_MODES.map((mode) => <option key={mode}>{mode}</option>)}</select></label>
             </div>
           </section>
@@ -1270,23 +1365,10 @@ export default function App() {
           <hr />
           <section className="sidebar-block selected-block">
             <h2>Selected cell</h2>
-            {!noNavigationUnits && selectedCell && selectedDetails ? (
-              <div className="selected-cell-text">
-                <span>cluster {viewState.clusterId}</span>
-                <span>yIdx {selectedCell[0] + 1}{selectedCell[1] !== selectedCell[0] ? `-${selectedCell[1] + 1}` : ""}; y {formatNumber(meta.yPositions[selectedCell[0]], 3)}{selectedCell[1] !== selectedCell[0] ? `..${formatNumber(meta.yPositions[selectedCell[1]], 3)}` : ""},</span>
-                <span>xIdx {selectedCell[2] + 1}{selectedCell[3] !== selectedCell[2] ? `-${selectedCell[3] + 1}` : ""}; x {formatNumber(meta.xPositions[selectedCell[2]], 3)}{selectedCell[3] !== selectedCell[2] ? `..${formatNumber(meta.xPositions[selectedCell[3]], 3)}` : ""}</span>
-                {(selectedCell[1] !== selectedCell[0] || selectedCell[3] !== selectedCell[2]) && <span>{viewState.valueMode === "Spike count" ? "mean" : "pooled"} over exposed source pixels</span>}
-                <span>bin {formatResponse(selectedDetails.activeValue, viewState.valueMode)} {unit} ({formatNumber(timeBounds(meta, groups[activeGroup])[0])}–{formatNumber(timeBounds(meta, groups[activeGroup])[1])} ms)</span>
-                <span>RF {rfWindowLabel(viewState)}: {formatResponse(selectedDetails.rfValue, viewState.valueMode)} {unit}</span>
-                <span>full window {formatResponse(selectedDetails.totalValue, viewState.valueMode)} {unit}</span>
-                <span>peak {formatResponse(selectedDetails.peakValue, viewState.valueMode)} {unit}</span>
-                <span>peak bin {selectedDetails.peakIndex < 0 ? "n/a" : `${selectedDetails.peakIndex + 1} (${formatNumber(timeBounds(meta, groups[selectedDetails.peakIndex])[0])}–${formatNumber(timeBounds(meta, groups[selectedDetails.peakIndex])[1])} ms)`}</span>
-                <span>count-rate peak delay {selectedDetails.delay == null ? "n/a" : `${formatNumber(selectedDetails.delay, 1)} ms`}, count entropy {selectedDetails.entropy.toFixed(3)}</span>
-              </div>
-            ) : <span className="muted-copy">N/A for this session</span>}
+            <button type="button" onClick={() => setInspectorOpen(true)}>Inspector…</button>
             <div className="export-button-stack">
-              <button className="export-button figure-button" type="button" onClick={openFigureComposer} disabled={unitFilterStatus !== "ready" || !qualityVisibleUnitIds.length || Boolean(cacheProgress && !cacheProgress.complete)}>Compose figures…</button>
-              <button className="export-button" type="button" onClick={openExportDialog} disabled={!counts || noNavigationUnits}>Export displayed data…</button>
+              <button className="export-button figure-button" type="button" onClick={openFigureComposer} disabled={viewState.selectedTab === "results" || unitFilterStatus !== "ready" || !qualityVisibleUnitIds.length || Boolean(cacheProgress && !cacheProgress.complete)}>Compose figures…</button>
+              <button className="export-button" type="button" onClick={openExportDialog} disabled={viewState.selectedTab === "results" || !counts || noNavigationUnits}>Export displayed data…</button>
             </div>
           </section>
 
@@ -1302,13 +1384,15 @@ export default function App() {
               ? emptyUnitDetail
               : `x: ${formatNumber(meta.xPositions[0], 3)}..${formatNumber(meta.xPositions.at(-1)!, 3)}  y: ${formatNumber(meta.yPositions[0], 3)}..${formatNumber(meta.yPositions.at(-1)!, 3)}  time: ${formatNumber(axisStartMs)}..${formatNumber(axisEndMs)} ms  value: ${viewState.valueMode}`}
           </p>
+          <button type="button" onClick={() => setInspectorOpen(true)}>Inspector…</button>
         </header>
 
         <section className="plot-controls">
           <div className="plot-control-row top-row">
-            <label><span>Value</span><select value={viewState.valueMode} onChange={(event) => updateState({ valueMode: VALUE_MODES.includes(event.target.value as ValueMode) ? event.target.value as ValueMode : DEFAULT_VALUE_MODE })}>{VALUE_MODES.map((mode) => <option key={mode}>{mode}</option>)}</select></label>
+            <label><span>Value</span><select value={viewState.valueMode} onChange={(event) => updateState({ valueMode: VALUE_MODES.includes(event.target.value as ValueMode) ? event.target.value as ValueMode : DEFAULT_VALUE_MODE })}>{VALUE_MODES.map((mode) => <option key={mode} disabled={mode === "Mean firing rate (Hz)" && !supportsFiringRate(meta)}>{mode}</option>)}</select></label>
             <label><span>Time resolution (ms)</span><input type="number" min={baseBinMs(meta)} max={axisEndMs - axisStartMs} step={baseBinMs(meta)} value={formatNumber(viewState.timeResolutionMs, 6)} onChange={(event) => changeResolution(Number(event.target.value))} /></label>
           </div>
+          {!supportsFiringRate(meta) && <p className="muted-copy">Hz requires saved stimulus presentation counts. Showing spike counts.</p>}
           <div className="plot-control-row bottom-row">
             <label className="range-title"><select aria-label="RF window mode" value={viewState.rfWindowMode ?? "sum"} onChange={() => updateState(toggleRfMode(meta, viewState))}><option value="sum">RF sum (ms)</option><option value="difference">RF A − B (ms)</option></select></label>
             <RfWindowInput value={viewState.rfStartMs} label="RF range start" onCommit={(value) => { const bounds = timeBounds(meta, snapTimeRange(meta, value, viewState.rfEndMs)); updateState({ rfStartMs: bounds[0], rfEndMs: bounds[1] }); }} />
@@ -1337,14 +1421,26 @@ export default function App() {
               </button>
             ))}
           </nav>
-          <section className="view-surface">
+          <section className={`view-surface ${viewState.selectedTab === "results" || (viewState.selectedTab === "rf" && rfOverlay.mode !== "None") ? "with-results-controls" : ""}`}>
+            {(viewState.selectedTab === "results" || (viewState.selectedTab === "rf" && rfOverlay.mode !== "None")) && <div className="rf-results-controls">
+              {viewState.selectedTab === "results" && <>
+                <label>Dimension <select aria-label="Saved RF dimensions" value={resultMode} onChange={(event) => setResultMode(event.target.value as RfOverlayMode)}>{["2D", "1D", "Both"].map((mode) => <option key={mode}>{mode}</option>)}</select></label>
+                <label>Polarity <select aria-label="Saved RF polarity" value={resultPolarity} onChange={(event) => setResultPolarity(event.target.value as RfResultPolarity)}><option>excitatory</option><option>inhibitory</option></select></label>
+              </>}
+              <button type="button" onClick={reloadResults} disabled={resultsLoading}>Reload results</button>
+              <span role="status">{resultsLoading ? "Loading saved results…" : resultsError || (savedOverlay?.unavailable.length ? `${savedOverlay.unavailable.join(" / ")} unavailable for this unit. See Inspector.` : "Saved detections")}</span>
+            </div>}
+            {viewState.selectedTab === "results" && (noNavigationUnits ? <div className="view-empty"><strong>{emptyUnitTitle}</strong><span>{emptyUnitDetail}</span></div>
+              : unavailableUnit ? unavailableView : counts && selectedCell && savedOverlay
+                ? <SpatialPlot kind="results" meta={meta} counts={counts} state={viewState} unitIndex={localIndex} selectedCell={selectedCell} onSelectCell={selectCell} savedOverlay={savedOverlay} overlaySettings={{ ...rfOverlay, mode: resultMode, polarity: resultPolarity }} />
+                : <div className="view-empty">Loading unit…</div>)}
             <div className={`rf-hd-layout hd-layout-${hdLayout} ${!showHd ? "hd-is-hidden" : hdCollapsed ? "hd-is-collapsed" : ""}`} hidden={viewState.selectedTab !== "rf"}>
               <div className="rf-primary-pane">
                 {noNavigationUnits && <div className={`view-empty${unitFilterStatus === "error" ? " error-state" : ""}`}><strong>{emptyUnitTitle}</strong><span>{emptyUnitDetail}</span></div>}
                 {unavailableUnit && unavailableView}
                 {!noNavigationUnits && unitIsLoading && <div className="view-empty"><span className="spinner" /> Loading cluster {viewState.clusterId}…</div>}
                 {!noNavigationUnits && unitStatus === "error" && <div className="view-empty error-state"><strong>Unit data could not be loaded</strong><span>{error}</span></div>}
-                {viewState.selectedTab === "rf" && !noNavigationUnits && !unavailableUnit && counts && selectedCell && <SpatialPlot kind="rf" meta={meta} counts={counts} state={viewState} unitIndex={localIndex} selectedCell={selectedCell} onSelectCell={selectCell} />}
+                {viewState.selectedTab === "rf" && !noNavigationUnits && !unavailableUnit && counts && selectedCell && <SpatialPlot kind="rf" meta={meta} counts={counts} state={viewState} unitIndex={localIndex} selectedCell={selectedCell} onSelectCell={selectCell} savedOverlay={rfOverlay.mode !== "None" ? savedOverlay ?? undefined : undefined} overlaySettings={rfOverlay} />}
               </div>
               {showHd && <HdPanel
                 artifact={hdArtifact}
@@ -1356,7 +1452,7 @@ export default function App() {
                 collapsed={hdCollapsed}
                 settings={hdSettings}
                 onSettingsChange={setHdSettings}
-                onToggleCollapsed={() => setHdCollapsed((value) => !value)}
+                onToggleCollapsed={() => { hdAutomatic.current = false; setHdCollapsed((value) => !value); }}
                 onChoosePath={() => setHdChooserOpen(true)}
                 autoLoad={settings.autoLoadHd}
               />}
@@ -1384,6 +1480,7 @@ export default function App() {
       </main>
 
       {settingsDialog}
+      {inspectorOpen && <RfInspector selection={selectionDetails} results={savedResults} unitId={viewState.clusterId} loading={resultsLoading} error={resultsError} onClose={() => setInspectorOpen(false)} />}
       {sourceOpen && (
         <SourceChooser
           overlay
@@ -1472,7 +1569,7 @@ export default function App() {
         <div className="modal-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) setHelpOpen(false); }}>
           <div className="info-dialog" role="dialog" aria-modal="true" aria-label="Keyboard Shortcuts">
             <header><strong>Keyboard Shortcuts</strong><button type="button" aria-label="Close" onClick={() => setHelpOpen(false)}>×</button></header>
-            <pre>← / → or [ / ]   Previous / next unit{"\n"}↑ / ↓   Previous / next timeline bin{"\n"}Shift+, / Shift+.   Coarser / finer by one source bin{"\n"}−   Toggle RF Sum / A − B windows{"\n"}D   Show / hide Display Options{"\n"}Command/Ctrl-Shift+.   Show / hide filtered units{"\n"}1–3   Switch RF / Delay-RGB / Timeline{"\n"}F   Invert Y{"\n"}P   Toggle rectangular / polar layout{"\n"}Shift+P   Cycle palette{"\n"}Double-click waveform   Enlarge local waveform{"\n"}Esc   Close waveform zoom; clear Probe region; otherwise show full Timeline{"\n"}Command/Ctrl-,   Settings{"\n"}Command/Ctrl-O   Open an RF mapping file in this viewer{"\n"}Command/Ctrl-E   Open Figure Export Composer{"\n"}Command/Ctrl-Shift-E   Export displayed data CSV</pre>
+            <pre>← / → or [ / ]   Previous / next unit{"\n"}↑ / ↓   Previous / next timeline bin{"\n"}Shift+, / Shift+.   Coarser / finer by one source bin{"\n"}−   Toggle RF Sum / A − B windows{"\n"}D   Show / hide Display Options{"\n"}Command/Ctrl-Shift+.   Show / hide filtered units{"\n"}1–4   Switch visible tabs in order{"\n"}Shift+1 / Shift+2 / Shift+0   RF overlap: 1D / 2D / None{"\n"}F   Invert Y{"\n"}P   Toggle rectangular / polar layout{"\n"}Shift+P   Cycle palette{"\n"}Double-click waveform   Enlarge local waveform{"\n"}Esc   Close waveform zoom; clear Probe region; otherwise show full Timeline{"\n"}Command/Ctrl-,   Settings{"\n"}Command/Ctrl-O   Open an RF mapping file in this viewer{"\n"}Command/Ctrl-E   Open Figure Export Composer{"\n"}Command/Ctrl-Shift-E   Export displayed data CSV</pre>
             <footer><button type="button" onClick={() => setHelpOpen(false)}>OK</button></footer>
           </div>
         </div>

@@ -22,6 +22,9 @@ struct PolarMapView: View {
                         kind: kind,
                         drawInteraction: false
                     )
+                    if kind != .delay {
+                        drawSavedRFPolar(context: &context, store: store, layout: layout, resultOnly: kind == .results)
+                    }
                 }
                 PolarInteractionLayer(store: store, layout: layout, size: size)
             }
@@ -48,6 +51,8 @@ struct PolarMapView: View {
         switch kind {
         case .rf:
             store.currentHeatmapPlot()
+        case .results:
+            store.resultsHeatmapPlot()
         case .delay:
             store.delayHeatmapPlot(floor: store.responseFloor)
         }
@@ -150,11 +155,12 @@ private func drawPolar(
     drawInteraction: Bool = true
 ) {
     let isDelay = kind == .delay
+    let resultOnly = kind == .results
     drawTitle(
         context: &context,
         title: isDelay
             ? "Polar delay map - peak displayed bin center"
-            : "Polar RF map - \(store.currentMatrixLabel())",
+            : (resultOnly ? "Saved RF results · \(store.savedResultInterval)" : "Polar RF map - \(store.currentMatrixLabel())"),
         subtitle: "total_deg inferred: \(String(format: "%.0f", layout.totalDegrees)); radius: \(store.polarRadiusMode.rawValue)"
     )
 
@@ -189,7 +195,7 @@ private func drawPolar(
                 thetaStart: thetaEdges[col],
                 thetaEnd: thetaEdges[col + 1]
             )
-            context.fill(path, with: .color(fill))
+            context.fill(path, with: .color(resultOnly ? .white : fill))
         }
     }
 
@@ -222,7 +228,7 @@ private func drawPolar(
         at: CGPoint(x: layout.center.x, y: layout.center.y + outer + 22),
         anchor: .center
     )
-    drawColorbar(
+    if !resultOnly { drawColorbar(
         context: &context,
         x: layout.center.x + outer + 34,
         y: layout.center.y - min(220, outer * 2) / 2,
@@ -231,7 +237,7 @@ private func drawPolar(
         high: plot.high,
         palette: isDelay ? nil : store.palette,
         suffix: isDelay ? " ms" : store.valueMode.suffix
-    )
+    ) }
 }
 
 func polarCellPath(

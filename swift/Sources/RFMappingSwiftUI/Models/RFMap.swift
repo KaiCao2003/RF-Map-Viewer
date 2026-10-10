@@ -99,6 +99,7 @@ struct RFMap: Sendable {
         "timeBinEdges",
         "occupancyTimeSec",
         "occupancyTimeSecSize",
+        "stimulusPresentationCounts",
         "responseUnits",
         "responseNormalization",
         "spikeCountDefinition",
@@ -112,6 +113,7 @@ struct RFMap: Sendable {
     let yPositions: [Double]
     let timeBinEdgesSeconds: [Double]
     let occupancyTimeSeconds: [[Double]]
+    let stimulusPresentationCounts: [[Double]]?
     let metadata: [String: RFMapJSONValue]
     let sourceURL: URL
 
@@ -139,6 +141,7 @@ struct RFMap: Sendable {
         yPositions: [Double],
         timeBinEdgesSeconds: [Double],
         occupancyTimeSeconds: [[Double]],
+        stimulusPresentationCounts: [[Double]]? = nil,
         metadata: [String: RFMapJSONValue] = [:],
         sourceURL: URL
     ) throws {
@@ -157,6 +160,14 @@ struct RFMap: Sendable {
         self.yPositions = yPositions
         self.timeBinEdgesSeconds = timeBinEdgesSeconds
         self.occupancyTimeSeconds = occupancyTimeSeconds
+        if let presentations = stimulusPresentationCounts {
+            guard presentations.count == yPositions.count,
+                  presentations.allSatisfy({ $0.count == xPositions.count }),
+                  presentations.joined().allSatisfy({ $0.isFinite && $0 >= 0 && $0 == $0.rounded() }) else {
+                throw RFMapError.invalidData("stimulusPresentationCounts must contain non-negative integers on the y-by-x grid.")
+            }
+        }
+        self.stimulusPresentationCounts = stimulusPresentationCounts
         self.metadata = metadata
         self.sourceURL = sourceURL.standardizedFileURL
     }
@@ -174,6 +185,7 @@ struct RFMap: Sendable {
         yPositions = source.yPositions
         self.timeBinEdgesSeconds = timeBinEdgesSeconds
         occupancyTimeSeconds = source.occupancyTimeSeconds
+        stimulusPresentationCounts = source.stimulusPresentationCounts
         self.metadata = metadata
         sourceURL = source.sourceURL
     }

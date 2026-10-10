@@ -51,7 +51,7 @@ func hdScreenVector(angleDegrees: Double) -> (x: Double, y: Double) {
 private struct HDTuningPayload: Decodable {
     let metadata: [String: RFMapJSONValue]
     let angleBinEdgesDegrees: [Double]
-    let occupancySamples: [Int]
+    let occupancySamples: [Int]?
     let occupancyTimeSeconds: [Double]
     let unitIDs: [Int]
     let spikeCounts: [[Int]]
@@ -81,24 +81,12 @@ private enum HDTuningContractValidator {
     private static let topLevelKeys = [
         "metadata",
         "angle_bin_edges_deg",
-        "occupancy_samples",
         "occupancy_time_s",
         "unit_id",
         "spike_counts",
         "firing_rate_hz",
         "unit_data",
     ]
-    private static let unitDataKeys = [
-        "hd_class",
-        "rate_mvl",
-        "spike_angle_mrl",
-        "rayleigh_score",
-        "rayleigh_p",
-        "rayleigh_significant",
-        "shuffle_p",
-        "shuffle_significant",
-    ]
-
     static func validate(_ data: Data) throws {
         try rejectDuplicateJSONKeys(data)
         let decoded: Any
@@ -127,19 +115,11 @@ private enum HDTuningContractValidator {
                 "Missing tuning-curve keys: \(missing.joined(separator: ", "))."
             )
         }
-        let allowed = Set(topLevelKeys)
-        let unexpected = payload.keys.filter { !allowed.contains($0) }.sorted()
-        if !unexpected.isEmpty {
-            throw HDTuningError.invalidData(
-                "Unexpected tuning-curve keys: \(unexpected.joined(separator: ", "))."
-            )
-        }
-
         let metadata = try object(
             payload["metadata"],
             label: "Tuning-curve metadata"
         )
-        let featureFrequency = try validateMetadata(metadata)
+        _ = try validateMetadata(metadata)
 
         let edges = try array(
             payload["angle_bin_edges_deg"],
@@ -162,17 +142,6 @@ private enum HDTuningContractValidator {
             )
         }
 
-        let occupancySamples = try array(
-            payload["occupancy_samples"],
-            count: HDTuningData.rawBinCount,
-            label: "Tuning-curve occupancy_samples"
-        ).enumerated().map { index, rawValue in
-            try integer(
-                rawValue,
-                label: "Tuning-curve occupancy sample \(index + 1)",
-                nonnegative: true
-            )
-        }
         let occupancy = try array(
             payload["occupancy_time_s"],
             count: HDTuningData.rawBinCount,
@@ -187,53 +156,6 @@ private enum HDTuningContractValidator {
         guard occupancy.contains(where: { $0 > 0 }) else {
             throw HDTuningError.invalidData(
                 "Tuning-curve occupancy_time_s must contain positive occupancy."
-            )
-        }
-
-        var samplingRates: [Double] = []
-        for index in occupancy.indices {
-            let samples = occupancySamples[index]
-            let occupiedSeconds = occupancy[index]
-            guard (samples == 0) == (occupiedSeconds == 0) else {
-                throw HDTuningError.invalidData(
-                    "Tuning-curve occupancy bin \(index + 1) has inconsistent samples and time."
-                )
-            }
-            guard samples > 0 else { continue }
-            let samplingRate = Double(samples) / occupiedSeconds
-            guard samplingRate.isFinite, samplingRate > 0 else {
-                throw HDTuningError.invalidData(
-                    "Tuning-curve occupancy bin \(index + 1) implies an invalid sampling rate."
-                )
-            }
-            samplingRates.append(samplingRate)
-        }
-        guard let referenceFrequency = samplingRates.first else {
-            throw HDTuningError.invalidData(
-                "Tuning-curve occupancy_time_s must contain positive occupancy."
-            )
-        }
-        guard samplingRates.dropFirst().allSatisfy({ value in
-            isClose(
-                value,
-                referenceFrequency,
-                relativeTolerance: 1e-9,
-                absoluteTolerance: 1e-9
-            )
-        }) else {
-            throw HDTuningError.invalidData(
-                "Tuning-curve occupancy_samples and occupancy_time_s imply inconsistent sampling rates."
-            )
-        }
-        if let featureFrequency,
-           !isClose(
-               featureFrequency,
-               referenceFrequency,
-               relativeTolerance: 1e-9,
-               absoluteTolerance: 1e-9
-           ) {
-            throw HDTuningError.invalidData(
-                "Tuning-curve metadata.feature_fs_hz does not match occupancy samples/time."
             )
         }
 
@@ -273,44 +195,10 @@ private enum HDTuningContractValidator {
             payload["unit_data"],
             label: "Tuning-curve unit_data"
         )
-        let requiredUnitData = Set(unitDataKeys)
-        let missingUnitData = unitDataKeys.filter { unitData[$0] == nil }
-        let unexpectedUnitData = unitData.keys
-            .filter { !requiredUnitData.contains($0) }
-            .sorted()
-        if !missingUnitData.isEmpty {
-            throw HDTuningError.invalidData(
-                "Missing tuning-curve unit_data keys: \(missingUnitData.joined(separator: ", "))."
-            )
-        }
-        if !unexpectedUnitData.isEmpty {
-            throw HDTuningError.invalidData(
-                "Unexpected tuning-curve unit_data keys: \(unexpectedUnitData.joined(separator: ", "))."
-            )
-        }
         var columns: [String: [Any]] = [:]
-        for key in unitDataKeys {
-            columns[key] = try array(
-                unitData[key],
-                count: unitIDs.count,
-                label: "Tuning-curve unit_data.\(key)"
-            )
+        for (key, value) in unitData {
+            columns[key] = try array(value, count: unitIDs.count, label: "unit_data.\(key)")
         }
-
-        let classification = metadata["classification"]
-            .flatMap { $0 is NSNull ? nil : $0 as? [String: Any] }
-        let rayleighAlpha = try classification.flatMap { value in
-            try nullableNumber(
-                value["rayleigh_alpha"],
-                label: "Tuning-curve metadata.classification.rayleigh_alpha"
-            )
-        } ?? 0.05
-        let shuffleAlpha = try classification.flatMap { value in
-            try nullableNumber(
-                value["shuffle_alpha"],
-                label: "Tuning-curve metadata.classification.shuffle_alpha"
-            )
-        } ?? 0.01
 
         for unitIndex in unitIDs.indices {
             let unitID = unitIDs[unitIndex]
@@ -358,85 +246,13 @@ private enum HDTuningContractValidator {
                 }
             }
 
-            _ = try optionalUnitNumber(
-                columns,
-                key: "rate_mvl",
-                unitIndex: unitIndex,
-                unitID: unitID,
-                maximum: 1
-            )
-            _ = try optionalUnitNumber(
-                columns,
-                key: "spike_angle_mrl",
-                unitIndex: unitIndex,
-                unitID: unitID,
-                maximum: 1
-            )
-            let rayleighScore = try optionalUnitNumber(
-                columns,
-                key: "rayleigh_score",
-                unitIndex: unitIndex,
-                unitID: unitID
-            )
-            let rayleighP = try optionalUnitNumber(
-                columns,
-                key: "rayleigh_p",
-                unitIndex: unitIndex,
-                unitID: unitID,
-                maximum: 1
-            )
-            let shuffleP = try optionalUnitNumber(
-                columns,
-                key: "shuffle_p",
-                unitIndex: unitIndex,
-                unitID: unitID,
-                maximum: 1
-            )
-            guard (rayleighScore == nil) == (rayleighP == nil) else {
-                throw HDTuningError.invalidData(
-                    "Unit \(unitID) rayleigh_score and rayleigh_p must both be null or numeric."
-                )
-            }
-            let rayleighSignificant = try nullableBoolean(
-                columns["rayleigh_significant"]?[unitIndex],
-                label: "Unit \(unitID) rayleigh_significant"
-            )
-            let shuffleSignificant = try nullableBoolean(
-                columns["shuffle_significant"]?[unitIndex],
-                label: "Unit \(unitID) shuffle_significant"
-            )
-            let expectedRayleigh = rayleighP.map { $0 < rayleighAlpha }
-            let expectedShuffle = shuffleP.map { $0 <= shuffleAlpha }
-            guard rayleighSignificant == expectedRayleigh else {
-                throw HDTuningError.invalidData(
-                    "Unit \(unitID) rayleigh_significant does not match rayleigh_p."
-                )
-            }
-            guard shuffleSignificant == expectedShuffle else {
-                throw HDTuningError.invalidData(
-                    "Unit \(unitID) shuffle_significant does not match shuffle_p."
-                )
-            }
             let hdClass = try nullableInteger(
                 columns["hd_class"]?[unitIndex],
                 label: "Unit \(unitID) hd_class"
             )
-            guard hdClass == nil || [0, 1, 2].contains(hdClass!) else {
+            guard hdClass == nil || [0, 1, 2, 3].contains(hdClass!) else {
                 throw HDTuningError.invalidData(
-                    "Unit \(unitID) hd_class must be 0, 1, 2, or null."
-                )
-            }
-            let expectedClass: Int?
-            if let rayleighSignificant, let shuffleSignificant {
-                expectedClass = rayleighSignificant && shuffleSignificant
-                    ? 2
-                    : rayleighSignificant || shuffleSignificant ? 1 : 0
-            } else {
-                expectedClass = nil
-            }
-            guard hdClass == expectedClass else {
-                throw HDTuningError.invalidData(
-                    "Unit \(unitID) hd_class does not match its significance results."
+                    "Unit \(unitID) hd_class must be 0, 1, 2, 3, or null."
                 )
             }
         }
@@ -494,6 +310,7 @@ private enum HDTuningContractValidator {
                 "class_0",
                 "class_1",
                 "class_2",
+                "class_3",
                 "class_null",
                 "rayleigh_test",
             ] where classification[key] != nil {
@@ -584,40 +401,12 @@ private enum HDTuningContractValidator {
         return featureFrequency
     }
 
-    private static func optionalUnitNumber(
-        _ columns: [String: [Any]],
-        key: String,
-        unitIndex: Int,
-        unitID: Int,
-        maximum: Double? = nil
-    ) throws -> Double? {
-        let value = try nullableNumber(
-            columns[key]?[unitIndex],
-            label: "Unit \(unitID) \(key)",
-            nonnegative: true
-        )
-        if let value, let maximum, value > maximum {
-            guard isClose(
-                value,
-                maximum,
-                relativeTolerance: 0,
-                absoluteTolerance: 1e-12
-            ) else {
-                throw HDTuningError.invalidData(
-                    "Unit \(unitID) \(key) must not exceed \(maximum)."
-                )
-            }
-            return maximum
-        }
-        return value
-    }
-
     /// JSONSerialization keeps only one value for duplicate object keys. This
     /// structural token pass rejects them first at every nesting depth while
     /// leaving complete syntax validation to Foundation. Key strings are
     /// decoded with JSONDecoder so escaped spellings such as `"a"` and
     /// `"\\u0061"` are treated as the same key.
-    private static func rejectDuplicateJSONKeys(_ data: Data) throws {
+    static func rejectDuplicateJSONKeys(_ data: Data) throws {
         let bytes = [UInt8](data)
         var frames: [JSONContainerFrame] = []
         var index = 0
@@ -814,10 +603,53 @@ struct HDTuningData: Sendable {
     private let unitsByID: [Int: HDTuningUnit]
 
     init(data: Data, sourceURL: URL) throws {
-        try HDTuningContractValidator.validate(data)
+        try HDTuningContractValidator.rejectDuplicateJSONKeys(data)
+        guard var document = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              !document.isEmpty else {
+            throw HDTuningError.invalidData("Tuning-curve JSON must be a non-empty object.")
+        }
+        let columnarMarkers: Set<String> = ["metadata", "angle_bin_edges_deg", "occupancy_time_s",
+                                            "unit_id", "spike_counts", "firing_rate_hz", "unit_data"]
+        if document["schema_version"] == nil && columnarMarkers.isDisjoint(with: document.keys) {
+            var parsed: [Int: HDTuningUnit] = [:]
+            var ids: [Int] = []
+            for key in document.keys.sorted() {
+                guard let id = Int(key), parsed[id] == nil,
+                      let values = document[key] as? [NSNumber], values.count == Self.rawBinCount,
+                      values.allSatisfy({ CFGetTypeID($0) != CFBooleanGetTypeID() && $0.doubleValue.isFinite && $0.doubleValue >= 0 }) else {
+                    throw HDTuningError.invalidData("Legacy tuning curves require unique integer IDs and 180 non-negative rates per unit.")
+                }
+                ids.append(id)
+                parsed[id] = HDTuningUnit(unitID: id, spikeCounts: [], rawRatesHz: values.map { $0.doubleValue }, hdClass: nil, metrics: [:])
+            }
+            self.sourceURL = sourceURL.standardizedFileURL
+            angleBinEdgesDegrees = (0...Self.rawBinCount).map { Double($0) * 2 }
+            occupancySamples = []
+            occupancyTimeSeconds = []
+            unitIDs = ids
+            metadata = [:]
+            unitsByID = parsed
+            return
+        }
+        if let version = document.removeValue(forKey: "schema_version") {
+            guard let number = version as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(), number == 2,
+                  let units = document.removeValue(forKey: "units") as? [[String: Any]], !units.isEmpty else {
+                throw HDTuningError.invalidData("Schema version 2 requires a non-empty units array.")
+            }
+            document["unit_id"] = units.map { $0["unit_id"] ?? NSNull() }
+            document["spike_counts"] = units.map { $0["spike_counts"] ?? NSNull() }
+            document["firing_rate_hz"] = units.map { $0["firing_rate_hz"] ?? NSNull() }
+            let keys = Set(units.flatMap { $0.keys }).subtracting(["unit_id", "spike_counts", "firing_rate_hz"])
+            document["unit_data"] = Dictionary(uniqueKeysWithValues: keys.map { key in
+                (key, units.map { $0[key] ?? NSNull() })
+            })
+        }
+        if document["metadata"] == nil || document["metadata"] is NSNull { document["metadata"] = [String: Any]() }
+        let canonicalData = try JSONSerialization.data(withJSONObject: document)
+        try HDTuningContractValidator.validate(canonicalData)
         let payload: HDTuningPayload
         do {
-            payload = try JSONDecoder().decode(HDTuningPayload.self, from: data)
+            payload = try JSONDecoder().decode(HDTuningPayload.self, from: canonicalData)
         } catch {
             throw HDTuningError.invalidData(
                 "Could not decode HD tuning JSON: \(error.localizedDescription)"
@@ -883,25 +715,22 @@ struct HDTuningData: Sendable {
             }
             var metrics: [String: RFMapJSONValue] = [:]
             for (key, column) in payload.unitData {
-                metrics[key] = Self.normalizedUnitMetric(
-                    column[index],
-                    key: key
-                )
+                metrics[key] = column[index]
             }
             let hdClass: Int?
             switch metrics["hd_class"] {
             case nil, .some(.null):
                 hdClass = nil
             case .some(.number(let value)):
-                guard let exact = Int(exactly: value), [0, 1, 2].contains(exact) else {
+                guard let exact = Int(exactly: value), [0, 1, 2, 3].contains(exact) else {
                     throw HDTuningError.invalidData(
-                        "HD unit \(unitID) hd_class must be 0, 1, 2, or null."
+                        "HD unit \(unitID) hd_class must be 0, 1, 2, 3, or null."
                     )
                 }
                 hdClass = exact
             default:
                 throw HDTuningError.invalidData(
-                    "HD unit \(unitID) hd_class must be 0, 1, 2, or null."
+                    "HD unit \(unitID) hd_class must be 0, 1, 2, 3, or null."
                 )
             }
             unitsByID[unitID] = HDTuningUnit(
@@ -915,28 +744,11 @@ struct HDTuningData: Sendable {
 
         self.sourceURL = sourceURL.standardizedFileURL
         angleBinEdgesDegrees = payload.angleBinEdgesDegrees
-        occupancySamples = payload.occupancySamples
+        occupancySamples = payload.occupancySamples ?? []
         occupancyTimeSeconds = payload.occupancyTimeSeconds
         unitIDs = payload.unitIDs
         metadata = payload.metadata
         self.unitsByID = unitsByID
-    }
-
-    private static func normalizedUnitMetric(
-        _ metric: RFMapJSONValue,
-        key: String
-    ) -> RFMapJSONValue {
-        let boundedKeys: Set<String> = [
-            "rate_mvl",
-            "spike_angle_mrl",
-            "rayleigh_p",
-            "shuffle_p",
-        ]
-        guard boundedKeys.contains(key),
-              case .number(let value) = metric,
-              value > 1,
-              value - 1 <= 1e-12 else { return metric }
-        return .number(1)
     }
 
     init(url: URL) throws {
@@ -961,6 +773,18 @@ struct HDTuningData: Sendable {
     ) throws -> ProcessedHDCurve {
         let unit = try unit(byID: unitID)
         let bins = Self.normalizedDisplayBinCount(displayBins)
+        if unit.spikeCounts.isEmpty {
+            var rates = unit.rawRatesHz.map { $0 ?? .nan }
+            if smoothing {
+                guard sigma.isFinite, sigma > 0 else { throw HDTuningError.invalidData("HD smoothing sigma must be positive and finite.") }
+                rates = Self.smoothCircular(rates, sigma: sigma * Double(Self.rawBinCount) / Double(Self.defaultDisplayBins))
+            }
+            let groupSize = Self.rawBinCount / bins
+            let grouped = (0..<bins).map { group in
+                compensatedSum(rates[(group * groupSize)..<((group + 1) * groupSize)]) / Double(groupSize)
+            }
+            return ProcessedHDCurve(anglesDegrees: (0..<bins).map { (Double($0) + 0.5) * 360 / Double(bins) }, ratesHz: grouped)
+        }
         var counts = unit.spikeCounts
         var occupancy = occupancyTimeSeconds
         if smoothing {
@@ -983,7 +807,7 @@ struct HDTuningData: Sendable {
             let groupedCounts = compensatedSum(counts[start..<end])
             let groupedOccupancy = compensatedSum(occupancy[start..<end])
             groupedRates.append(
-                groupedOccupancy > 1e-12 ? groupedCounts / groupedOccupancy : 0.0
+                groupedOccupancy > 1e-12 ? groupedCounts / groupedOccupancy : .nan
             )
         }
         let width = 360.0 / Double(bins)

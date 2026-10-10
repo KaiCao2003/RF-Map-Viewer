@@ -249,13 +249,30 @@ final class RFMappingStore {
     var timeResolutionMS = 1.0
     var smoothRadius = 0
     var selectedTab: PlotTab = .rf
+    var displayDefaults = ViewerDisplayDefaults()
+    var overlayMode: RFOverlayMode = .none
+    var overlayPolarity: RFResultPolarity = .excitatory
+    var resultsMode: RFOverlayMode = .twoD
+    var resultsPolarity: RFResultPolarity = .excitatory
+    var isShowingSettings = false
+    var inspectorRequest = 0
+    var probeExpanded: Bool? = nil
+    var waveformExpanded: Bool? = nil
+    var tuningExpanded: Bool? = nil
+    private(set) var savedResults: [String: SavedRFResult] = [:]
+    private(set) var savedResultErrors: [String: String] = [:]
+
 
     private(set) var tuningSessionIndex = 1
     private(set) var showWaveform = true
     private(set) var waveformChannelMode: WaveformChannelMode = .sameXColumn
     private(set) var rfFilterUnitsWithZeroBins = true
     private(set) var rfZeroBinThreshold = 1
-    private(set) var hdTuning: HDTuningData?
+    private(set) var hdTuning: HDTuningData? {
+        didSet { tuningCurveCache.removeAll(); tuningScaleCache = nil }
+    }
+    @ObservationIgnored private var tuningCurveCache: [String: ProcessedHDCurve] = [:]
+    @ObservationIgnored private var tuningScaleCache: (key: String, peak: Double)?
     private(set) var hdTuningURL: URL?
     private(set) var hdTuningError: String?
     private(set) var probeGeometry: ProbeGeometry?
@@ -298,6 +315,11 @@ final class RFMappingStore {
            let decoded = try? JSONDecoder().decode(TimingDefaults.self, from: stored) {
             timingDefaults = decoded
         }
+        if let stored = preferences.data(forKey: "rfmapping.displayDefaults"),
+           let decoded = try? JSONDecoder().decode(ViewerDisplayDefaults.self, from: stored) {
+            displayDefaults = decoded
+        }
+        applyDisplayDefaults()
         rfSubtractEnabled = timingDefaults.subtract
         lastSumRange = (timingDefaults.sumStart, timingDefaults.sumEnd)
         lastDifferenceRange = (timingDefaults.aStart, timingDefaults.aEnd)
@@ -542,7 +564,13 @@ final class RFMappingStore {
             timelineScrollFraction: timelineScrollFraction,
             rfSubtractEnabled: rfSubtractEnabled,
             subtractRangeStartMS: subtractRangeStartMS,
-            subtractRangeEndMS: subtractRangeEndMS
+            subtractRangeEndMS: subtractRangeEndMS,
+            tuningStyle: displayDefaults.tuningStyle, tuningLayout: displayDefaults.tuningLayout,
+            tuningBins: displayDefaults.tuningBins, tuningSmoothing: displayDefaults.tuningSmoothing,
+            tuningSigmaDegrees: displayDefaults.tuningSigmaDegrees,
+            tuningSharedScale: displayDefaults.tuningSharedScale,
+            showTuning: displayDefaults.showTuning, showProbe: displayDefaults.showProbe,
+            overlayMode: overlayMode, overlayPolarity: overlayPolarity
         )
     }
 
@@ -551,7 +579,7 @@ final class RFMappingStore {
         return """
         \(data.url.path)
         \(data.nUnits) units  \(data.nY) y x \(data.nX) x  \(data.nBins) bins
-        Occupancy: \(data.nY) y x \(data.nX) x seconds; firing rate = count / occupancy
+        \(data.supportsMeanFiringRate ? "Hz = counts / (presentations × response seconds)" : "Showing spike count as Hz is unavailable.")
         """
     }
 
@@ -728,10 +756,14 @@ final class RFMappingStore {
         binIndex = 0
         rangeStartMS = loaded.timeBinEdges[0] * 1000.0
         rangeEndMS = loaded.timeBinEdges[loaded.nBins] * 1000.0
-        xBins = loaded.nX
-        yBins = loaded.nY
-        timeResolutionMS = baseBinMS()
-        valueMode = ResponseValueMode.allCases.contains(valueMode) ? valueMode : .meanFiringRate
+        xBins = displayDefaults.xBins == 0 ? loaded.nX : displayDefaults.xBins
+        yBins = displayDefaults.yBins == 0 ? loaded.nY : displayDefaults.yBins
+        timeResolutionMS = displayDefaults.timeResolutionMS
+        valueMode = loaded.supportsMeanFiringRate ? displayDefaults.valueMode : .spikeCount
+        probeExpanded = nil
+        waveformExpanded = nil
+        tuningExpanded = nil
+        reloadSavedResults()
         selectedCell = nil
         clearHover()
         timelineRangeAnchor = nil
@@ -846,7 +878,17 @@ final class RFMappingStore {
         spatialPlotFormat = state.spatialPlotFormat
         delayRGBMode = state.delayRGBMode
         responseFloor = max(0, finiteOr(state.responseFloor, fallback: 0))
-        selectedTab = state.selectedTab
+        selectedTab = visibleTabs.contains(state.selectedTab) ? state.selectedTab : visibleTabs[0]
+        displayDefaults.tuningStyle = state.tuningStyle
+        displayDefaults.tuningLayout = state.tuningLayout
+        displayDefaults.tuningBins = HDTuningData.normalizedDisplayBinCount(state.tuningBins)
+        displayDefaults.tuningSmoothing = state.tuningSmoothing
+        displayDefaults.tuningSigmaDegrees = state.tuningSigmaDegrees
+        displayDefaults.tuningSharedScale = state.tuningSharedScale
+        displayDefaults.showTuning = state.showTuning
+        displayDefaults.showProbe = state.showProbe
+        overlayMode = state.overlayMode
+        overlayPolarity = state.overlayPolarity
 
         rangeStartMS = finiteOr(state.rangeStartMS, fallback: timeAxisStartMS())
         rangeEndMS = finiteOr(state.rangeEndMS, fallback: timeAxisEndMS())
@@ -929,7 +971,7 @@ final class RFMappingStore {
 
     func setValueMode(_ mode: ResponseValueMode) {
         guard data != nil else { return }
-        valueMode = mode
+        valueMode = mode == .meanFiringRate && data?.supportsMeanFiringRate != true ? .spikeCount : mode
         clearHover()
     }
 
@@ -1129,8 +1171,8 @@ final class RFMappingStore {
 
     private func discoverCompanions(for loaded: RFMappingData) {
         clearDiscoveredCompanions()
-        reloadDiscoveredHDTuning()
-        if let paths = ProbeGeometryDiscovery.discover(forRFURL: loaded.url) {
+        if displayDefaults.autoLoadTuning { reloadDiscoveredHDTuning() }
+        if displayDefaults.autoLoadProbe, let paths = ProbeGeometryDiscovery.discover(forRFURL: loaded.url) {
             do {
                 probeGeometry = try ProbeGeometryDiscovery.load(
                     paths,
@@ -1259,7 +1301,7 @@ final class RFMappingStore {
         yBins = max(1, min(data.nY, yBins))
         smoothRadius = max(0, min(3, smoothRadius))
         responseFloor = max(0.0, responseFloor)
-        if !ResponseValueMode.allCases.contains(valueMode) { valueMode = .meanFiringRate }
+        if !data.supportsMeanFiringRate { valueMode = .spikeCount }
 
         let base = baseBinMS()
         let requested = max(base, min(totalTimeMS(), timeResolutionMS))
@@ -1377,8 +1419,7 @@ final class RFMappingStore {
     func ensureSelectedCell() {
         guard selectedCell == nil,
               let data,
-              hasSelectedUnit,
-              data.metrics(for: unitIndex).maxFiringRate != nil else {
+              hasSelectedUnit else {
             return
         }
         let metrics = data.metrics(for: unitIndex)
@@ -2102,15 +2143,13 @@ final class RFMappingStore {
             let totals = data.metrics(for: unitIndex).binTotals
             return groups.map { compensatedSum(totals[$0.start...$0.end]) }
         }
-        let occupancyTotal = compensatedSum(
-            data.occupancyTimeSeconds.flatMap { row in row.filter { $0 > 0 } }
-        )
-        guard occupancyTotal > 0 else {
-            return Array(repeating: 0.0, count: groups.count)
-        }
-        return data.countWindows(unitIndex: unitIndex, timeGroups: groups).map { frame in
-            let count = compensatedSum(frame.joined())
-            return count / occupancyTotal
+        guard let presentations = data.stimulusPresentationCounts else { return [] }
+        let totalPresentations = compensatedSum(presentations.enumerated().flatMap { y, row in
+            row.enumerated().compactMap { x, count in data.occupancyTimeSeconds[y][x] > 0 ? count : nil }
+        })
+        guard totalPresentations > 0 else { return Array(repeating: 0, count: groups.count) }
+        return zip(data.countWindows(unitIndex: unitIndex, timeGroups: groups), groups).map { frame, group in
+            compensatedSum(frame.joined()) / (totalPresentations * data.timeSpanSeconds(start: group.start, end: group.end))
         }
     }
 
@@ -2151,10 +2190,7 @@ final class RFMappingStore {
         return (matrix, xGroups, yGroups)
     }
 
-    /// Pools source counts and occupancy independently before normalization.
-    /// This keeps sparsely occupied source positions from receiving the same
-    /// weight as well-observed positions when display bins are merged or
-    /// smoothed.
+    /// Pool counts and presentation-based response exposure before normalization.
     private func responsePlotMatrix(
         sourceStart: Int,
         sourceEnd: Int,
@@ -2205,22 +2241,22 @@ final class RFMappingStore {
         var pooledCounts: OptionalMatrix = observations.map { row in
             row.map { value in value.sourcePixelCount > 0 ? value.count : nil }
         }
-        var pooledOccupancy: OptionalMatrix = observations.map { row in
+        var pooledExposure: OptionalMatrix = observations.map { row in
             row.map { value in
-                value.sourcePixelCount > 0 ? value.occupancyTimeSeconds : nil
+                value.sourcePixelCount > 0 ? value.responseExposureSeconds : nil
             }
         }
         pooledCounts = smoothMatrix(pooledCounts, radius: smoothingRadius)
-        pooledOccupancy = smoothMatrix(pooledOccupancy, radius: smoothingRadius)
+        pooledExposure = smoothMatrix(pooledExposure, radius: smoothingRadius)
         return pooledCounts.enumerated().map { yIndex, row in
             row.enumerated().map { xIndex, count in
                 guard valid[yIndex][xIndex],
                       let count,
-                      let occupancy = pooledOccupancy[yIndex][xIndex],
-                      occupancy > 0 else {
+                      let exposure = pooledExposure[yIndex][xIndex],
+                      exposure > 0 else {
                     return nil
                 }
-                return count / occupancy
+                return count / exposure
             }
         }
     }
@@ -2266,7 +2302,8 @@ final class RFMappingStore {
         case .spikeCount:
             return observations.count / Double(observations.sourcePixelCount)
         case .meanFiringRate:
-            return observations.count / observations.occupancyTimeSeconds
+            guard let exposure = observations.responseExposureSeconds, exposure > 0 else { return nil }
+            return observations.count / exposure
         }
     }
 
@@ -2503,9 +2540,151 @@ final class RFMappingStore {
     }
 
     func selectTab(_ index: Int) {
-        let tabs = PlotTab.allCases
+        let tabs = visibleTabs
         guard tabs.indices.contains(index) else { return }
         selectedTab = tabs[index]
+    }
+
+    private var tuningProcessingKey: String {
+        "\(displayDefaults.tuningBins):\(displayDefaults.tuningSmoothing):\(displayDefaults.tuningSigmaDegrees)"
+    }
+
+    func processedTuningCurve(unitID: Int) -> ProcessedHDCurve? {
+        let key = "\(unitID):" + tuningProcessingKey
+        if let cached = tuningCurveCache[key] { return cached }
+        guard let hdTuning, let curve = try? hdTuning.processedCurve(
+            unitID: unitID, displayBins: displayDefaults.tuningBins,
+            smoothing: displayDefaults.tuningSmoothing,
+            sigma: displayDefaults.tuningSigmaDegrees * Double(HDTuningData.defaultDisplayBins) / 360
+        ) else { return nil }
+        if tuningCurveCache.count > max(256, hdTuning.unitIDs.count) { tuningCurveCache.removeAll() }
+        tuningCurveCache[key] = curve
+        return curve
+    }
+
+    func tuningScaleHigh(current: ProcessedHDCurve) -> Double {
+        guard displayDefaults.tuningSharedScale, let hdTuning else {
+            return max(current.ratesHz.filter(\.isFinite).max() ?? 0, 1e-12)
+        }
+        let key = tuningProcessingKey
+        if let cached = tuningScaleCache, cached.key == key { return cached.peak }
+        let peak = hdTuning.unitIDs.reduce(1e-12) { high, id in
+            max(high, processedTuningCurve(unitID: id)?.ratesHz.filter(\.isFinite).max() ?? 0)
+        }
+        tuningScaleCache = (key, peak)
+        return peak
+    }
+
+    var visibleTabs: [PlotTab] {
+        let tabs = PlotTab.allCases.filter { displayDefaults.visibleTabs.contains($0) }
+        return tabs.isEmpty ? [.rf] : tabs
+    }
+
+    func setTabVisible(_ tab: PlotTab, visible: Bool) {
+        var tabs = visibleTabs
+        if visible { if !tabs.contains(tab) { tabs.append(tab) } }
+        else if tabs.count > 1 { tabs.removeAll { $0 == tab } }
+        displayDefaults.visibleTabs = PlotTab.allCases.filter(tabs.contains)
+        if !tabs.contains(selectedTab) { selectedTab = visibleTabs[0] }
+        if !tabs.contains(displayDefaults.initialTab) { displayDefaults.initialTab = visibleTabs[0] }
+    }
+
+    private func applyDisplayDefaults() {
+        valueMode = displayDefaults.valueMode
+        flipY = displayDefaults.flipY
+        palette = displayDefaults.palette
+        spatialPlotFormat = displayDefaults.spatialFormat
+        polarRadiusMode = displayDefaults.polarRadius
+        delayRGBMode = displayDefaults.delayRGBMode
+        smoothRadius = displayDefaults.smoothRadius
+        overlayMode = displayDefaults.overlayMode
+        overlayPolarity = displayDefaults.overlayPolarity
+        selectedTab = visibleTabs.contains(displayDefaults.initialTab) ? displayDefaults.initialTab : visibleTabs[0]
+    }
+
+    func saveDisplayDefaults() {
+        displayDefaults.valueMode = valueMode
+        displayDefaults.xBins = xBins
+        displayDefaults.yBins = yBins
+        displayDefaults.timeResolutionMS = timeResolutionMS
+        displayDefaults.smoothRadius = smoothRadius
+        displayDefaults.flipY = flipY
+        displayDefaults.palette = palette
+        displayDefaults.spatialFormat = spatialPlotFormat
+        displayDefaults.polarRadius = polarRadiusMode
+        displayDefaults.delayRGBMode = delayRGBMode
+        displayDefaults.overlayMode = overlayMode
+        displayDefaults.overlayPolarity = overlayPolarity
+        displayDefaults.tuningBins = HDTuningData.normalizedDisplayBinCount(displayDefaults.tuningBins)
+        if let encoded = try? JSONEncoder().encode(displayDefaults) {
+            preferences.set(encoded, forKey: "rfmapping.displayDefaults")
+        }
+        saveTimingDefaults()
+    }
+
+    var isProbeExpanded: Bool { probeExpanded ?? (probeGeometry != nil || probeGeometryError != nil) }
+    var isWaveformExpanded: Bool { waveformExpanded ?? (waveformArtifact != nil) }
+    var isTuningExpanded: Bool { tuningExpanded ?? (hdTuning != nil) }
+
+    func reloadSavedResults() {
+        savedResults.removeAll()
+        savedResultErrors.removeAll()
+        guard let data else { return }
+        for polarity in RFResultPolarity.allCases {
+            for dimension in ["2d", "1d"] {
+                let key = dimension + ":" + polarity.rawValue
+                do { savedResults[key] = try SavedRFResult.load(source: data, dimension: dimension, polarity: polarity.rawValue) }
+                catch { savedResultErrors[key] = error.localizedDescription }
+            }
+        }
+    }
+
+    private var activeResultMode: RFOverlayMode { selectedTab == .results ? resultsMode : overlayMode }
+    private var activeResultPolarity: RFResultPolarity { selectedTab == .results ? resultsPolarity : overlayPolarity }
+
+    var savedResultInterval: String {
+        activeResultMode.dimensions.compactMap { dimension in
+            savedResults[dimension + ":" + activeResultPolarity.rawValue].map { result in
+                "\(dimension.uppercased()) \(String(format: "%g", result.timeRangeSeconds[0] * 1000))–\(String(format: "%g", result.timeRangeSeconds[1] * 1000)) ms"
+            }
+        }.joined(separator: " · ")
+    }
+
+    var savedResultDetails: String {
+        guard let unitID = selectedUnitID else { return "No unit selected" }
+        let mode = activeResultMode == .none ? resultsMode : activeResultMode
+        return mode.dimensions.map { dimension in
+            let key = dimension + ":" + activeResultPolarity.rawValue
+            return savedResults[key]?.diagnostics(for: unitID) ?? savedResultErrors[key] ?? "No saved result"
+        }.joined(separator: "\n\n")
+    }
+
+    var savedOverlayCells: [RFOverlayCell] {
+        guard let data, let unitID = selectedUnitID else { return [] }
+        let mode = activeResultMode
+        let polarity = activeResultPolarity.rawValue
+        let two = mode.dimensions.contains("2d") ? savedResults["2d:" + polarity] : nil
+        let one = mode.dimensions.contains("1d") ? savedResults["1d:" + polarity] : nil
+        let mask2 = two?.nativeMask(for: unitID), mask1 = one?.nativeMask(for: unitID)
+        let center2 = two?.nativeCenter(for: unitID), center1 = one?.nativeCenter(for: unitID)
+        var cells: [RFOverlayCell] = []
+        for y in 0..<data.nY {
+            for x in 0..<data.nX {
+                let flag = (mask2?[y][x] == true ? 1 : 0) | (mask1?[y][x] == true ? 2 : 0)
+                if flag != 0 {
+                    cells.append(RFOverlayCell(y: y, x: x, membership: flag,
+                        center2D: center2?[y][x] == true,
+                        center1D: center1?[y][x] == true && (one?.axis == "y" ? x == 0 : y == 0),
+                        oneDAxis: one?.axis))
+                }
+            }
+        }
+        return cells
+    }
+
+    func resultsHeatmapPlot() -> HeatmapPlot {
+        let x = xGroups(), y = displayYGroups()
+        return HeatmapPlot(matrix: y.map { _ in x.map { _ in Optional(0.0) } }, xGroups: x, yGroups: y, low: 0, high: 1)
     }
 
     private func csvRow(_ fields: [String]) -> String {

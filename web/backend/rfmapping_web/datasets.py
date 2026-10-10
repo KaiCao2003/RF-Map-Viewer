@@ -9,7 +9,7 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable, Iterator
@@ -48,6 +48,7 @@ METADATA_FIELDS = {
     "responseNormalization",
     "spikeCountDefinition",
     "occupancyTimeSec",
+    "stimulusPresentationCounts",
     "occupancyTimeSecSize",
     "occupancyTimeDefinition",
 }
@@ -62,7 +63,7 @@ REQUIRED_TOP_LEVEL = {
     "responseNormalization",
     "occupancyTimeSec",
 }
-CACHE_SCHEMA_VERSION = 3
+CACHE_SCHEMA_VERSION = 4
 COUNT_DTYPES = ("|u1", "<u2", "<u4", "<u8")
 UNCLAIMED_DATASET_TIMEOUT_SECONDS = 60.0
 
@@ -215,11 +216,13 @@ def _matlab_vector(
     return [_number(item, f"{label} value") for item in source]
 
 
-def _occupancy_matrix(value: Any, n_y: int, n_x: int) -> list[list[float]]:
+def _occupancy_matrix(
+    value: Any, n_y: int, n_x: int, *, label: str = "occupancyTimeSec"
+) -> list[list[float]]:
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         if n_y != 1 or n_x != 1:
             raise DatasetValidationError(
-                "occupancyTimeSec must be a y-by-x array"
+                f"{label} must be a y-by-x array"
             )
         rows: list[list[Any]] = [[value]]
     elif isinstance(value, list):
@@ -230,28 +233,28 @@ def _occupancy_matrix(value: Any, n_y: int, n_x: int) -> list[list[float]]:
                 rows = [[item] for item in value]
             else:
                 raise DatasetValidationError(
-                    "occupancyTimeSec dimensions do not match unitsSpikeCountsSize"
+                    f"{label} dimensions do not match unitsSpikeCountsSize"
                 )
         elif all(isinstance(item, list) for item in value):
             rows = value
         else:
             raise DatasetValidationError(
-                "occupancyTimeSec must be a rectangular y-by-x array"
+                f"{label} must be a rectangular y-by-x array"
             )
     else:
-        raise DatasetValidationError("occupancyTimeSec must be a y-by-x array")
+        raise DatasetValidationError(f"{label} must be a y-by-x array")
     if len(rows) != n_y or any(len(row) != n_x for row in rows):
         raise DatasetValidationError(
-            "occupancyTimeSec dimensions do not match unitsSpikeCountsSize"
+            f"{label} dimensions do not match unitsSpikeCountsSize"
         )
     normalized: list[list[float]] = []
     for y_index, row in enumerate(rows):
         normalized_row: list[float] = []
         for x_index, item in enumerate(row):
-            parsed = _number(item, f"occupancyTimeSec[{y_index}][{x_index}]")
+            parsed = _number(item, f"{label}[{y_index}][{x_index}]")
             if parsed < 0:
                 raise DatasetValidationError(
-                    "occupancyTimeSec values must be non-negative"
+                    f"{label} values must be non-negative"
                 )
             normalized_row.append(parsed)
         normalized.append(normalized_row)
@@ -364,6 +367,16 @@ def _normalize_metadata(raw: dict[str, Any]) -> dict[str, Any]:
         raise DatasetValidationError(
             "occupancyTimeSec must contain at least one positive value"
         )
+    presentations = None
+    if "stimulusPresentationCounts" in raw:
+        presentations = _occupancy_matrix(
+            raw["stimulusPresentationCounts"], n_y, n_x,
+            label="stimulusPresentationCounts",
+        )
+        if any(not value.is_integer() for row in presentations for value in row):
+            raise DatasetValidationError(
+                "stimulusPresentationCounts values must be non-negative integers"
+            )
     return {
         "shape": shape,
         "countsDtype": raw["countsDtype"],
@@ -372,6 +385,7 @@ def _normalize_metadata(raw: dict[str, Any]) -> dict[str, Any]:
         "yPositions": y_positions,
         "timeBinEdges": time_bin_edges,
         "occupancyTimeSec": occupancy_time_sec,
+        "stimulusPresentationCounts": presentations,
         "isVerticalBar": raw.get("isVerticalBar"),
         "responseUnits": raw["responseUnits"],
         "responseNormalization": raw["responseNormalization"],
@@ -394,6 +408,8 @@ def _write_counts_stream(
     unit_count = 0
     occupancy = np.asarray(metadata["occupancyTimeSec"], dtype=np.float64)
     zero_occupancy_mask = occupancy == 0
+    presentations = metadata.get("stimulusPresentationCounts")
+    zero_presentations = None if presentations is None else np.asarray(presentations) == 0
     try:
         with temporary.open("wb") as output:
             try:
@@ -412,6 +428,10 @@ def _write_counts_stream(
                         if np.any(array[zero_occupancy_mask, :] != 0):
                             raise DatasetValidationError(
                                 "occupancyTimeSec is zero where spike counts are nonzero"
+                            )
+                        if zero_presentations is not None and np.any(array[zero_presentations, :] != 0):
+                            raise DatasetValidationError(
+                                "stimulusPresentationCounts is zero where spike counts are nonzero"
                             )
                         output.write(array.tobytes(order="C"))
                         unit_count += 1
@@ -636,6 +656,8 @@ class DatasetRecord:
     cache: CacheEntry
     companions: CompanionSet
     indexed: Any = None
+    saved_results: dict[tuple[str, str], dict[str, Any]] = field(default_factory=dict)
+    saved_results_lock: Any = field(default_factory=threading.Lock)
 
 
 class DatasetStore:
@@ -762,6 +784,7 @@ class DatasetStore:
             "yPositions": metadata["yPositions"],
             "timeBinEdges": metadata["timeBinEdges"],
             "occupancyTimeSec": metadata["occupancyTimeSec"],
+            "stimulusPresentationCounts": metadata.get("stimulusPresentationCounts"),
             "responseUnits": metadata["responseUnits"],
             "responseNormalization": metadata["responseNormalization"],
             "cacheProgress": record.indexed.status() if record.indexed is not None else {

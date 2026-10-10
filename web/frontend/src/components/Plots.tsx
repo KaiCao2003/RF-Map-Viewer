@@ -1,3 +1,6 @@
+import { drawSavedRfOverlay } from "../rfResultDrawing";
+import type { SavedRfOverlay } from "../rfResults";
+import type { RfOverlaySettings } from "../types";
 import { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { canvasFont } from "../canvasFont";
 import { useFrameEffect } from "../useFrameEffect";
@@ -56,7 +59,9 @@ interface CommonPlotProps {
 }
 
 interface SpatialPlotProps extends CommonPlotProps {
-  kind: "rf" | "delay";
+  kind: "rf" | "delay" | "results";
+  savedOverlay?: SavedRfOverlay;
+  overlaySettings?: RfOverlaySettings;
 }
 
 interface TooltipState {
@@ -363,6 +368,8 @@ const SpatialPlotContent = memo(function SpatialPlotContent({
   selectedCell,
   onSelectCell,
   kind,
+  savedOverlay,
+  overlaySettings,
 }: SpatialPlotProps) {
   const wrapper = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
@@ -389,7 +396,7 @@ const SpatialPlotContent = memo(function SpatialPlotContent({
   useFrameEffect(useCallback(() => {
     if (!canvas.current) return;
     const context = contextFor(canvas.current, width, height);
-    const prepared = kind === "rf"
+    const prepared = kind !== "delay"
       ? response!
       : { matrix: temporal!.delay, xGroups: temporal!.xGroups, yGroups: temporal!.yGroups };
     const entropyPrepared = kind === "delay" && state.rgbMode
@@ -399,7 +406,7 @@ const SpatialPlotContent = memo(function SpatialPlotContent({
     const [autoLow, autoHigh] = responseRangeForPalette(finiteLow, finiteHigh, state.palette);
     const low = kind === "delay" && !state.rgbMode ? meta.timeBinEdges[0] * 1000 : autoLow;
     const high = kind === "delay" && !state.rgbMode ? meta.timeBinEdges.at(-1)! * 1000 : autoHigh;
-    const title = kind === "rf"
+    const title = kind === "results" ? "Saved RF results" : kind === "rf"
       ? `RF map - ${state.valueMode}: ${rfWindowLabel(state)}`
       : state.rgbMode ? "RGB composite" : "Delay map - peak count-rate interval center";
     const totalDegrees = inferTotalDegrees(meta.xPositions);
@@ -415,6 +422,7 @@ const SpatialPlotContent = memo(function SpatialPlotContent({
     const maxResponse = Math.max(1, finiteMaximum(responsePrepared ?? [[0]]));
 
     const color = (value: number | null, row = 0, column = 0) => {
+      if (kind === "results") return "#ffffff";
       if (kind === "delay" && state.rgbMode) {
         const responseValue = responsePrepared?.[row]?.[column] ?? null;
         const entropy = entropyPrepared?.[row]?.[column] ?? null;
@@ -471,7 +479,7 @@ const SpatialPlotContent = memo(function SpatialPlotContent({
           context.fillRect(x, y, 16, 16);
           drawText(context, label, x + 24, y + 12, { color: "#475467" });
         });
-      } else {
+      } else if (kind !== "results") {
         drawColorbar(
           context,
           nextLayout.x + nextLayout.width + 38,
@@ -554,7 +562,7 @@ const SpatialPlotContent = memo(function SpatialPlotContent({
           context.fillRect(legendX, y, 16, 16);
           drawText(context, label, legendX + 24, y + 8, { color: "#475467", baseline: "middle" });
         });
-      } else {
+      } else if (kind !== "results") {
         drawText(context, "x columns span visual angle", nextLayout.cx, nextLayout.cy - outer - 18, { color: "#475467", align: "center" });
         drawText(context, `Values: ${kind === "delay" ? "delay (ms)" : state.valueMode}`, nextLayout.cx, nextLayout.cy + outer + 22, { color: "#475467", align: "center" });
         drawColorbar(
@@ -569,7 +577,19 @@ const SpatialPlotContent = memo(function SpatialPlotContent({
         );
       }
     }
-  }, [height, kind, meta, response, responsePrepared, selectedCell, state, temporal, unitIndex, width]));
+    if (kind !== "delay" && savedOverlay && overlaySettings && layout.current) {
+      drawSavedRfOverlay(context, layout.current, state, savedOverlay, overlaySettings, kind === "results");
+      drawSelection(context, layout.current, selectedCell);
+      let legendX = 20;
+      for (const [label, color] of [["2D", overlaySettings.color2d], ["1D", overlaySettings.color1d], ["Overlap", overlaySettings.overlapColor]]) {
+        if ((label === "2D" && overlaySettings.mode === "1D") || (label === "1D" && overlaySettings.mode === "2D") || (label === "Overlap" && overlaySettings.mode !== "Both")) continue;
+        context.strokeStyle = color; context.lineWidth = overlaySettings.width;
+        context.strokeRect(legendX, height - 18, 10, 10);
+        drawText(context, label, legendX + 16, height - 9, { font: canvasFont(11) }); legendX += 86;
+      }
+      if (!savedOverlay.flags) drawText(context, "No saved result for this unit", width / 2, 66, { align: "center", color: "#667085" });
+    }
+  }, [height, kind, meta, response, responsePrepared, savedOverlay, overlaySettings, selectedCell, state, temporal, unitIndex, width]));
 
   const pointerCell = (event: React.PointerEvent<HTMLCanvasElement> | React.MouseEvent<HTMLCanvasElement>): CellRef | null => {
     const bounds = event.currentTarget.getBoundingClientRect();
@@ -580,7 +600,7 @@ const SpatialPlotContent = memo(function SpatialPlotContent({
     <div className="canvas-stage spatial-stage" ref={wrapper}>
       <canvas
         ref={canvas}
-        aria-label={kind === "rf" ? "RF response heatmap" : state.rgbMode ? "RGB response composite" : "Peak delay heatmap"}
+        aria-label={kind === "results" ? "Saved RF results" : kind === "rf" ? "RF response heatmap" : state.rgbMode ? "RGB response composite" : "Peak delay heatmap"}
         onPointerMove={(event) => {
           const cell = pointerCell(event);
           const bounds = event.currentTarget.getBoundingClientRect();

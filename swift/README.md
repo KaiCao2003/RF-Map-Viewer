@@ -10,6 +10,25 @@ to a loaded RF map in the figure composer so recorded unit IDs can be matched.
 Its `1.10.3` release follows the stable Python macOS `1.10.4` display
 conventions; `swift` remains an artifact/tag identity rather than a version suffix.
 
+The current source also includes the Python 1.11 viewer updates below. The
+published Swift package remains at 1.10.3 until a separate release.
+
+- RF Hz uses `counts / (stimulusPresentationCounts × response-window seconds)`;
+  files without presentation counts remain viewable in Spike count mode.
+- **RF Results** reads saved 1D/2D excitatory/inhibitory masks and centers, using
+  the same plot geometry as RF. **Reload** rereads sidecars without detection.
+- **RF overlap** displays native-bin saved outlines, with configurable polarity,
+  width and colors. **Shift+1 / Shift+2 / Shift+0** select 1D / 2D / None;
+  Both highlights the original-bin intersection.
+- Saved settings control RF display defaults, visible/initial tabs, and HD plot
+  style, bins, smoothing, arrangement and shared scale. **Inspector** provides
+  selected-cell information and saved-result parameters, QC and provenance.
+- Missing companion panes start folded; loading data opens them unless manually
+  folded. HD readers accept classes 0–3, columnar and nested tuning documents,
+  and legacy rate-only files without inventing observations.
+
+PDF/Figure Studio and CCG updates are excluded from this source update.
+
 Version 1.10.3 aligns HD tuning with clockwise RF angles in the viewer and
 exported figures: RF −90° matches HD 270°, RF 90° matches HD 90°, and 0° matches
 0°. HD line plots center on 0° without mirroring rates; polar plots use 0° north
@@ -73,7 +92,7 @@ used for indexed input.
 
 Press `-` or use **View → Subtract RF Windows (A − B)** to subtract two
 independent, half-open response windows. The initial A/B windows are 80–160 ms
-and 0–80 ms. Each window pools counts and occupancy and applies smoothing before
+and 0–80 ms. Each window pools counts and response exposure and applies smoothing before
 subtraction; negative differences are gray/missing, while zero stays zero.
 Sum and difference modes restore their own last-used windows. **Save timing
 defaults** under Display saves both modes and B for new windows and Reset.
@@ -89,11 +108,11 @@ smoothed count histograms, accounts for bin duration, and retains the first
 equal peak. RGB distinguishes black zero response from gray missing occupancy.
 Waveform navigation maintains one active read plus the latest pending unit.
 
-Mean firing rate is the default response display and is computed as pooled raw
-count divided by pooled occupancy seconds. Spatial reduction and smoothing pool
-counts and occupancy independently before division, so unequal occupancy does
-not bias the display or initial strongest-cell selection. Raw spike count
-remains available as the alternate response display.
+Mean firing rate is available when the RF document has presentation counts.
+Spatial reduction and smoothing pool counts and presentation-based exposure
+independently before division. Each response window and Timeline frame uses its
+actual duration, including nonuniform time bins. Occupancy describes stimulus
+display time. Raw spike count remains available when presentation counts are absent.
 
 The main viewer discovers and independently parses the same read-only
 companions as Python: probe positions, an exact positive HD tuning session

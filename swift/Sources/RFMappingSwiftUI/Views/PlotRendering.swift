@@ -147,7 +147,8 @@ func drawHeatmap(
     palette: RFPalette?,
     valueSuffix: String = "",
     drawLegend: Bool = true,
-    drawInteraction: Bool = true
+    drawInteraction: Bool = true,
+    resultOnly: Bool = false
 ) {
     drawTitle(context: &context, title: title, subtitle: subtitle)
 
@@ -162,7 +163,7 @@ func drawHeatmap(
             let value = plot.matrix[displayY][groupIndex]
             let fill = palette.map { paletteColor(value, low: plot.low, high: plot.high, palette: $0) }
                 ?? delayColor(value, low: plot.low, high: plot.high)
-            context.fill(Path(rect), with: .color(fill))
+            context.fill(Path(rect), with: .color(resultOnly ? .white : fill))
         }
     }
 

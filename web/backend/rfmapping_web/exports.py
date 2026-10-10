@@ -285,6 +285,10 @@ def _response_matrix(
         raise ExportValidationError(f"Unknown value mode: {value_mode}")
     _n_units, n_y, n_x, _n_bins = metadata["shape"]
     occupancy = metadata["occupancyTimeSec"]
+    presentations = metadata.get("stimulusPresentationCounts")
+    if value_mode == VALUE_MODE_RATE and presentations is None:
+        raise ExportValidationError("Mean firing rate requires saved stimulusPresentationCounts")
+    duration = metadata["timeBinEdges"][end + 1] - metadata["timeBinEdges"][start]
     result: list[list[float | None]] = []
     for y_index in range(n_y):
         row: list[float | None] = []
@@ -298,7 +302,8 @@ def _response_matrix(
             elif value_mode == VALUE_MODE_COUNT:
                 row.append(count)
             else:
-                row.append(count / occupancy_seconds)
+                exposure = presentations[y_index][x_index] * duration
+                row.append(count / exposure if exposure > 0 else None)
         result.append(row)
     return result
 
@@ -313,7 +318,7 @@ def _prepared_response_matrix(
     x_groups: list[tuple[int, int]],
     smooth_radius: int,
 ) -> list[list[float | None]]:
-    """Mirror the interactive count/occupancy spatial reduction pipeline."""
+    """Pool counts and presentation-based exposure as in the interactive map."""
 
     raw_counts = _response_matrix(
         counts, metadata, start, end, VALUE_MODE_COUNT
@@ -324,27 +329,32 @@ def _prepared_response_matrix(
     if value_mode != VALUE_MODE_RATE:
         raise ExportValidationError(f"Unknown value mode: {value_mode}")
 
-    occupancy = [
-        [float(value) if float(value) > 0 else None for value in row]
-        for row in metadata["occupancyTimeSec"]
+    presentations = metadata.get("stimulusPresentationCounts")
+    if presentations is None:
+        raise ExportValidationError("Mean firing rate requires saved stimulusPresentationCounts")
+    duration = metadata["timeBinEdges"][end + 1] - metadata["timeBinEdges"][start]
+    exposure = [
+        [float(value) * duration if metadata["occupancyTimeSec"][y][x] > 0 else None
+         for x, value in enumerate(row)]
+        for y, row in enumerate(presentations)
     ]
     grouped_counts = _sum_matrix(raw_counts, y_groups, x_groups)
-    grouped_occupancy = _sum_matrix(occupancy, y_groups, x_groups)
+    grouped_exposure = _sum_matrix(exposure, y_groups, x_groups)
     smoothed_counts = _smooth_preserving_missing(grouped_counts, smooth_radius)
-    smoothed_occupancy = _smooth_preserving_missing(
-        grouped_occupancy, smooth_radius
+    smoothed_exposure = _smooth_preserving_missing(
+        grouped_exposure, smooth_radius
     )
     result: list[list[float | None]] = []
     for y_index, count_row in enumerate(smoothed_counts):
         row: list[float | None] = []
         for x_index, count in enumerate(count_row):
-            occupancy_seconds = smoothed_occupancy[y_index][x_index]
+            exposure_seconds = smoothed_exposure[y_index][x_index]
             row.append(
                 None
                 if count is None
-                or occupancy_seconds is None
-                or occupancy_seconds <= 0
-                else count / occupancy_seconds
+                or exposure_seconds is None
+                or exposure_seconds <= 0
+                else count / exposure_seconds
             )
         result.append(row)
     return result

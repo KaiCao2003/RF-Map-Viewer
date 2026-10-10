@@ -38,18 +38,20 @@ top-level fields are metadata and do not invalidate an otherwise valid
 document. Geometry-specific fields written for vertical bars remain metadata
 in the shared base contract.
 
-The Python viewer uses `stimulusPresentationCounts`, a non-negative integer
+The current Python, Swift, and Web source uses `stimulusPresentationCounts`, a non-negative integer
 matrix with axes `(y, x)`, for firing rate. For a selected half-open lag window,
 Hz is the summed raw spike count divided by the presentation count times the
 window duration in seconds. Combining time bins uses their actual edge widths,
 including nonuniform bins. `occupancyTimeSec` describes stimulus display time;
 it is not the denominator for an arbitrary response lag window.
 
-Python combines or smooths counts and presentation-based exposure separately
+Viewers combine or smooth counts and presentation-based exposure separately
 before division. A zero-occupancy or zero-presentation cell is unavailable in
 rate mode. Legacy files without `stimulusPresentationCounts` remain viewable
-as counts; Python does not infer presentation counts from occupancy. This rate
-correction is specific to Python; Swift and Web need separate updates.
+as counts; viewers do not infer presentation counts from occupancy. A zero
+presentation count cannot accompany nonzero spike counts. Python introduced
+this correction in 1.11.1; the Swift and Web source updates require a new release
+before they are present in published packages.
 
 Version 1.9.5 intentionally does not support earlier RF payloads that omit this
 occupancy-aware contract or store already-normalized values in
@@ -81,7 +83,7 @@ preserves display order. Keys are accessed without the `.npy` suffix.
 | `xPositions`, `yPositions` | One-dimensional spatial coordinates |
 | `timeBinEdges` | One-dimensional bin edges in seconds |
 | `occupancyTimeSec` | `(y, x)` occupancy seconds |
-| `stimulusPresentationCounts` | `(y, x)` non-negative integer presentations; required for Python Hz display |
+| `stimulusPresentationCounts` | `(y, x)` non-negative integer presentations; required for Hz display |
 | `unit_<ID>` | `(y, x, time)` raw counts, written as lossless `float64` |
 
 The declared overall shape still includes the unit axis, but there is no
