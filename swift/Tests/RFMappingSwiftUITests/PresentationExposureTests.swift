@@ -45,11 +45,9 @@ final class PresentationExposureTests: XCTestCase {
     }
 
     func testPresentationCountsRequireNativeShapeAndNonnegativeIntegers() throws {
-        let invalidValues: [Any] = [[[1]], [[-1, 2]], [[0.5, 2]], NSNull()]
+        let invalidValues: [Any] = [[[1]], [[-1, 2]], [[0.5, 2]], [[0, 10]], NSNull()]
         for invalid in invalidValues {
             XCTAssertThrowsError(try makeData(presentations: invalid))
         }
-        let zero = try makeData(presentations: [[0, 10]])
-        XCTAssertNil(try zero.responseValue(unitIndex: 0, yIndex: 0, xIndex: 0, start: 0, end: 1, valueMode: .meanFiringRate))
     }
 }

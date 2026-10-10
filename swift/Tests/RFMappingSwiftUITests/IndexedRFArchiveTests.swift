@@ -465,6 +465,8 @@ extension IndexedRFArchiveTests {
         let index = try XCTUnwrap(entries.firstIndex { $0.0 == "stimulusPresentationCounts" })
         entries[index].1 = npy(dtype: "<f8", shape: [1, 1], bytes: doubles([0.5]))
         XCTAssertThrowsError(try RFMappingData(data: zip(entries), url: url))
+        entries[index].1 = npy(dtype: "<f8", shape: [1, 1], bytes: doubles([0]))
+        XCTAssertThrowsError(try RFMappingData(data: zip(entries), url: url))
     }
 
     func testStaleAnalysisSummaryCannotOverrideSavedTwoDimensionalResult() throws {

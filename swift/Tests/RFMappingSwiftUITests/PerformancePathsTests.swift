@@ -104,7 +104,9 @@ final class PerformancePathsTests: XCTestCase {
         ])
         XCTAssertEqual(initial.matrices[0][0][0] ?? .nan, 24.0 / 14.0, accuracy: 1e-12)
         XCTAssertEqual(initial.matrices[1][0][0] ?? .nan, 34.0 / 14.0, accuracy: 1e-12)
-        XCTAssertEqual(initial.totals, [24.0 / 14.0, 34.0 / 14.0])
+        XCTAssertEqual(initial.totals.count, 2)
+        XCTAssertEqual(initial.totals[0], 24.0 / 14.0, accuracy: 1e-12)
+        XCTAssertEqual(initial.totals[1], 34.0 / 14.0, accuracy: 1e-12)
 
         store.plotRangeStartMS = 0
         store.plotRangeEndMS = 100

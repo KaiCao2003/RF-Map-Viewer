@@ -587,7 +587,7 @@ const SpatialPlotContent = memo(function SpatialPlotContent({
         context.strokeRect(legendX, height - 18, 10, 10);
         drawText(context, label, legendX + 16, height - 9, { font: canvasFont(11) }); legendX += 86;
       }
-      if (!savedOverlay.flags) drawText(context, "No saved result for this unit", width / 2, 66, { align: "center", color: "#667085" });
+      if (kind === "results" && !savedOverlay.flags) drawText(context, "No saved result for this unit", width / 2, 66, { align: "center", color: "#667085" });
     }
   }, [height, kind, meta, response, responsePrepared, savedOverlay, overlaySettings, selectedCell, state, temporal, unitIndex, width]));
 

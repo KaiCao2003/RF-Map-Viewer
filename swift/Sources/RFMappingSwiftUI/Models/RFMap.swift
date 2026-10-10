@@ -166,6 +166,13 @@ struct RFMap: Sendable {
                   presentations.joined().allSatisfy({ $0.isFinite && $0 >= 0 && $0 == $0.rounded() }) else {
                 throw RFMapError.invalidData("stimulusPresentationCounts must contain non-negative integers on the y-by-x grid.")
             }
+            for y in yPositions.indices {
+                for x in xPositions.indices where presentations[y][x] == 0 {
+                    guard spikeCounts[y][x].allSatisfy({ $0 == 0 }) else {
+                        throw RFMapError.invalidData("stimulusPresentationCounts is zero where spike counts are nonzero.")
+                    }
+                }
+            }
         }
         self.stimulusPresentationCounts = stimulusPresentationCounts
         self.metadata = metadata

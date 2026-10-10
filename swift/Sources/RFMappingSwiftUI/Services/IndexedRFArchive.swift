@@ -491,8 +491,10 @@ struct RFNPYArray {
         }
     }
 
-    func doubleValues() throws -> [Double] {
-        guard kind != "U" else { throw invalid("Expected numeric NPY data.") }
+    func doubleValues(allowBoolean: Bool = false) throws -> [Double] {
+        guard "uif".contains(kind) || (allowBoolean && kind == "b") else {
+            throw invalid("Expected numeric NPY data.")
+        }
         return try decode { raw in
             let value: Double
             switch kind {

@@ -64,7 +64,7 @@ struct SavedRFResult: Sendable {
             guard shape.count == 3, shape[0] == ids.count, shape.allSatisfy({ $0 > 0 }) else {
                 throw failure("\(name) must be a binary (unit, y, x) array aligned with unit_ids.")
             }
-            let numbers = try array.doubleValues()
+            let numbers = try array.doubleValues(allowBoolean: true)
             guard numbers.allSatisfy({ $0 == 0 || $0 == 1 }) else { throw failure("\(name) must contain only 0 and 1.") }
             let volume = (0..<shape[0]).map { unit in
                 (0..<shape[1]).map { y in
