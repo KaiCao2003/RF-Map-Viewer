@@ -64,14 +64,23 @@ func drawSavedRFPolar(context: inout GraphicsContext, store: RFMappingStore, lay
         let color = overlayColor(cell, settings: store.displayDefaults)
         if resultOnly { context.fill(path, with: .color(color)) }
         context.stroke(path, with: .color(color), lineWidth: store.displayDefaults.overlayWidth)
-        if resultOnly && (cell.center2D || cell.center1D) {
+        if resultOnly && cell.center2D {
             let angle = (theta1 + theta2) / 2
-            let radius = cell.center1D && !cell.center2D
-                ? Double(innerBlankRows) - 0.35 : (inner + outer) / 2
+            let radius = (inner + outer) / 2
             drawSavedCenter(context: &context, at: CGPoint(
                 x: layout.center.x + CGFloat(radius * cos(angle)) * layout.scale,
                 y: layout.center.y - CGFloat(radius * sin(angle)) * layout.scale
-            ), triangle: cell.center1D && !cell.center2D)
+            ), triangle: false)
+        }
+        if resultOnly && cell.center1D {
+            let angle = cell.oneDAxis == "y" ? (90 + layout.totalDegrees / 2) * .pi / 180 : (theta1 + theta2) / 2
+            let radius = cell.oneDAxis == "x"
+                ? (Double(innerBlankRows) + Double(layout.yGroups.count) * Double(layout.ringSpan)) * Double(layout.scale) + 7
+                : (inner + outer) / 2 * Double(layout.scale)
+            drawSavedCenter(context: &context, at: CGPoint(
+                x: layout.center.x + CGFloat(radius * cos(angle)),
+                y: layout.center.y - CGFloat(radius * sin(angle))
+            ), triangle: true)
         }
     }
 }
@@ -89,5 +98,25 @@ private func drawSavedCenter(context: inout GraphicsContext, at point: CGPoint, 
         path.move(to: CGPoint(x: point.x - 4, y: point.y + 4))
         path.addLine(to: CGPoint(x: point.x + 4, y: point.y - 4))
     }
+    if triangle { context.fill(path, with: .color(.white)) }
+    else { context.stroke(path, with: .color(.white), lineWidth: 4) }
     context.stroke(path, with: .color(.black), lineWidth: 2)
+}
+
+
+struct SavedRFOverlayLegend: View {
+    let settings: ViewerDisplayDefaults
+    var body: some View {
+        HStack(spacing: 10) {
+            entry("2D", color: settings.overlay2DColor)
+            entry("1D", color: settings.overlay1DColor)
+            entry("Overlap", color: settings.overlayIntersectionColor)
+        }.font(.caption)
+    }
+    private func entry(_ label: String, color: String) -> some View {
+        HStack(spacing: 4) {
+            Rectangle().stroke(savedRFColor(color), lineWidth: 2).frame(width: 10, height: 10)
+            Text(label)
+        }
+    }
 }

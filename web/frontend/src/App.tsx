@@ -1433,7 +1433,7 @@ export default function App() {
               <span role="status">{resultsLoading ? "Loading saved results…" : resultsError || (savedOverlay?.unavailable.length ? `${savedOverlay.unavailable.join(" / ")} unavailable for this unit. See Inspector.` : "Saved detections")}</span>
             </div>}
             {viewState.selectedTab === "results" && (noNavigationUnits ? <div className="view-empty"><strong>{emptyUnitTitle}</strong><span>{emptyUnitDetail}</span></div>
-              : unavailableUnit ? unavailableView : counts && selectedCell && savedOverlay
+              : unavailableUnit ? unavailableView : unitStatus === "error" ? <div className="view-empty error-state"><strong>Unit data could not be loaded</strong><span>{error}</span></div> : counts && selectedCell && savedOverlay
                 ? <SpatialPlot kind="results" meta={meta} counts={counts} state={viewState} unitIndex={localIndex} selectedCell={selectedCell} onSelectCell={selectCell} savedOverlay={savedOverlay} overlaySettings={{ ...rfOverlay, mode: resultMode, polarity: resultPolarity }} />
                 : <div className="view-empty">Loading unit…</div>)}
             <div className={`rf-hd-layout hd-layout-${hdLayout} ${!showHd ? "hd-is-hidden" : hdCollapsed ? "hd-is-collapsed" : ""}`} hidden={viewState.selectedTab !== "rf"}>

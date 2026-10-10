@@ -334,9 +334,13 @@ def _prepared_response_matrix(
         raise ExportValidationError("Mean firing rate requires saved stimulusPresentationCounts")
     duration = metadata["timeBinEdges"][end + 1] - metadata["timeBinEdges"][start]
     exposure = [
-        [float(value) * duration if metadata["occupancyTimeSec"][y][x] > 0 else None
+        [float(value) * duration if value > 0 and metadata["occupancyTimeSec"][y][x] > 0 else None
          for x, value in enumerate(row)]
         for y, row in enumerate(presentations)
+    ]
+    raw_counts = [
+        [count if exposure[y][x] is not None else None for x, count in enumerate(row)]
+        for y, row in enumerate(raw_counts)
     ]
     grouped_counts = _sum_matrix(raw_counts, y_groups, x_groups)
     grouped_exposure = _sum_matrix(exposure, y_groups, x_groups)

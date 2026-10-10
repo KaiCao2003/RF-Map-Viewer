@@ -42,3 +42,11 @@ describe("saved RF results", () => {
     expect(savedNativeCell(layout, { flipY: false, polarRadius: "Display bottom inner" }, 0, 0)).toMatchObject({ inner: 45, outer: 50 });
   });
 });
+
+it("broadcasts native collapsed 1D sidecars along only their recorded axis", () => {
+  const x: SavedRfResult = { ...result, dimension: "1d", axis: "x", masks: [[[0, 1, 0]]], centers: [[[0, 1, 0]]] };
+  const y: SavedRfResult = { ...result, dimension: "1d", axis: "y", masks: [[[0], [1]]], centers: [[[0], [1]]] };
+  expect(savedRfOverlay(meta, [x], 42).flags).toEqual([[0, 2, 0], [0, 2, 0]]);
+  expect(savedRfOverlay(meta, [y], 42).flags).toEqual([[0, 0, 0], [2, 2, 2]]);
+  expect(savedRfOverlay(meta, [y], 42).centers1d).toEqual([{ axis: "y", index: 1 }]);
+});

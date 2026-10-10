@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { allPositionsTimelineValues, groupResponseValue, prepareRfResponse, responseValue, supportsFiringRate, unitMetrics } from "./math";
+import { allPositionsTimelineValues, groupResponseValue, prepareResponseMatrix, prepareRfResponse, responseValue, supportsFiringRate, unitMetrics } from "./math";
 import { DEFAULT_VIEWER_SETTINGS, viewerSettingsPatch } from "./viewerSettings";
 import type { DatasetMeta, ViewState } from "./types";
 
@@ -35,4 +35,14 @@ describe("RF presentation exposure", () => {
     expect(unitMetrics(counts, legacy)).toMatchObject({ bestX: 1, bestRateHz: null });
     expect(responseValue(counts, legacy, 0, 1, 0, 1, "Spike count")).toBe(90);
   });
+});
+
+it("does not invent response exposure in zero-presentation cells when smoothing", () => {
+  const missing = { ...meta, stimulusPresentationCounts: [[0, 30]] };
+  const observed = Float64Array.from([0, 0, 30, 60]);
+  const display = prepareResponseMatrix(observed, missing, [0, 1], "Mean firing rate (Hz)", 2, 1, false, 1);
+  expect(display.matrix[0][0]).toBeNull();
+  expect(display.matrix[0][1]).toBeCloseTo(100);
+  const grouped = prepareResponseMatrix(observed, missing, [0, 1], "Mean firing rate (Hz)", 1, 1, false, 1);
+  expect(grouped.matrix[0][0]).toBeCloseTo(100);
 });

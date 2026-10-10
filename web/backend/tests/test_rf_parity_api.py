@@ -108,6 +108,15 @@ def test_csv_rates_follow_response_window_and_pool_exposure():
                                   [(0, 0)], [(0, 1)], 0)
 
 
+def test_csv_smoothing_preserves_unpresented_cells_as_missing():
+    metadata = dict(shape=[1, 1, 3, 1], timeBinEdges=[0, .1],
+                    occupancyTimeSec=[[1, 1, 1]], stimulusPresentationCounts=[[2, 0, 4]])
+    counts = np.array([[[4], [0], [8]]])
+    assert _prepared_response_matrix(
+        counts, metadata, 0, 0, VALUE_MODE_RATE, [(0, 0)], [(0, 0), (1, 1), (2, 2)], 1,
+    ) == [[20., None, 20.]]
+
+
 def _result_source(settings):
     source = settings.rf_root / "mapping.rfmap"
     payload = dict(unitsSpikeCounts=np.ones((3, 2, 3, 3), dtype=int).tolist(),

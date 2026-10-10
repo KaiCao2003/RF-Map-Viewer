@@ -35,6 +35,9 @@ struct SidebarView: View {
                 Picker("RF overlap", selection: $store.overlayMode) {
                     ForEach(RFOverlayMode.allCases) { Text($0.rawValue).tag($0) }
                 }
+                if store.overlayMode != .none || store.selectedTab == .results {
+                    SavedRFOverlayLegend(settings: store.displayDefaults)
+                }
                 if !store.savedResultInterval.isEmpty {
                     Text("Saved " + store.savedResultInterval).font(.caption).foregroundStyle(.secondary)
                 }

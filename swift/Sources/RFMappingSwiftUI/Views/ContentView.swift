@@ -308,6 +308,7 @@ private struct PlotControlBar: View {
                 Spacer(minLength: 0)
             }
 
+            Group {
             switch store.selectedTab {
             case .rf:
                 HStack(spacing: 8) {
@@ -400,6 +401,7 @@ private struct PlotControlBar: View {
                     Spacer(minLength: 0)
                 }
             }
+            }.frame(height: 28)
         }
         .controlSize(.small)
         .padding(.horizontal, 12)

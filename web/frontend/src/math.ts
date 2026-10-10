@@ -409,11 +409,12 @@ export function prepareResponseMatrix(
     return { matrix, xGroups, yGroups };
   }
 
-  let pooledCounts: Matrix = observations.map((row) => row.map((value) =>
-    value.sourcePixelCount > 0 ? value.count : null,
+  const rateValid = observations.map((row) => row.map((value) => value.sourcePixelCount > 0 && value.rateExposureSeconds > 0));
+  let pooledCounts: Matrix = observations.map((row, y) => row.map((value, x) =>
+    rateValid[y][x] ? value.count : null,
   ));
-  let pooledExposure: Matrix = observations.map((row) => row.map((value) =>
-    value.sourcePixelCount > 0 ? value.rateExposureSeconds : null,
+  let pooledExposure: Matrix = observations.map((row, y) => row.map((value, x) =>
+    rateValid[y][x] ? value.rateExposureSeconds : null,
   ));
   if (smoothRadius > 0) {
     pooledCounts = smoothMatrix(pooledCounts, smoothRadius);
@@ -421,7 +422,7 @@ export function prepareResponseMatrix(
   }
   const matrix: Matrix = pooledCounts.map((row, y) => row.map((count, x) => {
     const exposure = pooledExposure[y][x];
-    if (!valid[y][x] || count == null || exposure == null || exposure <= 0) return null;
+    if (!rateValid[y][x] || count == null || exposure == null || exposure <= 0) return null;
     return count / exposure;
   }));
   return { matrix, xGroups, yGroups };

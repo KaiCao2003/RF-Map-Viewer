@@ -2725,6 +2725,14 @@ final class RFMappingStore {
         return cells
     }
 
+    func savedResultCellDescription(y: AxisGroup, x: AxisGroup) -> String {
+        let cells = savedOverlayCells.filter { (y.start...y.end).contains($0.y) && (x.start...x.end).contains($0.x) }
+        let two = cells.filter { $0.membership & 1 != 0 }.count
+        let one = cells.filter { $0.membership & 2 != 0 }.count
+        let overlap = cells.filter { $0.membership == 3 }.count
+        return "Saved detections: 2D \(two), 1D \(one), overlap \(overlap) original bins"
+    }
+
     func resultsHeatmapPlot() -> HeatmapPlot {
         let x = xGroups(), y = displayYGroups()
         return HeatmapPlot(matrix: y.map { _ in x.map { _ in Optional(0.0) } }, xGroups: x, yGroups: y, low: 0, high: 1)

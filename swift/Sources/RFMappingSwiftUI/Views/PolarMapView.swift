@@ -35,7 +35,8 @@ struct PolarMapView: View {
                     matrix: plot.matrix,
                     xGroups: plot.xGroups,
                     yGroups: plot.yGroups,
-                    valueDescription: { _, _, value in
+                    valueDescription: { y, x, value in
+                        if kind == .results { return store.savedResultCellDescription(y: plot.yGroups[y], x: plot.xGroups[x]) }
                         if kind == .delay {
                             return value.map { String(format: "%.1f milliseconds", $0) } ?? "no delay"
                         }
