@@ -197,4 +197,3 @@ def test_malformed_archive_is_reported(source):
     rf_result_path(source.path).write_bytes(b"not an npz archive")
     with pytest.raises(ValueError, match="Cannot read"):
         load_saved_rf_result(source)
-
