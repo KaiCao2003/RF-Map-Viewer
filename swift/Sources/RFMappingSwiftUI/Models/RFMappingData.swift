@@ -163,13 +163,13 @@ private struct RFMappingPayload: Decodable {
     ) throws -> OccupancyTimePayload {
         guard container.contains(key) else {
             throw RFMappingError.invalidData(
-                "occupancyTimeSec is required by the current RF map schema."
+                "\(key.rawValue) is required by the current RF map schema."
             )
         }
         let isNull = try container.decodeNil(forKey: key)
         guard !isNull else {
             throw RFMappingError.invalidData(
-                "occupancyTimeSec cannot be null in the current RF map schema."
+                "\(key.rawValue) cannot be null in the current RF map schema."
             )
         }
         if let matrix = try? container.decode([[Double]].self, forKey: key) {
@@ -182,7 +182,7 @@ private struct RFMappingPayload: Decodable {
             return .scalar(scalar)
         }
         throw RFMappingError.invalidData(
-            "occupancyTimeSec must be a y-by-x numeric array."
+            "\(key.rawValue) must be a y-by-x numeric array."
         )
     }
 
@@ -425,8 +425,11 @@ final class RFMappingData: @unchecked Sendable {
             nY: nY,
             nX: nX
         )
-        let presentations = try payload.stimulusPresentationCounts.map {
-            try Self.normalizeOccupancyTime($0, nY: nY, nX: nX)
+        let presentations: [[Double]]?
+        if let savedPresentations = payload.stimulusPresentationCounts {
+            presentations = try Self.normalizeOccupancyTime(savedPresentations, nY: nY, nX: nX)
+        } else {
+            presentations = nil
         }
         let sourceMetadata = payload.metadata
         let initialCounts: [[[[Double]]]]

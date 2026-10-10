@@ -16,7 +16,7 @@ struct ViewerSettingsView: View {
             .padding(.horizontal)
             Divider()
             HStack {
-                Text("Changes apply to this window. Save defaults for new documents.")
+                Text("Save defaults for open and new document windows.")
                     .font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 Button("Save Defaults") {

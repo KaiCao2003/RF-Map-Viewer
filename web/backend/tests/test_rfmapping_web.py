@@ -567,6 +567,7 @@ def test_open_metadata_binary_probe_and_hd(app, settings: Settings) -> None:
             "yPositions": [-5.0, 5.0],
             "timeBinEdges": [-0.1, 0.0, 0.1, 0.2],
             "occupancyTimeSec": [[0.2, 0.3], [0.4, 0.5]],
+            "stimulusPresentationCounts": None,
             "responseUnits": "spike_count",
             "responseNormalization": "none",
             "capabilities": {
@@ -4406,7 +4407,9 @@ def test_indexed_preserves_singleton_axes_uint64_and_complete_timeline(tmp_path)
 
 
 def test_subtracted_csv_and_composer_share_pooled_smoothed_values(app, settings):
-    source = write_json(settings.rf_root / "difference.rfmap")
+    payload = sample_payload()
+    payload["stimulusPresentationCounts"] = [[2, 3], [4, 5]]
+    source = write_json(settings.rf_root / "difference.rfmap", payload)
     with authenticated_client(app) as client:
         meta = _open(client, source)
         request = {**_csv_export_payload(), "rfStartMs": 100, "rfEndMs": 200,

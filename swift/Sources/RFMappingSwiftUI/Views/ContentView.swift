@@ -373,7 +373,7 @@ private struct PlotControlBar: View {
                     Picker("Polarity", selection: $store.resultsPolarity) {
                         ForEach(RFResultPolarity.allCases) { Text($0.rawValue).tag($0) }
                     }
-                    Text(store.savedResultInterval).font(.caption).foregroundStyle(.secondary)
+                    Text(store.savedResultStatus).font(.caption).foregroundStyle(.secondary)
                     Spacer()
                     Button("Reload", action: store.reloadSavedResults)
                     Button("Inspector…") { store.inspectorRequest += 1 }

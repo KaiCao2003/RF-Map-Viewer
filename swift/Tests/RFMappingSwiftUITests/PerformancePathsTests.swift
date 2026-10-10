@@ -20,6 +20,7 @@ final class PerformancePathsTests: XCTestCase {
             "xPositions": [-1.0, 0.0, 1.0],
             "yPositions": [0.0, 1.0],
             "timeBinEdges": [-0.1, 0.0, 0.1, 0.2, 0.3],
+            "stimulusPresentationCounts": [[5, 0, 50], [10, 5, 0]],
         ], occupancyTimeSec: [[1.0, 0.0, 10.0], [2.0, 1.0, 0.0]],
            occupancyTimeSecSize: [2, 3])
         return try RFMappingData(

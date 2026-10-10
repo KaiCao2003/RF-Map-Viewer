@@ -27,6 +27,12 @@ final class PresentationExposureTests: XCTestCase {
         XCTAssertEqual(observation.responseExposureSeconds!, 3.6, accuracy: 1e-12)
         XCTAssertEqual(observation.count, 72)
         XCTAssertEqual(observation.occupancyTimeSeconds, 8)
+        let frames = data.spatialObservationFrames(unitIndex: 0,
+            timeGroups: [AxisGroup(start: 0, end: 0), AxisGroup(start: 1, end: 1)],
+            yGroups: [AxisGroup(start: 0, end: 0)], xGroups: [AxisGroup(start: 0, end: 1)])
+        XCTAssertEqual(frames[0][0][0].responseExposureSeconds!, 1.2, accuracy: 1e-12)
+        XCTAssertEqual(frames[1][0][0].responseExposureSeconds!, 2.4, accuracy: 1e-12)
+        XCTAssertEqual(data.metrics(for: 0).bestX, 0)
     }
 
     func testFilesWithoutPresentationsRemainCountOnly() throws {
@@ -39,7 +45,8 @@ final class PresentationExposureTests: XCTestCase {
     }
 
     func testPresentationCountsRequireNativeShapeAndNonnegativeIntegers() throws {
-        for invalid: Any in [[[1]], [[-1, 2]], [[0.5, 2]], NSNull()] {
+        let invalidValues: [Any] = [[[1]], [[-1, 2]], [[0.5, 2]], NSNull()]
+        for invalid in invalidValues {
             XCTAssertThrowsError(try makeData(presentations: invalid))
         }
         let zero = try makeData(presentations: [[0, 10]])

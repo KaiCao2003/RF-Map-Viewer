@@ -4,7 +4,10 @@ import { savedNativeCell } from "./rfResultDrawing";
 import type { DatasetMeta, SavedRfResult } from "./types";
 import type { RectSpatialLayout, PolarSpatialLayout } from "./spatialLayout";
 
-const meta = { shape: [1, 2, 3, 1] } as DatasetMeta;
+const meta: DatasetMeta = { id: "saved", name: "saved", sourcePath: "/source.rfmap", shape: [1, 2, 3, 1],
+  unitPool: [42], xPositions: [0, 1, 2], yPositions: [0, 1], timeBinEdges: [0, 0.1],
+  occupancyTimeSec: [[1, 1, 1], [1, 1, 1]], responseUnits: "spike_count", responseNormalization: "none",
+  capabilities: { probe: false, hd: false, waveform: false, occupancy: true } };
 const result: SavedRfResult = { available: true, sourcePath: "/source.rfmap", resultPath: "/source.npz", dimension: "2d", polarity: "excitatory",
   unitIds: [42], masks: [[[1, 0, 0], [0, 1, 0]]], centers: [[[0, 0, 0], [0, 1, 0]]], axis: null,
   manifest: { time_range_s: [0.08, 0.16], parameters: { wrap_x: true } }, summary: null, summaryWarning: null, projectedFrom2d: false };

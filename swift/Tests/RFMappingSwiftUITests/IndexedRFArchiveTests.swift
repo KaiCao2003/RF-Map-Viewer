@@ -350,6 +350,37 @@ private extension Data {
 }
 
 extension IndexedRFArchiveTests {
+    @MainActor
+    func testStoreOverlayIntersectionsStayOnOriginalDetectionBins() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = try savedSource(directory)
+        try savedArchive(shape: [1, 2, 2], mask: [1, 1, 0, 0], center: [0, 1, 0, 0])
+            .write(to: SavedRFResult.resultURL(source: source.url))
+        try savedArchive(shape: [1, 1, 2], mask: [1, 0], center: [1, 0], axis: "x")
+            .write(to: SavedRFResult.resultURL(source: source.url, dimension: "1d"))
+        let store = RFMappingStore(initialData: source, loadDefault: false, discoverJSONChoices: false,
+            discoverCompanions: false, unitQualityFilterEnabled: false,
+            preferences: UserDefaults(suiteName: UUID().uuidString)!)
+        store.selectUnitID(42)
+        store.reloadSavedResults()
+        store.selectedTab = .results
+        store.resultsMode = .both
+        store.xBins = 1
+        store.yBins = 1
+        store.normalizeControls()
+        let cells = store.savedOverlayCells
+        XCTAssertEqual(cells.count, 3)
+        XCTAssertEqual(cells.first { $0.y == 0 && $0.x == 0 }?.membership, 3)
+        XCTAssertEqual(cells.first { $0.y == 0 && $0.x == 1 }?.membership, 1)
+        XCTAssertEqual(cells.first { $0.y == 1 && $0.x == 0 }?.membership, 2)
+        XCTAssertNil(cells.first { $0.y == 1 && $0.x == 1 })
+        XCTAssertEqual(cells.filter(\.center1D).count, 1)
+        store.selectUnitID(17)
+        XCTAssertTrue(store.savedOverlayCells.isEmpty)
+    }
+
     func testSavedResultsMatchRecordedIDsAndNativeAxes() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -377,6 +408,9 @@ extension IndexedRFArchiveTests {
         XCTAssertEqual(result.nativeMask(for: 42), [[true, false], [true, false]])
         XCTAssertEqual(result.forUnit(42)?.mask, [[true, false]])
         XCTAssertFalse(result.projectedFrom2D)
+        try savedArchive(shape: [1, 2, 1], mask: [0, 1], center: [0, 1], axis: "y", polarity: "inhibitory").write(to: path)
+        let vertical = try SavedRFResult.load(source: source, dimension: "1d", polarity: "inhibitory")
+        XCTAssertEqual(vertical.nativeMask(for: 42), [[false, false], [true, true]])
     }
 
     func testSavedResultRejectsMisalignedIDsAxesCentersAndTiming() throws {
@@ -431,6 +465,20 @@ extension IndexedRFArchiveTests {
         let index = try XCTUnwrap(entries.firstIndex { $0.0 == "stimulusPresentationCounts" })
         entries[index].1 = npy(dtype: "<f8", shape: [1, 1], bytes: doubles([0.5]))
         XCTAssertThrowsError(try RFMappingData(data: zip(entries), url: url))
+    }
+
+    func testStaleAnalysisSummaryCannotOverrideSavedTwoDimensionalResult() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = try savedSource(directory)
+        try savedArchive(shape: [1, 2, 2], mask: [1, 0, 0, 0], center: [1, 0, 0, 0])
+            .write(to: SavedRFResult.resultURL(source: source.url))
+        try Data(#"{"source_path":"different.rfmap"}"#.utf8)
+            .write(to: directory.appendingPathComponent("fixture_analysis.json"))
+        let result = try SavedRFResult.load(source: source)
+        XCTAssertEqual(result.forUnit(42)?.mask, [[true, false], [false, false]])
+        XCTAssertNotNil(result.summaryWarning)
     }
 
     private func savedSource(_ directory: URL) throws -> RFMappingData {

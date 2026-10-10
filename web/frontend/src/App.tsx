@@ -53,7 +53,7 @@ import {
   unitMetrics,
   valueModeUnit,
 } from "./math";
-import { exportShortcutAction, steppedTimeResolutionMs } from "./appShortcuts";
+import { rfOverlapShortcut, exportShortcutAction, steppedTimeResolutionMs } from "./appShortcuts";
 import { nearestProbeUnitToRegionCenter, probeUnitsInRegion } from "./probeSelection";
 import { resolutionChangePatch, timelineSelectionPatch } from "./viewStateMath";
 import { VIEWER_TABS } from "./viewTabs";
@@ -786,8 +786,10 @@ export default function App() {
       .finally(() => { if (!controller.signal.aborted) setResultsLoading(false); });
     return () => controller.abort();
   }, [meta, effectiveResultMode, effectiveResultPolarity, resultsReload]);
-  const savedOverlay = useMemo(() => meta && viewState ? savedRfOverlay(meta, savedResults, viewState.clusterId) : null,
-    [meta, savedResults, viewState?.clusterId]);
+  const activeResults = useMemo(() => savedResults.filter((result) => result.polarity === effectiveResultPolarity
+    && resultDimensions(effectiveResultMode).includes(result.dimension)), [savedResults, effectiveResultPolarity, effectiveResultMode]);
+  const savedOverlay = useMemo(() => meta && viewState ? savedRfOverlay(meta, activeResults, viewState.clusterId) : null,
+    [meta, activeResults, viewState?.clusterId]);
   const reloadResults = () => { resultsCache.current.clear(); forceResultsReload.current = true; setResultsReload((value) => value + 1); };
 
   const probeFilter = useMemo(() => {
@@ -1067,9 +1069,9 @@ export default function App() {
       }
       if (editing || event.metaKey || event.ctrlKey || event.altKey || !meta || !viewState) return;
       if (picker && (target?.matches(":open") || event.key.toLowerCase() !== "p")) return;
-      if (event.shiftKey && ["Digit1", "Digit2", "Digit0"].includes(event.code)) {
-        event.preventDefault();
-        setRfOverlay((current) => ({ ...current, mode: event.code === "Digit1" ? "1D" : event.code === "Digit2" ? "2D" : "None" })); return;
+      const overlapMode = rfOverlapShortcut(event);
+      if (overlapMode) {
+        event.preventDefault(); setRfOverlay((current) => ({ ...current, mode: overlapMode })); return;
       }
       if (event.key === "-") { event.preventDefault(); updateState(toggleRfMode(meta, viewState)); return; }
       if (event.key.toLowerCase() === "d") { event.preventDefault(); setDisplayOptions((value) => !value); return; }
@@ -1480,7 +1482,7 @@ export default function App() {
       </main>
 
       {settingsDialog}
-      {inspectorOpen && <RfInspector selection={selectionDetails} results={savedResults} unitId={viewState.clusterId} loading={resultsLoading} error={resultsError} onClose={() => setInspectorOpen(false)} />}
+      {inspectorOpen && <RfInspector selection={selectionDetails} results={activeResults} unitId={viewState.clusterId} loading={resultsLoading} error={resultsError} onClose={() => setInspectorOpen(false)} />}
       {sourceOpen && (
         <SourceChooser
           overlay

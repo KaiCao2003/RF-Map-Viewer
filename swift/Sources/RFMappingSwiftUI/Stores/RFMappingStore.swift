@@ -20,6 +20,8 @@ enum RFUnitUnavailableReason: Equatable, Sendable {
 final class RFMappingStore {
     private static let filterPreferenceChanged = Notification.Name("rfmapping.filterPreferenceChanged")
     @ObservationIgnored private var filterPreferenceObserver: NSObjectProtocol?
+    private static let displayPreferenceChanged = Notification.Name("rfmapping.displayPreferenceChanged")
+    @ObservationIgnored private var displayPreferenceObserver: NSObjectProtocol?
 
     private enum PreferenceKey {
         static let timingDefaults = "rfmapping.timingDefaults"
@@ -356,6 +358,22 @@ final class RFMappingStore {
             guard let enabled = notification.userInfo?["enabled"] as? Bool else { return }
             self?.applyRFUnitQualityFilterEnabled(enabled)
         }
+        displayPreferenceObserver = NotificationCenter.default.addObserver(
+            forName: Self.displayPreferenceChanged, object: preferences, queue: .main
+        ) { [weak self] notification in
+            guard let self, let encoded = notification.userInfo?["settings"] as? Data,
+                  let settings = try? JSONDecoder().decode(ViewerDisplayDefaults.self, from: encoded) else { return }
+            let activeTab = self.selectedTab
+            self.displayDefaults = settings
+            self.applyDisplayDefaults()
+            self.selectedTab = self.visibleTabs.contains(activeTab) ? activeTab : self.visibleTabs[0]
+            if let data = self.data {
+                self.xBins = settings.xBins == 0 ? data.nX : settings.xBins
+                self.yBins = settings.yBins == 0 ? data.nY : settings.yBins
+                self.timeResolutionMS = settings.timeResolutionMS
+                self.normalizeControls()
+            }
+        }
         isAwaitingStartupDocument = initialURL == nil && initialData == nil && !loadDefault
         if discoverJSONChoices { refreshJSONChoices() }
         if let initialData {
@@ -369,6 +387,7 @@ final class RFMappingStore {
 
     deinit {
         if let observer = filterPreferenceObserver { NotificationCenter.default.removeObserver(observer) }
+        if let observer = displayPreferenceObserver { NotificationCenter.default.removeObserver(observer) }
         activeDecodeTask?.cancel()
         unitCacheTask?.cancel()
         waveformTask?.cancel()
@@ -630,7 +649,9 @@ final class RFMappingStore {
         }
         let metrics = data.metrics(for: unitIndex)
         guard let strongestRate = metrics.maxFiringRate else {
-            return "Summed RF counts: \(String(format: "%.0f", metrics.totalSpikes))\nNo occupied RF cells"
+            let detail = data.supportsMeanFiringRate ? "No cells with response exposure"
+                : "Strongest count cell: yIdx \(metrics.bestY + 1), xIdx \(metrics.bestX + 1) · Hz unavailable"
+            return "Summed RF counts: \(String(format: "%.0f", metrics.totalSpikes))\n\(detail)"
         }
         let delay = metrics.delayMS[metrics.bestY][metrics.bestX]
         let delayText = delay.map { String(format: "%.1f ms", $0) } ?? "n/a"
@@ -2220,7 +2241,10 @@ final class RFMappingStore {
         smoothingRadius: Int
     ) -> OptionalMatrix {
         let valid = observations.map { row in
-            row.map { $0.sourcePixelCount > 0 && $0.occupancyTimeSeconds > 0 }
+            row.map {
+                $0.sourcePixelCount > 0 && $0.occupancyTimeSeconds > 0
+                    && (valueMode == .spikeCount || ($0.responseExposureSeconds ?? 0) > 0)
+            }
         }
 
         if valueMode == .spikeCount {
@@ -2239,11 +2263,11 @@ final class RFMappingStore {
         }
 
         var pooledCounts: OptionalMatrix = observations.map { row in
-            row.map { value in value.sourcePixelCount > 0 ? value.count : nil }
+            row.map { value in value.sourcePixelCount > 0 && (value.responseExposureSeconds ?? 0) > 0 ? value.count : nil }
         }
         var pooledExposure: OptionalMatrix = observations.map { row in
             row.map { value in
-                value.sourcePixelCount > 0 ? value.responseExposureSeconds : nil
+                value.sourcePixelCount > 0 && (value.responseExposureSeconds ?? 0) > 0 ? value.responseExposureSeconds : nil
             }
         }
         pooledCounts = smoothMatrix(pooledCounts, radius: smoothingRadius)
@@ -2358,7 +2382,12 @@ final class RFMappingStore {
         let bin = max(0, min(displayValues.count - 1, displayBin ?? binIndex))
 
         let grouped = cell.yStart != cell.yEnd || cell.xStart != cell.xEnd
-        let groupNote = grouped ? "avg over source pixels\n" : ""
+        let groupNote = grouped ? (valueMode == .spikeCount ? "avg over source pixels\n" : "pooled counts / pooled exposure\n") : ""
+        let window = sourceBinsForPlotRange()
+        let observations = data.spatialObservations(unitIndex: unitIndex,
+            yGroup: AxisGroup(start: cell.yStart, end: cell.yEnd),
+            xGroup: AxisGroup(start: cell.xStart, end: cell.xEnd), start: window.start, end: window.end)
+        let exposureText = observations.responseExposureSeconds.map { String(format: "%g s", $0) } ?? "unavailable"
         let peakText = analysis.peakBin.map { "\($0 + 1) (\(timeGroupLabel($0)))" } ?? "n/a"
         let delayText = analysis.delayMS.map { String(format: "%.1f ms", $0) } ?? "n/a"
         return """
@@ -2370,6 +2399,8 @@ final class RFMappingStore {
         peak \(valueMode.format(analysis.peakValue)) \(valueMode.unit)
         peak bin \(peakText)
         delay \(delayText), count entropy \(String(format: "%.3f", analysis.entropy))
+        Stimulus display occupancy: \(String(format: "%g", observations.occupancyTimeSeconds)) s
+        Response exposure: \(exposureText)
         """
     }
 
@@ -2618,6 +2649,8 @@ final class RFMappingStore {
         displayDefaults.tuningBins = HDTuningData.normalizedDisplayBinCount(displayDefaults.tuningBins)
         if let encoded = try? JSONEncoder().encode(displayDefaults) {
             preferences.set(encoded, forKey: "rfmapping.displayDefaults")
+            NotificationCenter.default.post(name: Self.displayPreferenceChanged, object: preferences,
+                                            userInfo: ["settings": encoded])
         }
         saveTimingDefaults()
     }
@@ -2648,6 +2681,16 @@ final class RFMappingStore {
                 "\(dimension.uppercased()) \(String(format: "%g", result.timeRangeSeconds[0] * 1000))–\(String(format: "%g", result.timeRangeSeconds[1] * 1000)) ms"
             }
         }.joined(separator: " · ")
+    }
+
+    var savedResultStatus: String {
+        guard let unitID = selectedUnitID else { return "No unit selected" }
+        let missing = activeResultMode.dimensions.filter {
+            savedResults[$0 + ":" + activeResultPolarity.rawValue]?.forUnit(unitID) == nil
+        }.map { $0.uppercased() }
+        if !missing.isEmpty { return missing.joined(separator: "/") + " unavailable · see Inspector" }
+        if activeResultMode != .none && savedOverlayCells.isEmpty { return savedResultInterval + " · No detected bins" }
+        return savedResultInterval
     }
 
     var savedResultDetails: String {

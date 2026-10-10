@@ -87,28 +87,8 @@ private enum HDTuningContractValidator {
         "firing_rate_hz",
         "unit_data",
     ]
-    static func validate(_ data: Data) throws {
-        try rejectDuplicateJSONKeys(data)
-        let decoded: Any
-        do {
-            decoded = try JSONSerialization.jsonObject(with: data)
-        } catch {
-            throw HDTuningError.invalidData(
-                "Could not decode HD tuning JSON: \(error.localizedDescription)"
-            )
-        }
-        guard let payload = decoded as? [String: Any], !payload.isEmpty else {
-            throw HDTuningError.invalidData(
-                "Tuning-curve JSON must be a non-empty object."
-            )
-        }
+    static func validate(_ payload: [String: Any]) throws {
         try requireFiniteJSON(payload, context: "tuning-curve JSON")
-
-        if payload["schema_version"] != nil {
-            throw HDTuningError.invalidData(
-                "Tuning-curve schema_version is obsolete; the current columnar contract has exactly eight unversioned top-level keys."
-            )
-        }
         let missing = topLevelKeys.filter { payload[$0] == nil }
         if !missing.isEmpty {
             throw HDTuningError.invalidData(
@@ -632,7 +612,8 @@ struct HDTuningData: Sendable {
             return
         }
         if let version = document.removeValue(forKey: "schema_version") {
-            guard let number = version as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(), number == 2,
+            guard let number = version as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+                  !["f", "d"].contains(String(cString: number.objCType)), number == 2,
                   let units = document.removeValue(forKey: "units") as? [[String: Any]], !units.isEmpty else {
                 throw HDTuningError.invalidData("Schema version 2 requires a non-empty units array.")
             }
@@ -645,8 +626,8 @@ struct HDTuningData: Sendable {
             })
         }
         if document["metadata"] == nil || document["metadata"] is NSNull { document["metadata"] = [String: Any]() }
+        try HDTuningContractValidator.validate(document)
         let canonicalData = try JSONSerialization.data(withJSONObject: document)
-        try HDTuningContractValidator.validate(canonicalData)
         let payload: HDTuningPayload
         do {
             payload = try JSONDecoder().decode(HDTuningPayload.self, from: canonicalData)

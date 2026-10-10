@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { DatasetMeta } from "./types";
-import { exportShortcutAction, steppedTimeResolutionMs } from "./appShortcuts";
+import { exportShortcutAction, rfOverlapShortcut, steppedTimeResolutionMs } from "./appShortcuts";
 
 const meta: DatasetMeta = {
   id: "fixture",
@@ -36,4 +36,13 @@ describe("viewer keyboard shortcut parity", () => {
     expect(exportShortcutAction({ key: "e", metaKey: false, ctrlKey: false, shiftKey: true }))
       .toBeNull();
   });
+});
+
+it("selects overlays with physical shifted digits without stealing command chords", () => {
+  const event = { code: "Digit1", shiftKey: true, metaKey: false, ctrlKey: false, altKey: false };
+  expect(rfOverlapShortcut(event)).toBe("1D");
+  expect(rfOverlapShortcut({ ...event, code: "Digit2" })).toBe("2D");
+  expect(rfOverlapShortcut({ ...event, code: "Digit0" })).toBe("None");
+  expect(rfOverlapShortcut({ ...event, ctrlKey: true })).toBeNull();
+  expect(rfOverlapShortcut({ ...event, shiftKey: false })).toBeNull();
 });

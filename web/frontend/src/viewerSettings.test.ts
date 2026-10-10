@@ -68,3 +68,13 @@ describe("viewer settings", () => {
     expect(patch).not.toHaveProperty("clusterId");
   });
 });
+
+it("round trips overlays and visible tabs while retaining a visible initial tab", () => {
+  const saved = storage();
+  const settings = { ...DEFAULT_VIEWER_SETTINGS, visibleTabs: ["timeline", "results"] as const,
+    initialTab: "results" as const, rfOverlay: { ...DEFAULT_VIEWER_SETTINGS.rfOverlay, mode: "Both" as const, polarity: "inhibitory" as const, width: 3, color1d: "#123456" } };
+  saveViewerSettings(saved, { ...settings, visibleTabs: [...settings.visibleTabs] });
+  expect(loadViewerSettings(saved)).toEqual(settings);
+  saved.setItem(VIEWER_SETTINGS_KEY, JSON.stringify({ ...settings, initialTab: "rf" }));
+  expect(loadViewerSettings(saved).initialTab).toBe("timeline");
+});
