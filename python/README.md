@@ -1,6 +1,6 @@
 # Python RF Map Viewers
 
-This directory contains the Python/Tk RF Map Viewer `1.11.3`, launched by
+This directory contains the Python/Tk RF Map Viewer `1.11.4`, launched by
 `rfmapping_gui.py` or the installed `rfmapping-viewer` command. The separate
 Free-Moving alpha and its HDF5 Square/Bar, 3D-sphere, and exposure-QA paths have
 been retired. The offline session/EBC HTML report script remains available.
@@ -107,6 +107,30 @@ The Probe view shows channels and units with known positions:
 
 Units without usable positions remain part of the RF data but cannot be
 selected by clicking or included by a Probe-region filter.
+
+**Annotate ADN…** opens a larger probe view with the complete attached unit
+positions, including units absent from the current RF file. Draw a freehand
+loop to add units to the ADN selection; the dot position determines inclusion.
+Use **Undo** or **Clear selection** to revise it, and the depth zoom buttons
+and scrollbar for dense regions. Hover a dot in either probe view to see its
+unit **ID**, **x**, and **y** in µm.
+
+**Save ADN** writes `session/data/adn_neuron.npy`. The NumPy structured array
+has `probe` (Unicode) and `unit_id` (int64) fields, so Probe A and B can share
+one session file without mixing identical unit IDs. Saving replaces the
+current probe's list and preserves other probes. Reopening the annotation
+window reloads the saved IDs. RF, tuning, and position source files are unchanged.
+
+```python
+adn = np.load(session / "data" / "adn_neuron.npy", allow_pickle=False)
+unit_ids = adn["unit_id"][adn["probe"] == "ProbeA"]
+```
+
+Enable **Only ADN** to load this recording/probe's saved list and restrict
+unit navigation, probe dots, and new Figure Studio sessions. RF-quality filters
+still apply, but never change the saved anatomical selection. Switching the
+document resets Only ADN; synced windows retain their own recording/probe
+annotations. A synced unit outside the ADN list appears unavailable.
 
 ### Read the views
 
@@ -338,7 +362,12 @@ Open **Help → Keyboard Shortcuts** for the in-app list.
 
 ---
 
-## Stable viewer 1.11.3
+## Stable viewer 1.11.4
+
+Version 1.11.4 adds **Annotate ADN…**: circle probe units, use Undo/Clear, and
+save per-probe IDs to `session/data/adn_neuron.npy`. **Only ADN** filters the
+viewer and figure exports. Hover over a probe unit to see its ID and physical
+x/y coordinates.
 
 Version 1.11.3 adds **RF overlap** to the foldable Display options. Choose
 None, 2D, 1D, or Both, or press **Shift+1 / Shift+2 / Shift+0** for 1D / 2D /
@@ -528,7 +557,7 @@ Opening the app without a path shows the native file chooser. Release packages
 do not contain or auto-load sample RF data.
 
 Its macOS identity is `RF Map Viewer.app`, bundle ID
-`org.local.rfmapping.viewer`, and version/build `1.11.3` / `111003`. Build it with:
+`org.local.rfmapping.viewer`, and version/build `1.11.4` / `111004`. Build it with:
 
 ```sh
 script/build_python_stable_macos_app.sh
@@ -570,6 +599,7 @@ code lives in `rfmapping_viewer/`:
 | Module | Responsibility |
 | --- | --- |
 | `rf_model.py`, `companions.py` | Read-only data adapters and cached display values |
+| `adn_selection.py`, `adn_annotation_window.py` | Physical-coordinate selection and NPY storage, separate from the annotation UI |
 | `display.py` | Spatial grouping, colors, timelines, and raster calculations |
 | `settings.py`, `settings_window.py` | Validated preferences and their Tk editor |
 | `viewer_state.py` | Paired-window state and waveform worker results |

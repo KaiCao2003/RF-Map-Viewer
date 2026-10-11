@@ -2,7 +2,7 @@
   "schema_version": 1,
   "reference": {
     "component": "python_stable",
-    "version": "1.11.3",
+    "version": "1.11.4",
     "stable_series": "1.11"
   },
   "policy": {
@@ -11,20 +11,20 @@
   },
   "components": {
     "python_stable": {
-      "release_version": "1.11.3",
-      "marketing_version": "1.11.3",
-      "package_version": "1.11.3",
-      "build": "111003",
+      "release_version": "1.11.4",
+      "marketing_version": "1.11.4",
+      "package_version": "1.11.4",
+      "build": "111004",
       "channel": "stable",
       "feature_generation_offset": 0,
       "edition": "Full",
       "artifact_flavor": "full",
-      "artifact": "RF_Map_Viewer-python-1.11.3-full-macos-arm64.zip",
-      "checksum": "SHA256SUMS-python-1.11.3-full.txt",
+      "artifact": "RF_Map_Viewer-python-1.11.4-full-macos-arm64.zip",
+      "checksum": "SHA256SUMS-python-1.11.4-full.txt",
       "windows_portable_artifact": "RF_Map_Viewer-python-1.11.1-full-windows-x64-portable.zip",
       "windows_installer_artifact": "RF_Map_Viewer-python-1.11.1-full-windows-x64-setup.exe",
       "windows_checksum": "SHA256SUMS-python-1.11.1-full-windows-x64.txt",
-      "tag": "python-v1.11.3",
+      "tag": "python-v1.11.4",
       "windows_release_version": "1.11.1",
       "windows_build": "11101"
     },

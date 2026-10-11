@@ -10,10 +10,10 @@ The Free-Moving alpha application has been retired from the active source and
 release workflow. Its historical Git tags and published artifacts are retained.
 The Python package and generic launcher now identify the stable viewer.
 
-Python 1.11.3 adds an RF overlap control to the folded Display toolbar and
-Shift+1, Shift+2, and Shift+0 shortcuts for 1D, 2D, and no overlap. This release
-targets macOS Apple Silicon, build 111003. The published Windows release remains
-1.11.2, build 11102, from its separate packaging commit.
+Python 1.11.4 adds ADN circle selection with Undo/Clear, per-probe IDs saved to
+`session/data/adn_neuron.npy`, an **Only ADN** filter, and probe-unit hover
+coordinates. It targets macOS Apple Silicon, build 111004. The published Windows
+release remains 1.11.2, build 11102, from its separate packaging commit.
 
 Python 1.11.2 adds configurable saved RF overlays and aligned RF/Results plots,
 restores native macOS welcome controls, and supports trackpad scrolling in
@@ -32,7 +32,7 @@ component tag and artifact name:
 
 | Component | Release | Tag | Channel |
 | --- | --- | --- | --- |
-| Python stable (macOS) | `1.11.3` | `python-v1.11.3` | stable |
+| Python stable (macOS) | `1.11.4` | `python-v1.11.4` | stable |
 | Python stable (Windows x64) | `1.11.2` | `python-v1.11.2` | stable |
 | Swift | `1.10.3` | `swift-v1.10.3` | stable |
 | Web | `1.10.2` | `web-v1.10.2` | stable |

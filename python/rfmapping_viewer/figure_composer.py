@@ -23,7 +23,7 @@ from rfmapping_viewer.figure_export import (
     render_live_preview,
 )
 
-from rfmapping_viewer.companions import TuningCurveData
+from rfmapping_viewer.companions import TuningCurveData, probe_name_for_json
 from rfmapping_viewer.constants import (
     APP_EDITION,
     APP_VERSION,
@@ -158,6 +158,8 @@ class FigureViewerSnapshot:
     unit_filter_enabled: bool = False
     zero_bin_threshold: int = 1
     visible_unit_ids: tuple[int, ...] | None = None
+    only_adn: bool = False
+    adn_unit_ids: tuple[int, ...] = ()
     waveform_channel_mode: str = "same_x_column"
 
     rf_subtract_source_range: AxisGroup | None = None
@@ -196,7 +198,9 @@ class FigureViewerSnapshot:
                 viewer.settings.rf_filter_units_with_zero_bins
             ),
             zero_bin_threshold=int(viewer.settings.rf_zero_bin_threshold),
-            visible_unit_ids=tuple(viewer._local_quality_visible_unit_ids()),
+            visible_unit_ids=tuple(viewer._local_visible_unit_ids()),
+            only_adn=bool(viewer.only_adn_var.get()),
+            adn_unit_ids=tuple(sorted(viewer.adn_unit_ids)),
             waveform_channel_mode=viewer.waveform_channel_mode_var.get(),
         )
 
@@ -792,6 +796,11 @@ def _figure_snapshot_metadata(data: RFMappingData, snapshot: FigureViewerSnapsho
         if snapshot.visible_unit_ids is None
         else snapshot.visible_unit_ids
     )
+    filter_rules = []
+    if snapshot.unit_filter_enabled:
+        filter_rules.append("hide when zero-bin count is greater than or equal to threshold")
+    if snapshot.only_adn:
+        filter_rules.append("keep only saved ADN unit IDs for this probe")
     return {
         "valueMode": snapshot.value_mode,
         "valueUnit": value_mode_unit(snapshot.value_mode),
@@ -834,16 +843,22 @@ def _figure_snapshot_metadata(data: RFMappingData, snapshot: FigureViewerSnapsho
         ),
         "stimulusPresentationCountsAvailable": data.presentation_counts is not None,
         "unitFilter": {
-            "enabled": snapshot.unit_filter_enabled,
+            "enabled": snapshot.unit_filter_enabled or snapshot.only_adn,
+            "rfZeroBinFilterEnabled": snapshot.unit_filter_enabled,
             "zeroSpikeSpatialBinThreshold": snapshot.zero_bin_threshold,
             "spatialBinCount": data.spatial_bin_count,
-            "comparison": "hide when zero-bin count is greater than or equal to threshold",
+            "comparison": "; ".join(filter_rules) or "none",
             "visibleUnitIds": list(visible_unit_ids),
             "excludedUnitIds": [
                 int(unit_id)
                 for unit_id in data.unit_pool
                 if int(unit_id) not in visible_unit_ids
             ],
+        },
+        "adnFilter": {
+            "enabled": snapshot.only_adn,
+            "unitIds": list(snapshot.adn_unit_ids),
+            "probe": probe_name_for_json(data.path),
         },
     }
 

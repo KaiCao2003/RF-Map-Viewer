@@ -56,6 +56,8 @@ def viewer_stub(**state):
         "_viewer_ready": True,
         "_pair_apply_in_progress": False,
         "spatial_region": None,
+        "only_adn_var": Variable(False),
+        "adn_unit_ids": set(),
         "probe_geometry": None,
         "selected_cell": None,
         "_base_bin_cache": None,

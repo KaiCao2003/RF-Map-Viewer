@@ -18,6 +18,8 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 import numpy as np
+from rfmapping_viewer.adn_selection import adn_selection_path, load_adn_units
+from rfmapping_viewer.adn_annotation_window import ADNAnnotationWindow, draw_unit_tooltip
 from rfmapping_viewer.inspector import RFInspector
 from rfmapping_viewer.figure_export import (
     ExportPage,
@@ -30,12 +32,14 @@ from rfmapping_viewer.figure_export import (
 
 from rfmapping_viewer.companions import (
     ProbeGeometry,
+    ProbeUnitPosition,
     SpatialRegion,
     TuningCurveData,
     center_tuning_curve_on_zero,
     discover_probe_geometry,
     discover_tuning_curve_path,
     head_direction_unit_vector,
+    load_probe_geometry,
     probe_name_for_json,
     processed_tuning_curve,
     tuning_rate_peak,
@@ -579,11 +583,16 @@ class RFMViewer(tk.Toplevel):
         self._waveform_error: str | None = None
         self._waveform_error_key: tuple[int, str] | None = None
         self.spatial_region: SpatialRegion | None = None
+        self.only_adn_var = tk.BooleanVar(value=False)
+        self.adn_unit_ids: set[int] = set()
+        self._adn_path = adn_selection_path(data.path)
+        self._adn_window: ADNAnnotationWindow | None = None
         self._probe_drag_start: tuple[float, float] | None = None
         self._probe_drag_end: tuple[float, float] | None = None
         self._probe_press_canvas: tuple[float, float] | None = None
         self._probe_drag_moved = False
         self._probe_canvas_transform: tuple[float, float, float, float] | None = None
+        self._probe_hit_points: list[tuple[float, float, ProbeUnitPosition]] = []
         self.probe_collapsed_var = tk.BooleanVar(value=True)
         self.tuning_collapsed_var = tk.BooleanVar(value=True)
         self._sidebar_auto_visibility = True
@@ -1325,6 +1334,17 @@ class RFMViewer(tk.Toplevel):
             justify="left",
         )
         self.spatial_status_label.grid(row=2, column=0, sticky="ew", pady=(5, 10))
+        adn_controls = ttk.Frame(self.probe_section, style="Sidebar.TFrame")
+        adn_controls.grid(row=3, column=0, sticky="ew", pady=(0, 8))
+        self.annotate_adn_button = ttk.Button(
+            adn_controls, text="Annotate ADN…", command=self._open_adn_annotation,
+        )
+        self.annotate_adn_button.pack(side="left")
+        self.only_adn_toggle = ttk.Checkbutton(
+            adn_controls, text="Only ADN", variable=self.only_adn_var,
+            command=self._on_only_adn_toggled, style="Sidebar.TCheckbutton",
+        )
+        self.only_adn_toggle.pack(side="right")
         row += 1
 
         self.waveform_host = ttk.Frame(
@@ -2192,6 +2212,8 @@ class RFMViewer(tk.Toplevel):
         self.probe_canvas.bind("<ButtonPress-1>", self._on_probe_press)
         self.probe_canvas.bind("<B1-Motion>", self._on_probe_drag)
         self.probe_canvas.bind("<ButtonRelease-1>", self._on_probe_release)
+        self.probe_canvas.bind("<Motion>", self._on_probe_motion)
+        self.probe_canvas.bind("<Leave>", lambda _event: self.probe_canvas.delete("hover"))
         self.tuning_curve_canvas.bind(
             "<Configure>", lambda _event: self._schedule_optional_redraw("tuning")
         )
@@ -2519,7 +2541,7 @@ class RFMViewer(tk.Toplevel):
                 self.unit_idx.set(-1)
             return None
         unit_id = self._selected_unit_id_value()
-        if unit_id not in navigation_ids or not self._local_unit_passes_quality_filter(
+        if unit_id not in navigation_ids or not self._local_unit_is_visible(
             unit_id
         ):
             if int(self.unit_idx.get()) != -1:
@@ -2549,7 +2571,12 @@ class RFMViewer(tk.Toplevel):
         if hasattr(self, "unit_combo"):
             self._sync_unit_combo()
 
-    def _quality_filter_status(self, unit_id: int | None = None) -> str | None:
+    def _unit_filter_status(self, unit_id: int | None = None) -> str | None:
+        if self.only_adn_var.get():
+            if not self.adn_unit_ids:
+                return "No ADN units saved for this probe. Use Annotate ADN… to select and save units."
+            if unit_id is not None and unit_id not in self.adn_unit_ids:
+                return f"Cluster {unit_id} is hidden by Only ADN."
         if not self.settings.rf_filter_units_with_zero_bins:
             return None
         visible = self._local_quality_visible_unit_ids()
@@ -2559,7 +2586,7 @@ class RFMViewer(tk.Toplevel):
                 "RF window. Change the window or filter in Settings."
             )
         if unit_id is not None and self._local_unit_index(unit_id) is not None:
-            if not self._local_unit_passes_quality_filter(unit_id):
+            if not self._local_unit_is_visible(unit_id):
                 return (
                     f"Cluster {unit_id} is hidden by the zero-spike RF-bin "
                     "filter for the current RF window."
@@ -2567,7 +2594,7 @@ class RFMViewer(tk.Toplevel):
         return None
 
     def _restore_local_unit_selection(self) -> None:
-        local_units = RFMViewer._local_quality_visible_unit_ids(self)
+        local_units = RFMViewer._local_visible_unit_ids(self)
         if not local_units:
             self.unit_idx.set(-1)
             if hasattr(self, "unit_combo"):
@@ -2601,6 +2628,17 @@ class RFMViewer(tk.Toplevel):
             ) or self.data.zero_spike_spatial_bin_count(index, start, end) < threshold
         ]
 
+    def _local_visible_unit_ids(self) -> list[int]:
+        unit_ids = RFMViewer._local_quality_visible_unit_ids(self)
+        if self.only_adn_var.get():
+            return [unit_id for unit_id in unit_ids if unit_id in self.adn_unit_ids]
+        return unit_ids
+
+    def _local_unit_is_visible(self, unit_id: int) -> bool:
+        if self.only_adn_var.get() and unit_id not in self.adn_unit_ids:
+            return False
+        return self._local_unit_passes_quality_filter(unit_id)
+
     def _local_unit_passes_quality_filter(self, unit_id: int) -> bool:
         if not self.settings.rf_filter_units_with_zero_bins:
             return True
@@ -2624,7 +2662,7 @@ class RFMViewer(tk.Toplevel):
             {
                 unit_id
                 for window in ready
-                for unit_id in RFMViewer._local_quality_visible_unit_ids(window)
+                for unit_id in RFMViewer._local_visible_unit_ids(window)
             }
         )
 
@@ -2634,9 +2672,11 @@ class RFMViewer(tk.Toplevel):
             if eligible:
                 unit_ids = RFMViewer._quality_filtered_pairing_unit_ids(self, ready)
             else:
-                unit_ids = RFMViewer._local_quality_visible_unit_ids(self)
+                unit_ids = RFMViewer._local_visible_unit_ids(self)
         else:
-            unit_ids = RFMViewer._local_quality_visible_unit_ids(self)
+            unit_ids = RFMViewer._local_visible_unit_ids(self)
+        if self.only_adn_var.get():
+            unit_ids = [unit_id for unit_id in unit_ids if unit_id in self.adn_unit_ids]
         region = self.spatial_region
         geometry = self.probe_geometry
         if region is not None and geometry is not None:
@@ -2648,6 +2688,16 @@ class RFMViewer(tk.Toplevel):
 
         unit_ids = self._unit_navigation_ids()
         selected = self._selected_unit_id_value()
+        if (
+            self._app_root._rfm_pairing_enabled
+            and self.only_adn_var.get()
+            and selected not in self.adn_unit_ids
+        ):
+            # A synced non-ADN unit stays unavailable here; do not substitute
+            # another neuron while the other window is displaying that ID.
+            self.unit_idx.set(-1)
+            self._sync_unit_combo()
+            return
         if not unit_ids:
             self.unit_idx.set(-1)
             if hasattr(self, "unit_combo"):
@@ -2658,7 +2708,7 @@ class RFMViewer(tk.Toplevel):
             self._set_selected_unit_id(self._next_union_unit_id(unit_ids, selected))
             return
         local_index = self._local_unit_index(selected)
-        if local_index is None or not self._local_unit_passes_quality_filter(selected):
+        if local_index is None or not self._local_unit_is_visible(selected):
             self.unit_idx.set(-1)
         elif int(self.unit_idx.get()) != local_index:
             self.unit_idx.set(local_index)
@@ -4257,8 +4307,8 @@ class RFMViewer(tk.Toplevel):
         cluster_id = self._selected_unit_id_value()
         if hasattr(self, "tuning_cluster_label"):
             self.tuning_cluster_label.configure(text=f"Cluster {cluster_id}")
-        filter_status = self._quality_filter_status(cluster_id)
-        if filter_status is not None and not self._local_unit_passes_quality_filter(
+        filter_status = self._unit_filter_status(cluster_id)
+        if filter_status is not None and not self._local_unit_is_visible(
             cluster_id
         ):
             if hasattr(self, "tuning_provenance_button"):
@@ -4283,10 +4333,10 @@ class RFMViewer(tk.Toplevel):
             rf_unit_ids = (
                 set(self._quality_filtered_pairing_unit_ids(ready))
                 if eligible
-                else set(self._local_quality_visible_unit_ids())
+                else set(self._local_visible_unit_ids())
             )
         else:
-            rf_unit_ids = set(self._local_quality_visible_unit_ids())
+            rf_unit_ids = set(self._local_visible_unit_ids())
         if cluster_id not in rf_unit_ids:
             self._draw_tuning_placeholder(
                 f"Cluster {cluster_id} skipped",
@@ -4576,6 +4626,78 @@ class RFMViewer(tk.Toplevel):
             return
         self._load_probe_geometry_path(Path(path))
 
+    def _adn_probe_name(self) -> str | None:
+        return probe_name_for_json(self.data.path) or (
+            self.probe_geometry.probe_name if self.probe_geometry is not None else None
+        )
+
+    def _open_adn_annotation(self) -> None:
+        if self._adn_path is None:
+            messagebox.showinfo(
+                "No recording session", "Open an RF file inside its recording session to save session/data/adn_neuron.npy.",
+                parent=self,
+            )
+            return
+        if self._adn_window is not None and self._adn_window.winfo_exists():
+            self._adn_window.lift()
+            return
+        geometry = self.probe_geometry or self.data.probe_geometry()
+        if geometry is None:
+            self._attach_probe_geometry()
+            geometry = self.probe_geometry
+        if geometry is None:
+            return
+        try:
+            # The ordinary RF view only keeps RF units. Annotation needs the
+            # complete sorting result, including units without an RF export.
+            full_geometry = load_probe_geometry(
+                geometry.probe_name, geometry.positions_path, geometry.channels_path,
+            )
+            self._adn_window = ADNAnnotationWindow(
+                self, full_geometry, self._adn_path, self._on_adn_saved,
+            )
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("Could not open ADN annotation", str(exc), parent=self)
+
+    def _on_only_adn_toggled(self) -> None:
+        if self.only_adn_var.get():
+            probe_name = self._adn_probe_name()
+            if self._adn_path is None or probe_name is None:
+                self.only_adn_var.set(False)
+                messagebox.showinfo(
+                    "No recording session", "Open a recording with a known session and probe to use Only ADN.",
+                    parent=self,
+                )
+                return
+            try:
+                self.adn_unit_ids = load_adn_units(self._adn_path, probe_name)
+            except (OSError, ValueError) as exc:
+                self.only_adn_var.set(False)
+                messagebox.showerror("Could not load ADN units", str(exc), parent=self)
+                return
+        self._reconcile_unit_filter_selection()
+        self._update_all()
+        self._publish_pairing_state_if_changed()
+
+    def _on_adn_saved(self, unit_ids: set[int]) -> None:
+        for window in self._ready_pairing_viewers():
+            if window._adn_path == self._adn_path and window._adn_probe_name() == self._adn_probe_name():
+                window.adn_unit_ids = set(unit_ids)
+                window._reconcile_unit_filter_selection()
+                window._update_all()
+
+    def _on_probe_motion(self, event: tk.Event) -> None:
+        canvas = self.probe_canvas
+        canvas.delete("hover")
+        if self._probe_drag_start is not None or not self._probe_hit_points:
+            return
+        x, y, unit = min(
+            self._probe_hit_points,
+            key=lambda item: (item[0] - event.x) ** 2 + (item[1] - event.y) ** 2,
+        )
+        if math.hypot(x - event.x, y - event.y) <= 8:
+            draw_unit_tooltip(canvas, event, unit)
+
     def _probe_to_canvas(self, x_um: float, y_um: float) -> tuple[float, float] | None:
         transform = self._probe_canvas_transform
         if transform is None:
@@ -4621,6 +4743,7 @@ class RFMViewer(tk.Toplevel):
         width = max(canvas.winfo_width(), 220)
         height = max(canvas.winfo_height(), 120 if compact else 200)
         if geometry is None:
+            self._probe_hit_points = []
             self._probe_canvas_transform = None
             signature = ("missing", width, height)
             if signature != self._probe_static_signature:
@@ -4646,7 +4769,7 @@ class RFMViewer(tk.Toplevel):
             self.clear_spatial_button.state(["disabled"])
             return
 
-        available = set(self._local_quality_visible_unit_ids())
+        available = set(self._local_visible_unit_ids())
         units = [unit for unit in geometry.units if unit.unit_id in available]
         points = [(channel.x_um, channel.y_um) for channel in geometry.channels]
         positioned_units = [
@@ -4665,6 +4788,7 @@ class RFMViewer(tk.Toplevel):
             else None
         )
         if not points:
+            self._probe_hit_points = []
             self._probe_canvas_transform = None
             signature = ("no-matches", id(geometry), width, height, frozenset(available))
             if signature != self._probe_static_signature:
@@ -4717,6 +4841,7 @@ class RFMViewer(tk.Toplevel):
         )
         if signature != self._probe_static_signature:
             canvas.delete("all")
+            self._probe_hit_points = []
             xs, ys = zip(*points)
             x_min, x_max = min(xs), max(xs)
             y_min, y_max = min(ys), max(ys)
@@ -4754,6 +4879,7 @@ class RFMViewer(tk.Toplevel):
                 if point is None:
                     continue
                 x, y = point
+                self._probe_hit_points.append((x, y, unit))
                 in_region = unit.unit_id in region_ids
                 fill = "#f79009" if in_region else "#2e90fa"
                 radius = 4 if in_region else 3
@@ -4863,6 +4989,7 @@ class RFMViewer(tk.Toplevel):
         canvas.tag_raise(tag)
 
     def _on_probe_press(self, event: tk.Event) -> None:
+        self.probe_canvas.delete("hover")
         point = self._canvas_to_probe(float(event.x), float(event.y))
         self._probe_drag_start = point
         self._probe_drag_end = None
@@ -4899,7 +5026,7 @@ class RFMViewer(tk.Toplevel):
             self._apply_spatial_region(region)
             return
 
-        available = set(self._local_quality_visible_unit_ids())
+        available = set(self._local_visible_unit_ids())
         nearest: tuple[float, int] | None = None
         for unit in self.probe_geometry.units:
             if unit.unit_id not in available or unit.x_um is None or unit.y_um is None:
@@ -4959,7 +5086,7 @@ class RFMViewer(tk.Toplevel):
         unit_ids = self._unit_navigation_ids()
         self._unit_combo_unit_ids = unit_ids
         local_indices = {int(unit_id): index for index, unit_id in enumerate(self.data.unit_pool)}
-        local_visible = set(self._local_quality_visible_unit_ids())
+        local_visible = set(self._local_visible_unit_ids())
         values: list[str] = []
         for unit_id in unit_ids:
             local_index = local_indices.get(unit_id)
@@ -5866,7 +5993,7 @@ class RFMViewer(tk.Toplevel):
         no_spatial_matches = (
             self.spatial_region is not None and not self._unit_navigation_ids()
         )
-        filter_status = self._quality_filter_status(unit_id)
+        filter_status = self._unit_filter_status(unit_id)
         loading_message = self._unit_loading_message()
         canvas.create_text(
             width / 2,
@@ -5909,7 +6036,7 @@ class RFMViewer(tk.Toplevel):
             no_spatial_matches = (
                 self.spatial_region is not None and not self._unit_navigation_ids()
             )
-            filter_status = self._quality_filter_status(cluster_id)
+            filter_status = self._unit_filter_status(cluster_id)
             self.status_label.configure(
                 text=(
                     "No units match the probe region."
@@ -5923,7 +6050,7 @@ class RFMViewer(tk.Toplevel):
             self.unit_stats_label.configure(
                 text=(
                     loading_message or (
-                        "N/A\nHidden by the zero-spike RF-bin filter."
+                        f"N/A\n{filter_status}"
                         if filter_status
                         else "N/A\nThis unit is available only in another paired window."
                     )
@@ -8315,7 +8442,7 @@ class RFMViewer(tk.Toplevel):
             unit_id = self._selected_unit_id_value()
             self.status_label.configure(
                 text=(
-                    self._quality_filter_status(unit_id)
+                    self._unit_filter_status(unit_id)
                     or (
                         f"N/A: cluster {unit_id} is not available in this session. "
                         "Use ←/→ to continue through the paired unit list."
@@ -8560,6 +8687,12 @@ class RFMViewer(tk.Toplevel):
         except Exception as exc:
             messagebox.showerror("Could not load RF map", str(exc))
             return
+        if self._adn_window is not None and self._adn_window.winfo_exists():
+            self._adn_window.destroy()
+        self._adn_window = None
+        self.only_adn_var.set(False)
+        self.adn_unit_ids = set()
+        self._adn_path = adn_selection_path(data.path)
         self._stop_unit_cache()
         self.data.close()
         self.data = data
@@ -8633,6 +8766,7 @@ class RFMViewer(tk.Toplevel):
         self._probe_drag_moved = False
         self._probe_canvas_transform = None
         self._probe_static_signature = None
+        self._probe_hit_points = []
         self._waveform_generation += 1
         self.waveform_payload = None
         self._waveform_payload_key = None
@@ -8672,11 +8806,10 @@ class RFMViewer(tk.Toplevel):
                     return
             except tk.TclError:
                 pass
-        if not self._local_quality_visible_unit_ids():
+        if not self._local_visible_unit_ids():
             messagebox.showinfo(
                 "No visible units",
-                "No units pass the zero-spike RF-bin filter for the current RF "
-                "window. Change the RF window or unit-filter Settings before exporting.",
+                "No units pass the current unit filters. Adjust Only ADN or the RF-bin filter before exporting.",
                 parent=self,
             )
             return
