@@ -394,7 +394,9 @@ private struct RFMappingWindow: View {
 
     private func openFigureExporter() {
         guard let request = FigureExportWindowRegistry.shared.prepare(from: store) else {
-            store.errorMessage = "Load an RF dataset and wait for all units to cache before opening Figure Export."
+            store.errorMessage = store.isUnitCacheComplete
+                ? "No units pass the current filters. Change the filters before opening Figure Export."
+                : "Load an RF dataset and wait for all units to cache before opening Figure Export."
             return
         }
         openWindow(value: request)

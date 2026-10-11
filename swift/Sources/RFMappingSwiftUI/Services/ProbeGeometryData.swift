@@ -151,7 +151,7 @@ enum ProbeGeometryDiscovery {
 
     static func load(
         _ paths: ProbeGeometryPaths,
-        rfUnitIDs: [Int]
+        rfUnitIDs: [Int]? = nil
     ) throws -> ProbeGeometry {
         let positions = try ProbeCSVTable(
             url: paths.positionsURL,
@@ -190,9 +190,11 @@ enum ProbeGeometryDiscovery {
             }
         }
 
-        let allowedUnitIDs = Set(rfUnitIDs)
-        units = units.filter { allowedUnitIDs.contains($0.unitID) }
-        guard !units.isEmpty else { throw ProbeGeometryError.noRFUnits }
+        if let rfUnitIDs {
+            let allowedUnitIDs = Set(rfUnitIDs)
+            units = units.filter { allowedUnitIDs.contains($0.unitID) }
+            guard !units.isEmpty else { throw ProbeGeometryError.noRFUnits }
+        }
 
         var channels: [ProbeChannel] = []
         var validatedChannelsURL: URL?

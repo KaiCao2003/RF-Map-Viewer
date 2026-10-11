@@ -1,9 +1,10 @@
-## Swift 1.10.3
+## Swift 1.10.4: ADN selection
 
-Version **1.10.3**. Target: macOS 15 or later, Apple Silicon (build **110003**).
+macOS 15 or later · Apple Silicon · build **110004**
 
-- Start with a compact, single-column native welcome window showing Open and macOS recent documents; the file chooser opens only on request.
-- Open recent documents from the welcome window or File menu. Finder opens still load directly into the initial window.
-- Align RF and HD angles in line and polar plots, with clockwise labels and opaque white plot backgrounds.
+- Circle neurons in **Annotate ADN…**, with **Undo**, **Clear selection**, and depth zoom.
+- **Save ADN** writes per-probe IDs to `session/data/adn_neuron.npy`, shared with Python.
+- Enable **Only ADN** to filter the viewer and figure exports.
+- Hover over probe units to show **ID**, **x**, and **y** in µm.
 
-This patch replaces the existing Swift 1.10.3 download without changing the version number.
+[Download macOS app](https://github.com/KaiCao2003/RF-Map-Viewer/releases/download/swift-v1.10.4/RF_Map_Viewer-1.10.4-swift-macos-arm64.zip)

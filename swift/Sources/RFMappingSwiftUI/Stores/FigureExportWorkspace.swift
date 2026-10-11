@@ -13,8 +13,8 @@ final class FigureExportWindowRegistry {
 
     func prepare(from store: RFMappingStore) -> FigureExportRequest? {
         guard let data = store.data, store.isUnitCacheComplete,
-              !store.qualityFilteredUnitIDs.isEmpty else { return nil }
-        let unitPool = store.qualityFilteredUnitIDs
+              !store.localVisibleUnitIDs.isEmpty else { return nil }
+        let unitPool = store.localVisibleUnitIDs
         let currentUnitID = store.selectedUnitID.flatMap {
             unitPool.contains($0) ? $0 : nil
         } ?? unitPool[0]
@@ -25,6 +25,7 @@ final class FigureExportWindowRegistry {
             viewerSnapshot: store.viewerSyncState,
             currentUnitID: currentUnitID,
             unitQualityFilter: store.unitQualityFilterSnapshot,
+            adnFilter: store.adnFilterSnapshot,
             tuningSessionIndex: store.tuningSessionIndex,
             waveformChannelMode: store.waveformChannelMode,
             discoversMissingCompanions: false,
@@ -120,6 +121,7 @@ final class FigureExportWorkspace {
             pages: pages,
             viewerSnapshot: seed.viewerSnapshot,
             unitQualityFilter: seed.unitQualityFilter,
+            adnFilter: seed.adnFilter,
             outputScale: outputScale
         )
     }

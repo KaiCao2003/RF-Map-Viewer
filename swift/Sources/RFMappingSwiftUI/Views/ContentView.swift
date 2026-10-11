@@ -163,6 +163,18 @@ struct ContentView: View {
                 systemImage: "line.3.horizontal.decrease.circle",
                 description: "Cluster \(unitID) is present in this file but does not pass its current zero-spike RF-bin filter. It can remain in the paired union when another window still shows it."
             )
+        case .some(.noADNVisibleUnits):
+            unavailableUnitView(
+                title: "No visible ADN units",
+                systemImage: "line.3.horizontal.decrease.circle",
+                description: "No saved ADN units pass the current RF-bin filter. Annotate ADN units or turn off Only ADN."
+            )
+        case .some(.adnFiltered(let unitID)):
+            unavailableUnitView(
+                title: "Unit outside ADN selection",
+                systemImage: "line.3.horizontal.decrease.circle",
+                description: "Cluster \(unitID) is not in this probe’s saved ADN selection. Turn off Only ADN to show it."
+            )
         case .some(.noProbeVisibleUnits):
             unavailableUnitView(
                 title: "No units in Probe selection",

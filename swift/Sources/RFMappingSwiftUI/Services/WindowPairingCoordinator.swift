@@ -67,6 +67,14 @@ final class WindowPairingCoordinator {
             guard let self, let store else { return }
             self.unitQualityVisibilityDidChange(in: store, id: id, reason: reason)
         }
+        store.adnSelectionDidChange = { [weak self, weak store] in
+            guard let self, let store else { return }
+            for (_, target) in self.loadedStores() where target !== store
+                && target.adnSelectionURL == store.adnSelectionURL
+                && target.adnProbeName == store.adnProbeName {
+                target.applyADNSelection(store.adnUnitIDs)
+            }
+        }
 
         guard isNewRegistration else { return }
         refreshEligibility()
@@ -78,6 +86,7 @@ final class WindowPairingCoordinator {
         if let store = stores.removeValue(forKey: id)?.value {
             store.pairingDataDidChange = nil
             store.unitQualityVisibilityDidChange = nil
+            store.adnSelectionDidChange = nil
         }
         expectedAppliedStates[id] = nil
         refreshEligibility()
@@ -261,7 +270,7 @@ final class WindowPairingCoordinator {
     }
 
     private func sortedUnitIDUnion() -> [Int] {
-        Array(Set(loadedStores().flatMap { $0.value.qualityFilteredUnitIDs })).sorted()
+        Array(Set(loadedStores().flatMap { $0.value.localVisibleUnitIDs })).sorted()
     }
 
     private func updatePairedUnitUnion() {

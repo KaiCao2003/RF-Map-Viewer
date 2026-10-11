@@ -18,7 +18,7 @@ through versioned file contracts, principally the RF formats described in
 ## Component versions
 
 The stable Python macOS release is `1.11.4` (build `111004`). The published Windows
-release is `1.11.2` (build `11102`), Swift is at `1.10.3`, and Web at `1.10.2`.
+release is `1.11.2` (build `11102`), Swift is at `1.10.4`, and Web at `1.10.2`.
 Python 1.11.4 adds ADN circle selection, saved per-probe unit IDs, an **Only ADN**
 filter, and probe-unit hover coordinates.
 Component identity belongs in release tags and artifact names, not in a fourth
@@ -33,7 +33,7 @@ GitHub Actions builds the stable packages published on the
 
 - [Python 1.11.4 macOS app](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/python-v1.11.4)
 - [Python 1.11.2 Windows installer and portable ZIP](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/python-v1.11.2)
-- [Swift 1.10.3 macOS app](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/swift-v1.10.3)
+- [Swift 1.10.4 macOS app](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/swift-v1.10.4)
 - [Web 1.10.2 package](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/web-v1.10.2)
 
 The Windows 1.11.2 packages use a separate packaging commit identified in the

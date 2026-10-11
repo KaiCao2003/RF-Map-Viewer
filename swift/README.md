@@ -1,4 +1,4 @@
-# SwiftUI Viewer 1.10.3
+# SwiftUI Viewer 1.10.4
 
 This is the native SwiftUI implementation for macOS 15 on Apple silicon. It
 parses RF/HD/probe files itself and has no Python dependency. RF mapping files
@@ -7,8 +7,30 @@ positions use `.probe` (CSV schema). `.json` and `.csv` remain filename aliases,
 but an RF map's extension never enables an older schema. RF maps are primary
 documents; tuning and probe files are attached
 to a loaded RF map in the figure composer so recorded unit IDs can be matched.
-Its `1.10.3` release follows the stable Python macOS `1.10.4` display
-conventions; `swift` remains an artifact/tag identity rather than a version suffix.
+Version `1.10.4` adds ADN annotation and filtering shared with Python’s saved
+selection format; `swift` remains an artifact/tag identity rather than a version suffix.
+
+## ADN selection
+
+Open **Annotate ADN…** under the Probe panel and draw a freehand circle to add
+neurons. The annotation view uses every unit in the original probe positions,
+including units absent from the loaded RF file. Use **Undo**, **Clear selection**,
+and **Depth zoom** with vertical scrolling to refine the selection. Hover over
+a unit in either probe view to see its ID and physical x/y coordinates in µm.
+
+**Save ADN** writes `session/data/adn_neuron.npy` under the RF document’s recording
+session. It replaces only the current probe’s IDs and preserves other probes.
+Reopening annotation restores the saved selection. The portable NumPy array uses
+the structured dtype `[("probe", "<U16"), ("unit_id", "<i8")]`, with unique,
+sorted IDs per probe and no pickle. Python and Swift can read and update the
+same file without changing RF inputs or probe-position files.
+
+Enable **Only ADN** to intersect the saved IDs with the current RF-bin filter.
+The filter applies to unit navigation, probe points, companion views, and figure
+export choices. Exported figure metadata records the ADN filter and saved IDs.
+Annotation remains available over the full probe geometry while Only ADN is on.
+
+## Display and input behavior
 
 Version 1.10.3 aligns HD tuning with clockwise RF angles in the viewer and
 exported figures: RF −90° matches HD 270°, RF 90° matches HD 90°, and 0° matches
@@ -22,8 +44,7 @@ only when requested. **File → Open Recent** and the welcome list use macOS's
 the files. **File → Welcome to RF Map Viewer** brings the welcome window back.
 A missing or unreadable recent document leaves the welcome window available.
 The welcome window hides once an opened document is ready. Each RF document has
-its own resizable window with a normal title bar. This is a same-version update
-to 1.10.3.
+its own resizable window with a normal title bar.
 
 Version 1.10.2 opens Finder/Launch Services document URLs directly in the
 initial window instead of showing the file picker. Later external opens create

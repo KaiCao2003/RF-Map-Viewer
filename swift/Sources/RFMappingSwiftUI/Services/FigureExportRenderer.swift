@@ -1187,7 +1187,8 @@ struct FigureExportRenderer {
                     comparison: "hide when zero-bin count is greater than or equal to threshold",
                     visibleUnitIDs: qualityFilter.visibleUnitIDs,
                     excludedUnitIDs: qualityFilter.excludedUnitIDs
-                )
+                ),
+                adnFilter: configuration.adnFilter
             ),
             sharedRFScale: sharedRFRange.map {
                 FigureManifestSharedRFScale(
@@ -1288,7 +1289,7 @@ struct FigureExportRenderer {
               !version.isEmpty else {
             // `Bundle.main` belongs to xctest when the renderer is exercised
             // through SwiftPM, not to RF Map Viewer.
-            return "1.10.3"
+            return "1.10.4"
         }
         return version
     }
@@ -1764,6 +1765,15 @@ struct FigureExportRenderer {
             throw invalidExportBundle(directory, "manifest v2 unit-quality filter is invalid")
         }
 
+        if let adnFilter = display.adnFilter {
+            let annotated = Set(adnFilter.unitIDs)
+            guard annotated.count == adnFilter.unitIDs.count,
+                  adnFilter.unitIDs == adnFilter.unitIDs.sorted(),
+                  !adnFilter.enabled || unitIDs.allSatisfy(annotated.contains) else {
+                throw invalidExportBundle(directory, "manifest v2 ADN filter is invalid")
+            }
+        }
+
         let companions = provenance.companions
         let companionKeys = companions.map { "\($0.kind)\u{0}\($0.path)" }
         guard Set(companionKeys).count == companionKeys.count,
@@ -2025,6 +2035,7 @@ private struct FigureManifestDisplaySettings: Codable {
     let waveformChannelMode: String
     let sharedWaveformAmplitudeLimitMicrovolts: Double?
     let unitQualityFilter: FigureManifestUnitQualityFilter?
+    let adnFilter: ADNFilterSnapshot?
 }
 
 private struct FigureManifestSharedRFScale: Codable {

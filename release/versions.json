@@ -29,13 +29,13 @@
       "windows_build": "11101"
     },
     "swift": {
-      "release_version": "1.10.3",
-      "marketing_version": "1.10.3",
-      "build": "110003",
+      "release_version": "1.10.4",
+      "marketing_version": "1.10.4",
+      "build": "110004",
       "channel": "stable",
       "feature_generation_offset": -1,
-      "artifact": "RF_Map_Viewer-1.10.3-swift-macos-arm64.zip",
-      "tag": "swift-v1.10.3"
+      "artifact": "RF_Map_Viewer-1.10.4-swift-macos-arm64.zip",
+      "tag": "swift-v1.10.4"
     },
     "web": {
       "release_version": "1.10.2",

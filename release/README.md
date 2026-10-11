@@ -34,7 +34,7 @@ component tag and artifact name:
 | --- | --- | --- | --- |
 | Python stable (macOS) | `1.11.4` | `python-v1.11.4` | stable |
 | Python stable (Windows x64) | `1.11.2` | `python-v1.11.2` | stable |
-| Swift | `1.10.3` | `swift-v1.10.3` | stable |
+| Swift | `1.10.4` | `swift-v1.10.4` | stable |
 | Web | `1.10.2` | `web-v1.10.2` | stable |
 
 Published downloads and checksums are available from the repository

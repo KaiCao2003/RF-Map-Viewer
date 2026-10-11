@@ -10,6 +10,8 @@ enum UnitQualityVisibilityChangeReason: Equatable, Sendable {
 enum RFUnitUnavailableReason: Equatable, Sendable {
     case noQualityVisibleUnits(total: Int)
     case qualityFiltered(unitID: Int)
+    case noADNVisibleUnits
+    case adnFiltered(unitID: Int)
     case noProbeVisibleUnits
     case probeFiltered(unitID: Int)
     case pairedMissing(unitID: Int)
@@ -214,6 +216,7 @@ final class RFMappingStore {
     @ObservationIgnored private var loadRequestID: UUID?
     @ObservationIgnored private var activeDecodeTask: Task<RFMappingData, Error>?
     @ObservationIgnored var pairingDataDidChange: (() -> Void)?
+    @ObservationIgnored var adnSelectionDidChange: (() -> Void)?
     @ObservationIgnored var unitQualityVisibilityDidChange:
         ((UnitQualityVisibilityChangeReason) -> Void)?
     private let preferences: UserDefaults
@@ -264,6 +267,8 @@ final class RFMappingStore {
     private(set) var waveformPayload: WaveformPayload?
     private(set) var waveformError: String?
     private(set) var probeFilteredUnitIDs: Set<Int>?
+    private(set) var onlyADN = false
+    private(set) var adnUnitIDs: Set<Int> = []
     var isWaveformZoomed = false
 
     var selectedCell: CellRef?
@@ -386,6 +391,12 @@ final class RFMappingStore {
         return try? data.rfMap(byUnitID: selectedUnitID)
     }
 
+    var selectedHDTuningCurve: ProcessedHDCurve? {
+        guard let selectedUnitID, let hdTuning,
+              !onlyADN || adnUnitIDs.contains(selectedUnitID) else { return nil }
+        return try? hdTuning.processedCurve(unitID: selectedUnitID)
+    }
+
     /// Local source-order IDs that pass the native-grid zero-spike test for
     /// the current 2-D RF sum window. Timeline selection and display
     /// rebinning/smoothing do not participate in this calculation.
@@ -437,6 +448,24 @@ final class RFMappingStore {
         return "\(visible)/\(total) units visible · hide when zero-bin count ≥ \(rfZeroBinThreshold)"
     }
 
+    var adnSelectionURL: URL? {
+        data.flatMap { ADNSelection.selectionURL(forRFURL: $0.url) }
+    }
+
+    var adnProbeName: String? {
+        data.flatMap { HDTuningDiscovery.probeName(forRFURL: $0.url) }
+            ?? probeGeometry?.probeName
+    }
+
+    var localVisibleUnitIDs: [Int] {
+        let units = qualityFilteredUnitIDs
+        return onlyADN ? units.filter(adnUnitIDs.contains) : units
+    }
+
+    var adnFilterSnapshot: ADNFilterSnapshot {
+        ADNFilterSnapshot(enabled: onlyADN, probe: adnProbeName, unitIDs: adnUnitIDs.sorted())
+    }
+
     /// Maximum value accepted from this window's live threshold control.
     ///
     /// Persisted values intentionally retain the application-wide 1...100,000
@@ -466,13 +495,14 @@ final class RFMappingStore {
     }
 
     private var locallyNavigableUnitIDs: [Int] {
-        let unitIDs = qualityFilteredUnitIDs
+        let unitIDs = localVisibleUnitIDs
         guard let probeFilteredUnitIDs else { return unitIDs }
         return unitIDs.filter(probeFilteredUnitIDs.contains)
     }
 
     var navigationUnitIDs: [Int] {
-        let unitIDs = pairedUnitIDs ?? qualityFilteredUnitIDs
+        var unitIDs = pairedUnitIDs ?? localVisibleUnitIDs
+        if onlyADN { unitIDs = unitIDs.filter(adnUnitIDs.contains) }
         guard let probeFilteredUnitIDs else { return unitIDs }
         return unitIDs.filter(probeFilteredUnitIDs.contains)
     }
@@ -487,6 +517,7 @@ final class RFMappingStore {
             return .noQualityVisibleUnits(total: data.unitPool.count)
         }
         guard let selectedUnitID else {
+            if onlyADN, localVisibleUnitIDs.isEmpty { return .noADNVisibleUnits }
             if probeFilteredUnitIDs != nil, locallyNavigableUnitIDs.isEmpty {
                 return .noProbeVisibleUnits
             }
@@ -497,6 +528,9 @@ final class RFMappingStore {
         }
         guard qualityVisible.contains(selectedUnitID) else {
             return .qualityFiltered(unitID: selectedUnitID)
+        }
+        if onlyADN, !adnUnitIDs.contains(selectedUnitID) {
+            return .adnFiltered(unitID: selectedUnitID)
         }
         if let probeFilteredUnitIDs,
            !probeFilteredUnitIDs.contains(selectedUnitID) {
@@ -560,11 +594,17 @@ final class RFMappingStore {
         if qualityFilteredUnitIDs.isEmpty {
             return "No visible units — zero-spike RF-bin filter"
         }
+        if onlyADN, localVisibleUnitIDs.isEmpty {
+            return "No visible units — Only ADN"
+        }
         if isSelectedUnitLoading, let selectedUnitID {
             return "Loading cluster \(selectedUnitID)…"
         }
         guard hasSelectedUnit, let selectedUnitID else {
             let missingID = selectedUnitID.map { String($0) } ?? "unknown"
+            if let selectedUnitID, onlyADN, !adnUnitIDs.contains(selectedUnitID) {
+                return "Unit N/A / cluster \(missingID) is hidden by Only ADN"
+            }
             if let selectedUnitID,
                data.unitIndex(forUnitID: selectedUnitID) != nil,
                !qualityFilteredUnitIDs.contains(selectedUnitID) {
@@ -582,6 +622,7 @@ final class RFMappingStore {
     var statusText: String {
         guard let data else { return "Open an RF mapping .rfmap or JSON file." }
         if qualityFilteredUnitIDs.isEmpty { return unitQualityFilterStatusText }
+        if onlyADN, localVisibleUnitIDs.isEmpty { return "No saved ADN units pass the current RF filters." }
         if let hoverCell {
             let prefix = hoverExtra.isEmpty ? "Hover" : "Hover \(hoverExtra);"
             return "\(prefix) \(yGroupText(hoverCell.yStart, hoverCell.yEnd)), \(xGroupText(hoverCell.xStart, hoverCell.xEnd))"
@@ -721,6 +762,8 @@ final class RFMappingStore {
         isCachingUnits = false
         clearDerivedCaches()
         data = loaded
+        onlyADN = false
+        adnUnitIDs = []
         cachedUnitCount = loaded.cachedUnitCount
         selectedJSONPath = loaded.url.path
         unitIndex = 0
@@ -952,8 +995,8 @@ final class RFMappingStore {
             priorityUnitIndex = index
             retryUnitCaching()
         }
-        let locallyQualityVisible = qualityFilteredUnitIDs.contains(unitID)
-        guard locallyQualityVisible || pairedUnitIDs?.contains(unitID) == true else { return }
+        let locallyVisible = localVisibleUnitIDs.contains(unitID)
+        guard locallyVisible || pairedUnitIDs?.contains(unitID) == true else { return }
         let localIndex = locallyNavigableUnitIDs.contains(unitID)
             ? data.unitIndex(forUnitID: unitID)
             : nil
@@ -1037,8 +1080,58 @@ final class RFMappingStore {
         reconcileUnitSelection()
     }
 
+    func setOnlyADN(_ enabled: Bool) {
+        if enabled {
+            guard let url = adnSelectionURL, let probeName = adnProbeName else {
+                errorMessage = "Open a recording with a known session and probe to use Only ADN."
+                return
+            }
+            do {
+                adnUnitIDs = try ADNSelection.load(from: url, probeName: probeName)
+            } catch {
+                errorMessage = "Could not load ADN units: \(error.localizedDescription)"
+                return
+            }
+        }
+        onlyADN = enabled
+        reconcileUnitSelection()
+        unitQualityVisibilityDidChange?(.filterSettings)
+    }
+
+    func loadADNGeometry() throws -> ProbeGeometry {
+        guard let geometry = probeGeometry else {
+            throw RFMappingError.invalidData("Attach probe positions before annotating ADN units.")
+        }
+        return try ProbeGeometryDiscovery.load(ProbeGeometryPaths(
+            probeName: adnProbeName ?? geometry.probeName,
+            positionsURL: geometry.positionsURL,
+            channelsURL: geometry.channelsURL
+        ), rfUnitIDs: nil)
+    }
+
+    func saveADNSelection(_ unitIDs: Set<Int>) throws {
+        guard let url = adnSelectionURL, let probeName = adnProbeName else {
+            throw RFMappingError.invalidData("Open a recording with a known session and probe to save ADN units.")
+        }
+        try ADNSelection.save(unitIDs, probeName: probeName, to: url)
+        applyADNSelection(unitIDs)
+        adnSelectionDidChange?()
+    }
+
+    func applyADNSelection(_ unitIDs: Set<Int>) {
+        adnUnitIDs = unitIDs
+        reconcileUnitSelection()
+        unitQualityVisibilityDidChange?(.filterSettings)
+    }
+
     private func reconcileUnitSelection() {
         guard let data else { return }
+        if onlyADN, let selectedUnitID,
+           pairedUnitIDs?.contains(selectedUnitID) == true,
+           !adnUnitIDs.contains(selectedUnitID) {
+            applyResolvedUnitSelection(selectedUnitID, localIndex: nil, resetInteraction: true)
+            return
+        }
         let choices = navigationUnitIDs
         guard !choices.isEmpty else {
             applyResolvedUnitSelection(nil, localIndex: nil, resetInteraction: true)

@@ -121,6 +121,12 @@ struct SidebarView: View {
                     get: { store.selectedUnitID ?? store.navigationUnitIDs.first ?? 0 },
                     set: { store.selectUnitID($0) }
                 )) {
+                    if let unitID = store.selectedUnitID,
+                       !store.navigationUnitIDs.contains(unitID) {
+                        Text("N/A  cluster \(unitID)")
+                            .tag(unitID)
+                            .disabled(true)
+                    }
                     if let data = store.data {
                         ForEach(store.navigationUnitIDs, id: \.self) { unitID in
                             if let index = data.unitIndex(forUnitID: unitID) {
@@ -267,7 +273,7 @@ struct SidebarView: View {
     private var actionSection: some View {
         VStack(alignment: .leading, spacing: 7) {
             Button("Export Figures…", action: openFigureExporter)
-                .disabled(!store.isUnitCacheComplete || store.qualityFilteredUnitIDs.isEmpty)
+                .disabled(!store.isUnitCacheComplete || store.localVisibleUnitIDs.isEmpty)
             HStack {
                 Button("Export displayed CSV") { store.prepareExport() }
                     .disabled(!store.hasSelectedUnit)

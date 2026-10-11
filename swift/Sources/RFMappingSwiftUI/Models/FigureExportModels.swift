@@ -19,6 +19,12 @@ struct RFUnitQualityFilterSnapshot: Equatable, Codable, Sendable {
     let excludedUnitIDs: [Int]
 }
 
+struct ADNFilterSnapshot: Equatable, Codable, Sendable {
+    let enabled: Bool
+    let probe: String?
+    let unitIDs: [Int]
+}
+
 enum FigureExportPlotKind: String, CaseIterable, Codable, Identifiable, Hashable, Sendable {
     case rfCartesian = "rf.cartesian"
     case rfPolar = "rf.polar"
@@ -177,6 +183,7 @@ struct FigureExportConfiguration: Sendable {
     var pages: [FigurePageTemplate]
     var viewerSnapshot: ViewerSyncState
     var unitQualityFilter: RFUnitQualityFilterSnapshot?
+    var adnFilter: ADNFilterSnapshot?
     var outputScale: CGFloat
 
     init(
@@ -189,6 +196,7 @@ struct FigureExportConfiguration: Sendable {
         pages: [FigurePageTemplate],
         viewerSnapshot: ViewerSyncState,
         unitQualityFilter: RFUnitQualityFilterSnapshot? = nil,
+        adnFilter: ADNFilterSnapshot? = nil,
         outputScale: CGFloat = 2
     ) {
         self.format = format
@@ -200,6 +208,7 @@ struct FigureExportConfiguration: Sendable {
         self.pages = pages
         self.viewerSnapshot = viewerSnapshot
         self.unitQualityFilter = unitQualityFilter
+        self.adnFilter = adnFilter
         self.outputScale = outputScale
     }
 
@@ -351,11 +360,12 @@ enum FigureExportValidation {
 
 struct FigureExportSeed: Sendable {
     let data: RFMappingData
-    /// Frozen source-order pool after the viewer's zero-spike quality filter.
+    /// Frozen source-order pool after the viewer's quality and ADN filters.
     let unitPool: [Int]
     let viewerSnapshot: ViewerSyncState
     let currentUnitID: Int
     let unitQualityFilter: RFUnitQualityFilterSnapshot?
+    let adnFilter: ADNFilterSnapshot?
     let tuningSessionIndex: Int
     let waveformChannelMode: WaveformChannelMode
     let discoversMissingCompanions: Bool
@@ -367,6 +377,7 @@ struct FigureExportSeed: Sendable {
         viewerSnapshot: ViewerSyncState,
         currentUnitID: Int,
         unitQualityFilter: RFUnitQualityFilterSnapshot? = nil,
+        adnFilter: ADNFilterSnapshot? = nil,
         tuningSessionIndex: Int = 1,
         waveformChannelMode: WaveformChannelMode = .sameXColumn,
         discoversMissingCompanions: Bool = true,
@@ -384,6 +395,7 @@ struct FigureExportSeed: Sendable {
             ? currentUnitID
             : (self.unitPool.first ?? currentUnitID)
         self.unitQualityFilter = unitQualityFilter
+        self.adnFilter = adnFilter
         self.tuningSessionIndex = max(1, tuningSessionIndex)
         self.waveformChannelMode = waveformChannelMode
         self.discoversMissingCompanions = discoversMissingCompanions

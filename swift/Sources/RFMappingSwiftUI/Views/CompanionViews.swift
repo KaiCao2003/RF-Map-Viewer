@@ -6,6 +6,9 @@ struct ProbeSidebarSection: View {
     @Bindable var store: RFMappingStore
     @State private var dragStart: CGPoint?
     @State private var dragCurrent: CGPoint?
+    @State private var hoveredUnit: ProbeUnitPosition?
+    @State private var hoverLocation: CGPoint?
+    @State private var annotation: ADNAnnotationPresentation?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
@@ -20,7 +23,7 @@ struct ProbeSidebarSection: View {
                 GeometryReader { proxy in
                     let transform = ProbeDisplayTransform(
                         geometry: geometry,
-                        unitIDs: Set(store.qualityFilteredUnitIDs),
+                        unitIDs: Set(store.localVisibleUnitIDs),
                         size: proxy.size
                     )
                     Canvas { context, _ in
@@ -29,11 +32,20 @@ struct ProbeSidebarSection: View {
                             geometry: geometry,
                             transform: transform
                         )
+                        if let hoveredUnit, let hoverLocation {
+                            drawProbeUnitTooltip(
+                                context: &context,
+                                unit: hoveredUnit,
+                                at: hoverLocation,
+                                bounds: CGRect(origin: .zero, size: proxy.size)
+                            )
+                        }
                     }
                     .contentShape(Rectangle())
                     .gesture(
                         DragGesture(minimumDistance: 3)
                             .onChanged { value in
+                                hoveredUnit = nil
                                 if dragStart == nil { dragStart = value.startLocation }
                                 dragCurrent = value.location
                             }
@@ -57,9 +69,21 @@ struct ProbeSidebarSection: View {
                             )
                         }
                     )
+                    .onContinuousHover { phase in
+                        switch phase {
+                        case .active(let location):
+                            hoverLocation = location
+                            hoveredUnit = dragStart == nil ? nearestProbeUnit(
+                                at: location, geometry: geometry, transform: transform, radius: 8
+                            ) : nil
+                        case .ended:
+                            hoveredUnit = nil
+                            hoverLocation = nil
+                        }
+                    }
                 }
                 .frame(height: 225)
-                .background(Color(nsColor: .textBackgroundColor))
+                .background(.white)
                 .overlay(RoundedRectangle(cornerRadius: 5).stroke(.secondary.opacity(0.45)))
 
                 Text(probeStatus(geometry))
@@ -75,7 +99,35 @@ struct ProbeSidebarSection: View {
                 Button("Choose Probe Positions…", action: chooseProbePositions)
                     .controlSize(.small)
             }
+            HStack {
+                Button("Annotate ADN…", action: openADNAnnotation)
+                    .disabled(store.probeGeometry == nil
+                        || store.adnSelectionURL == nil || store.adnProbeName == nil)
+                Spacer()
+                Toggle("Only ADN", isOn: Binding(
+                    get: { store.onlyADN },
+                    set: store.setOnlyADN
+                ))
+                .toggleStyle(.checkbox)
+                .disabled(store.adnSelectionURL == nil || store.adnProbeName == nil)
+            }
+            .controlSize(.small)
         }
+        .sheet(item: $annotation) { presentation in
+            ADNAnnotationView(
+                geometry: presentation.geometry,
+                savedUnitIDs: presentation.unitIDs,
+                selectionURL: presentation.selectionURL,
+                save: store.saveADNSelection
+            )
+        }
+        .onChange(of: store.data?.url) { _, _ in
+            annotation = nil
+            hoveredUnit = nil
+            dragStart = nil
+            dragCurrent = nil
+        }
+        .onChange(of: store.localVisibleUnitIDs) { _, _ in hoveredUnit = nil }
     }
 
     private func drawProbe(
@@ -93,8 +145,8 @@ struct ProbeSidebarSection: View {
                 with: .color(Color(red: 0.58, green: 0.64, blue: 0.72).opacity(0.75))
             )
         }
-        let qualityVisibleIDs = Set(store.qualityFilteredUnitIDs)
-        for unit in geometry.positionedUnits where qualityVisibleIDs.contains(unit.unitID) {
+        let localVisibleIDs = Set(store.localVisibleUnitIDs)
+        for unit in geometry.positionedUnits where localVisibleIDs.contains(unit.unitID) {
             guard let position = unit.position else { continue }
             let point = transform.point(x: position.x, y: position.y)
             let selected = unit.unitID == store.selectedUnitID
@@ -130,9 +182,9 @@ struct ProbeSidebarSection: View {
     ) {
         let rect = normalizedRect(from: start, to: end)
         guard rect.width >= 3 || rect.height >= 3 else { return }
-        let qualityVisibleIDs = Set(store.qualityFilteredUnitIDs)
+        let localVisibleIDs = Set(store.localVisibleUnitIDs)
         let selected: Set<Int> = Set(geometry.units.compactMap { unit -> Int? in
-            guard qualityVisibleIDs.contains(unit.unitID) else { return nil }
+            guard localVisibleIDs.contains(unit.unitID) else { return nil }
             guard let position = unit.position else { return nil }
             return rect.contains(transform.point(x: position.x, y: position.y))
                 ? unit.unitID
@@ -146,10 +198,22 @@ struct ProbeSidebarSection: View {
         geometry: ProbeGeometry,
         transform: ProbeDisplayTransform
     ) {
-        let qualityVisibleIDs = Set(store.qualityFilteredUnitIDs)
+        guard let nearest = nearestProbeUnit(
+            at: location, geometry: geometry, transform: transform, radius: 14
+        ) else { return }
+        store.selectUnitID(nearest.unitID)
+    }
+
+    private func nearestProbeUnit(
+        at location: CGPoint,
+        geometry: ProbeGeometry,
+        transform: ProbeDisplayTransform,
+        radius: CGFloat
+    ) -> ProbeUnitPosition? {
+        let localVisibleIDs = Set(store.localVisibleUnitIDs)
         let candidates: [(unit: ProbeUnitPosition, point: CGPoint)] = geometry.positionedUnits
             .compactMap { unit -> (unit: ProbeUnitPosition, point: CGPoint)? in
-                guard qualityVisibleIDs.contains(unit.unitID),
+                guard localVisibleIDs.contains(unit.unitID),
                       let position = unit.position else { return nil }
                 return (
                     unit: unit,
@@ -158,16 +222,16 @@ struct ProbeSidebarSection: View {
             }
         guard let nearest = candidates.min(by: {
             distance($0.point, location) < distance($1.point, location)
-        }), distance(nearest.point, location) <= 14 else { return }
-        store.selectUnitID(nearest.unit.unitID)
+        }), distance(nearest.point, location) <= radius else { return nil }
+        return nearest.unit
     }
 
     private func probeStatus(_ geometry: ProbeGeometry) -> String {
-        let qualityVisibleIDs = Set(store.qualityFilteredUnitIDs)
-        let qualityUnits = geometry.units.filter { qualityVisibleIDs.contains($0.unitID) }
-        let positionedCount = qualityUnits.filter { $0.position != nil }.count
+        let localVisibleIDs = Set(store.localVisibleUnitIDs)
+        let localUnits = geometry.units.filter { localVisibleIDs.contains($0.unitID) }
+        let positionedCount = localUnits.filter { $0.position != nil }.count
         let filteredCount = store.probeFilteredUnitIDs.map {
-            $0.intersection(qualityVisibleIDs).count
+            $0.intersection(localVisibleIDs).count
         }
         var suffix = filteredCount.map { " · \($0) selected" } ?? ""
         if let selectedUnitID = store.selectedUnitID,
@@ -175,8 +239,23 @@ struct ProbeSidebarSection: View {
            selected.position == nil {
             suffix += " · unit \(selectedUnitID) position is nan,nan"
         }
-        return "\(positionedCount)/\(qualityUnits.count) visible RF units positioned"
+        return "\(positionedCount)/\(localUnits.count) visible RF units positioned"
             + " · drag to filter, click to select\(suffix)"
+    }
+
+    private func openADNAnnotation() {
+        guard let selectionURL = store.adnSelectionURL, let probeName = store.adnProbeName else {
+            return
+        }
+        do {
+            let geometry = try store.loadADNGeometry()
+            let unitIDs = try ADNSelection.load(from: selectionURL, probeName: probeName)
+            annotation = ADNAnnotationPresentation(
+                geometry: geometry, unitIDs: unitIDs, selectionURL: selectionURL
+            )
+        } catch {
+            store.errorMessage = error.localizedDescription
+        }
     }
 
     private func chooseProbePositions() {
@@ -192,6 +271,13 @@ struct ProbeSidebarSection: View {
             store.setProbePositionsURL(url)
         }
     }
+}
+
+private struct ADNAnnotationPresentation: Identifiable {
+    let id = UUID()
+    let geometry: ProbeGeometry
+    let unitIDs: Set<Int>
+    let selectionURL: URL
 }
 
 struct WaveformSidebarSection: View {
@@ -451,7 +537,7 @@ struct HDTuningCompanionView: View {
             }
             .padding(10)
             Divider()
-            if let curve = processedCurve {
+            if let curve = store.selectedHDTuningCurve {
                 GeometryReader { _ in
                     Canvas { context, size in
                         drawHDTuning(context: &context, size: size, curve: curve)
@@ -468,7 +554,9 @@ struct HDTuningCompanionView: View {
                 ContentUnavailableView {
                     Label("HD tuning unavailable", systemImage: "chart.xyaxis.line")
                 } description: {
-                    Text(store.hdTuningError ?? "The selected RF unit is absent from the tuning curve.")
+                    Text(store.onlyADN && store.selectedUnitID.map({ !store.adnUnitIDs.contains($0) }) == true
+                        ? "The selected unit is hidden by Only ADN."
+                        : store.hdTuningError ?? "The selected RF unit is absent from the tuning curve.")
                 } actions: {
                     Button("Choose Tuning Curve…", action: chooseHDTuning)
                 }
@@ -476,12 +564,6 @@ struct HDTuningCompanionView: View {
             }
         }
         .background(Color(nsColor: .controlBackgroundColor))
-    }
-
-    private var processedCurve: ProcessedHDCurve? {
-        guard let unitID = store.selectedUnitID,
-              let hdTuning = store.hdTuning else { return nil }
-        return try? hdTuning.processedCurve(unitID: unitID)
     }
 
     private func drawHDTuning(
@@ -581,13 +663,15 @@ struct HDTuningCompanionView: View {
     }
 }
 
-private struct ProbeDisplayTransform {
+struct ProbeDisplayTransform {
     let plotRect: CGRect
     let xRange: ClosedRange<Double>
     let yRange: ClosedRange<Double>
 
-    init(geometry: ProbeGeometry, unitIDs: Set<Int>, size: CGSize) {
-        plotRect = CGRect(x: 12, y: 10, width: max(10, size.width - 24), height: max(10, size.height - 20))
+    init(geometry: ProbeGeometry, unitIDs: Set<Int>, size: CGSize, axes: Bool = false) {
+        plotRect = axes
+            ? CGRect(x: 60, y: 20, width: max(10, size.width - 86), height: max(10, size.height - 65))
+            : CGRect(x: 12, y: 10, width: max(10, size.width - 24), height: max(10, size.height - 20))
         let xValues = geometry.channels.map(\.xMicrometers)
             + geometry.units.compactMap {
                 unitIDs.contains($0.unitID) ? $0.xMicrometers : nil
@@ -598,6 +682,15 @@ private struct ProbeDisplayTransform {
             }
         xRange = Self.padded(low: xValues.min() ?? 0, high: xValues.max() ?? 1)
         yRange = Self.padded(low: yValues.min() ?? 0, high: yValues.max() ?? 1)
+    }
+
+    func position(at point: CGPoint) -> CGPoint {
+        CGPoint(
+            x: xRange.lowerBound + Double((point.x - plotRect.minX) / plotRect.width)
+                * (xRange.upperBound - xRange.lowerBound),
+            y: yRange.lowerBound + Double((plotRect.maxY - point.y) / plotRect.height)
+                * (yRange.upperBound - yRange.lowerBound)
+        )
     }
 
     func point(x: Double, y: Double) -> CGPoint {
