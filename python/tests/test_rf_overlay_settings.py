@@ -11,12 +11,11 @@ from rfmapping_viewer.tk_support import TK_AVAILABLE, tk
 
 def test_overlay_defaults_and_persisted_custom_style(tmp_path):
     defaults = ViewerSettings()
-    assert defaults.rf_result_overlay_mode == "None"
-    assert defaults.rf_result_overlay_polarity == "excitatory"
+    assert defaults.rf_result_overlay_layers == ()
     assert (defaults.rf_result_overlay_2d_color, defaults.rf_result_overlay_1d_color,
             defaults.rf_result_overlay_overlap_color) == ("#34c759", "#ffcc00", "#ff9500")
     custom = replace(
-        defaults, rf_result_overlay_mode="Both", rf_result_overlay_polarity="inhibitory",
+        defaults, rf_result_overlay_layers=("excitatory_2d", "inhibitory_1d"),
         rf_result_overlay_width=3.5, rf_result_overlay_2d_color="#135724",
         rf_result_overlay_1d_color="#246813", rf_result_overlay_overlap_color="#abcdef",
     )
@@ -26,8 +25,8 @@ def test_overlay_defaults_and_persisted_custom_style(tmp_path):
 
 
 @pytest.mark.parametrize("field,value", [
-    ("rf_result_overlay_mode", "unsupported"),
-    ("rf_result_overlay_polarity", "both"),
+    ("rf_result_overlay_layers", ["unsupported"]),
+    ("rf_result_overlay_layers", "inhibitory_1d"),
     ("rf_result_overlay_width", 0),
     ("rf_result_overlay_width", float("nan")),
     ("rf_result_overlay_width", True),
@@ -39,6 +38,17 @@ def test_invalid_overlay_preference_recovers_independently(field, value):
     restored = ViewerSettings.from_mapping({field: value, "rf_palette": "Inferno"})
     assert getattr(restored, field) == getattr(ViewerSettings(), field)
     assert restored.rf_palette == "Inferno"
+
+
+@pytest.mark.parametrize("mode,polarity,expected", [
+    ("Both", "inhibitory", ("inhibitory_2d", "inhibitory_1d")),
+    ("1D", "excitatory", ("excitatory_1d",)),
+    ("None", "excitatory", ()),
+])
+def test_migrate_saved_single_polarity_selection(mode, polarity, expected):
+    settings = ViewerSettings.from_mapping({"rf_result_overlay_mode": mode, "rf_result_overlay_polarity": polarity})
+    assert settings.rf_result_overlay_layers == expected
+    assert "rf_result_overlay_mode" not in settings.to_mapping()
 
 
 @pytest.mark.skipif(not TK_AVAILABLE, reason="Tk is unavailable")
@@ -55,14 +65,13 @@ def test_settings_overlay_controls_validate_and_enable_together():
         window = SettingsWindow(owner)
     try:
         assert window.rf_result_overlay_width_entry.instate(["disabled"])
-        window.rf_result_overlay_mode_var.set("Both")
+        window.rf_result_overlay_vars["excitatory_2d"].set(True)
         assert window.rf_result_overlay_width_entry.instate(["!disabled"])
-        window.rf_result_overlay_polarity_var.set("inhibitory")
+        window.rf_result_overlay_vars["inhibitory_1d"].set(True)
         window.rf_result_overlay_width_var.set("3.5")
         window.rf_result_overlay_overlap_color_var.set("#ABcDef")
         settings = window._validated_settings()
-        assert settings.rf_result_overlay_mode == "Both"
-        assert settings.rf_result_overlay_polarity == "inhibitory"
+        assert settings.rf_result_overlay_layers == ("excitatory_2d", "inhibitory_1d")
         assert settings.rf_result_overlay_width == 3.5
         assert settings.rf_result_overlay_overlap_color == "#abcdef"
         window.rf_result_overlay_width_var.set("0")

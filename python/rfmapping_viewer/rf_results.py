@@ -180,8 +180,8 @@ def load_saved_rf_result(source: RFResultSource, *, dimension="2d", rf_type="exc
     mask, center = arrays
     if mask.shape != center.shape or mask.shape[0] != len(ids):
         raise ValueError("Saved masks, centers and unit IDs are not aligned")
-    if np.any(center > mask) or not np.array_equal(center.sum(axis=(1, 2)), mask.any(axis=(1, 2))):
-        raise ValueError("Each nonempty RF needs exactly one center inside its mask")
+    if np.any(center > mask) or not np.array_equal(center.any(axis=(1, 2)), mask.any(axis=(1, 2))):
+        raise ValueError("Each nonempty RF needs a center inside its mask")
     if not set(ids).issubset(source.unit_ids):
         raise ValueError("Saved unit IDs are absent from this RF document")
     if manifest.get("schema_name") != "rfmapping-rf-result":

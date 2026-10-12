@@ -143,6 +143,14 @@ def test_rejects_center_outside_mask(source):
         load_saved_rf_result(source)
 
 
+def test_component_centers_are_preserved_for_one_unit(source):
+    mask = np.array([[[1, 0, 0], [0, 0, 1]], [[0, 0, 0], [0, 0, 0]]], dtype=np.uint8)
+    write_result(source, mask=mask, center=mask,
+                 manifest_changes={"center_algorithm": "component-response-weighted-medoid-v2"})
+    result = load_saved_rf_result(source)
+    np.testing.assert_array_equal(result.for_unit(42)[1], mask[0])
+
+
 def test_checks_grid_against_open_document(source):
     write_result(source)
     with pytest.raises(ValueError, match="axes"):

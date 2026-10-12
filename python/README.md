@@ -1,6 +1,6 @@
 # Python RF Map Viewers
 
-This directory contains the Python/Tk RF Map Viewer `1.11.4`, launched by
+This directory contains the Python/Tk RF Map Viewer `1.11.5`, launched by
 `rfmapping_gui.py` or the installed `rfmapping-viewer` command. The separate
 Free-Moving alpha and its HDF5 Square/Bar, 3D-sphere, and exposure-QA paths have
 been retired. The offline session/EBC HTML report script remains available.
@@ -151,9 +151,11 @@ run detection. Legacy 1D projections require their saved analysis provenance.
 Use **Reload** after the analysis producer updates the files.
 
 **Settings → RF Map → Saved RF overlay** adds saved detections to RF as colored
-bin borders. Choose **None / 2D / 1D / Both**, the detection polarity, border
-width and colors. Defaults are green for 2D, yellow for 1D and orange for their
-intersection. Borders retain the original detection bins when the RF display
+bin borders. Check **Excitatory 2D**, **Excitatory 1D**, **Inhibitory 2D** and
+**Inhibitory 1D** independently; all four can be shown together. Excitatory
+borders are solid (green/yellow/orange); inhibitory borders are dashed
+(purple/cyan/indigo), so both remain visible where they intersect. Set the border
+width and colors in Settings. Borders retain the original detection bins when the RF display
 combines bins; orange marks only an actual original-bin intersection. The saved
 detection interval appears beside the RF response interval.
 
@@ -334,7 +336,8 @@ Open **Help → Keyboard Shortcuts** for the in-app list.
 | ↑ / ↓ | Previous / next timeline bin |
 | Shift+, / Shift+. | Coarser / finer target time width |
 | 1 / 2 / 3 / 4 | Switch between visible tabs in order |
-| Shift+1 / Shift+2 / Shift+0 | Set RF overlap to 1D / 2D / None |
+| Shift+1 / Shift+2 | Toggle excitatory 1D / 2D overlay |
+| Shift+0 | Clear all RF overlays |
 | F | Invert Y |
 | P / Shift+P | Toggle Polar layout / cycle palette |
 | - | Toggle RF Sum / A − B |
@@ -361,6 +364,11 @@ Open **Help → Keyboard Shortcuts** for the in-app list.
   displayed as zero.
 
 ---
+
+## Stable viewer 1.11.5
+
+Version 1.11.5 adds independent excitatory/inhibitory 2D/1D overlay checks,
+saves the selected layers, and reads multiple RF component centers per unit.
 
 ## Stable viewer 1.11.4
 
@@ -535,9 +543,9 @@ Press **D** to show or hide **Display Options**; the expanded button reads
 **Hide (D)**. These shortcuts leave text entry, including negative time
 values, available while an input has focus.
 
-**Display → RF overlap** selects **None**, **2D**, **1D**, or **Both** for
-the saved RF outlines on the RF map. **Shift+1**, **Shift+2**, and **Shift+0**
-select **1D**, **2D**, and **None**, even while Display is folded. These
+**Display → RF overlap** has independent checkboxes for excitatory and inhibitory
+**2D** and **1D** saved outlines. **Shift+1** and **Shift+2** toggle the excitatory
+**1D** and **2D** layers; **Shift+0** clears all four, even while Display is folded. These
 controls apply to the current window; save defaults in **Settings → RF Map**.
 
 Press **Command+Shift+.** (or use **View → Show Filtered Units / Hide Units
@@ -557,7 +565,7 @@ Opening the app without a path shows the native file chooser. Release packages
 do not contain or auto-load sample RF data.
 
 Its macOS identity is `RF Map Viewer.app`, bundle ID
-`org.local.rfmapping.viewer`, and version/build `1.11.4` / `111004`. Build it with:
+`org.local.rfmapping.viewer`, and version/build `1.11.5` / `111005`. Build it with:
 
 ```sh
 script/build_python_stable_macos_app.sh

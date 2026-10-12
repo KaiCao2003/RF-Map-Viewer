@@ -131,7 +131,7 @@ from rfmapping_viewer.recent_documents import (
     record_recent_document,
 )
 from rfmapping_viewer.settings import (
-    RF_RESULT_OVERLAY_MODES,
+    RF_RESULT_OVERLAY_LAYERS,
     ViewerSettings,
     load_viewer_settings,
     normalize_hd_bin_count,
@@ -523,7 +523,10 @@ class RFMViewer(tk.Toplevel):
         self.palette_var = tk.StringVar(value=self.settings.rf_palette)
         self.polar_radius_var = tk.StringVar(value=self.settings.rf_polar_radius)
         self.polar_layout_var = tk.BooleanVar(value=self.settings.rf_polar_layout)
-        self.rf_result_overlay_mode_var = tk.StringVar(value=self.settings.rf_result_overlay_mode)
+        self.rf_result_overlay_vars = {
+            layer: tk.BooleanVar(value=layer in self.settings.rf_result_overlay_layers)
+            for layer in RF_RESULT_OVERLAY_LAYERS
+        }
         self.rgb_mode_var = tk.BooleanVar(value=self.settings.rf_rgb_mode)
         self.pair_windows_var = tk.BooleanVar(
             value=bool(self._app_root._rfm_pairing_enabled)
@@ -2105,16 +2108,17 @@ class RFMViewer(tk.Toplevel):
         ttk.Label(display, text="RF overlap", style="Panel.TLabel").grid(
             row=2, column=0, sticky="w", pady=(8, 0)
         )
-        self.rf_result_overlay_mode_combo = ttk.Combobox(
-            display,
-            state="readonly",
-            values=RF_RESULT_OVERLAY_MODES,
-            textvariable=self.rf_result_overlay_mode_var,
-            width=12,
-        )
-        self.rf_result_overlay_mode_combo.grid(
-            row=2, column=1, sticky="w", padx=(6, 18), pady=(8, 0)
-        )
+        overlays = ttk.Frame(display, style="Panel.TFrame")
+        overlays.grid(row=2, column=1, columnspan=4, sticky="w", padx=(6, 0), pady=(8, 0))
+        self.rf_result_overlay_checks = {}
+        for column, (layer, variable) in enumerate(self.rf_result_overlay_vars.items()):
+            polarity, dimension = layer.split("_")
+            check = ttk.Checkbutton(
+                overlays, text=f"{polarity.title()} {dimension.upper()}", variable=variable,
+                command=self._on_rf_result_overlays_changed,
+            )
+            check.grid(row=0, column=column, sticky="w", padx=(0, 12))
+            self.rf_result_overlay_checks[layer] = check
         self.rate_notice_label = ttk.Label(
             controls,
             text="Showing spike count as Hz is unavailable.",
@@ -2124,10 +2128,6 @@ class RFMViewer(tk.Toplevel):
     def _wire_events(self) -> None:
         self.unit_combo.bind("<<ComboboxSelected>>", self._on_unit_selected)
         self.value_mode_combo.bind("<<ComboboxSelected>>", self._on_value_mode_changed)
-        self.rf_result_overlay_mode_combo.bind(
-            "<<ComboboxSelected>>",
-            lambda _event: self._set_rf_result_overlay_mode(self.rf_result_overlay_mode_var.get()),
-        )
         for spin in (
             self.range_start_spin, self.range_end_spin,
             self.subtract_start_spin, self.subtract_end_spin,
@@ -2172,9 +2172,9 @@ class RFMViewer(tk.Toplevel):
             (f"<KeyPress-{index + 1}>", self._select_tab, (index,))
             for index in range(len(VIEWER_TABS))
         ) + tuple(
-            (f"<Shift-KeyPress-{keysym}>", self._set_rf_result_overlay_mode, (mode,))
-            for digit, shifted, mode in (
-                ("1", "exclam", "1D"), ("2", "at", "2D"), ("0", "parenright", "None"),
+            (f"<Shift-KeyPress-{keysym}>", self._toggle_rf_result_overlay, (layer,))
+            for digit, shifted, layer in (
+                ("1", "exclam", "excitatory_1d"), ("2", "at", "excitatory_2d"), ("0", "parenright", None),
             )
             for keysym in (digit, shifted)
         )
@@ -2413,10 +2413,19 @@ class RFMViewer(tk.Toplevel):
         self.polar_layout_var.set(not self.polar_layout_var.get())
         self._on_spatial_format_changed()
 
-    def _set_rf_result_overlay_mode(self, mode: str) -> None:
-        self.settings = replace(self.settings, rf_result_overlay_mode=mode)
-        self.rf_result_overlay_mode_var.set(mode)
+    def _on_rf_result_overlays_changed(self) -> None:
+        layers = tuple(layer for layer, variable in self.rf_result_overlay_vars.items() if variable.get())
+        self.settings = replace(self.settings, rf_result_overlay_layers=layers)
         self._on_control_changed()
+
+    def _toggle_rf_result_overlay(self, layer: str | None) -> None:
+        if layer is None:
+            for variable in self.rf_result_overlay_vars.values():
+                variable.set(False)
+        else:
+            variable = self.rf_result_overlay_vars[layer]
+            variable.set(not variable.get())
+        self._on_rf_result_overlays_changed()
 
     def _cycle_palette(self) -> None:
         try:
@@ -2433,7 +2442,8 @@ class RFMViewer(tk.Toplevel):
             "↑ / ↓   Previous / next timeline bin\n"
             "Shift+, / Shift+.   Coarser / finer by one source bin\n"
             "1–4   Switch visible plot tab\n"
-            "Shift+1 / Shift+2 / Shift+0   RF overlap: 1D / 2D / None\n"
+            "Shift+1 / Shift+2   Toggle excitatory 1D / 2D overlay\n"
+            "Shift+0   Clear all RF overlays\n"
             "F   Invert Y\n"
             "P   Toggle Rectangle / Polar layout\n"
             "Shift+P   Cycle palette\n"
@@ -3323,7 +3333,8 @@ class RFMViewer(tk.Toplevel):
             self.palette_var.set(settings.rf_palette)
             self.polar_radius_var.set(settings.rf_polar_radius)
             self.polar_layout_var.set(settings.rf_polar_layout)
-            self.rf_result_overlay_mode_var.set(settings.rf_result_overlay_mode)
+            for layer, variable in self.rf_result_overlay_vars.items():
+                variable.set(layer in settings.rf_result_overlay_layers)
             self.rgb_mode_var.set(settings.rf_rgb_mode)
             self.tuning_plot_mode_var.set(settings.tuning_plot_mode)
             self.tuning_layout_var.set(settings.tuning_layout)
@@ -5254,9 +5265,8 @@ class RFMViewer(tk.Toplevel):
     def _sync_inspector_results(self) -> None:
         pane = self.results_pane
         pane.unit_id = self._selected_unit_id_value() if self._selected_local_unit_index() is not None else None
-        if self._active_tab_key() == "rf" and self.settings.rf_result_overlay_mode != "None":
-            pane.update_details(mode=self.settings.rf_result_overlay_mode,
-                                rf_type=self.settings.rf_result_overlay_polarity)
+        if self._active_tab_key() == "rf" and self.settings.rf_result_overlay_layers:
+            pane.update_details(layers=self.settings.rf_result_overlay_layers)
         else:
             pane.update_details()
         self.inspector_window.set_results(pane.details.get())
@@ -6811,33 +6821,52 @@ class RFMViewer(tk.Toplevel):
 
     def _draw_saved_rf_overlay(self, *, result_only: bool) -> None:
         pane = self.results_pane
-        mode = pane.dimension.get() if result_only else self.settings.rf_result_overlay_mode
-        if mode == "None":
-            return
-        polarity = pane.rf_type.get() if result_only else self.settings.rf_result_overlay_polarity
-        unit_id = self._selected_unit_id_value()
-        overlay = pane.cache.get(unit_id, mode=mode, rf_type=polarity)
-        pane.unit_id = unit_id
-        pane.update_details(mode=mode, rf_type=polarity)
+        pane.unit_id = self._selected_unit_id_value()
+        if result_only:
+            selections = [(pane.dimension.get(), pane.rf_type.get())]
+            pane.update_details()
+        else:
+            layers = self.settings.rf_result_overlay_layers
+            if not layers:
+                return
+            selections = []
+            for polarity in ("excitatory", "inhibitory"):
+                dimensions = [dimension for dimension in ("2d", "1d") if f"{polarity}_{dimension}" in layers]
+                if dimensions:
+                    selections.append(("Both" if len(dimensions) == 2 else dimensions[0].upper(), polarity))
+            pane.update_details(layers=layers)
         self.inspector_window.set_results(pane.details.get())
         if not result_only and pane.status.get():
             self.rf_map_subtitle_label.configure(
                 text=f"{self._current_matrix_label()} · Saved {pane.status.get()}"
             )
+        for index, (mode, polarity) in enumerate(selections):
+            self._draw_saved_rf_polarity(mode, polarity, result_only=result_only, legend_y=12 + index * 20)
+
+    def _draw_saved_rf_polarity(self, mode, polarity, *, result_only, legend_y):
+        pane = self.results_pane
+        unit_id = self._selected_unit_id_value()
+        overlay = pane.cache.get(unit_id, mode=mode, rf_type=polarity)
         canvas = self.canvases["rf"]
         if overlay.unavailable:
-            self.status_label.configure(text=" / ".join(overlay.unavailable) + " saved results unavailable. See Inspector for details.")
+            self.status_label.configure(text=f"{polarity.title()} " + " / ".join(overlay.unavailable) + " saved results unavailable. See Inspector for details.")
         if not overlay.available:
-            canvas.create_text(max(canvas.winfo_width(), 200) / 2, 12,
-                               text="No saved result for this unit", fill="#6e6e73",
+            canvas.create_text(max(canvas.winfo_width(), 200) / 2, legend_y,
+                               text=f"No saved {polarity} result for this unit", fill="#6e6e73",
                                tags="rf-result-notice")
             return
         if result_only and not overlay.flags.any():
             pane.status.set(pane.status.get() + " · No detected bins")
         layout = self._canvas_layouts["rf"]
-        colors = {1: self.settings.rf_result_overlay_2d_color,
-                  2: self.settings.rf_result_overlay_1d_color,
-                  3: self.settings.rf_result_overlay_overlap_color}
+        if polarity == "excitatory":
+            colors = {1: self.settings.rf_result_overlay_2d_color,
+                      2: self.settings.rf_result_overlay_1d_color,
+                      3: self.settings.rf_result_overlay_overlap_color}
+        else:
+            colors = {1: self.settings.rf_result_overlay_inhibitory_2d_color,
+                      2: self.settings.rf_result_overlay_inhibitory_1d_color,
+                      3: self.settings.rf_result_overlay_inhibitory_overlap_color}
+        dash = (5, 3) if polarity == "inhibitory" and not result_only else ()
         border = self.settings.rf_result_overlay_width
         x_groups, y_groups = layout["x_groups"], layout["y_groups"]
         # Subdivide grouped display cells: a saved native bin keeps its mask
@@ -6851,7 +6880,8 @@ class RFMViewer(tk.Toplevel):
                             continue
                         color = colors[flag]
                         options = dict(fill=color if result_only else "", outline=color,
-                                       width=border, tags=("rf-result-overlay", f"rf-result-{flag}",
+                                       width=border, dash=dash,
+                                       tags=("rf-result-overlay", f"rf-result-{flag}", f"rf-polarity-{polarity}",
                                                            f"rf-source-{source_y}-{source_x}"))
                         fx = (source_x - xs) / (xe - xs + 1)
                         dx = 1 / (xe - xs + 1)
@@ -6878,10 +6908,10 @@ class RFMViewer(tk.Toplevel):
         for flag, label in ((1, "2D"), (2, "1D"), (3, "Overlap")):
             if (flag == 1 and mode == "1D") or (flag == 2 and mode == "2D") or (flag == 3 and mode != "Both"):
                 continue
-            canvas.create_rectangle(x, 6, x + 11, 17, outline=colors[flag], width=border,
+            canvas.create_rectangle(x, legend_y - 6, x + 11, legend_y + 5, outline=colors[flag], width=border, dash=dash,
                                     fill=colors[flag] if result_only else "", tags="rf-result-legend")
-            canvas.create_text(x + 17, 12, anchor="w", text=label, fill="#475467", tags="rf-result-legend")
-            x += 82
+            canvas.create_text(x + 17, legend_y, anchor="w", text=f"{polarity.title()} {label}", fill="#475467", tags="rf-result-legend")
+            x += 148
 
     def _saved_bin_center(self, layout, source_y, source_x):
         column, (xs, xe) = next((index, group) for index, group in enumerate(layout["x_groups"])
@@ -8725,7 +8755,8 @@ class RFMViewer(tk.Toplevel):
         self.palette_var.set(self.settings.rf_palette)
         self.polar_radius_var.set(self.settings.rf_polar_radius)
         self.polar_layout_var.set(self.settings.rf_polar_layout)
-        self.rf_result_overlay_mode_var.set(self.settings.rf_result_overlay_mode)
+        for layer, variable in self.rf_result_overlay_vars.items():
+            variable.set(layer in self.settings.rf_result_overlay_layers)
         self.rgb_mode_var.set(self.settings.rf_rgb_mode)
         self.smooth_radius_var.set(self.settings.rf_smooth_radius)
         self.show_probe_layout_var.set(self.settings.show_probe_layout)

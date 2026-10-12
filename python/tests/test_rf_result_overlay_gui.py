@@ -32,7 +32,7 @@ def app(tmp_path):
         ViewerSettings(), rf_filter_units_with_zero_bins=False,
         show_tuning_curve=False, auto_load_tuning_curve=False,
         show_probe_layout=False, auto_load_probe_layout=False, show_waveform=False,
-        rf_result_overlay_mode="Both", rf_result_overlay_width=3.5,
+        rf_result_overlay_layers=("excitatory_2d", "excitatory_1d"), rf_result_overlay_width=3.5,
         rf_result_overlay_2d_color="#125e20", rf_result_overlay_1d_color="#ab8200",
         rf_result_overlay_overlap_color="#cf6c15",
     )
@@ -312,7 +312,9 @@ def test_rf_and_results_keep_identical_canvas_and_grid_through_switches_and_resi
 def test_rf_overlay_modes_color_native_bins_and_preserve_saved_files(app, mode, expected):
     source_files = [app.data.path, app.data.path.with_suffix(".npz"), app.data.path.with_name("mapping_1d.npz")]
     original = {path: path.read_bytes() for path in source_files}
-    app.settings = replace(app.settings, rf_result_overlay_mode=mode)
+    layers = {"None": (), "2D": ("excitatory_2d",), "1D": ("excitatory_1d",),
+              "Both": ("excitatory_2d", "excitatory_1d")}[mode]
+    app.settings = replace(app.settings, rf_result_overlay_layers=layers)
     draw(app, "rf")
     items = native_overlay(app)
     assert items.keys() == expected.keys()
@@ -323,6 +325,50 @@ def test_rf_overlay_modes_color_native_bins_and_preserve_saved_files(app, mode, 
         assert fill == ""
         assert width == 3.5
     assert {path: path.read_bytes() for path in source_files} == original
+
+
+@pytest.mark.parametrize("polar", [False, True])
+def test_all_four_checkboxes_preserve_each_polarity_and_native_bins(app, polar):
+    source = app.results_pane.source
+    mask = np.array([[[1, 0, 0], [0, 1, 0]], [[0, 0, 0], [0, 0, 0]]], dtype=np.uint8)
+    write_result(source, rf_type="inhibitory", ids=(7, 8), mask=mask)
+    write_result(source, "1d", "inhibitory", ids=(7, 8),
+                 mask=np.array([[[0, 1, 0]], [[0, 0, 0]]], dtype=np.uint8))
+    originals = {path: path.read_bytes() for path in source.path.parent.glob("*.npz")}
+    app.polar_layout_var.set(polar)
+    for layer in ("inhibitory_2d", "inhibitory_1d"):
+        app.rf_result_overlay_checks[layer].invoke()
+    draw(app, "rf")
+    assert app.settings.rf_result_overlay_layers == (
+        "excitatory_2d", "excitatory_1d", "inhibitory_2d", "inhibitory_1d",
+    )
+    canvas = app.canvases["rf"]
+    excitatory = canvas.find_withtag("rf-polarity-excitatory")
+    inhibitory = canvas.find_withtag("rf-polarity-inhibitory")
+    assert len(excitatory) == len(inhibitory) == 3
+    assert {canvas.itemcget(item, "dash") for item in excitatory} == {""}
+    assert {canvas.itemcget(item, "dash") for item in inhibitory} == {"5 3"}
+    assert {canvas.itemcget(item, "outline") for item in inhibitory} == {"#af52de", "#00a1b5", "#5856d6"}
+    for polarity in ("excitatory", "inhibitory"):
+        for dimension in ("2D", "1D"):
+            assert f"{dimension} {polarity}" in app.results_pane.details.get()
+    # Turning off one checkbox leaves the other three layers selected.
+    app.rf_result_overlay_checks["excitatory_2d"].invoke()
+    draw(app, "rf")
+    assert app.settings.rf_result_overlay_layers == ("excitatory_1d", "inhibitory_2d", "inhibitory_1d")
+    assert len(canvas.find_withtag("rf-polarity-inhibitory")) == 3
+    assert {path: path.read_bytes() for path in originals} == originals
+
+
+def test_overlay_shortcuts_toggle_one_layer_and_clear_all(app):
+    app.rf_result_overlay_checks["inhibitory_1d"].invoke()
+    app._toggle_rf_result_overlay("excitatory_1d")
+    assert app.settings.rf_result_overlay_layers == ("excitatory_2d", "inhibitory_1d")
+    app._toggle_rf_result_overlay("excitatory_1d")
+    assert app.settings.rf_result_overlay_layers == ("excitatory_2d", "excitatory_1d", "inhibitory_1d")
+    app._toggle_rf_result_overlay(None)
+    assert app.settings.rf_result_overlay_layers == ()
+    assert not any(variable.get() for variable in app.rf_result_overlay_vars.values())
 
 
 def test_pooled_display_bins_preserve_native_boundaries_without_false_overlap(app):

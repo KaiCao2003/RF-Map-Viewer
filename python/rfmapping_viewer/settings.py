@@ -34,6 +34,9 @@ from rfmapping_viewer.constants import (
 
 RF_RESULT_OVERLAY_MODES = ("None", "2D", "1D", "Both")
 RF_RESULT_OVERLAY_POLARITIES = ("excitatory", "inhibitory")
+RF_RESULT_OVERLAY_LAYERS = (
+    "excitatory_2d", "excitatory_1d", "inhibitory_2d", "inhibitory_1d",
+)
 
 
 def is_hex_color(value: object) -> bool:
@@ -97,12 +100,14 @@ class ViewerSettings:
     rf_polar_radius: str = POLAR_RADIUS_MODES[1]
     rf_polar_layout: bool = False
     rf_rgb_mode: bool = False
-    rf_result_overlay_mode: str = "None"
-    rf_result_overlay_polarity: str = "excitatory"
+    rf_result_overlay_layers: tuple[str, ...] = ()
     rf_result_overlay_width: float = 2.0
     rf_result_overlay_2d_color: str = "#34c759"
     rf_result_overlay_1d_color: str = "#ffcc00"
     rf_result_overlay_overlap_color: str = "#ff9500"
+    rf_result_overlay_inhibitory_2d_color: str = "#af52de"
+    rf_result_overlay_inhibitory_1d_color: str = "#00a1b5"
+    rf_result_overlay_inhibitory_overlap_color: str = "#5856d6"
     default_viewer_tab: str = "rf"
     visible_tabs: tuple[str, ...] = tuple(VIEWER_TABS)
     waveform_channel_mode: str = "same_x_column"
@@ -173,12 +178,17 @@ class ViewerSettings:
         polar_radius = payload.get("rf_polar_radius", defaults.rf_polar_radius)
         if polar_radius not in POLAR_RADIUS_MODES:
             polar_radius = defaults.rf_polar_radius
-        overlay_mode = payload.get("rf_result_overlay_mode", defaults.rf_result_overlay_mode)
-        if overlay_mode not in RF_RESULT_OVERLAY_MODES:
-            overlay_mode = defaults.rf_result_overlay_mode
-        overlay_polarity = payload.get("rf_result_overlay_polarity", defaults.rf_result_overlay_polarity)
-        if overlay_polarity not in RF_RESULT_OVERLAY_POLARITIES:
-            overlay_polarity = defaults.rf_result_overlay_polarity
+        requested_layers = payload.get("rf_result_overlay_layers")
+        if requested_layers is None:
+            # Preserve the former single-polarity preference on upgrade.
+            mode = payload.get("rf_result_overlay_mode", "None")
+            polarity = payload.get("rf_result_overlay_polarity", "excitatory")
+            dimensions = {"2D": ("2d",), "1D": ("1d",), "Both": ("2d", "1d")}.get(mode, ())
+            requested_layers = [f"{polarity}_{dimension}" for dimension in dimensions]
+        overlay_layers = (
+            tuple(layer for layer in RF_RESULT_OVERLAY_LAYERS if layer in requested_layers)
+            if isinstance(requested_layers, (list, tuple)) else ()
+        )
         viewer_tab = payload.get("default_viewer_tab", defaults.default_viewer_tab)
         if viewer_tab not in VIEWER_TABS:
             viewer_tab = defaults.default_viewer_tab
@@ -232,12 +242,14 @@ class ViewerSettings:
             rf_polar_radius=polar_radius,
             rf_polar_layout=boolean("rf_polar_layout"),
             rf_rgb_mode=boolean("rf_rgb_mode"),
-            rf_result_overlay_mode=overlay_mode,
-            rf_result_overlay_polarity=overlay_polarity,
+            rf_result_overlay_layers=overlay_layers,
             rf_result_overlay_width=finite_float("rf_result_overlay_width", positive=True),
             rf_result_overlay_2d_color=color("rf_result_overlay_2d_color"),
             rf_result_overlay_1d_color=color("rf_result_overlay_1d_color"),
             rf_result_overlay_overlap_color=color("rf_result_overlay_overlap_color"),
+            rf_result_overlay_inhibitory_2d_color=color("rf_result_overlay_inhibitory_2d_color"),
+            rf_result_overlay_inhibitory_1d_color=color("rf_result_overlay_inhibitory_1d_color"),
+            rf_result_overlay_inhibitory_overlap_color=color("rf_result_overlay_inhibitory_overlap_color"),
             default_viewer_tab=viewer_tab,
             visible_tabs=visible_tabs,
             waveform_channel_mode=waveform_channel_mode,

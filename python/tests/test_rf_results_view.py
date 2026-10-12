@@ -25,7 +25,7 @@ def test_saved_result_selectors_share_cache_and_reload_without_a_second_canvas(s
         assert pane.controls.master is controls_host
         assert not hasattr(pane, "canvas")
         pane.set_unit(42)
-        assert pane.status.get() == "2D unavailable"
+        assert pane.status.get() == "excitatory 2D unavailable"
         write_result(source)
         pane.refresh()
         changed.assert_called_once_with()
@@ -34,7 +34,7 @@ def test_saved_result_selectors_share_cache_and_reload_without_a_second_canvas(s
         assert "Unit 42" in pane.details.get()
         pane.dimension.set("Both")
         pane._selection_changed()
-        assert pane.status.get() == "0–200 ms · 1D unavailable"
+        assert pane.status.get() == "0–200 ms · excitatory 1D unavailable"
         assert changed.call_count == 2
         pane.set_document(None)
         pane.set_unit(None)

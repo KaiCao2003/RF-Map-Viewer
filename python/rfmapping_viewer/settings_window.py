@@ -19,8 +19,7 @@ from rfmapping_viewer.constants import (
 )
 from rfmapping_viewer.display import format_ms
 from rfmapping_viewer.settings import (
-    RF_RESULT_OVERLAY_MODES,
-    RF_RESULT_OVERLAY_POLARITIES,
+    RF_RESULT_OVERLAY_LAYERS,
     ViewerSettings,
     is_hex_color,
     normalize_hd_bin_count,
@@ -108,12 +107,17 @@ class SettingsWindow(tk.Toplevel):
             value="Polar" if settings.rf_polar_layout else "Rectangle"
         )
         self.rf_rgb_mode_var = tk.BooleanVar(value=settings.rf_rgb_mode)
-        self.rf_result_overlay_mode_var = tk.StringVar(value=settings.rf_result_overlay_mode)
-        self.rf_result_overlay_polarity_var = tk.StringVar(value=settings.rf_result_overlay_polarity)
+        self.rf_result_overlay_vars = {
+            layer: tk.BooleanVar(value=layer in settings.rf_result_overlay_layers)
+            for layer in RF_RESULT_OVERLAY_LAYERS
+        }
         self.rf_result_overlay_width_var = tk.StringVar(value=f"{settings.rf_result_overlay_width:g}")
         self.rf_result_overlay_2d_color_var = tk.StringVar(value=settings.rf_result_overlay_2d_color)
         self.rf_result_overlay_1d_color_var = tk.StringVar(value=settings.rf_result_overlay_1d_color)
         self.rf_result_overlay_overlap_color_var = tk.StringVar(value=settings.rf_result_overlay_overlap_color)
+        self.rf_result_overlay_inhibitory_2d_color_var = tk.StringVar(value=settings.rf_result_overlay_inhibitory_2d_color)
+        self.rf_result_overlay_inhibitory_1d_color_var = tk.StringVar(value=settings.rf_result_overlay_inhibitory_1d_color)
+        self.rf_result_overlay_inhibitory_overlap_color_var = tk.StringVar(value=settings.rf_result_overlay_inhibitory_overlap_color)
         self.default_viewer_tab_var = tk.StringVar(
             value=VIEWER_TABS[settings.default_viewer_tab]
         )
@@ -196,7 +200,7 @@ class SettingsWindow(tk.Toplevel):
             self.show_probe_layout_var,
             self.rf_filter_units_with_zero_bins_var,
             self.tuning_smoothing_var,
-            self.rf_result_overlay_mode_var,
+            *self.rf_result_overlay_vars.values(),
         ):
             variable.trace_add("write", lambda *_args: self._sync_dependent_controls())
 
@@ -437,18 +441,26 @@ class SettingsWindow(tk.Toplevel):
         ttk.Checkbutton(toggles, text="RGB composite", variable=self.rf_rgb_mode_var).grid(row=0, column=1)
 
         self._section_label(tab, "Saved RF overlay", 16)
-        self._labeled_combo(tab, 17, "Show", self.rf_result_overlay_mode_var, RF_RESULT_OVERLAY_MODES)
-        self.rf_result_overlay_polarity_combo = self._labeled_combo(
-            tab, 18, "Polarity", self.rf_result_overlay_polarity_var, RF_RESULT_OVERLAY_POLARITIES,
-        )
+        ttk.Label(tab, text="Show").grid(row=17, column=0, sticky="w", pady=5)
+        layers = ttk.Frame(tab)
+        layers.grid(row=17, column=1, sticky="w", pady=5)
+        for index, (layer, variable) in enumerate(self.rf_result_overlay_vars.items()):
+            polarity, dimension = layer.split("_")
+            ttk.Checkbutton(layers, text=f"{polarity.title()} {dimension.upper()}", variable=variable).grid(
+                row=index // 2, column=index % 2, sticky="w", padx=(0, 12), pady=2,
+            )
+        ttk.Label(tab, text="Inhibitory borders are dashed.").grid(row=18, column=1, sticky="w", pady=5)
         self.rf_result_overlay_width_entry = self._labeled_entry(
             tab, 19, "Border width (px)", self.rf_result_overlay_width_var,
         )
         self._overlay_color_controls = []
         for row, label, variable in (
-            (20, "2D color", self.rf_result_overlay_2d_color_var),
-            (21, "1D color", self.rf_result_overlay_1d_color_var),
-            (22, "Overlap color", self.rf_result_overlay_overlap_color_var),
+            (20, "Excitatory 2D color", self.rf_result_overlay_2d_color_var),
+            (21, "Excitatory 1D color", self.rf_result_overlay_1d_color_var),
+            (22, "Excitatory overlap color", self.rf_result_overlay_overlap_color_var),
+            (23, "Inhibitory 2D color", self.rf_result_overlay_inhibitory_2d_color_var),
+            (24, "Inhibitory 1D color", self.rf_result_overlay_inhibitory_1d_color_var),
+            (25, "Inhibitory overlap color", self.rf_result_overlay_inhibitory_overlap_color_var),
         ):
             ttk.Label(tab, text=label).grid(row=row, column=0, sticky="w", pady=5)
             color_row = ttk.Frame(tab)
@@ -621,9 +633,8 @@ class SettingsWindow(tk.Toplevel):
         self.tuning_sigma_entry.state(
             ["!disabled"] if self.tuning_smoothing_var.get() else ["disabled"]
         )
-        overlay_state = ["!disabled"] if self.rf_result_overlay_mode_var.get() != "None" else ["disabled"]
+        overlay_state = ["!disabled"] if any(variable.get() for variable in self.rf_result_overlay_vars.values()) else ["disabled"]
         for widget in (
-            self.rf_result_overlay_polarity_combo,
             self.rf_result_overlay_width_entry,
             *self._overlay_color_controls,
         ):
@@ -710,17 +721,15 @@ class SettingsWindow(tk.Toplevel):
         palette = self.rf_palette_var.get()
         polar_radius = self.rf_polar_radius_var.get()
         layout = self.rf_layout_var.get()
-        overlay_mode = self.rf_result_overlay_mode_var.get()
-        overlay_polarity = self.rf_result_overlay_polarity_var.get()
-        if overlay_mode not in RF_RESULT_OVERLAY_MODES:
-            raise SettingsValidationError("RF Map", "Choose None, 2D, 1D, or Both for the saved RF overlay.")
-        if overlay_polarity not in RF_RESULT_OVERLAY_POLARITIES:
-            raise SettingsValidationError("RF Map", "Choose excitatory or inhibitory overlay polarity.")
+        overlay_layers = tuple(layer for layer, variable in self.rf_result_overlay_vars.items() if variable.get())
         overlay_colors = {}
         for name, label, variable in (
             ("rf_result_overlay_2d_color", "2D color", self.rf_result_overlay_2d_color_var),
             ("rf_result_overlay_1d_color", "1D color", self.rf_result_overlay_1d_color_var),
             ("rf_result_overlay_overlap_color", "Overlap color", self.rf_result_overlay_overlap_color_var),
+            ("rf_result_overlay_inhibitory_2d_color", "Inhibitory 2D color", self.rf_result_overlay_inhibitory_2d_color_var),
+            ("rf_result_overlay_inhibitory_1d_color", "Inhibitory 1D color", self.rf_result_overlay_inhibitory_1d_color_var),
+            ("rf_result_overlay_inhibitory_overlap_color", "Inhibitory overlap color", self.rf_result_overlay_inhibitory_overlap_color_var),
         ):
             color = variable.get().strip()
             if not is_hex_color(color):
@@ -831,8 +840,7 @@ class SettingsWindow(tk.Toplevel):
             rf_polar_radius=polar_radius,
             rf_polar_layout=layout == "Polar",
             rf_rgb_mode=bool(self.rf_rgb_mode_var.get()),
-            rf_result_overlay_mode=overlay_mode,
-            rf_result_overlay_polarity=overlay_polarity,
+            rf_result_overlay_layers=overlay_layers,
             rf_result_overlay_width=overlay_width,
             **overlay_colors,
             default_viewer_tab=initial_tab_key,

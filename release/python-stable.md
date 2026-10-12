@@ -1,10 +1,9 @@
-## Python 1.11.4: ADN selection
+## Python 1.11.5: RF overlay multiselect
 
-macOS Apple Silicon · Full edition · build **111004**
+macOS Apple Silicon · Full edition · build **111005**
 
-- Circle neurons in **Annotate ADN…**, with **Undo** and **Clear selection**.
-- **Save ADN** writes per-probe unit IDs to `session/data/adn_neuron.npy`; reopening restores the selection.
-- Enable **Only ADN** to filter the viewer and figure exports.
-- Hover over a probe unit to show **ID**, **x**, and **y** in µm.
+- Show excitatory and inhibitory 2D/1D RF overlays together using four independent checkboxes.
+- Save selected overlays and distinguish inhibitory borders by color and dashes.
+- Open saved RF results with multiple component centers per neuron.
 
-[Download macOS app](https://github.com/KaiCao2003/RF-Map-Viewer/releases/download/python-v1.11.4/RF_Map_Viewer-python-1.11.4-full-macos-arm64.zip) · [SHA-256 checksum](https://github.com/KaiCao2003/RF-Map-Viewer/releases/download/python-v1.11.4/SHA256SUMS-python-1.11.4-full.txt)
+[Download macOS app](https://github.com/KaiCao2003/RF-Map-Viewer/releases/download/python-v1.11.5/RF_Map_Viewer-python-1.11.5-full-macos-arm64.zip) · [SHA-256 checksum](https://github.com/KaiCao2003/RF-Map-Viewer/releases/download/python-v1.11.5/SHA256SUMS-python-1.11.5-full.txt)

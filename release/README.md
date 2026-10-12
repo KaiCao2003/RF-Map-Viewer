@@ -10,9 +10,9 @@ The Free-Moving alpha application has been retired from the active source and
 release workflow. Its historical Git tags and published artifacts are retained.
 The Python package and generic launcher now identify the stable viewer.
 
-Python 1.11.4 adds ADN circle selection with Undo/Clear, per-probe IDs saved to
-`session/data/adn_neuron.npy`, an **Only ADN** filter, and probe-unit hover
-coordinates. It targets macOS Apple Silicon, build 111004. The published Windows
+Python 1.11.5 adds four independent excitatory/inhibitory 2D/1D overlay
+checkboxes and supports multiple saved RF component centers. It targets macOS
+Apple Silicon, build 111005. The published Windows
 release remains 1.11.2, build 11102, from its separate packaging commit.
 
 Python 1.11.2 adds configurable saved RF overlays and aligned RF/Results plots,
@@ -32,7 +32,7 @@ component tag and artifact name:
 
 | Component | Release | Tag | Channel |
 | --- | --- | --- | --- |
-| Python stable (macOS) | `1.11.4` | `python-v1.11.4` | stable |
+| Python stable (macOS) | `1.11.5` | `python-v1.11.5` | stable |
 | Python stable (Windows x64) | `1.11.2` | `python-v1.11.2` | stable |
 | Swift | `1.10.4` | `swift-v1.10.4` | stable |
 | Web | `1.10.2` | `web-v1.10.2` | stable |

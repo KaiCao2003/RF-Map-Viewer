@@ -121,19 +121,23 @@ class RFResultsPane(ttk.Frame):
             self.cache.clear()
         self._selection_changed()
 
-    def update_details(self, *, mode=None, rf_type=None):
+    def update_details(self, *, mode=None, rf_type=None, layers=None):
         if self.cache is None or self.unit_id is None:
             self.status.set("No unit selected")
             self.details.set("")
             return
-        mode = self.dimension.get() if mode is None else mode
-        rf_type = self.rf_type.get() if rf_type is None else rf_type
-        dimensions = {"None": (), "2D": ("2d",), "1D": ("1d",), "Both": ("2d", "1d")}[mode]
+        if layers is None:
+            mode = self.dimension.get() if mode is None else mode
+            rf_type = self.rf_type.get() if rf_type is None else rf_type
+            dimensions = {"None": (), "2D": ("2d",), "1D": ("1d",), "Both": ("2d", "1d")}[mode]
+            selections = [(rf_type, dimension) for dimension in dimensions]
+        else:
+            selections = [layer.split("_") for layer in layers]
         intervals, unavailable, details = [], [], []
-        for dimension in dimensions:
+        for rf_type, dimension in selections:
             result = self.cache.result(dimension, rf_type)
             if result is None:
-                unavailable.append(dimension.upper())
+                unavailable.append(f"{rf_type} {dimension.upper()}")
                 details.append(self.cache.error(dimension, rf_type) or "No saved result")
                 continue
             interval = result.manifest["time_range_s"]
@@ -142,7 +146,7 @@ class RFResultsPane(ttk.Frame):
                 intervals.append(text)
             saved = result.for_unit(self.unit_id)
             if saved is None:
-                unavailable.append(dimension.upper())
+                unavailable.append(f"{rf_type} {dimension.upper()}")
             parameters = result.manifest["parameters"]
             qc = result.unit_qc(self.unit_id)
             details.append(f"{dimension.upper()} {rf_type} · {text}\n{result.path}")
