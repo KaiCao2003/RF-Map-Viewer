@@ -369,6 +369,11 @@ of **⌘** on Windows. NumLock and ScrollLock do not disable viewer shortcuts.
 
 ---
 
+## Stable viewer 1.11.9
+
+Version 1.11.9 restores plot keyboard focus after closing Annotate ADN, so
+Left and Right immediately resume unit navigation.
+
 ## Stable viewer 1.11.8
 
 Version 1.11.8 repaints the covered plots when leaving waveform zoom on macOS,
@@ -584,7 +589,7 @@ Opening the app without a path shows the native file chooser. Release packages
 do not contain or auto-load sample RF data.
 
 Its macOS identity is `RF Map Viewer.app`, bundle ID
-`org.local.rfmapping.viewer`, and version/build `1.11.8` / `111008`. Build it with:
+`org.local.rfmapping.viewer`, and version/build `1.11.9` / `111009`. Build it with:
 
 ```sh
 script/build_python_stable_macos_app.sh

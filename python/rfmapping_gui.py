@@ -4713,8 +4713,17 @@ class RFMViewer(tk.Toplevel):
                 self, full_geometry, self._adn_path, self._on_adn_saved,
                 hd_classes=tuning.hd_classes if tuning is not None else {},
             )
+            self._adn_window.bind("<Destroy>", self._on_adn_window_destroyed, add="+")
         except (OSError, ValueError) as exc:
             messagebox.showerror("Could not open ADN annotation", str(exc), parent=self)
+
+    def _on_adn_window_destroyed(self, event: tk.Event) -> None:
+        if event.widget is not self._adn_window:
+            return
+        self._adn_window = None
+        if not self._quitting:
+            # Return navigation to the plot after Aqua finishes closing the utility.
+            self._focus_after = self.after_idle(self._focus_active_canvas)
 
     def _on_only_adn_toggled(self) -> None:
         if self.only_adn_var.get():
