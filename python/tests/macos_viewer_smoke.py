@@ -13,7 +13,7 @@ from PIL import Image, ImageChops
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import rfmapping_gui as gui
-from macos_key_events import send_double_click, send_key, window_number
+from macos_key_events import close_window, send_click, send_double_click, send_key, window_number
 from rfmapping_viewer.rf_model import RFMappingData
 
 
@@ -159,6 +159,98 @@ def check_native_waveform(app) -> None:
             app._app_root.deletecommand(command)
 
 
+def check_native_adn_close(app, utilities) -> None:
+    states = []
+    evidence = Path(__file__).resolve().parents[1] / ".test-artifacts" / "adn-close"
+    evidence.mkdir(parents=True, exist_ok=True)
+    result_path = evidence / f"window-{window_number(app)}.json"
+    with tempfile.TemporaryDirectory() as directory:
+        positions = Path(directory) / "ProbeA" / "positions.csv"
+        positions.parent.mkdir()
+        unit_ids = app._unit_navigation_ids()
+        assert len(unit_ids) > 1, "ADN navigation fixture needs multiple units"
+        positions.write_text(
+            "unit_index,unit_id,x_um,y_um\n" + "".join(
+                f"{index},{unit_id},{index * 20},{100 + index * 30}\n"
+                for index, unit_id in enumerate(unit_ids)
+            ), encoding="utf-8",
+        )
+        output = Path(directory) / "adn_neuron.npy"
+        geometry = gui.load_probe_geometry("ProbeA", positions, None)
+        with (
+            mock.patch.object(app, "probe_geometry", geometry),
+            mock.patch.object(app, "_adn_path", output),
+        ):
+            try:
+                for focus_kind in ("checkbox", "text"):
+                    for close_kind in ("button", "titlebar"):
+                        # Reproduce the owner input which swallowed arrows on return.
+                        app.unit_combo.focus_set()
+                        settle(app)
+                        assert app.focus_get() is app.unit_combo
+                        before = app._selected_unit_id_value()
+                        expected = unit_ids[(unit_ids.index(before) + 1) % len(unit_ids)]
+                        state = {
+                            "utility_focus": focus_kind, "close": close_kind,
+                            "before_unit": before, "before_focus": str(app.focus_get()),
+                        }
+                        states.append(state)
+                        utilities.invoke("Annotate ADN…")
+                        settle(app)
+                        dialog = app._adn_window
+                        assert dialog is not None and dialog.winfo_exists()
+                        assert dialog.output_path == output
+                        controls = []
+                        pending = list(dialog.winfo_children())
+                        while pending:
+                            control = pending.pop()
+                            controls.append(control)
+                            pending.extend(control.winfo_children())
+                        checkbox = next(
+                            control for control in controls
+                            if isinstance(control, gui.ttk.Checkbutton)
+                            and control.cget("text") == "Class 1"
+                        )
+                        target = checkbox if focus_kind == "checkbox" else dialog.unit_list
+                        send_click(target)
+                        settle(app)
+                        state["interaction_focus"] = str(app.focus_get())
+                        if focus_kind == "checkbox":
+                            assert not dialog.class_visible_vars[1].get(), "Native click did not toggle the class filter"
+                        else:
+                            assert app.focus_get() is target, "Native interaction did not focus the ADN text"
+                        if close_kind == "button":
+                            button = next(
+                                control for control in controls
+                                if isinstance(control, gui.ttk.Button)
+                                and control.cget("text") == "Close"
+                            )
+                            send_click(button)
+                        else:
+                            close_window(dialog)
+                        settle(app)
+                        state["closed"] = not bool(dialog.winfo_exists())
+                        state["after_close_focus"] = str(app.focus_get())
+                        assert state["closed"], "Native close did not dismiss ADN"
+                        window_number(app)  # The owner must regain Cocoa's key window.
+                        # No focus correction: arrows must follow the close action.
+                        send_key("\uf703", 124, (1 << 21) | (1 << 23))
+                        settle(app)
+                        state["after_right_unit"] = app._selected_unit_id_value()
+                        state["after_right_focus"] = str(app.focus_get())
+                        assert state["after_right_unit"] == expected, "Right did not navigate after ADN close"
+                        send_key("\uf702", 123, (1 << 21) | (1 << 23))
+                        settle(app)
+                        state["after_left_unit"] = app._selected_unit_id_value()
+                        state["after_left_focus"] = str(app.focus_get())
+                        assert state["after_left_unit"] == before, "Left did not navigate after ADN close"
+                        assert app.focus_get() is app.canvases[app._active_tab_key()]
+                        assert not output.exists(), "ADN close unexpectedly saved an annotation"
+            finally:
+                result_path.write_text(json.dumps(states, indent=2), encoding="utf-8")
+                print(json.dumps({"native_adn_close": states}, indent=2), flush=True)
+
+
 def check_native_keys(path: Path) -> None:
     with tempfile.TemporaryDirectory() as directory, mock.patch.object(
         gui, "viewer_settings_path", return_value=Path(directory) / "settings.json",
@@ -194,6 +286,7 @@ def check_native_keys(path: Path) -> None:
 
                 apple = child._menu.nametowidget(child._menu.entrycget(0, "menu"))
                 utilities = apple.nametowidget(apple.entrycget(0, "menu"))
+                check_native_adn_close(child, utilities)
                 utilities.invoke("Cross-correlogram…")
                 utility = root._rfm_crosscorrelogram_window
                 assert utility is not None and utility.winfo_exists()

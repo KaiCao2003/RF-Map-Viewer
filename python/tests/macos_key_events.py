@@ -78,7 +78,12 @@ def window_number(widget) -> int:
     return send(window, b"windowNumber", ctypes.c_long)
 
 
-def send_double_click(widget) -> None:
+def close_window(widget) -> None:
+    _objc, send, _application, window = _native_widget_dispatch(widget)
+    send(window, b"performClose:", None, (ctypes.c_void_p,), None)
+
+
+def send_click(widget, *, count: int = 1) -> None:
     objc, send, application, window = _native_widget_dispatch(widget)
     toplevel = widget.winfo_toplevel()
     view = send(window, b"contentView", ctypes.c_void_p)
@@ -104,7 +109,7 @@ def send_double_click(widget) -> None:
     pointer = widget.winfo_pointerxy()
     assert pointer == (root_x, root_y), f"Native pointer is at {pointer}, expected {(root_x, root_y)}"
     assert widget.winfo_containing(*pointer) is widget, "Native pointer does not target the widget"
-    for click_count in (1, 2):
+    for click_count in range(1, count + 1):
         for event_type in (1, 2):  # NSEventTypeLeftMouseDown, NSEventTypeLeftMouseUp
             event = send(
                 objc.objc_getClass(b"NSEvent"),
@@ -120,3 +125,7 @@ def send_double_click(widget) -> None:
             send(application, b"postEvent:atStart:", None, (ctypes.c_void_p, ctypes.c_bool), event, False)
         # Preserve the focus and widget changes caused by the first real click.
         widget.update()
+
+
+def send_double_click(widget) -> None:
+    send_click(widget, count=2)

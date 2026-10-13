@@ -87,6 +87,13 @@ jobs:
           name: python-waveform-repaint
           path: python/.test-artifacts/waveform-zoom/
           if-no-files-found: ignore
+      - name: Upload ADN close navigation evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: python-adn-close-navigation
+          path: python/.test-artifacts/adn-close/
+          if-no-files-found: ignore
       - uses: actions/upload-artifact@v6
         with:
           name: python-stable-${{ needs.validate-versions.outputs.python_stable_release }}
