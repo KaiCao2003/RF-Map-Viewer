@@ -1,6 +1,6 @@
 # Python RF Map Viewers
 
-This directory contains the Python/Tk RF Map Viewer `1.11.8`, launched by
+This directory contains the Python/Tk RF Map Viewer `1.11.9`, launched by
 `rfmapping_gui.py` or the installed `rfmapping-viewer` command. The separate
 Free-Moving alpha and its HDF5 Square/Bar, 3D-sphere, and exposure-QA paths have
 been retired. The offline session/EBC HTML report script remains available.
