@@ -18,6 +18,7 @@ final class OccupancyRFTests: XCTestCase {
             "xPositions": [-1.0, 0.0, 1.0],
             "yPositions": 0.0,
             "timeBinEdges": [0.0, 1.0],
+            "stimulusPresentationCounts": [1, 100, 1],
         ], occupancyTimeSec: occupancy, occupancyTimeSecSize: occupancySize)
         return try RFMappingData(
             data: JSONSerialization.data(withJSONObject: payload),
@@ -25,7 +26,7 @@ final class OccupancyRFTests: XCTestCase {
         )
     }
 
-    func testRateIsCountDividedByOccupancySeconds() throws {
+    func testRateUsesPresentationsAndResponseDuration() throws {
         let data = try makeData()
         let rates = try data.responseMatrix(
             unitIndex: 0,
@@ -54,6 +55,7 @@ final class OccupancyRFTests: XCTestCase {
             "xPositions": [-1.0, 1.0],
             "yPositions": 0.0,
             "timeBinEdges": [0.0, 0.1],
+            "stimulusPresentationCounts": [0, 5],
         ], occupancyTimeSec: [0.0, 0.5], occupancyTimeSecSize: [1, 2])
         let data = try RFMappingData(
             data: JSONSerialization.data(withJSONObject: zeroPayload),
@@ -173,6 +175,7 @@ final class OccupancyRFTests: XCTestCase {
             "xPositions": [-1.0, 1.0],
             "yPositions": 0.0,
             "timeBinEdges": [-0.1, 0.0, 0.1],
+            "stimulusPresentationCounts": [2, 0],
         ], occupancyTimeSec: [0.5, 0.0], occupancyTimeSecSize: [1, 2])
         for omitted in optionalKeys.map({ [$0] }) + [optionalKeys] {
             var candidate = valid
@@ -185,7 +188,7 @@ final class OccupancyRFTests: XCTestCase {
             XCTAssertEqual(data.timeBinEdges, [-0.1, 0.0, 0.1])
             XCTAssertEqual(try data.responseMatrix(
                 unitIndex: 0, start: 0, end: 1, valueMode: .meanFiringRate
-            ), [[12.0, nil]])
+            ), [[15.0, nil]])
         }
 
         var minimal = valid
@@ -212,7 +215,7 @@ final class OccupancyRFTests: XCTestCase {
         }
     }
 
-    func testSpatialPoolingSmoothingTimelineSelectionAndExportUseOccupancy() throws {
+    func testSpatialPoolingSmoothingTimelineSelectionAndExportUseResponseExposure() throws {
         let data = try makeData()
         let store = RFMappingStore(
             initialData: data,

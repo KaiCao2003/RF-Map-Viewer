@@ -812,7 +812,8 @@ class TkViewerTests(unittest.TestCase):
         settings.rf_subtract_end_var.set("50")  # An unrelated, unsaved edit.
         self.app._bind_unit_filter_shortcut()
         canvas = self.app.canvases["rf"]
-        sequences = ["<Command-Shift-period>", "<Command-Shift-greater>"]
+        primary = "Command" if sys.platform == "darwin" else "Control"
+        sequences = [f"<{primary}-Shift-period>", f"<{primary}-Shift-greater>"]
         # Xvfb cannot map kana_fullstop to a keycode and generates "??".
         # Exercise the IME keysym on Aqua, where the physical key reports it.
         if self.app.tk.call("tk", "windowingsystem") == "aqua":
@@ -1870,7 +1871,9 @@ class TkViewerTests(unittest.TestCase):
 
     def test_native_arrow_flags_work_through_tk_bindings(self) -> None:
         # Cocoa marks arrows as keypad/function keys even without a held Fn key.
-        state = 0x0060 if self.app.tk.call("tk", "windowingsystem") == "aqua" else 0x0010
+        state = {"aqua": 0x0060, "win32": 0x40008, "x11": 0x0010}[
+            self.app.tk.call("tk", "windowingsystem")
+        ]
         self.app.notebook.focus_force()
         self.app.update()
         self.app.notebook.event_generate("<KeyPress-Right>", state=state)
@@ -1880,6 +1883,60 @@ class TkViewerTests(unittest.TestCase):
         self.app.notebook.event_generate("<KeyPress-Up>", state=state)
         self.app.update()
         self.assertEqual(self.app.bin_var.get(), 4)
+
+    @unittest.skipUnless(sys.platform == "win32", "requires Windows Tk modifier handling")
+    def test_windows_lock_flags_preserve_shortcuts_after_focus_changes(self) -> None:
+        self.app._select_tab(0)
+        self.app.update()
+        for widget in (self.app.canvases["rf"], self.app.notebook, self.app.next_unit_button, self.app.unit_combo):
+            widget.focus_force()
+            self.app.update()
+            self.assertIs(self.app.focus_get(), widget)
+            for state in (0x0008, 0x0028, 0x002A, 0x40028):
+                with self.subTest(widget=widget.winfo_class(), state=state):
+                    for key, variable in (
+                        ("p", self.app.polar_layout_var),
+                        ("f", self.app.flip_y_var),
+                        ("d", self.app.display_expanded_var),
+                    ):
+                        before = variable.get()
+                        widget.event_generate("<KeyPress>", keysym=key, state=state)
+                        self.app.update()
+                        self.assertNotEqual(variable.get(), before, key)
+                    self.app.palette_var.set("Gray")
+                    widget.event_generate("<KeyPress-p>", state=state | 0x0001)
+                    self.app.update()
+                    self.assertEqual(self.app.palette_var.get(), "Viridis")
+
+        self.app.notebook.focus_force()
+        self.app.update()
+        self.app.unit_idx.set(0)
+        self.app.notebook.event_generate("<KeyPress-Right>", state=0x40028)
+        self.app.update()
+        self.assertEqual(self.app.unit_idx.get(), 1)
+        self.app.notebook.event_generate("<KeyPress-3>", state=0x0008)
+        self.app.update()
+        self.assertEqual(self.app._active_tab_key(), "timeline")
+
+    @unittest.skipUnless(sys.platform == "win32", "requires Windows Tk modifier handling")
+    def test_windows_ctrl_shortcuts_with_numlock_and_capslock(self) -> None:
+        canvas = self.app.canvases["timeline"]
+        canvas.focus_force()
+        self.app.update()
+        for keysym, modifier, method in (
+            ("o", 0x0004, "_open_json"),
+            ("e", 0x0004, "_open_figure_exporter"),
+            ("e", 0x0005, "_export_current_matrix"),
+            ("w", 0x0004, "_close_window"),
+            ("period", 0x0005, "_toggle_zero_bin_filter"),
+            ("comma", 0x0004, "_show_settings"),
+        ):
+            for lock_flags in (0x0008, 0x002A):
+                with self.subTest(keysym=keysym, modifier=modifier, lock_flags=lock_flags):
+                    with mock.patch.object(self.app, method) as action:
+                        canvas.event_generate("<KeyPress>", keysym=keysym, state=modifier | lock_flags)
+                        self.app.update()
+                        action.assert_called_once_with()
 
     @unittest.skipUnless(sys.platform == "darwin", "requires Cocoa key events")
     def test_native_macos_keys_reach_the_document_after_opening(self) -> None:
@@ -1934,9 +1991,9 @@ class TkViewerTests(unittest.TestCase):
                 self.assertTrue(self.app.polar_layout_var.get())
 
     def test_modified_keys_do_not_trigger_plain_view_shortcuts(self) -> None:
-        modifiers = ["Control", "Command", "Alt"]
+        modifiers = ["Control", "Alt"]
         if self.app.tk.call("tk", "windowingsystem") == "aqua":
-            modifiers.append("Option")
+            modifiers.extend(("Command", "Option"))
         for widget in (self.app.canvases["timeline"], self.app.notebook):
             widget.focus_force()
             self.app.update()

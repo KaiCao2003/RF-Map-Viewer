@@ -6,6 +6,7 @@ import type { DatasetMeta, ViewState } from "./types";
 const meta: DatasetMeta = {
   id: "rf", name: "synthetic.rfmap", sourcePath: "/fixture", shape: [1, 1, 2, 3],
   unitPool: [1], xPositions: [0, 1], yPositions: [0], timeBinEdges: [-0.1, 0, 0.1, 0.2],
+  stimulusPresentationCounts: [[10, 30]],
   occupancyTimeSec: [[1, 3]], responseUnits: "spike_count", responseNormalization: "none",
   capabilities: { probe: false, hd: false, waveform: false, occupancy: true },
 };

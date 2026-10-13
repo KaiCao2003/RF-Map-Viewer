@@ -98,6 +98,8 @@ Probe geometry is optional. Choose **File → Attach Probe Geometry…** or use
 available beside the recording, the viewer may discover it automatically.
 The Probe view shows channels and units with known positions:
 
+- Hover over a unit to see its ID and x/y coordinates in µm. Toggle this in
+  **Settings → General → Probe layout → Unit info on hover**.
 - Drag a rectangle to restrict unit navigation and Figure Composer to units
   in that spatial region.
 - Click near a plotted unit to select its nearest visible unit; this also
@@ -329,6 +331,8 @@ document.
 ### Keyboard shortcuts
 
 Open **Help → Keyboard Shortcuts** for the in-app list.
+On Windows and Linux, use **Ctrl** in place of **⌘**. Num Lock, Caps Lock,
+and Scroll Lock do not disable the Windows viewer shortcuts.
 
 | Shortcut | Action |
 | --- | --- |

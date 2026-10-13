@@ -31,6 +31,7 @@ const meta: DatasetMeta = {
   yPositions: [5, 15],
   timeBinEdges: [-0.1, -0.05, 0, 0.05, 0.1],
   occupancyTimeSec: [[2, 2, 2], [4, 4, 4]],
+  stimulusPresentationCounts: [[20, 20, 20], [40, 40, 40]],
   responseUnits: "spike_count",
   responseNormalization: "none",
   capabilities: { probe: false, hd: false, waveform: false, occupancy: true },
@@ -46,7 +47,7 @@ const counts = Float64Array.from([
 ]);
 
 describe("RF display math", () => {
-  it("defaults the viewer to occupancy-normalized firing rate", () => {
+  it("prefers firing rate when presentation counts are available", () => {
     expect(DEFAULT_VALUE_MODE).toBe("Mean firing rate (Hz)");
   });
 
@@ -130,7 +131,7 @@ describe("RF display math", () => {
     expect(timeGroupRangeForMs(noisyMeta, destination, 0, 20)).toEqual([1, 2]);
   });
 
-  it("normalizes raw counts by occupancy seconds", () => {
+  it("normalizes raw counts by presentation counts and response duration", () => {
     expect(responseMatrix(counts, meta, 2, 3, "Spike count")[0]).toEqual([5, 0, 2]);
     expect(responseMatrix(counts, meta, 2, 3, "Mean firing rate (Hz)")[0]).toEqual([2.5, 0, 1]);
   });
@@ -143,6 +144,7 @@ describe("RF display math", () => {
       yPositions: [0],
       timeBinEdges: [0, 1],
       occupancyTimeSec: [[1, 9, 0]],
+      stimulusPresentationCounts: [[1, 9, 0]],
     };
     const pooledCounts = Float64Array.from([10, 0, 999]);
     expect(responseValue(pooledCounts, pooledMeta, 0, 2, 0, 0, "Spike count")).toBeNull();
@@ -158,6 +160,7 @@ describe("RF display math", () => {
       yPositions: [0],
       timeBinEdges: [0, 0.1],
       occupancyTimeSec: [[100, 1]],
+      stimulusPresentationCounts: [[1000, 10]],
     };
     const prepared = prepareResponseMatrix(
       Float64Array.from([100, 9]),
@@ -226,7 +229,7 @@ describe("RF display math", () => {
     expect(metrics.totalSpikes).toBe(31);
     expect(metrics.bestY).toBe(0);
     expect(metrics.bestX).toBe(0);
-    expect(metrics.bestRateHz).toBe(3);
+    expect(metrics.bestRateHz).toBe(1.5);
     expect(metrics.delayMs[0][0]).toBeCloseTo(75);
     expect(allPositionsTimelineValues(counts, meta, [[0, 1], [2, 3]], "Spike count")).toEqual([15, 16]);
     expect(allPositionsTimelineValues(counts, meta, [[0, 1], [2, 3]], "Mean firing rate (Hz)"))

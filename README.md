@@ -17,10 +17,11 @@ through versioned file contracts, principally the RF formats described in
 
 ## Component versions
 
-The stable Python macOS release is `1.11.5` (build `111005`). The published Windows
-release is `1.11.2` (build `11102`), Swift is at `1.10.4`, and Web at `1.10.2`.
-Python 1.11.5 adds independent excitatory/inhibitory 2D and 1D RF overlay
-checkboxes, saved layer choices, and support for multiple RF component centers.
+Current source targets Python `1.11.6` on macOS (build `111006`) and Windows
+(build `11106`), Swift `1.10.5`, and Web `1.10.3`. These candidates add a probe
+hover preference, repair Windows shortcuts, and bring recent Python viewing
+features to Swift and Web, excluding CCG and PDF output changes.
+Published downloads below remain separate from candidate build versions.
 Component identity belongs in release tags and artifact names, not in a fourth
 version component. See
 [`release/README.md`](release/README.md) for the canonical mapping and tag

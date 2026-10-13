@@ -5,7 +5,7 @@ export type CellRef = readonly [number, number, number, number];
 export type ValueMode = "Spike count" | "Mean firing rate (Hz)";
 export type Palette = "Gray" | "Viridis" | "Inferno";
 export type PolarRadius = "MATLAB row 1 inner" | "Display bottom inner";
-export type ViewTab = "rf" | "delay" | "timeline";
+export type ViewTab = "rf" | "delay" | "timeline" | "results";
 
 export const VALUE_MODES: ValueMode[] = [
   "Mean firing rate (Hz)",
@@ -28,6 +28,7 @@ export interface DatasetMeta {
   yPositions: number[];
   timeBinEdges: number[];
   occupancyTimeSec: number[][];
+  stimulusPresentationCounts?: number[][] | null;
   isVerticalBar?: boolean;
   responseUnits: "spike_count";
   responseNormalization: "none";
@@ -197,7 +198,7 @@ export interface UnitMetrics {
   totalSpikes: number;
   bestY: number;
   bestX: number;
-  bestRateHz: number;
+  bestRateHz: number | null;
 }
 
 export interface HoverInfo {
@@ -206,3 +207,36 @@ export interface HoverInfo {
   clientX: number;
   clientY: number;
 }
+
+export type RfResultDimension = "2d" | "1d";
+export type RfResultPolarity = "excitatory" | "inhibitory";
+export type RfOverlayMode = "None" | "2D" | "1D" | "Both";
+export interface RfOverlaySettings {
+  mode: RfOverlayMode;
+  polarity: RfResultPolarity;
+  width: number;
+  color2d: string;
+  color1d: string;
+  overlapColor: string;
+}
+export type SavedRfResult = {
+  available: false;
+  detail: string;
+  dimension: RfResultDimension;
+  polarity: RfResultPolarity;
+  resultPath: string;
+} | {
+  available: true;
+  sourcePath: string;
+  resultPath: string;
+  dimension: RfResultDimension;
+  polarity: RfResultPolarity;
+  unitIds: number[];
+  masks: number[][][];
+  centers: number[][][];
+  axis: "x" | "y" | null;
+  manifest: Record<string, unknown>;
+  summary: Record<string, unknown> | null;
+  summaryWarning: string | null;
+  projectedFrom2d: boolean;
+};

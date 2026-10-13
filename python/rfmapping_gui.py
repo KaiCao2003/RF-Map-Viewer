@@ -158,10 +158,12 @@ class ViewerApplication:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.closing_all = False
-        root.bind_all("<Control-o>", self.open_json)
+        for keysym in ("o", "O"):
+            root.bind_all(f"<Control-{keysym}>", self.open_json)
         root.bind_all("<Control-comma>", self.show_settings)
         if sys.platform == "darwin":
-            root.bind_all("<Command-o>", self.open_json)
+            for keysym in ("o", "O"):
+                root.bind_all(f"<Command-{keysym}>", self.open_json)
             root.bind_all("<Command-comma>", self.show_settings)
             root.bind_all("<Command-Option-w>", self.close_all_windows)
             root.bind_all("<Command-Option-KeyPress>", self.close_all_option_key)
@@ -1183,7 +1185,7 @@ class RFMViewer(tk.Toplevel):
         self._display_options_menu_index = view_menu.index("end")
         view_menu.add_command(
             label="Show Filtered Units",
-            accelerator="⌘⇧.",
+            accelerator="⌘⇧." if sys.platform == "darwin" else "Ctrl+Shift+.",
             command=self._toggle_zero_bin_filter,
         )
         self._unit_filter_menu_index = view_menu.index("end")
@@ -2186,14 +2188,20 @@ class RFMViewer(tk.Toplevel):
             # TNotebook consumes arrows (and on Aqua, letter traversal) before
             # the toplevel bindtag. Handle viewer shortcuts there first too.
             self.notebook.bind(sequence, callback)
-        self.bind("<Control-e>", lambda _event: self._open_figure_exporter())
-        self.bind("<Control-Shift-E>", lambda _event: self._export_current_matrix())
-        self.bind("<Control-w>", lambda _event: self._close_window())
+        for keysym in ("e", "E"):
+            self.bind(f"<Control-{keysym}>", lambda _event: self._open_figure_exporter())
+        for keysym in ("w", "W"):
+            self.bind(f"<Control-{keysym}>", lambda _event: self._close_window())
+        for keysym in ("e", "E"):
+            self.bind(f"<Control-Shift-{keysym}>", lambda _event: self._export_current_matrix())
         if sys.platform == "darwin":
-            self.bind("<Command-e>", lambda _event: self._open_figure_exporter())
-            self.bind("<Command-Shift-E>", lambda _event: self._export_current_matrix())
-            self.bind("<Command-w>", lambda _event: self._close_window())
-            self._bind_unit_filter_shortcut()
+            for keysym in ("e", "E"):
+                self.bind(f"<Command-{keysym}>", lambda _event: self._open_figure_exporter())
+            for keysym in ("w", "W"):
+                self.bind(f"<Command-{keysym}>", lambda _event: self._close_window())
+            for keysym in ("e", "E"):
+                self.bind(f"<Command-Shift-{keysym}>", lambda _event: self._export_current_matrix())
+        self._bind_unit_filter_shortcut()
         for key, canvas in self.canvases.items():
             canvas.bind("<Configure>", self._schedule_redraw)
             canvas.bind("<Motion>", lambda event, k=key: self._on_canvas_motion(k, event))
@@ -2323,10 +2331,15 @@ class RFMViewer(tk.Toplevel):
             return None
         # Tk also matches a plain-key binding when extra modifiers are held.
         # Leave Command/Control/Alt chords to their own bindings.
-        if self.tk.call("tk", "windowingsystem") == "aqua":
+        windowing_system = self.tk.call("tk", "windowingsystem")
+        if windowing_system == "aqua":
             # Aqua: Control, Command (Mod1), Option (Mod2). Mod3/Mod4 are
             # keypad/Fn flags carried by ordinary native arrow-key events.
             command_modifiers = 0x0004 | 0x0008 | 0x0010 | 0x20000
+        elif windowing_system == "win32":
+            # Win32 uses Mod1 for NumLock, Mod3 for ScrollLock, and 0x40000
+            # for extended keys. Only Control and Alt should block shortcuts.
+            command_modifiers = 0x0004 | 0x0010 | 0x20000
         else:
             command_modifiers = 0x0004 | 0x0008 | 0x0040 | 0x0080 | 0x20000
         if int(getattr(event, "state", 0) or 0) & command_modifiers:
@@ -2356,8 +2369,12 @@ class RFMViewer(tk.Toplevel):
         # Aqua may report the period, its shifted keysym, or kana_fullstop
         # for the same physical key while a punctuation input method is active.
         target = self if target is None else target
-        for keysym in ("period", "greater", "kana_fullstop"):
-            target.bind(f"<Command-Shift-{keysym}>", toggle)
+        primary = "Command" if sys.platform == "darwin" else "Control"
+        keysyms = ("period", "greater")
+        if sys.platform == "darwin":
+            keysyms += ("kana_fullstop",)
+        for keysym in keysyms:
+            target.bind(f"<{primary}-Shift-{keysym}>", toggle)
 
     def _toggle_zero_bin_filter(self) -> None:
         enabled = not self.settings.rf_filter_units_with_zero_bins
@@ -2449,13 +2466,13 @@ class RFMViewer(tk.Toplevel):
             "Shift+P   Cycle palette\n"
             "−   Toggle RF sum / A − B\n"
             "D   Show / hide Display Options\n"
-            "Command+Shift+.   Hide / show units filtered by RF bins\n"
+            f"{primary}+Shift+.   Hide / show units filtered by RF bins\n"
             "Esc   Show Full Timeline Range\n"
             "[ / ]   Previous / next unit (legacy)\n"
-            "Command-O   Open an RF map in a new window\n"
-            "Command-E   Open figure exporter\n"
-            "Shift-Command-E   Export displayed data CSV\n"
-            "Command-W   Close current window",
+            f"{primary}+O   Open an RF map in a new window\n"
+            f"{primary}+E   Open figure exporter\n"
+            f"{primary}+Shift+E   Export displayed data CSV\n"
+            f"{primary}+W   Close current window",
             parent=self,
         )
 
@@ -3298,6 +3315,8 @@ class RFMViewer(tk.Toplevel):
                 return False
             self._app_root._rfm_settings = settings
         self.settings = settings
+        if not settings.show_probe_unit_info:
+            self.probe_canvas.delete("hover")
         if persist:
             for window in self._ready_pairing_viewers():
                 if window is not self:
@@ -4700,7 +4719,11 @@ class RFMViewer(tk.Toplevel):
     def _on_probe_motion(self, event: tk.Event) -> None:
         canvas = self.probe_canvas
         canvas.delete("hover")
-        if self._probe_drag_start is not None or not self._probe_hit_points:
+        if (
+            not self.settings.show_probe_unit_info
+            or self._probe_drag_start is not None
+            or not self._probe_hit_points
+        ):
             return
         x, y, unit = min(
             self._probe_hit_points,

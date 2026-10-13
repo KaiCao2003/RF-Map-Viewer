@@ -53,6 +53,7 @@ from .figure_exports import (
 )
 from .middleware import DirectAccessMiddleware
 from .paths import PathAccessError, list_directory, resolve_under
+from .rf_results import RFResultSource, load_saved_rf_result, rf_result_path
 from .waveforms import (
     DEFAULT_WAVEFORM_CHANNEL_MODE,
     WaveformArtifactError,
@@ -61,7 +62,7 @@ from .waveforms import (
 )
 
 
-WEB_VERSION = "1.10.2"
+WEB_VERSION = "1.10.3"
 
 
 class StrictRequest(BaseModel):
@@ -356,6 +357,48 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def dataset_cache(dataset_id: str) -> dict[str, Any]:
         record = _get_record(services, dataset_id)
         return services.datasets.response_metadata(record)["cacheProgress"]
+
+    @application.get("/api/datasets/{dataset_id}/rf-results")
+    def saved_rf_results(
+        dataset_id: str,
+        dimension: Literal["1d", "2d"] = "2d",
+        polarity: Literal["excitatory", "inhibitory"] = "excitatory",
+        force_reload: bool = False,
+    ) -> dict[str, Any]:
+        record = _get_record(services, dataset_id)
+        key = (dimension, polarity)
+        # Sidecars are explicitly reloaded, independently of progressive RF counts.
+        with record.saved_results_lock:
+            if not force_reload and key in record.saved_results:
+                return record.saved_results[key]
+            metadata = record.cache.metadata
+            source = RFResultSource(
+                record.source, tuple(metadata["unitPool"]),
+                tuple(metadata["xPositions"]), tuple(metadata["yPositions"]),
+                tuple(metadata["timeBinEdges"]),
+            )
+            payload: dict[str, Any] = {
+                "dimension": dimension, "polarity": polarity,
+                "sourcePath": record.public_source_path,
+                "resultPath": str(rf_result_path(record.source, dimension=dimension, rf_type=polarity)),
+            }
+            try:
+                result = load_saved_rf_result(
+                    source, dimension=dimension, rf_type=polarity,
+                    scope_root=record.scope_root,
+                )
+            except (OSError, ValueError, TypeError, KeyError) as error:
+                payload.update(available=False, detail=str(error))
+            else:
+                payload.update(
+                    available=True, unitIds=list(result.unit_ids),
+                    masks=result.mask.tolist(), centers=result.center.tolist(),
+                    axis=result.axis, projectedFrom2d=result.projected_from_2d,
+                    manifest=result.manifest, cacheKey=result.cache_key,
+                    summary=result.summary, summaryWarning=result.summary_warning,
+                )
+            record.saved_results[key] = payload
+            return payload
 
     @application.post("/api/datasets/{dataset_id}/cache/retry")
     def retry_dataset_cache(dataset_id: str) -> dict[str, Any]:

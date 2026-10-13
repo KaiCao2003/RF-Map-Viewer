@@ -139,11 +139,39 @@ def test_probe_hover_reports_unit_id_and_physical_coordinates(make_viewer):
         for item in viewer.probe_canvas.find_withtag("hover")
         if viewer.probe_canvas.type(item) == "text"
     ]
-    assert texts == ["ID: 7\nx: 7.5 µm\ny: 120 µm"]
+    assert texts == ["Unit ID: 7\nx: 7.5 µm\ny: 120 µm"]
     left, top, right, bottom = viewer.probe_canvas.bbox("hover")
     assert 0 <= left < right <= viewer.probe_canvas.winfo_width()
     assert 0 <= top < bottom <= viewer.probe_canvas.winfo_height()
     viewer.probe_canvas.event_generate("<Leave>")
+    assert viewer.probe_canvas.find_withtag("hover") == ()
+
+
+def test_probe_hover_setting_saves_clears_tooltip_and_can_be_reenabled(make_viewer):
+    viewer = make_viewer()
+    point = viewer._probe_to_canvas(7.5, 120.0)
+    assert point is not None
+    event = SimpleNamespace(x=point[0], y=point[1])
+    viewer._on_probe_motion(event)
+    assert viewer.probe_canvas.find_withtag("hover")
+
+    viewer._show_settings()
+    settings = viewer._app_root._rfm_settings_window
+    assert settings.show_probe_unit_info_var.get()
+    settings.show_probe_unit_info_var.set(False)
+    settings._commit(close=False)
+    assert not viewer.settings.show_probe_unit_info
+    assert viewer.probe_canvas.find_withtag("hover") == ()
+    viewer._on_probe_motion(event)
+    assert viewer.probe_canvas.find_withtag("hover") == ()
+    saved = json.loads(viewer._app_root._rfm_settings_path.read_text(encoding="utf-8"))
+    assert saved["show_probe_unit_info"] is False
+
+    settings.show_probe_unit_info_var.set(True)
+    settings._commit(close=False)
+    viewer._on_probe_motion(event)
+    assert viewer.probe_canvas.find_withtag("hover")
+    viewer._on_probe_motion(SimpleNamespace(x=event.x + 20, y=event.y))
     assert viewer.probe_canvas.find_withtag("hover") == ()
 
 
@@ -287,7 +315,7 @@ def test_annotation_zoom_and_scroll_preserve_hover_and_lasso_coordinates(make_vi
         for item in dialog.canvas.find_withtag("hover")
         if dialog.canvas.type(item) == "text"
     ]
-    assert texts == ["ID: 99\nx: 20 µm\ny: 130 µm"]
+    assert texts == ["Unit ID: 99\nx: 20 µm\ny: 130 µm"]
 
     draw_lasso(dialog, [(0, 110), (30, 110), (30, 140), (0, 140)])
     assert dialog.selected_ids == {7, 99}

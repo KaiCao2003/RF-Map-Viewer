@@ -2,8 +2,27 @@
 
 The current source ports the stable Python viewer's non-export updates:
 saved Settings, welcome/recent-file actions, HD input compatibility and Class 3,
-Probe selection, and companion synchronization between paired tabs. Figure
+Probe selection, and companion synchronization between paired tabs. It also
+includes the RF rate correction, saved RF Results and overlays, visible-tab
+preferences, Inspector, and automatic companion-pane folding from Python 1.11.
+These source updates do not change the published package version. Figure
 Studio/export updates, CCG, and the separate Free-Moving alpha are excluded.
+
+RF Hz is `counts / (stimulusPresentationCounts × response-window seconds)`.
+Spatial grouping and smoothing pool counts and exposure separately, and each
+Timeline frame uses its own duration. Files without presentation counts open in
+Spike count mode; occupancy is not substituted for response exposure.
+
+**RF Results** reads the source document's saved 1D/2D excitatory or inhibitory
+NPZ sidecars. Masks and centers use the RF plot's coordinates, orientation and
+grouping. **Reload** rereads saved results without running analysis. **Display →
+RF overlap** overlays native-bin outlines; **Shift+1 / Shift+2 / Shift+0** select
+1D / 2D / None. Settings includes default mode, polarity, border width and colors.
+Orange marks the original-bin intersection when both dimensions are displayed.
+**Inspector** shows selection details, saved parameters, QC and provenance.
+**Settings → General** selects visible tabs; number keys follow their order.
+Missing companion panes start folded and open when data arrives, while manual
+folding is respected.
 
 Open **Settings…** on the welcome screen or use the gear button in the viewer
 (**Command/Ctrl+,**). Its General, RF Map, Waveform, and Tuning Curve sections
@@ -26,7 +45,7 @@ The Web implementation contains a FastAPI backend in `backend/` and a
 React/Vite frontend in `frontend/`. The backend owns its figure renderer and
 does not import the analysis repository or the Python/Tk implementation.
 The published Web package remains at `1.10.2`, one feature generation behind
-the Python `1.11.0` reference; `web` remains an artifact/tag identity rather than
+the Python `1.11` reference; `web` remains an artifact/tag identity rather than
 a version suffix.
 
 Version 1.10.2 aligns HD tuning curves with clockwise-increasing RF azimuths

@@ -36,7 +36,7 @@ PROBE_POSITION_FILETYPES = (
     ("CSV document", "*.csv"),
     ("All files", "*.*"),
 )
-APP_VERSION = "1.11.5"
+APP_VERSION = "1.11.6"
 APP_EDITION = "Full"
 APP_DISPLAY_VERSION = APP_VERSION
 INNER_BLANK_ROWS = 4

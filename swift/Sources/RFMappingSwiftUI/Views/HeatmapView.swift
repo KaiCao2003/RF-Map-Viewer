@@ -3,6 +3,7 @@ import SwiftUI
 
 enum HeatmapKind {
     case rf
+    case results
     case delay
 }
 
@@ -28,8 +29,13 @@ struct HeatmapView: View {
                         subtitle: subtitle,
                         palette: kind == .delay ? nil : store.palette,
                         valueSuffix: kind == .delay ? " ms" : store.valueMode.suffix,
-                        drawInteraction: false
+                        drawLegend: kind != .results,
+                        drawInteraction: false,
+                        resultOnly: kind == .results
                     )
+                    if kind != .delay {
+                        drawSavedRFRectangles(context: &context, store: store, layout: layout, resultOnly: kind == .results)
+                    }
                 }
                 RectangularPlotInteractionLayer(store: store, layout: layout, size: size)
             }
@@ -40,7 +46,8 @@ struct HeatmapView: View {
                     matrix: plot.matrix,
                     xGroups: plot.xGroups,
                     yGroups: plot.yGroups,
-                    valueDescription: { _, _, value in
+                    valueDescription: { y, x, value in
+                        if kind == .results { return store.savedResultCellDescription(y: plot.yGroups[y], x: plot.xGroups[x]) }
                         if kind == .delay {
                             return value.map { String(format: "%.1f milliseconds", $0) } ?? "no delay"
                         }
@@ -56,6 +63,8 @@ struct HeatmapView: View {
         switch kind {
         case .rf:
             return store.currentHeatmapPlot()
+        case .results:
+            return store.resultsHeatmapPlot()
         case .delay:
             return store.delayHeatmapPlot(floor: store.responseFloor)
         }
@@ -65,6 +74,8 @@ struct HeatmapView: View {
         switch kind {
         case .rf:
             return "2D RF map - \(store.currentMatrixLabel())"
+        case .results:
+            return "Saved RF results · \(store.savedResultInterval)"
         case .delay:
             return "Delay map - peak displayed bin center"
         }

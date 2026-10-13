@@ -411,3 +411,13 @@ select, input[type="number"], input[type="text"], input[type="search"] { padding
 .recent-maps h2 { font-size: 14px; margin: 0 0 8px; }
 .recent-maps > button { width: 100%; display: flex; flex-direction: column; align-items: flex-start; padding: 8px; margin-top: 6px; text-align: left; overflow-wrap: anywhere; }
 .recent-maps > button span { color: #667085; font-size: 11px; }
+
+.rf-results-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 8px 16px; background: #fff; color: #1d1d1f; border-bottom: 1px solid #e4e7ec; }
+.rf-results-controls label { display: flex; align-items: center; gap: 6px; }
+.rf-results-controls span { color: #667085; font-size: 12px; }
+.rf-inspector { width: min(580px, calc(100vw - 44px)); }
+.rf-inspector pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
+
+.view-surface.with-results-controls { display: flex; flex-direction: column; }
+.with-results-controls > .rf-results-controls { flex: none; }
+.with-results-controls > .rf-hd-layout, .with-results-controls > .spatial-stage { height: auto; flex: 1; min-height: 0; }

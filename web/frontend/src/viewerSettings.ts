@@ -1,8 +1,13 @@
 import { DEFAULT_HD_DISPLAY_BINS, DEFAULT_HD_SMOOTH_SIGMA, normalizeHdBinCount } from "./hdMath";
-import { clamp, snappedResolutionMs } from "./math";
+import { clamp, snappedResolutionMs, supportsFiringRate } from "./math";
 import { DEFAULT_RF_TIMING, readRfTiming, RF_TIMING_KEY, timingPatch, type RfTiming } from "./rfTiming";
 import { DEFAULT_VALUE_MODE, PALETTES, POLAR_RADIUS_MODES, VALUE_MODES } from "./types";
-import type { DatasetMeta, HdViewSettings, ViewState, WaveformChannelMode } from "./types";
+import type { DatasetMeta, HdViewSettings, ViewState, WaveformChannelMode, RfOverlaySettings, ViewTab } from "./types";
+
+import { VIEWER_TABS } from "./viewTabs";
+
+export const RF_OVERLAY_MODES = ["None", "2D", "1D", "Both"] as const;
+export const DEFAULT_RF_OVERLAY: RfOverlaySettings = { mode: "None", polarity: "excitatory", width: 2, color2d: "#34c759", color1d: "#ffcc00", overlapColor: "#ff9500" };
 
 export const VIEWER_SETTINGS_KEY = "rfmapping-viewer-settings-v1";
 export type HdLayout = "side-by-side" | "stacked";
@@ -31,6 +36,8 @@ export interface ViewerSettings {
   polarLayout: boolean;
   rgbMode: boolean;
   initialTab: ViewState["selectedTab"];
+  visibleTabs: ViewTab[];
+  rfOverlay: RfOverlaySettings;
 }
 
 export const DEFAULT_VIEWER_SETTINGS: ViewerSettings = {
@@ -43,6 +50,7 @@ export const DEFAULT_VIEWER_SETTINGS: ViewerSettings = {
   timeResolutionMs: 1, valueMode: DEFAULT_VALUE_MODE, xBins: 0, yBins: 0,
   smoothRadius: 0, flipY: false, palette: "Gray", polarRadius: "Display bottom inner",
   polarLayout: false, rgbMode: false, initialTab: "rf",
+  visibleTabs: VIEWER_TABS.map((tab) => tab.key), rfOverlay: DEFAULT_RF_OVERLAY,
 };
 
 function readObject(raw: string | null): Record<string, unknown> {
@@ -63,6 +71,10 @@ export function loadViewerSettings(storage: Pick<Storage, "getItem">): ViewerSet
     hdLayout: storage.getItem("rfmapping-hd-layout-v1") ?? raw.hdLayout };
   const hd = readObject(JSON.stringify(raw.hd));
   const defaults = DEFAULT_VIEWER_SETTINGS;
+  const overlay = readObject(JSON.stringify(raw.rfOverlay));
+  const visibleTabs = VIEWER_TABS.map((tab) => tab.key).filter((key) => !Array.isArray(raw.visibleTabs) || raw.visibleTabs.includes(key));
+  if (!visibleTabs.length) visibleTabs.push("rf");
+  const color = (key: "color2d" | "color1d" | "overlapColor") => typeof overlay[key] === "string" && /^#[0-9a-f]{6}$/i.test(overlay[key] as string) ? overlay[key] as string : DEFAULT_RF_OVERLAY[key];
   const bool = (key: keyof ViewerSettings) => typeof source[key] === "boolean" ? source[key] as boolean : defaults[key] as boolean;
   const number = (key: keyof ViewerSettings, low: number, high: number, integer = false) => {
     const value = source[key];
@@ -90,7 +102,12 @@ export function loadViewerSettings(storage: Pick<Storage, "getItem">): ViewerSet
     xBins: number("xBins", 0, 100_000, true), yBins: number("yBins", 0, 100_000, true),
     smoothRadius: number("smoothRadius", 0, 3, true), flipY: bool("flipY"),
     palette: choice(source.palette, PALETTES, defaults.palette), polarRadius: choice(source.polarRadius, POLAR_RADIUS_MODES, defaults.polarRadius),
-    polarLayout: bool("polarLayout"), rgbMode: bool("rgbMode"), initialTab: choice(source.initialTab, ["rf", "delay", "timeline"], defaults.initialTab),
+    polarLayout: bool("polarLayout"), rgbMode: bool("rgbMode"),
+    initialTab: choice(source.initialTab, visibleTabs, visibleTabs[0]), visibleTabs,
+    rfOverlay: { mode: choice(overlay.mode, RF_OVERLAY_MODES, "None"),
+      polarity: choice(overlay.polarity, ["excitatory", "inhibitory"], "excitatory"),
+      width: typeof overlay.width === "number" && Number.isFinite(overlay.width) && overlay.width > 0 ? overlay.width : 2,
+      color2d: color("color2d"), color1d: color("color1d"), overlapColor: color("overlapColor") },
   };
 }
 
@@ -106,7 +123,10 @@ export function saveViewerSettings(storage: Pick<Storage, "setItem">, settings: 
 
 export function invalidSettingsSection(settings: ViewerSettings): "RF Map" | "Tuning Curve" | null {
   const integerInRange = (value: number, low: number, high: number) => Number.isInteger(value) && value >= low && value <= high;
-  if (!Number.isFinite(settings.timeResolutionMs) || settings.timeResolutionMs <= 0
+  if (!settings.visibleTabs.length || !settings.visibleTabs.includes(settings.initialTab)
+    || !Number.isFinite(settings.rfOverlay.width) || settings.rfOverlay.width <= 0
+    || ![settings.rfOverlay.color2d, settings.rfOverlay.color1d, settings.rfOverlay.overlapColor].every((color) => /^#[0-9a-f]{6}$/i.test(color))
+    || !Number.isFinite(settings.timeResolutionMs) || settings.timeResolutionMs <= 0
     || !integerInRange(settings.xBins, 0, 100_000) || !integerInRange(settings.yBins, 0, 100_000)
     || !integerInRange(settings.smoothRadius, 0, 3) || !integerInRange(settings.zeroBinThreshold, 1, 100_000)
     || ![settings.timing.sum, settings.timing.a, settings.timing.b].every(([start, end]) => Number.isFinite(start) && Number.isFinite(end) && start < end)) return "RF Map";
@@ -118,7 +138,7 @@ export function invalidSettingsSection(settings: ViewerSettings): "RF Map" | "Tu
 export function viewerSettingsPatch(meta: DatasetMeta, settings: ViewerSettings): Partial<ViewState> {
   return {
     ...timingPatch(meta, settings.timing), timeResolutionMs: snappedResolutionMs(meta, settings.timeResolutionMs),
-    valueMode: settings.valueMode, xBins: Math.min(settings.xBins || meta.shape[2], meta.shape[2]),
+    valueMode: supportsFiringRate(meta) ? settings.valueMode : "Spike count", xBins: Math.min(settings.xBins || meta.shape[2], meta.shape[2]),
     yBins: Math.min(settings.yBins || meta.shape[1], meta.shape[1]), smoothRadius: settings.smoothRadius,
     flipY: settings.flipY, palette: settings.palette, polarRadius: settings.polarRadius,
     polarLayout: settings.polarLayout, rgbMode: settings.rgbMode,

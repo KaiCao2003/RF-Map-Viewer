@@ -3,6 +3,7 @@ import SwiftUI
 struct ADNAnnotationView: View {
     let geometry: ProbeGeometry
     let selectionURL: URL
+    let showUnitInfo: Bool
     let save: (Set<Int>) throws -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var selectedUnitIDs: Set<Int>
@@ -19,10 +20,12 @@ struct ADNAnnotationView: View {
         geometry: ProbeGeometry,
         savedUnitIDs: Set<Int>,
         selectionURL: URL,
+        showUnitInfo: Bool = true,
         save: @escaping (Set<Int>) throws -> Void
     ) {
         self.geometry = geometry
         self.selectionURL = selectionURL
+        self.showUnitInfo = showUnitInfo
         self.save = save
         _selectedUnitIDs = State(initialValue: savedUnitIDs)
     }
@@ -68,7 +71,7 @@ struct ADNAnnotationView: View {
                     ScrollView(.vertical) {
                         Canvas { context, _ in
                             drawGeometry(context: &context, transform: transform)
-                            if let hoveredUnit, let hoverLocation {
+                            if showUnitInfo, let hoveredUnit, let hoverLocation {
                                 drawProbeUnitTooltip(
                                     context: &context,
                                     unit: hoveredUnit,
@@ -102,7 +105,7 @@ struct ADNAnnotationView: View {
                             switch phase {
                             case .active(let location):
                                 hoverLocation = location
-                                hoveredUnit = lasso.isEmpty
+                                hoveredUnit = showUnitInfo && lasso.isEmpty
                                     ? nearestUnit(at: location, transform: transform) : nil
                             case .ended:
                                 hoveredUnit = nil
@@ -247,7 +250,7 @@ func drawProbeUnitTooltip(
     bounds: CGRect
 ) {
     guard let position = unit.position else { return }
-    let label = Text("ID: \(unit.unitID)\nx: \(String(format: "%.1f", position.x)) µm\ny: \(String(format: "%.1f", position.y)) µm")
+    let label = Text("Unit ID: \(unit.unitID)\nx: \(String(format: "%.1f", position.x)) µm\ny: \(String(format: "%.1f", position.y)) µm")
         .font(.system(size: 11)).foregroundColor(.black)
     let resolved = context.resolve(label)
     let textSize = resolved.measure(in: CGSize(width: 200, height: 100))

@@ -22,11 +22,14 @@ struct ViewerSyncFields: OptionSet, Sendable {
     static let selectedCell = Self(rawValue: 1 << 16)
     static let timelineScroll = Self(rawValue: 1 << 17)
 
+    static let companionDisplay = Self(rawValue: 1 << 18)
+    static let overlay = Self(rawValue: 1 << 19)
+
     static let all: Self = [
         .unit, .valueMode, .activeTime, .timelineSelection, .plotRange,
         .timeResolution, .xBins, .yBins, .smoothing, .flipY, .palette,
         .polarRadius, .spatialFormat, .delayRGBMode, .responseFloor,
-        .selectedTab, .selectedCell, .timelineScroll
+        .selectedTab, .selectedCell, .timelineScroll, .companionDisplay, .overlay
     ]
 }
 
@@ -64,6 +67,16 @@ struct ViewerSyncState: Equatable, Sendable {
     var subtractRangeStartMS = 0.0
     var subtractRangeEndMS = 80.0
 
+    var tuningStyle = TuningPlotStyle.auto
+    var tuningLayout = TuningPaneLayout.sideBySide
+    var tuningBins = HDTuningData.defaultDisplayBins
+    var tuningSmoothing = true
+    var tuningSigmaDegrees = HDTuningData.defaultSmoothSigma * 360 / Double(HDTuningData.defaultDisplayBins)
+    var tuningSharedScale = false
+    var showTuning = true
+    var showProbe = true
+    var overlayLayers: Set<RFOverlayLayer> = []
+
     func changedFields(comparedTo baseline: ViewerSyncState) -> ViewerSyncFields {
         var fields: ViewerSyncFields = []
         if unitID != baseline.unitID { fields.insert(.unit) }
@@ -96,6 +109,13 @@ struct ViewerSyncState: Equatable, Sendable {
         if abs(timelineScrollFraction - baseline.timelineScrollFraction) > 1e-6 {
             fields.insert(.timelineScroll)
         }
+        if tuningStyle != baseline.tuningStyle || tuningLayout != baseline.tuningLayout
+            || tuningBins != baseline.tuningBins || tuningSmoothing != baseline.tuningSmoothing
+            || tuningSigmaDegrees != baseline.tuningSigmaDegrees || tuningSharedScale != baseline.tuningSharedScale
+            || showTuning != baseline.showTuning || showProbe != baseline.showProbe {
+            fields.insert(.companionDisplay)
+        }
+        if overlayLayers != baseline.overlayLayers { fields.insert(.overlay) }
         return fields
     }
 
@@ -128,7 +148,16 @@ struct ViewerSyncState: Equatable, Sendable {
                 : timelineScrollFraction,
             rfSubtractEnabled: fields.contains(.plotRange) ? incoming.rfSubtractEnabled : rfSubtractEnabled,
             subtractRangeStartMS: fields.contains(.plotRange) ? incoming.subtractRangeStartMS : subtractRangeStartMS,
-            subtractRangeEndMS: fields.contains(.plotRange) ? incoming.subtractRangeEndMS : subtractRangeEndMS
+            subtractRangeEndMS: fields.contains(.plotRange) ? incoming.subtractRangeEndMS : subtractRangeEndMS,
+            tuningStyle: fields.contains(.companionDisplay) ? incoming.tuningStyle : tuningStyle,
+            tuningLayout: fields.contains(.companionDisplay) ? incoming.tuningLayout : tuningLayout,
+            tuningBins: fields.contains(.companionDisplay) ? incoming.tuningBins : tuningBins,
+            tuningSmoothing: fields.contains(.companionDisplay) ? incoming.tuningSmoothing : tuningSmoothing,
+            tuningSigmaDegrees: fields.contains(.companionDisplay) ? incoming.tuningSigmaDegrees : tuningSigmaDegrees,
+            tuningSharedScale: fields.contains(.companionDisplay) ? incoming.tuningSharedScale : tuningSharedScale,
+            showTuning: fields.contains(.companionDisplay) ? incoming.showTuning : showTuning,
+            showProbe: fields.contains(.companionDisplay) ? incoming.showProbe : showProbe,
+            overlayLayers: fields.contains(.overlay) ? incoming.overlayLayers : overlayLayers
         )
     }
 
@@ -157,7 +186,11 @@ struct ViewerSyncState: Equatable, Sendable {
             timelineScrollFraction: timelineScrollFraction,
             rfSubtractEnabled: rfSubtractEnabled,
             subtractRangeStartMS: subtractRangeStartMS,
-            subtractRangeEndMS: subtractRangeEndMS
+            subtractRangeEndMS: subtractRangeEndMS,
+            tuningStyle: tuningStyle, tuningLayout: tuningLayout, tuningBins: tuningBins,
+            tuningSmoothing: tuningSmoothing, tuningSigmaDegrees: tuningSigmaDegrees,
+            tuningSharedScale: tuningSharedScale, showTuning: showTuning, showProbe: showProbe,
+            overlayLayers: overlayLayers
         )
     }
 
