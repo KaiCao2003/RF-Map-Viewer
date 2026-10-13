@@ -79,8 +79,13 @@ def window_number(widget) -> int:
 
 
 def close_window(widget) -> None:
-    _objc, send, _application, window = _native_widget_dispatch(widget)
-    send(window, b"performClose:", None, (ctypes.c_void_p,), None)
+    objc, send, _application, window = _native_widget_dispatch(widget)
+    # Dispatch while Tk drains the Cocoa loop, so Python callbacks enter through Tk.
+    send(
+        window, b"performSelector:withObject:afterDelay:", None,
+        (ctypes.c_void_p, ctypes.c_void_p, ctypes.c_double),
+        objc.sel_registerName(b"performClose:"), None, 0.0,
+    )
 
 
 def send_click(widget, *, count: int = 1) -> None:
