@@ -197,3 +197,12 @@ def test_malformed_archive_is_reported(source):
     rf_result_path(source.path).write_bytes(b"not an npz archive")
     with pytest.raises(ValueError, match="Cannot read"):
         load_saved_rf_result(source)
+
+
+def test_accepts_all_saved_component_centers(source):
+    mask = np.zeros((2, 2, 3), dtype=np.uint8)
+    mask[0, 0, 0] = mask[0, 1, 2] = 1
+    write_result(source, mask=mask, center=mask.copy(),
+                 manifest_changes={"center_algorithm": "component-response-weighted-medoid-v2"})
+    result = load_saved_rf_result(source)
+    assert result.for_unit(42)[1].sum() == 2

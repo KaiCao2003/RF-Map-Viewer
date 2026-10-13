@@ -40,8 +40,8 @@ describe("viewer keyboard shortcut parity", () => {
 
 it("selects overlays with physical shifted digits without stealing command chords", () => {
   const event = { code: "Digit1", shiftKey: true, metaKey: false, ctrlKey: false, altKey: false };
-  expect(rfOverlapShortcut(event)).toBe("1D");
-  expect(rfOverlapShortcut({ ...event, code: "Digit2" })).toBe("2D");
+  expect(rfOverlapShortcut(event)).toBe("excitatory_1d");
+  expect(rfOverlapShortcut({ ...event, code: "Digit2" })).toBe("excitatory_2d");
   expect(rfOverlapShortcut({ ...event, code: "Digit0" })).toBe("None");
   expect(rfOverlapShortcut({ ...event, ctrlKey: true })).toBeNull();
   expect(rfOverlapShortcut({ ...event, shiftKey: false })).toBeNull();

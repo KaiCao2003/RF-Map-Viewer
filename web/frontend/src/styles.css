@@ -421,3 +421,12 @@ select, input[type="number"], input[type="text"], input[type="search"] { padding
 .view-surface.with-results-controls { display: flex; flex-direction: column; }
 .with-results-controls > .rf-results-controls { flex: none; }
 .with-results-controls > .rf-hd-layout, .with-results-controls > .spatial-stage { height: auto; flex: 1; min-height: 0; }
+
+.probe-unit-tooltip { position: absolute; z-index: 2; pointer-events: none; background: #fff; color: #1d1d1f; border: 1px solid #aeb7c2; border-radius: 4px; padding: 5px 7px; font-size: 11px; white-space: nowrap; box-shadow: 0 2px 8px #0002; }
+.adn-dialog { display: flex; flex-direction: column; width: min(960px, 94vw); height: min(820px, 92vh); color: #1d1d1f; background: white; border-radius: 10px; overflow: hidden; }
+.adn-dialog header, .adn-heading { display: flex; gap: 10px; align-items: center; padding: 12px 16px; border-bottom: 1px solid #d6dbe2; }
+.adn-dialog header strong, .adn-heading > span:first-child { flex: 1; }
+.adn-content { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 180px; padding: 12px; gap: 16px; }
+.adn-content aside { display: flex; flex-direction: column; gap: 10px; min-height: 0; }
+.adn-unit-list { flex: 1; overflow: auto; padding: 8px; border: 1px solid #d6dbe2; font-size: 12px; }
+.adn-status { margin: 0; padding: 10px 16px; font-size: 12px; overflow-wrap: anywhere; }

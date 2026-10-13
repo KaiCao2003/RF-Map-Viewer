@@ -31,10 +31,14 @@ export function savedNativeCell(layout: SpatialLayout, state: Pick<ViewState, "f
 
 export function drawSavedRfOverlay(context: CanvasRenderingContext2D, layout: SpatialLayout,
   state: ViewState, overlay: SavedRfOverlay, settings: RfOverlaySettings, resultOnly: boolean): void {
-  const colors = ["", settings.color2d, settings.color1d, settings.overlapColor];
   context.save();
   context.lineWidth = settings.width;
-  overlay.flags?.forEach((row, y) => row.forEach((flag, x) => {
+  for (const inhibitory of [false, true]) {
+    const colors = inhibitory ? ["", settings.inhibitoryColor2d, settings.inhibitoryColor1d, settings.inhibitoryOverlapColor]
+      : ["", settings.color2d, settings.color1d, settings.overlapColor];
+    context.setLineDash(inhibitory && !resultOnly ? [5, 3] : []);
+    overlay.flags?.forEach((row, y) => row.forEach((flags, x) => {
+    const flag = (flags >> (inhibitory ? 2 : 0)) & 3;
     if (!flag) return;
     const cell = savedNativeCell(layout, state, y, x);
     context.strokeStyle = colors[flag];
@@ -48,7 +52,9 @@ export function drawSavedRfOverlay(context: CanvasRenderingContext2D, layout: Sp
     }
     if (resultOnly) context.fill();
     context.stroke();
-  }));
+    }));
+  }
+  context.setLineDash([]);
   if (resultOnly) {
     overlay.centers2d.forEach(([y, x]) => {
       const cell = savedNativeCell(layout, state, y, x);

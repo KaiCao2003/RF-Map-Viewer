@@ -1,5 +1,6 @@
 import type {
   DatasetMeta,
+  AdnSelection,
   SavedRfResult,
   RfResultDimension,
   RfResultPolarity,
@@ -896,4 +897,16 @@ export async function getSavedRfResult(datasetId: string, dimension: RfResultDim
   const params = new URLSearchParams({ dimension, polarity, force_reload: String(forceReload) });
   const response = await checked(await protectedFetch(apiUrl(`datasets/${encodeURIComponent(datasetId)}/rf-results?${params}`), { signal }));
   return await response.json() as SavedRfResult;
+}
+
+export async function getAdnSelection(id: string, positionsPath: string | null, signal?: AbortSignal): Promise<AdnSelection> {
+  const url = new URL(`datasets/${encodeURIComponent(id)}/adn-selection`, apiBase);
+  if (positionsPath) url.searchParams.set("path", positionsPath);
+  return (await checked(await protectedFetch(url, { signal }))).json();
+}
+
+export async function saveAdnSelection(id: string, positionsPath: string | null, unitIds: number[]): Promise<AdnSelection> {
+  return (await checked(await protectedFetch(apiUrl(`datasets/${encodeURIComponent(id)}/adn-selection`), {
+    method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ unitIds, positionsPath }),
+  }))).json();
 }

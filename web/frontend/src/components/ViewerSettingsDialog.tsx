@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { normalizeHdBinCount } from "../hdMath";
-import { DEFAULT_VIEWER_SETTINGS, RF_OVERLAY_MODES, invalidSettingsSection, type ViewerSettings } from "../viewerSettings";
+import { DEFAULT_VIEWER_SETTINGS, RF_OVERLAY_LAYERS, RF_OVERLAY_COLORS, toggleRfOverlayLayer, invalidSettingsSection, type ViewerSettings } from "../viewerSettings";
 import { PALETTES, POLAR_RADIUS_MODES, VALUE_MODES } from "../types";
 
 import { VIEWER_TABS } from "../viewTabs";
@@ -79,6 +79,7 @@ export default function ViewerSettingsDialog({ settings, onSave, onClose }: {
           {checkbox("Auto-load HD tuning curve", "autoLoadHd", !draft.showHd)}
           {checkbox("Probe layout", "showProbe")}
           {checkbox("Auto-load Probe layout", "autoLoadProbe", !draft.showProbe)}
+          {checkbox("Unit info on hover", "showProbeUnitInfo", !draft.showProbe)}
           <p className="muted-copy">Choose companion files manually when auto-load is off.</p>
           <h3>Visible tabs</h3>
           {VIEWER_TABS.map(({ key, label }) => <label className="check-row" key={key}><input type="checkbox" checked={draft.visibleTabs.includes(key)}
@@ -110,10 +111,10 @@ export default function ViewerSettingsDialog({ settings, onSave, onClose }: {
           </fieldset>
         </>}
         {tab === "RF Map" && <fieldset><legend>Saved RF overlay</legend>
-          <label className="settings-row"><span>Show</span><select value={draft.rfOverlay.mode} onChange={(event) => patch({ rfOverlay: { ...draft.rfOverlay, mode: event.target.value as ViewerSettings["rfOverlay"]["mode"] } })}>{RF_OVERLAY_MODES.map((mode) => <option key={mode}>{mode}</option>)}</select></label>
-          <label className="settings-row"><span>Polarity</span><select value={draft.rfOverlay.polarity} onChange={(event) => patch({ rfOverlay: { ...draft.rfOverlay, polarity: event.target.value as ViewerSettings["rfOverlay"]["polarity"] } })}><option>excitatory</option><option>inhibitory</option></select></label>
+          {RF_OVERLAY_LAYERS.map((layer) => <label className="check-row" key={layer}><input type="checkbox" checked={draft.rfOverlay.layers.includes(layer)}
+            onChange={() => patch({ rfOverlay: { ...draft.rfOverlay, layers: toggleRfOverlayLayer(draft.rfOverlay.layers, layer) } })} /><span>{layer.replace("_", " ").replace("1d", "1D").replace("2d", "2D")}</span></label>)}
           <label className="settings-row"><span>Border width (px)</span><input type="number" required min="0.1" step="any" value={draft.rfOverlay.width} onChange={(event) => patch({ rfOverlay: { ...draft.rfOverlay, width: Number(event.target.value) } })} /></label>
-          {([["color2d", "2D color"], ["color1d", "1D color"], ["overlapColor", "Overlap color"]] as const).map(([key, label]) => <label key={key} className="settings-row"><span>{label}</span><input type="color" value={draft.rfOverlay[key]} onChange={(event) => patch({ rfOverlay: { ...draft.rfOverlay, [key]: event.target.value } })} /></label>)}
+          {RF_OVERLAY_COLORS.map(([key, label]) => <label key={key} className="settings-row"><span>{label}</span><input type="color" value={draft.rfOverlay[key]} onChange={(event) => patch({ rfOverlay: { ...draft.rfOverlay, [key]: event.target.value } })} /></label>)}
         </fieldset>}
         {tab === "Waveform" && <fieldset><legend>Local average waveform</legend>
           {checkbox("Show waveform", "showWaveform")}

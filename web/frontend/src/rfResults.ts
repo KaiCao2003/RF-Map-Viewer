@@ -1,7 +1,16 @@
-import type { DatasetMeta, RfOverlayMode, RfResultDimension, SavedRfResult } from "./types";
+import type { DatasetMeta, RfOverlayMode, RfOverlayLayer, RfResultPolarity, RfResultDimension, SavedRfResult } from "./types";
 
 export function resultDimensions(mode: RfOverlayMode): RfResultDimension[] {
   return mode === "Both" ? ["2d", "1d"] : mode === "None" ? [] : [mode === "2D" ? "2d" : "1d"];
+}
+
+export function resultLayers(mode: RfOverlayMode, polarity: RfResultPolarity): RfOverlayLayer[] {
+  return resultDimensions(mode).map((dimension): RfOverlayLayer => `${polarity}_${dimension}`);
+}
+
+export function layerResult(layer: RfOverlayLayer): { dimension: RfResultDimension; polarity: RfResultPolarity } {
+  const [polarity, dimension] = layer.split("_") as [RfResultPolarity, RfResultDimension];
+  return { dimension, polarity };
 }
 
 export interface SavedRfOverlay {
@@ -16,7 +25,7 @@ export function savedRfOverlay(meta: DatasetMeta, results: SavedRfResult[], unit
   for (const result of results) {
     const index = result.available ? result.unitIds.indexOf(unitId) : -1;
     if (!result.available || index < 0) {
-      overlay.unavailable.push(result.dimension.toUpperCase());
+      overlay.unavailable.push(`${result.polarity} ${result.dimension.toUpperCase()}`);
       continue;
     }
     overlay.flags ??= Array.from({ length: meta.shape[1] }, () => Array(meta.shape[2]).fill(0));
@@ -28,7 +37,7 @@ export function savedRfOverlay(meta: DatasetMeta, results: SavedRfResult[], unit
         // broadcast over the collapsed axis only for display.
         const detected = result.dimension === "2d" ? Boolean(mask[y][x])
           : axis === "x" ? mask.some((row) => Boolean(row[x])) : mask[y].some(Boolean);
-        if (detected) overlay.flags[y][x] |= result.dimension === "2d" ? 1 : 2;
+        if (detected) overlay.flags[y][x] |= (result.dimension === "2d" ? 1 : 2) << (result.polarity === "inhibitory" ? 2 : 0);
         if (result.dimension === "2d" && center[y][x]) overlay.centers2d.push([y, x]);
       }
     }

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ApiError,
   getSavedRfResult,
+  getAdnSelection,
   getCacheProgress,
   getServerPaths,
   retryCache,
@@ -15,12 +16,13 @@ import {
   listRemoteFiles,
   openRemoteDataset,
 } from "./api";
+import AdnAnnotationDialog from "./components/AdnAnnotationDialog";
 import RfInspector from "./components/RfInspector";
-import { resultDimensions, savedRfOverlay } from "./rfResults";
+import { resultLayers, layerResult, savedRfOverlay } from "./rfResults";
 import { supportsFiringRate } from "./math";
 import RfWindowInput from "./components/RfWindowInput";
 import ViewerSettingsDialog from "./components/ViewerSettingsDialog";
-import { loadViewerSettings, saveViewerSettings, viewerSettingsPatch, RF_OVERLAY_MODES, type ViewerSettings, type HdLayout } from "./viewerSettings";
+import { loadViewerSettings, saveViewerSettings, viewerSettingsPatch, RF_OVERLAY_LAYERS, toggleRfOverlayLayer, type ViewerSettings, type HdLayout } from "./viewerSettings";
 import HdPanel from "./components/HdPanel";
 import FigureExportComposer from "./components/FigureExportComposer";
 import { SpatialPlot, TimelinePlot } from "./components/Plots";
@@ -70,6 +72,7 @@ import {
 } from "./unitFilter";
 import type {
   CellRef,
+  AdnSelection,
   RfOverlaySettings,
   RfOverlayMode,
   RfResultPolarity,
@@ -216,7 +219,7 @@ export default function App() {
   const [zeroSpikeSpatialBinThreshold, setZeroSpikeSpatialBinThreshold] = useState(
     () => settings.zeroBinThreshold,
   );
-  const [qualityVisibleUnitIds, setQualityVisibleUnitIds] = useState<number[]>([]);
+  const [rfVisibleUnitIds, setQualityVisibleUnitIds] = useState<number[]>([]);
   const [unitFilterStatus, setUnitFilterStatus] = useState<"loading" | "ready" | "error">("loading");
   const [unitFilterError, setUnitFilterError] = useState("");
   const [error, setError] = useState("");
@@ -248,6 +251,14 @@ export default function App() {
   const [probePositionsPath, setProbePositionsPath] = useState<string | null>(null);
   const [probeCollapsed, setProbeCollapsed] = useState(true);
   const [probeSelection, setProbeSelection] = useState<ProbeSelection | null>(null);
+  const [adnSelection, setAdnSelection] = useState<AdnSelection | null>(null);
+  const [adnError, setAdnError] = useState("");
+  const [adnOpen, setAdnOpen] = useState(false);
+  const [onlyAdn, setOnlyAdn] = useState(false);
+  const qualityVisibleUnitIds = useMemo(() => onlyAdn
+    ? rfVisibleUnitIds.filter((id) => adnSelection?.available && adnSelection.unitIds.includes(id)) : rfVisibleUnitIds,
+    [rfVisibleUnitIds, onlyAdn, adnSelection]);
+
   const [hdArtifact, setHdArtifact] = useState<HdDatasetArtifact | null>(null);
   const [hdError, setHdError] = useState("");
   const [hdLoading, setHdLoading] = useState(false);
@@ -325,6 +336,7 @@ export default function App() {
   const paired = usePairedWindows(meta, pairedState, qualityVisibleUnitIds, applyPairedPatch);
 
   const commitDataset = useCallback((next: DatasetMeta) => {
+    setOnlyAdn(false); setAdnOpen(false); setAdnSelection(null); setAdnError("");
     probeRequest.current.cancel();
     setProbeBusy(false);
     countsCache.current.clear();
@@ -763,31 +775,42 @@ export default function App() {
       ? { ...current, selectedTab: settings.visibleTabs[0] } : current);
   }, [settings.visibleTabs]);
 
-  const effectiveResultMode = viewState?.selectedTab === "results" ? resultMode
-    : rfOverlay.mode !== "None" ? rfOverlay.mode : inspectorOpen ? resultMode : "None";
-  const effectiveResultPolarity = viewState?.selectedTab === "results" || rfOverlay.mode === "None" ? resultPolarity : rfOverlay.polarity;
+  useEffect(() => {
+    setAdnSelection(null); setAdnError(""); setAdnOpen(false);
+    if (!meta || !probe) return;
+    const controller = new AbortController();
+    getAdnSelection(meta.id, probePositionsPath, controller.signal)
+      .then((selection) => { if (!controller.signal.aborted) setAdnSelection(selection); })
+      .catch((caught) => { if (!controller.signal.aborted) setAdnError(caught instanceof Error ? caught.message : "Could not read ADN annotation."); });
+    return () => controller.abort();
+  }, [meta?.id, probe, probePositionsPath]);
+
+  const effectiveResultLayers = useMemo(() => viewState?.selectedTab === "results" ? resultLayers(resultMode, resultPolarity)
+    : rfOverlay.layers.length ? rfOverlay.layers : inspectorOpen ? resultLayers(resultMode, resultPolarity) : [],
+    [viewState?.selectedTab, resultMode, resultPolarity, rfOverlay.layers, inspectorOpen]);
   useEffect(() => {
     const controller = new AbortController();
     const forceReload = forceResultsReload.current;
     forceResultsReload.current = false;
     setSavedResults([]);
     setResultsError("");
-    if (!meta || effectiveResultMode === "None") { setResultsLoading(false); return; }
+    if (!meta || !effectiveResultLayers.length) { setResultsLoading(false); return; }
     setResultsLoading(true);
-    Promise.all(resultDimensions(effectiveResultMode).map(async (dimension) => {
-      const key = `${meta.id}:${dimension}:${effectiveResultPolarity}`;
+    Promise.all(effectiveResultLayers.map(async (layer) => {
+      const { dimension, polarity } = layerResult(layer);
+      const key = `${meta.id}:${dimension}:${polarity}`;
       const cached = resultsCache.current.get(key);
       if (cached && !forceReload) return cached;
-      const result = await getSavedRfResult(meta.id, dimension, effectiveResultPolarity, forceReload, controller.signal);
+      const result = await getSavedRfResult(meta.id, dimension, polarity, forceReload, controller.signal);
       if (!controller.signal.aborted) resultsCache.current.set(key, result);
       return result;
     })).then((results) => { if (!controller.signal.aborted) setSavedResults(results); })
       .catch((error) => { if (!controller.signal.aborted) setResultsError(error instanceof Error ? error.message : "Could not load saved RF results."); })
       .finally(() => { if (!controller.signal.aborted) setResultsLoading(false); });
     return () => controller.abort();
-  }, [meta, effectiveResultMode, effectiveResultPolarity, resultsReload]);
-  const activeResults = useMemo(() => savedResults.filter((result) => result.polarity === effectiveResultPolarity
-    && resultDimensions(effectiveResultMode).includes(result.dimension)), [savedResults, effectiveResultPolarity, effectiveResultMode]);
+  }, [meta, effectiveResultLayers, resultsReload]);
+  const activeResults = useMemo(() => savedResults.filter((result) => effectiveResultLayers.includes(`${result.polarity}_${result.dimension}`)),
+    [savedResults, effectiveResultLayers]);
   const savedOverlay = useMemo(() => meta && viewState ? savedRfOverlay(meta, activeResults, viewState.clusterId) : null,
     [meta, activeResults, viewState?.clusterId]);
   const reloadResults = () => { resultsCache.current.clear(); forceResultsReload.current = true; setResultsReload((value) => value + 1); };
@@ -1044,7 +1067,7 @@ export default function App() {
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
-      if (settingsOpen || inspectorOpen || sourceOpen || probeChooserOpen || hdChooserOpen || figureComposerOpen) return;
+      if (adnOpen || settingsOpen || inspectorOpen || sourceOpen || probeChooserOpen || hdChooserOpen || figureComposerOpen) return;
       if ((event.metaKey || event.ctrlKey) && event.key === ",") {
         event.preventDefault(); setSettingsOpen(true); return;
       }
@@ -1071,7 +1094,7 @@ export default function App() {
       if (picker && (target?.matches(":open") || event.key.toLowerCase() !== "p")) return;
       const overlapMode = rfOverlapShortcut(event);
       if (overlapMode) {
-        event.preventDefault(); setRfOverlay((current) => ({ ...current, mode: overlapMode })); return;
+        event.preventDefault(); setRfOverlay((current) => ({ ...current, layers: overlapMode === "None" ? [] : toggleRfOverlayLayer(current.layers, overlapMode) })); return;
       }
       if (event.key === "-") { event.preventDefault(); updateState(toggleRfMode(meta, viewState)); return; }
       if (event.key.toLowerCase() === "d") { event.preventDefault(); setDisplayOptions((value) => !value); return; }
@@ -1102,7 +1125,7 @@ export default function App() {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [settings.visibleTabs, inspectorOpen, settingsOpen, sourceOpen, probeChooserOpen, hdChooserOpen, figureComposerOpen, meta, openChooser, openExportDialog, openFigureComposer, probeSelection, showFullTimeline, stepResolution, stepTimeline, stepUnit, updateState, viewState]);
+  }, [settings.visibleTabs, adnOpen, inspectorOpen, settingsOpen, sourceOpen, probeChooserOpen, hdChooserOpen, figureComposerOpen, meta, openChooser, openExportDialog, openFigureComposer, probeSelection, showFullTimeline, stepResolution, stepTimeline, stepUnit, updateState, viewState]);
 
   if (!meta || !viewState) {
     return (
@@ -1136,7 +1159,7 @@ export default function App() {
   const visibleTabs = VIEWER_TABS.filter((tab) => settings.visibleTabs.includes(tab.key));
   const noQualityMatches = unitFilterStatus === "ready"
     && unitFilterEnabled
-    && qualityVisibleUnitIds.length === 0;
+    && rfVisibleUnitIds.length === 0;
   const noNavigationUnits = unitFilterStatus !== "ready" || navigationPool.length === 0;
   const emptyUnitTitle = unitFilterStatus === "loading"
     ? "Updating native RF-bin unit filter"
@@ -1144,15 +1167,15 @@ export default function App() {
       ? "Unit filter unavailable"
       : noQualityMatches
         ? "No units pass the current RF window"
-        : "No units in selected Probe region";
+        : onlyAdn && !qualityVisibleUnitIds.length ? "No saved ADN units pass the current filter" : "No units in selected Probe region";
   const emptyUnitDetail = unitFilterStatus === "loading"
     ? "Counting zero-spike native spatial bins for the current RF selection window."
     : unitFilterStatus === "error"
       ? unitFilterError
       : noQualityMatches
         ? `Increase the zero-bin threshold, change the RF sum range, or disable the filter. Visible requires zero-bin count < ${zeroSpikeSpatialBinThreshold}.`
-        : "Clear or redraw the Probe region to continue unit navigation.";
-  const unavailableUnit = !noNavigationUnits && (localIndex < 0 || (unitFilterEnabled && !qualityVisibleUnitIds.includes(viewState.clusterId)));
+        : onlyAdn && !qualityVisibleUnitIds.length ? "Annotate ADN and save, or turn off Only ADN." : "Clear or redraw the Probe region to continue unit navigation.";
+  const unavailableUnit = !noNavigationUnits && (localIndex < 0 || ((unitFilterEnabled || onlyAdn) && !qualityVisibleUnitIds.includes(viewState.clusterId)));
   const unitIsLoading = !unavailableUnit && (unitStatus === "loading" || unitStatus === "unavailable");
   const unavailableView = <div className="view-empty"><strong>Cluster {viewState.clusterId}: N/A in this dataset</strong><span>{localIndex < 0 ? "This recorded unit is present in a paired viewer, but absent from this RF file." : "This unit is hidden by this dataset's native RF-bin filter."}</span></div>;
   const unit = valueModeUnit(viewState.valueMode);
@@ -1237,6 +1260,7 @@ export default function App() {
             {probe ? (
               <ProbeLayout
                 geometry={probe}
+                showUnitInfo={settings.showProbeUnitInfo}
                 availableUnitIds={qualityVisibleUnitIds}
                 currentClusterId={viewState.clusterId}
                 selection={probeSelection}
@@ -1259,6 +1283,10 @@ export default function App() {
                   : <><strong>Probe layout unavailable</strong><span>{probeError || "Choose the matching remote .probe or positions.csv file."}</span><button type="button" onClick={() => setProbeChooserOpen(true)}>Choose .probe / positions.csv…</button></>}
               </div>
             )}
+            <div className="probe-toolbar"><button type="button" disabled={!probe || !adnSelection?.available} onClick={() => setAdnOpen(true)}>Annotate ADN…</button>
+              <label className="check-row"><input type="checkbox" checked={onlyAdn} disabled={!adnSelection?.available} onChange={(event) => setOnlyAdn(event.target.checked)} />Only ADN</label></div>
+            {adnError && <p className="dialog-error" role="alert">{adnError}</p>}
+            {adnSelection && !adnSelection.available && <p className="muted-copy">{adnSelection.detail}</p>}
             {probePositionsPath && <p className="companion-path" title={probePositionsPath}>{probePositionsPath}</p>}
           </section>}
 
@@ -1359,7 +1387,9 @@ export default function App() {
             <label className="display-row"><span>Y bins</span><input type="number" min={1} max={meta.shape[1]} step={1} value={viewState.yBins} onChange={(event) => updateState({ yBins: clamp(Math.round(Number(event.target.value)), 1, meta.shape[1]) })} /></label>
             <label className="display-row"><span>Smooth</span><input type="number" min={0} max={3} step={1} value={viewState.smoothRadius} onChange={(event) => updateState({ smoothRadius: clamp(Math.round(Number(event.target.value)), 0, 3) })} /></label>
             <label className="display-row"><span>Palette</span><select value={viewState.palette} onChange={(event) => updateState({ palette: event.target.value as Palette })}>{PALETTES.map((palette) => <option key={palette}>{palette}</option>)}</select></label>
-            <label className="display-row"><span>RF overlap</span><select value={rfOverlay.mode} onChange={(event) => setRfOverlay((current) => ({ ...current, mode: event.target.value as RfOverlayMode }))}>{RF_OVERLAY_MODES.map((mode) => <option key={mode}>{mode}</option>)}</select></label>
+            <span className="display-row">RF overlap</span>
+            {RF_OVERLAY_LAYERS.map((layer) => <label className="check-row" key={layer}><input type="checkbox" checked={rfOverlay.layers.includes(layer)}
+              onChange={() => setRfOverlay((current) => ({ ...current, layers: toggleRfOverlayLayer(current.layers, layer) }))} />{layer.replace("_", " ").replace("1d", "1D").replace("2d", "2D")}</label>)}
             <label className="display-row"><span>Polar radius</span><select value={viewState.polarRadius} onChange={(event) => updateState({ polarRadius: event.target.value as PolarRadius })}>{POLAR_RADIUS_MODES.map((mode) => <option key={mode}>{mode}</option>)}</select></label>
             </div>
           </section>
@@ -1423,8 +1453,8 @@ export default function App() {
               </button>
             ))}
           </nav>
-          <section className={`view-surface ${viewState.selectedTab === "results" || (viewState.selectedTab === "rf" && rfOverlay.mode !== "None") ? "with-results-controls" : ""}`}>
-            {(viewState.selectedTab === "results" || (viewState.selectedTab === "rf" && rfOverlay.mode !== "None")) && <div className="rf-results-controls">
+          <section className={`view-surface ${viewState.selectedTab === "results" || (viewState.selectedTab === "rf" && rfOverlay.layers.length > 0) ? "with-results-controls" : ""}`}>
+            {(viewState.selectedTab === "results" || (viewState.selectedTab === "rf" && rfOverlay.layers.length > 0)) && <div className="rf-results-controls">
               {viewState.selectedTab === "results" && <>
                 <label>Dimension <select aria-label="Saved RF dimensions" value={resultMode} onChange={(event) => setResultMode(event.target.value as RfOverlayMode)}>{["2D", "1D", "Both"].map((mode) => <option key={mode}>{mode}</option>)}</select></label>
                 <label>Polarity <select aria-label="Saved RF polarity" value={resultPolarity} onChange={(event) => setResultPolarity(event.target.value as RfResultPolarity)}><option>excitatory</option><option>inhibitory</option></select></label>
@@ -1434,7 +1464,7 @@ export default function App() {
             </div>}
             {viewState.selectedTab === "results" && (noNavigationUnits ? <div className="view-empty"><strong>{emptyUnitTitle}</strong><span>{emptyUnitDetail}</span></div>
               : unavailableUnit ? unavailableView : unitStatus === "error" ? <div className="view-empty error-state"><strong>Unit data could not be loaded</strong><span>{error}</span></div> : counts && selectedCell && savedOverlay
-                ? <SpatialPlot kind="results" meta={meta} counts={counts} state={viewState} unitIndex={localIndex} selectedCell={selectedCell} onSelectCell={selectCell} savedOverlay={savedOverlay} overlaySettings={{ ...rfOverlay, mode: resultMode, polarity: resultPolarity }} />
+                ? <SpatialPlot kind="results" meta={meta} counts={counts} state={viewState} unitIndex={localIndex} selectedCell={selectedCell} onSelectCell={selectCell} savedOverlay={savedOverlay} overlaySettings={{ ...rfOverlay, layers: resultLayers(resultMode, resultPolarity) }} />
                 : <div className="view-empty">Loading unit…</div>)}
             <div className={`rf-hd-layout hd-layout-${hdLayout} ${!showHd ? "hd-is-hidden" : hdCollapsed ? "hd-is-collapsed" : ""}`} hidden={viewState.selectedTab !== "rf"}>
               <div className="rf-primary-pane">
@@ -1442,7 +1472,7 @@ export default function App() {
                 {unavailableUnit && unavailableView}
                 {!noNavigationUnits && unitIsLoading && <div className="view-empty"><span className="spinner" /> Loading cluster {viewState.clusterId}…</div>}
                 {!noNavigationUnits && unitStatus === "error" && <div className="view-empty error-state"><strong>Unit data could not be loaded</strong><span>{error}</span></div>}
-                {viewState.selectedTab === "rf" && !noNavigationUnits && !unavailableUnit && counts && selectedCell && <SpatialPlot kind="rf" meta={meta} counts={counts} state={viewState} unitIndex={localIndex} selectedCell={selectedCell} onSelectCell={selectCell} savedOverlay={rfOverlay.mode !== "None" ? savedOverlay ?? undefined : undefined} overlaySettings={rfOverlay} />}
+                {viewState.selectedTab === "rf" && !noNavigationUnits && !unavailableUnit && counts && selectedCell && <SpatialPlot kind="rf" meta={meta} counts={counts} state={viewState} unitIndex={localIndex} selectedCell={selectedCell} onSelectCell={selectCell} savedOverlay={rfOverlay.layers.length > 0 ? savedOverlay ?? undefined : undefined} overlaySettings={rfOverlay} />}
               </div>
               {showHd && <HdPanel
                 artifact={hdArtifact}
@@ -1549,12 +1579,12 @@ export default function App() {
             rfStartMs: viewState.rfStartMs,
             rfEndMs: viewState.rfEndMs,
             zeroSpikeSpatialBinThreshold,
-            visibleUnitIds: [...qualityVisibleUnitIds],
+            visibleUnitIds: [...rfVisibleUnitIds],
           }}
           viewState={viewState}
           selectedCell={selectedCell}
           hdSettings={hdSettings}
-          probeFilteredUnitIds={probeFilter}
+          probeFilteredUnitIds={probeFilter ?? (onlyAdn ? qualityVisibleUnitIds : null)}
           availableCapabilities={{
             hd: Boolean(hdArtifact?.available),
             probe: probe != null,
@@ -1567,11 +1597,13 @@ export default function App() {
           onClose={() => setFigureComposerOpen(false)}
         />
       )}
+      {adnOpen && probe && adnSelection?.available && <AdnAnnotationDialog datasetId={meta.id} positionsPath={probePositionsPath}
+        geometry={probe} selection={adnSelection} showUnitInfo={settings.showProbeUnitInfo} onSaved={setAdnSelection} onClose={() => setAdnOpen(false)} />}
       {helpOpen && (
         <div className="modal-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) setHelpOpen(false); }}>
           <div className="info-dialog" role="dialog" aria-modal="true" aria-label="Keyboard Shortcuts">
             <header><strong>Keyboard Shortcuts</strong><button type="button" aria-label="Close" onClick={() => setHelpOpen(false)}>×</button></header>
-            <pre>← / → or [ / ]   Previous / next unit{"\n"}↑ / ↓   Previous / next timeline bin{"\n"}Shift+, / Shift+.   Coarser / finer by one source bin{"\n"}−   Toggle RF Sum / A − B windows{"\n"}D   Show / hide Display Options{"\n"}Command/Ctrl-Shift+.   Show / hide filtered units{"\n"}1–4   Switch visible tabs in order{"\n"}Shift+1 / Shift+2 / Shift+0   RF overlap: 1D / 2D / None{"\n"}F   Invert Y{"\n"}P   Toggle rectangular / polar layout{"\n"}Shift+P   Cycle palette{"\n"}Double-click waveform   Enlarge local waveform{"\n"}Esc   Close waveform zoom; clear Probe region; otherwise show full Timeline{"\n"}Command/Ctrl-,   Settings{"\n"}Command/Ctrl-O   Open an RF mapping file in this viewer{"\n"}Command/Ctrl-E   Open Figure Export Composer{"\n"}Command/Ctrl-Shift-E   Export displayed data CSV</pre>
+            <pre>← / → or [ / ]   Previous / next unit{"\n"}↑ / ↓   Previous / next timeline bin{"\n"}Shift+, / Shift+.   Coarser / finer by one source bin{"\n"}−   Toggle RF Sum / A − B windows{"\n"}D   Show / hide Display Options{"\n"}Command/Ctrl-Shift+.   Show / hide filtered units{"\n"}1–4   Switch visible tabs in order{"\n"}Shift+1 / Shift+2 / Shift+0   Toggle excitatory 1D / 2D; disable all overlays{"\n"}F   Invert Y{"\n"}P   Toggle rectangular / polar layout{"\n"}Shift+P   Cycle palette{"\n"}Double-click waveform   Enlarge local waveform{"\n"}Esc   Close waveform zoom; clear Probe region; otherwise show full Timeline{"\n"}Command/Ctrl-,   Settings{"\n"}Command/Ctrl-O   Open an RF mapping file in this viewer{"\n"}Command/Ctrl-E   Open Figure Export Composer{"\n"}Command/Ctrl-Shift-E   Export displayed data CSV</pre>
             <footer><button type="button" onClick={() => setHelpOpen(false)}>OK</button></footer>
           </div>
         </div>

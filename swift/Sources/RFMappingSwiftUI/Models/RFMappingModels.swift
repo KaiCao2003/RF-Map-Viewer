@@ -106,10 +106,10 @@ struct UnitMetrics: Sendable {
     let maxTotal: Double
     let maxPeak: Double
     let maxBinCount: Double
-    /// Nil only when every spatial cell has zero occupancy.
+    /// Nil when presentation counts or positive response exposure are unavailable.
     let maxFiringRate: Double?
     let totalSpikes: Double
-    /// Full-window strongest occupancy-normalized response cell.
+    /// Full-window strongest rate cell, or strongest count cell when Hz is unavailable.
     let bestY: Int
     let bestX: Int
 }

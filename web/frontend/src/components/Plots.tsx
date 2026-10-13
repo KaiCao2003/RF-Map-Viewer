@@ -581,12 +581,21 @@ const SpatialPlotContent = memo(function SpatialPlotContent({
       drawSavedRfOverlay(context, layout.current, state, savedOverlay, overlaySettings, kind === "results");
       drawSelection(context, layout.current, selectedCell);
       let legendX = 20;
-      for (const [label, color] of [["2D", overlaySettings.color2d], ["1D", overlaySettings.color1d], ["Overlap", overlaySettings.overlapColor]]) {
-        if ((label === "2D" && overlaySettings.mode === "1D") || (label === "1D" && overlaySettings.mode === "2D") || (label === "Overlap" && overlaySettings.mode !== "Both")) continue;
-        context.strokeStyle = color; context.lineWidth = overlaySettings.width;
-        context.strokeRect(legendX, height - 18, 10, 10);
-        drawText(context, label, legendX + 16, height - 9, { font: canvasFont(11) }); legendX += 86;
+      for (const polarity of ["excitatory", "inhibitory"] as const) {
+        const twoD = overlaySettings.layers.includes(`${polarity}_2d`), oneD = overlaySettings.layers.includes(`${polarity}_1d`);
+        const colors = polarity === "excitatory" ? [overlaySettings.color2d, overlaySettings.color1d, overlaySettings.overlapColor]
+          : [overlaySettings.inhibitoryColor2d, overlaySettings.inhibitoryColor1d, overlaySettings.inhibitoryOverlapColor];
+        for (const [index, label] of ["2D", "1D", "overlap"].entries()) {
+          if (!(index === 0 ? twoD : index === 1 ? oneD : twoD && oneD)) continue;
+          context.strokeStyle = colors[index]; context.lineWidth = overlaySettings.width;
+          context.setLineDash(polarity === "inhibitory" && kind !== "results" ? [5, 3] : []);
+          context.strokeRect(legendX, height - 18, 10, 10);
+          const text = `${polarity === "excitatory" ? "Ex" : "Inh"} ${label}`;
+          drawText(context, text, legendX + 16, height - 9, { font: canvasFont(11) });
+          legendX += index === 2 ? 99 : 76;
+        }
       }
+      context.setLineDash([]);
       if (kind === "results" && !savedOverlay.flags) drawText(context, "No saved result for this unit", width / 2, 66, { align: "center", color: "#667085" });
     }
   }, [height, kind, meta, response, responsePrepared, savedOverlay, overlaySettings, selectedCell, state, temporal, unitIndex, width]));

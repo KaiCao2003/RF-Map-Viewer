@@ -2,12 +2,20 @@ import { DEFAULT_HD_DISPLAY_BINS, DEFAULT_HD_SMOOTH_SIGMA, normalizeHdBinCount }
 import { clamp, snappedResolutionMs, supportsFiringRate } from "./math";
 import { DEFAULT_RF_TIMING, readRfTiming, RF_TIMING_KEY, timingPatch, type RfTiming } from "./rfTiming";
 import { DEFAULT_VALUE_MODE, PALETTES, POLAR_RADIUS_MODES, VALUE_MODES } from "./types";
-import type { DatasetMeta, HdViewSettings, ViewState, WaveformChannelMode, RfOverlaySettings, ViewTab } from "./types";
+import type { DatasetMeta, HdViewSettings, ViewState, WaveformChannelMode, RfOverlaySettings, RfOverlayLayer, ViewTab } from "./types";
 
 import { VIEWER_TABS } from "./viewTabs";
 
 export const RF_OVERLAY_MODES = ["None", "2D", "1D", "Both"] as const;
-export const DEFAULT_RF_OVERLAY: RfOverlaySettings = { mode: "None", polarity: "excitatory", width: 2, color2d: "#34c759", color1d: "#ffcc00", overlapColor: "#ff9500" };
+export const RF_OVERLAY_LAYERS: readonly RfOverlayLayer[] = ["excitatory_2d", "excitatory_1d", "inhibitory_2d", "inhibitory_1d"];
+export const RF_OVERLAY_COLORS = [["color2d", "Excitatory 2D"], ["color1d", "Excitatory 1D"], ["overlapColor", "Excitatory overlap"],
+  ["inhibitoryColor2d", "Inhibitory 2D"], ["inhibitoryColor1d", "Inhibitory 1D"], ["inhibitoryOverlapColor", "Inhibitory overlap"]] as const;
+export const DEFAULT_RF_OVERLAY: RfOverlaySettings = { layers: [], width: 2, color2d: "#34c759", color1d: "#ffcc00", overlapColor: "#ff9500",
+  inhibitoryColor2d: "#af52de", inhibitoryColor1d: "#00a1b5", inhibitoryOverlapColor: "#5856d6" };
+
+export function toggleRfOverlayLayer(layers: RfOverlayLayer[], layer: RfOverlayLayer): RfOverlayLayer[] {
+  return RF_OVERLAY_LAYERS.filter((item) => item === layer ? !layers.includes(item) : layers.includes(item));
+}
 
 export const VIEWER_SETTINGS_KEY = "rfmapping-viewer-settings-v1";
 export type HdLayout = "side-by-side" | "stacked";
@@ -17,6 +25,7 @@ export interface ViewerSettings {
   autoLoadHd: boolean;
   showProbe: boolean;
   autoLoadProbe: boolean;
+  showProbeUnitInfo: boolean;
   showWaveform: boolean;
   tuningSession: number;
   waveformChannelMode: WaveformChannelMode;
@@ -41,7 +50,7 @@ export interface ViewerSettings {
 }
 
 export const DEFAULT_VIEWER_SETTINGS: ViewerSettings = {
-  showHd: true, autoLoadHd: true, showProbe: true, autoLoadProbe: true,
+  showHd: true, autoLoadHd: true, showProbe: true, autoLoadProbe: true, showProbeUnitInfo: true,
   showWaveform: true, tuningSession: 1, waveformChannelMode: "same_x_column",
   hdLayout: "side-by-side",
   hd: { plotMode: "auto", displayBins: DEFAULT_HD_DISPLAY_BINS, smoothing: true,
@@ -74,7 +83,7 @@ export function loadViewerSettings(storage: Pick<Storage, "getItem">): ViewerSet
   const overlay = readObject(JSON.stringify(raw.rfOverlay));
   const visibleTabs = VIEWER_TABS.map((tab) => tab.key).filter((key) => !Array.isArray(raw.visibleTabs) || raw.visibleTabs.includes(key));
   if (!visibleTabs.length) visibleTabs.push("rf");
-  const color = (key: "color2d" | "color1d" | "overlapColor") => typeof overlay[key] === "string" && /^#[0-9a-f]{6}$/i.test(overlay[key] as string) ? overlay[key] as string : DEFAULT_RF_OVERLAY[key];
+  const color = (key: typeof RF_OVERLAY_COLORS[number][0]) => typeof overlay[key] === "string" && /^#[0-9a-f]{6}$/i.test(overlay[key] as string) ? overlay[key] as string : DEFAULT_RF_OVERLAY[key];
   const bool = (key: keyof ViewerSettings) => typeof source[key] === "boolean" ? source[key] as boolean : defaults[key] as boolean;
   const number = (key: keyof ViewerSettings, low: number, high: number, integer = false) => {
     const value = source[key];
@@ -84,7 +93,7 @@ export function loadViewerSettings(storage: Pick<Storage, "getItem">): ViewerSet
   const choice = <T extends string>(value: unknown, choices: readonly T[], fallback: T): T =>
     choices.includes(value as T) ? value as T : fallback;
   return {
-    showHd: bool("showHd"), autoLoadHd: bool("autoLoadHd"), showProbe: bool("showProbe"), autoLoadProbe: bool("autoLoadProbe"),
+    showHd: bool("showHd"), autoLoadHd: bool("autoLoadHd"), showProbe: bool("showProbe"), autoLoadProbe: bool("autoLoadProbe"), showProbeUnitInfo: bool("showProbeUnitInfo"),
     showWaveform: bool("showWaveform"), tuningSession: number("tuningSession", 1, Number.MAX_SAFE_INTEGER, true),
     waveformChannelMode: choice(source.waveformChannelMode, ["same_x_column", "same_shank"], defaults.waveformChannelMode),
     hdLayout: choice(source.hdLayout, ["side-by-side", "stacked"], defaults.hdLayout),
@@ -104,10 +113,12 @@ export function loadViewerSettings(storage: Pick<Storage, "getItem">): ViewerSet
     palette: choice(source.palette, PALETTES, defaults.palette), polarRadius: choice(source.polarRadius, POLAR_RADIUS_MODES, defaults.polarRadius),
     polarLayout: bool("polarLayout"), rgbMode: bool("rgbMode"),
     initialTab: choice(source.initialTab, visibleTabs, visibleTabs[0]), visibleTabs,
-    rfOverlay: { mode: choice(overlay.mode, RF_OVERLAY_MODES, "None"),
-      polarity: choice(overlay.polarity, ["excitatory", "inhibitory"], "excitatory"),
+    rfOverlay: { layers: Array.isArray(overlay.layers) ? RF_OVERLAY_LAYERS.filter((layer) => (overlay.layers as unknown[]).includes(layer))
+      : RF_OVERLAY_LAYERS.filter((layer) => layer.startsWith(overlay.polarity === "inhibitory" ? "inhibitory" : "excitatory")
+        && (overlay.mode === "Both" || layer.endsWith(overlay.mode === "2D" ? "_2d" : overlay.mode === "1D" ? "_1d" : "_none"))),
       width: typeof overlay.width === "number" && Number.isFinite(overlay.width) && overlay.width > 0 ? overlay.width : 2,
-      color2d: color("color2d"), color1d: color("color1d"), overlapColor: color("overlapColor") },
+      color2d: color("color2d"), color1d: color("color1d"), overlapColor: color("overlapColor"),
+      inhibitoryColor2d: color("inhibitoryColor2d"), inhibitoryColor1d: color("inhibitoryColor1d"), inhibitoryOverlapColor: color("inhibitoryOverlapColor") },
   };
 }
 
@@ -125,7 +136,7 @@ export function invalidSettingsSection(settings: ViewerSettings): "RF Map" | "Tu
   const integerInRange = (value: number, low: number, high: number) => Number.isInteger(value) && value >= low && value <= high;
   if (!settings.visibleTabs.length || !settings.visibleTabs.includes(settings.initialTab)
     || !Number.isFinite(settings.rfOverlay.width) || settings.rfOverlay.width <= 0
-    || ![settings.rfOverlay.color2d, settings.rfOverlay.color1d, settings.rfOverlay.overlapColor].every((color) => /^#[0-9a-f]{6}$/i.test(color))
+    || !RF_OVERLAY_COLORS.every(([key]) => /^#[0-9a-f]{6}$/i.test(settings.rfOverlay[key]))
     || !Number.isFinite(settings.timeResolutionMs) || settings.timeResolutionMs <= 0
     || !integerInRange(settings.xBins, 0, 100_000) || !integerInRange(settings.yBins, 0, 100_000)
     || !integerInRange(settings.smoothRadius, 0, 3) || !integerInRange(settings.zeroBinThreshold, 1, 100_000)

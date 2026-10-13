@@ -211,13 +211,16 @@ export interface HoverInfo {
 export type RfResultDimension = "2d" | "1d";
 export type RfResultPolarity = "excitatory" | "inhibitory";
 export type RfOverlayMode = "None" | "2D" | "1D" | "Both";
+export type RfOverlayLayer = `${RfResultPolarity}_${RfResultDimension}`;
 export interface RfOverlaySettings {
-  mode: RfOverlayMode;
-  polarity: RfResultPolarity;
+  layers: RfOverlayLayer[];
   width: number;
   color2d: string;
   color1d: string;
   overlapColor: string;
+  inhibitoryColor2d: string;
+  inhibitoryColor1d: string;
+  inhibitoryOverlapColor: string;
 }
 export type SavedRfResult = {
   available: false;
@@ -239,4 +242,8 @@ export type SavedRfResult = {
   summary: Record<string, unknown> | null;
   summaryWarning: string | null;
   projectedFrom2d: boolean;
+};
+
+export type AdnSelection = { available: false; detail: string } | {
+  available: true; path: string; probe: string; unitIds: number[];
 };

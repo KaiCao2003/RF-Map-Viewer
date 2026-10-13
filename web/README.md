@@ -1,12 +1,13 @@
-# Web Viewer 1.10.2
+# Web Viewer 1.10.3
 
 The current source ports the stable Python viewer's non-export updates:
 saved Settings, welcome/recent-file actions, HD input compatibility and Class 3,
 Probe selection, and companion synchronization between paired tabs. It also
 includes the RF rate correction, saved RF Results and overlays, visible-tab
 preferences, Inspector, and automatic companion-pane folding from Python 1.11.
-These source updates do not change the published package version. Figure
-Studio/export updates, CCG, and the separate Free-Moving alpha are excluded.
+Version 1.10.3 also includes independent RF overlays, probe hover details, and
+ADN annotation/filtering from Python 1.11.5. Figure Studio/PDF export updates,
+CCG, and the separate Free-Moving alpha are excluded.
 
 RF Hz is `counts / (stimulusPresentationCounts × response-window seconds)`.
 Spatial grouping and smoothing pool counts and exposure separately, and each
@@ -16,9 +17,11 @@ Spike count mode; occupancy is not substituted for response exposure.
 **RF Results** reads the source document's saved 1D/2D excitatory or inhibitory
 NPZ sidecars. Masks and centers use the RF plot's coordinates, orientation and
 grouping. **Reload** rereads saved results without running analysis. **Display →
-RF overlap** overlays native-bin outlines; **Shift+1 / Shift+2 / Shift+0** select
-1D / 2D / None. Settings includes default mode, polarity, border width and colors.
-Orange marks the original-bin intersection when both dimensions are displayed.
+RF overlap** independently overlays excitatory/inhibitory 1D/2D native-bin
+outlines; **Shift+1 / Shift+2** toggle excitatory 1D/2D and **Shift+0** disables
+all four layers. Settings saves the four defaults, border width, and six colors.
+Inhibitory outlines are dashed; overlap colors mark original-bin intersections
+within each polarity. All saved component centers remain visible.
 **Inspector** shows selection details, saved parameters, QC and provenance.
 **Settings → General** selects visible tabs; number keys follow their order.
 Missing companion panes start folded and open when data arrives, while manual
@@ -34,6 +37,14 @@ with opted-in paired tabs. **Restore Defaults** takes effect when saved.
 **Close map** returns to the welcome screen, whose Recent RF maps list can reopen
 a file or be cleared without changing the files.
 
+Probe hover shows Unit ID and physical x/y coordinates in µm. **Settings →
+General → Unit info on hover** toggles this display and saves the preference.
+**Annotate ADN…** opens a probe-space lasso with depth zoom, Undo, and Clear.
+Only **Save ADN** writes the session's `data/adn_neuron.npy`; entries for other
+probes are retained, and RF/geometry inputs remain read-only. **Only ADN**
+intersects the saved IDs with the current RF unit filter. Annotation requires a
+recording-session ancestor named `YYMMDD_N` and available probe geometry.
+
 HD readers accept current columnar tuning JSON, nested schema-v2 JSON, and legacy
 unit-ID-to-rate mappings. Saved classes 0–3 are accepted; Class 3 has a blue badge,
 and its saved `kappa_cutoff` and class description are available under **Info**.
@@ -44,9 +55,9 @@ Gaussian smoothing, without inventing counts or exposure.
 The Web implementation contains a FastAPI backend in `backend/` and a
 React/Vite frontend in `frontend/`. The backend owns its figure renderer and
 does not import the analysis repository or the Python/Tk implementation.
-The published Web package remains at `1.10.2`, one feature generation behind
-the Python `1.11` reference; `web` remains an artifact/tag identity rather than
-a version suffix.
+The Web component version is `1.10.3`; `web` remains an artifact/tag identity
+rather than a version suffix. Source/build validation does not update the live
+Web deployment.
 
 Version 1.10.2 aligns HD tuning curves with clockwise-increasing RF azimuths
 in both the viewer and figure exports: RF −90° matches HD 270°, RF 90° matches
