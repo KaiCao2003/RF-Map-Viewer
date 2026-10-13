@@ -368,7 +368,7 @@ def test_health_and_lazy_browse_are_root_confined(
         ]
         assert health.json() == {
             "status": "ok",
-            "version": "1.10.2",
+            "version": "1.10.3",
             "rfRoot": str(settings.rf_root),
             "rfRootAvailable": True,
             "outputRoot": str(settings.output_root),
@@ -3105,7 +3105,7 @@ def test_figure_manifest_records_hashed_frozen_source_and_companions(
     assert provenance["provenanceVersion"] == 1
     assert provenance["application"] == {
         "name": "RF Map Viewer",
-        "version": "1.10.2",
+        "version": "1.10.3",
         "edition": "Web",
     }
     assert provenance["snapshot"] == {

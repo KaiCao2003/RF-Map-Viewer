@@ -3703,14 +3703,22 @@ class TkViewerTests(unittest.TestCase):
     def test_inspector_opens_from_view_menu_updates_and_closes_independently(self) -> None:
         self.app.notebook.select(0)
         self.app._update_all()
-        self.app.update_idletasks()
+        self.app.update()
         inspector = self.app.inspector_window
         self.assertFalse(inspector.winfo_ismapped())
         self.assertFalse(self.app.cell_label.winfo_ismapped())
         self.assertFalse(self.app.unit_stats_label.winfo_ismapped())
         initial_rf_size = (self.app.canvases["rf"].winfo_width(), self.app.canvases["rf"].winfo_height())
         self.app._view_menu.invoke("Inspector…")
-        self.app.update_idletasks()
+        # Win32 maps the notebook page through native events, not idle tasks.
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            self.app.update()
+            if all(widget.winfo_ismapped() for widget in (
+                inspector, self.app.cell_label, self.app.unit_stats_label,
+            )):
+                break
+            time.sleep(0.004)
         self.assertTrue(inspector.winfo_ismapped())
         self.assertTrue(self.app.cell_label.winfo_ismapped())
         self.assertIn("bin", self.app.cell_label.cget("text"))
