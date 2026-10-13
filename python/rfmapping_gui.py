@@ -158,10 +158,12 @@ class ViewerApplication:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.closing_all = False
-        root.bind_all("<Control-o>", self.open_json)
+        for keysym in ("o", "O"):
+            root.bind_all(f"<Control-{keysym}>", self.open_json)
         root.bind_all("<Control-comma>", self.show_settings)
         if sys.platform == "darwin":
-            root.bind_all("<Command-o>", self.open_json)
+            for keysym in ("o", "O"):
+                root.bind_all(f"<Command-{keysym}>", self.open_json)
             root.bind_all("<Command-comma>", self.show_settings)
             root.bind_all("<Command-Option-w>", self.close_all_windows)
             root.bind_all("<Command-Option-KeyPress>", self.close_all_option_key)
@@ -221,7 +223,15 @@ class ViewerApplication:
             menu.add_cascade(label="RF Map Viewer", menu=parent)
         utilities = tk.Menu(parent, tearoff=False)
         utilities.add_command(label="Cross-correlogram…", command=self.open_crosscorrelogram)
+        utilities.add_command(label="Annotate ADN…", command=self.open_adn_annotation)
         parent.add_cascade(label="Utilities", menu=utilities)
+
+    def open_adn_annotation(self) -> None:
+        viewer = self.current_viewer()
+        if viewer is None or not viewer._viewer_ready:
+            messagebox.showinfo("Annotate ADN", "Open a recording's RF map to annotate its probe units.", parent=self.root)
+            return
+        viewer._open_adn_annotation()
 
     def add_file_menu(self, menu: tk.Menu, close: Callable[[], None]) -> None:
         file_menu = tk.Menu(menu, tearoff=False)
@@ -303,7 +313,9 @@ class ViewerApplication:
         window.configure(menu=menu)
         self.root._rfm_crosscorrelogram_window = window
         window.bind("<Destroy>", self.utility_destroyed, add="+")
-        window.bind("<Command-w>" if sys.platform == "darwin" else "<Control-w>", lambda _event: window.destroy())
+        primary = "Command" if sys.platform == "darwin" else "Control"
+        for keysym in ("w", "W"):
+            window.bind(f"<{primary}-{keysym}>", lambda _event: window.destroy())
         if sys.platform == "darwin":
             window.bind("<Command-Option-w>", self.close_all_windows)
             window.bind("<Command-Option-KeyPress>", self.close_all_option_key)
@@ -523,6 +535,7 @@ class RFMViewer(tk.Toplevel):
         self.palette_var = tk.StringVar(value=self.settings.rf_palette)
         self.polar_radius_var = tk.StringVar(value=self.settings.rf_polar_radius)
         self.polar_layout_var = tk.BooleanVar(value=self.settings.rf_polar_layout)
+        self.rf_result_overlay_enabled_var = tk.BooleanVar(value=self.settings.rf_result_overlay_enabled)
         self.rf_result_overlay_vars = {
             layer: tk.BooleanVar(value=layer in self.settings.rf_result_overlay_layers)
             for layer in RF_RESULT_OVERLAY_LAYERS
@@ -1183,10 +1196,14 @@ class RFMViewer(tk.Toplevel):
         self._display_options_menu_index = view_menu.index("end")
         view_menu.add_command(
             label="Show Filtered Units",
-            accelerator="⌘⇧.",
+            accelerator="⌘⇧." if sys.platform == "darwin" else "Ctrl+Shift+.",
             command=self._toggle_zero_bin_filter,
         )
         self._unit_filter_menu_index = view_menu.index("end")
+        view_menu.add_checkbutton(
+            label="Only ADN", variable=self.only_adn_var,
+            command=self._on_only_adn_toggled,
+        )
         self._view_menu = view_menu
         if sys.platform != "darwin":
             view_menu.add_separator()
@@ -1337,17 +1354,6 @@ class RFMViewer(tk.Toplevel):
             justify="left",
         )
         self.spatial_status_label.grid(row=2, column=0, sticky="ew", pady=(5, 10))
-        adn_controls = ttk.Frame(self.probe_section, style="Sidebar.TFrame")
-        adn_controls.grid(row=3, column=0, sticky="ew", pady=(0, 8))
-        self.annotate_adn_button = ttk.Button(
-            adn_controls, text="Annotate ADN…", command=self._open_adn_annotation,
-        )
-        self.annotate_adn_button.pack(side="left")
-        self.only_adn_toggle = ttk.Checkbutton(
-            adn_controls, text="Only ADN", variable=self.only_adn_var,
-            command=self._on_only_adn_toggled, style="Sidebar.TCheckbutton",
-        )
-        self.only_adn_toggle.pack(side="right")
         row += 1
 
         self.waveform_host = ttk.Frame(
@@ -2105,7 +2111,11 @@ class RFMViewer(tk.Toplevel):
             command=self._on_spatial_format_changed,
         )
         self.polar_layout_toggle.grid(row=1, column=4, sticky="w", pady=(8, 0))
-        ttk.Label(display, text="RF overlap", style="Panel.TLabel").grid(
+        self.rf_result_overlay_toggle = ttk.Checkbutton(
+            display, text="RF overlap", variable=self.rf_result_overlay_enabled_var,
+            command=self._on_rf_result_overlays_changed,
+        )
+        self.rf_result_overlay_toggle.grid(
             row=2, column=0, sticky="w", pady=(8, 0)
         )
         overlays = ttk.Frame(display, style="Panel.TFrame")
@@ -2157,7 +2167,6 @@ class RFMViewer(tk.Toplevel):
             ("<Shift-comma>", self._step_time_resolution, (1.0,)),
             ("<greater>", self._step_time_resolution, (-1.0,)),
             ("<Shift-period>", self._step_time_resolution, (-1.0,)),
-            ("<Escape>", self._handle_escape, ()),
             ("<KeyPress-f>", self._toggle_flip_y, ()),
             ("<KeyPress-F>", self._toggle_flip_y, ()),
             ("<KeyPress-p>", self._toggle_polar_layout, ()),
@@ -2186,14 +2195,19 @@ class RFMViewer(tk.Toplevel):
             # TNotebook consumes arrows (and on Aqua, letter traversal) before
             # the toplevel bindtag. Handle viewer shortcuts there first too.
             self.notebook.bind(sequence, callback)
-        self.bind("<Control-e>", lambda _event: self._open_figure_exporter())
-        self.bind("<Control-Shift-E>", lambda _event: self._export_current_matrix())
-        self.bind("<Control-w>", lambda _event: self._close_window())
-        if sys.platform == "darwin":
-            self.bind("<Command-e>", lambda _event: self._open_figure_exporter())
-            self.bind("<Command-Shift-E>", lambda _event: self._export_current_matrix())
-            self.bind("<Command-w>", lambda _event: self._close_window())
-            self._bind_unit_filter_shortcut()
+        for widget in (
+            self, self.notebook, self.waveform_zoom_canvas, self.waveform_zoom_done_button,
+        ):
+            widget.bind("<Escape>", self._on_escape_key)
+        modifiers = ("Control", "Command") if sys.platform == "darwin" else ("Control",)
+        for modifier in modifiers:
+            # CapsLock changes letter keysyms, including Shift+letter on Windows.
+            for keysym in ("e", "E"):
+                self.bind(f"<{modifier}-{keysym}>", lambda _event: self._open_figure_exporter())
+                self.bind(f"<{modifier}-Shift-{keysym}>", lambda _event: self._export_current_matrix())
+            for keysym in ("w", "W"):
+                self.bind(f"<{modifier}-{keysym}>", lambda _event: self._close_window())
+        self._bind_unit_filter_shortcut()
         for key, canvas in self.canvases.items():
             canvas.bind("<Configure>", self._schedule_redraw)
             canvas.bind("<Motion>", lambda event, k=key: self._on_canvas_motion(k, event))
@@ -2295,6 +2309,13 @@ class RFMViewer(tk.Toplevel):
         else:
             self._clear_timeline_selection()
 
+    def _on_escape_key(self, event: tk.Event) -> str | None:
+        # The enlarged waveform owns Escape even when an input retained focus.
+        if self._waveform_zoomed:
+            self._close_waveform_zoom()
+            return "break"
+        return self._run_navigation_shortcut(event, self._handle_escape)
+
     def _on_window_focus(self, _event: object | None = None) -> None:
         self._app_root._rfm_active_viewer = self
 
@@ -2323,10 +2344,15 @@ class RFMViewer(tk.Toplevel):
             return None
         # Tk also matches a plain-key binding when extra modifiers are held.
         # Leave Command/Control/Alt chords to their own bindings.
-        if self.tk.call("tk", "windowingsystem") == "aqua":
+        windowing_system = self.tk.call("tk", "windowingsystem")
+        if windowing_system == "aqua":
             # Aqua: Control, Command (Mod1), Option (Mod2). Mod3/Mod4 are
             # keypad/Fn flags carried by ordinary native arrow-key events.
             command_modifiers = 0x0004 | 0x0008 | 0x0010 | 0x20000
+        elif windowing_system == "win32":
+            # Windows: Mod1 is NumLock and Mod3 is ScrollLock. Neither lock
+            # state nor the extended-key flag is a command modifier.
+            command_modifiers = 0x0004 | 0x0010 | 0x20000
         else:
             command_modifiers = 0x0004 | 0x0008 | 0x0040 | 0x0080 | 0x20000
         if int(getattr(event, "state", 0) or 0) & command_modifiers:
@@ -2356,8 +2382,12 @@ class RFMViewer(tk.Toplevel):
         # Aqua may report the period, its shifted keysym, or kana_fullstop
         # for the same physical key while a punctuation input method is active.
         target = self if target is None else target
-        for keysym in ("period", "greater", "kana_fullstop"):
-            target.bind(f"<Command-Shift-{keysym}>", toggle)
+        primary = "Command" if sys.platform == "darwin" else "Control"
+        keysyms = ("period", "greater")
+        if sys.platform == "darwin":
+            keysyms += ("kana_fullstop",)
+        for keysym in keysyms:
+            target.bind(f"<{primary}-Shift-{keysym}>", toggle)
 
     def _toggle_zero_bin_filter(self) -> None:
         enabled = not self.settings.rf_filter_units_with_zero_bins
@@ -2415,13 +2445,15 @@ class RFMViewer(tk.Toplevel):
 
     def _on_rf_result_overlays_changed(self) -> None:
         layers = tuple(layer for layer, variable in self.rf_result_overlay_vars.items() if variable.get())
-        self.settings = replace(self.settings, rf_result_overlay_layers=layers)
+        self.settings = replace(
+            self.settings, rf_result_overlay_layers=layers,
+            rf_result_overlay_enabled=self.rf_result_overlay_enabled_var.get(),
+        )
         self._on_control_changed()
 
     def _toggle_rf_result_overlay(self, layer: str | None) -> None:
         if layer is None:
-            for variable in self.rf_result_overlay_vars.values():
-                variable.set(False)
+            self.rf_result_overlay_enabled_var.set(not self.rf_result_overlay_enabled_var.get())
         else:
             variable = self.rf_result_overlay_vars[layer]
             variable.set(not variable.get())
@@ -2443,19 +2475,19 @@ class RFMViewer(tk.Toplevel):
             "Shift+, / Shift+.   Coarser / finer by one source bin\n"
             "1–4   Switch visible plot tab\n"
             "Shift+1 / Shift+2   Toggle excitatory 1D / 2D overlay\n"
-            "Shift+0   Clear all RF overlays\n"
+            "Shift+0   Show / hide RF overlays (keep selected layers)\n"
             "F   Invert Y\n"
             "P   Toggle Rectangle / Polar layout\n"
             "Shift+P   Cycle palette\n"
             "−   Toggle RF sum / A − B\n"
             "D   Show / hide Display Options\n"
-            "Command+Shift+.   Hide / show units filtered by RF bins\n"
+            f"{primary}+Shift+.   Hide / show units filtered by RF bins\n"
             "Esc   Show Full Timeline Range\n"
             "[ / ]   Previous / next unit (legacy)\n"
-            "Command-O   Open an RF map in a new window\n"
-            "Command-E   Open figure exporter\n"
-            "Shift-Command-E   Export displayed data CSV\n"
-            "Command-W   Close current window",
+            f"{primary}+O   Open an RF map in a new window\n"
+            f"{primary}+E   Open figure exporter\n"
+            f"{primary}+Shift+E   Export displayed data CSV\n"
+            f"{primary}+W   Close current window",
             parent=self,
         )
 
@@ -2486,7 +2518,9 @@ class RFMViewer(tk.Toplevel):
 
     def _install_application_handlers(self) -> None:
         self.protocol("WM_DELETE_WINDOW", self._close_window)
-        self.bind("<Command-w>" if sys.platform == "darwin" else "<Control-w>", self._close_window)
+        primary = "Command" if sys.platform == "darwin" else "Control"
+        for keysym in ("w", "W"):
+            self.bind(f"<{primary}-{keysym}>", self._close_window)
         if sys.platform == "darwin":
             self.bind("<Command-Option-w>", self._app_root._rfm_application.close_all_windows)
             self.bind("<Command-Option-KeyPress>", self._app_root._rfm_application.close_all_option_key)
@@ -3298,6 +3332,8 @@ class RFMViewer(tk.Toplevel):
                 return False
             self._app_root._rfm_settings = settings
         self.settings = settings
+        if not settings.show_probe_unit_info:
+            self.probe_canvas.delete("hover")
         if persist:
             for window in self._ready_pairing_viewers():
                 if window is not self:
@@ -3333,6 +3369,7 @@ class RFMViewer(tk.Toplevel):
             self.palette_var.set(settings.rf_palette)
             self.polar_radius_var.set(settings.rf_polar_radius)
             self.polar_layout_var.set(settings.rf_polar_layout)
+            self.rf_result_overlay_enabled_var.set(settings.rf_result_overlay_enabled)
             for layer, variable in self.rf_result_overlay_vars.items():
                 variable.set(layer in settings.rf_result_overlay_layers)
             self.rgb_mode_var.set(settings.rf_rgb_mode)
@@ -4664,8 +4701,14 @@ class RFMViewer(tk.Toplevel):
             full_geometry = load_probe_geometry(
                 geometry.probe_name, geometry.positions_path, geometry.channels_path,
             )
+            tuning = self.tuning_curve_data
+            if tuning is None:
+                tuning_path = discover_tuning_curve_path(self.data.path, self.settings.tuning_curve_session)
+                if tuning_path is not None:
+                    tuning = TuningCurveData.load(tuning_path)
             self._adn_window = ADNAnnotationWindow(
                 self, full_geometry, self._adn_path, self._on_adn_saved,
+                hd_classes=tuning.hd_classes if tuning is not None else {},
             )
         except (OSError, ValueError) as exc:
             messagebox.showerror("Could not open ADN annotation", str(exc), parent=self)
@@ -4700,7 +4743,11 @@ class RFMViewer(tk.Toplevel):
     def _on_probe_motion(self, event: tk.Event) -> None:
         canvas = self.probe_canvas
         canvas.delete("hover")
-        if self._probe_drag_start is not None or not self._probe_hit_points:
+        if (
+            not self.settings.show_probe_unit_info
+            or self._probe_drag_start is not None
+            or not self._probe_hit_points
+        ):
             return
         x, y, unit = min(
             self._probe_hit_points,
@@ -5265,7 +5312,7 @@ class RFMViewer(tk.Toplevel):
     def _sync_inspector_results(self) -> None:
         pane = self.results_pane
         pane.unit_id = self._selected_unit_id_value() if self._selected_local_unit_index() is not None else None
-        if self._active_tab_key() == "rf" and self.settings.rf_result_overlay_layers:
+        if self._active_tab_key() == "rf" and self.settings.rf_result_overlay_enabled and self.settings.rf_result_overlay_layers:
             pane.update_details(layers=self.settings.rf_result_overlay_layers)
         else:
             pane.update_details()
@@ -6827,7 +6874,7 @@ class RFMViewer(tk.Toplevel):
             pane.update_details()
         else:
             layers = self.settings.rf_result_overlay_layers
-            if not layers:
+            if not self.settings.rf_result_overlay_enabled or not layers:
                 return
             selections = []
             for polarity in ("excitatory", "inhibitory"):
@@ -8755,6 +8802,7 @@ class RFMViewer(tk.Toplevel):
         self.palette_var.set(self.settings.rf_palette)
         self.polar_radius_var.set(self.settings.rf_polar_radius)
         self.polar_layout_var.set(self.settings.rf_polar_layout)
+        self.rf_result_overlay_enabled_var.set(self.settings.rf_result_overlay_enabled)
         for layer, variable in self.rf_result_overlay_vars.items():
             variable.set(layer in self.settings.rf_result_overlay_layers)
         self.rgb_mode_var.set(self.settings.rf_rgb_mode)

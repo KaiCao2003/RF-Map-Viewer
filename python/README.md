@@ -1,6 +1,6 @@
 # Python RF Map Viewers
 
-This directory contains the Python/Tk RF Map Viewer `1.11.5`, launched by
+This directory contains the Python/Tk RF Map Viewer `1.11.7`, launched by
 `rfmapping_gui.py` or the installed `rfmapping-viewer` command. The separate
 Free-Moving alpha and its HDF5 Square/Bar, 3D-sphere, and exposure-QA paths have
 been retired. The offline session/EBC HTML report script remains available.
@@ -108,9 +108,12 @@ The Probe view shows channels and units with known positions:
 Units without usable positions remain part of the RF data but cannot be
 selected by clicking or included by a Probe-region filter.
 
-**Annotate ADN…** opens a larger probe view with the complete attached unit
+**Utilities → Annotate ADN…** opens a larger probe view with the complete attached unit
 positions, including units absent from the current RF file. Draw a freehand
 loop to add units to the ADN selection; the dot position determines inclusion.
+Dots use separate colors for HD classes 0–3 and unknown classifications. Use
+the class checkboxes to filter visible dots; loops add only visible units.
+An orange ring marks selected ADN units, and filtering preserves the selection.
 Use **Undo** or **Clear selection** to revise it, and the depth zoom buttons
 and scrollbar for dense regions. Hover a dot in either probe view to see its
 unit **ID**, **x**, and **y** in µm.
@@ -126,7 +129,7 @@ adn = np.load(session / "data" / "adn_neuron.npy", allow_pickle=False)
 unit_ids = adn["unit_id"][adn["probe"] == "ProbeA"]
 ```
 
-Enable **Only ADN** to load this recording/probe's saved list and restrict
+Enable **View → Only ADN** to load this recording/probe's saved list and restrict
 unit navigation, probe dots, and new Figure Studio sessions. RF-quality filters
 still apply, but never change the saved anatomical selection. Switching the
 document resets Only ADN; synced windows retain their own recording/probe
@@ -328,7 +331,8 @@ document.
 
 ### Keyboard shortcuts
 
-Open **Help → Keyboard Shortcuts** for the in-app list.
+Open **Help → Keyboard Shortcuts** for the in-app list. Use **Ctrl** in place
+of **⌘** on Windows. NumLock and ScrollLock do not disable viewer shortcuts.
 
 | Shortcut | Action |
 | --- | --- |
@@ -337,7 +341,7 @@ Open **Help → Keyboard Shortcuts** for the in-app list.
 | Shift+, / Shift+. | Coarser / finer target time width |
 | 1 / 2 / 3 / 4 | Switch between visible tabs in order |
 | Shift+1 / Shift+2 | Toggle excitatory 1D / 2D overlay |
-| Shift+0 | Clear all RF overlays |
+| Shift+0 | Show / hide RF overlays while keeping selected layers |
 | F | Invert Y |
 | P / Shift+P | Toggle Polar layout / cycle palette |
 | - | Toggle RF Sum / A − B |
@@ -364,6 +368,15 @@ Open **Help → Keyboard Shortcuts** for the in-app list.
   displayed as zero.
 
 ---
+
+## Stable viewer 1.11.7
+
+Version 1.11.7 moves ADN annotation to Utilities, adds HD-class colors and
+filters to its probe view, and keeps the sidebar available for waveform.
+Escape closes the enlarged waveform with one keypress. The RF overlap master
+switch hides and restores the selected layers without changing their checks.
+
+Version 1.11.6 adds the probe unit-info hover preference.
 
 ## Stable viewer 1.11.5
 
@@ -545,7 +558,8 @@ values, available while an input has focus.
 
 **Display → RF overlap** has independent checkboxes for excitatory and inhibitory
 **2D** and **1D** saved outlines. **Shift+1** and **Shift+2** toggle the excitatory
-**1D** and **2D** layers; **Shift+0** clears all four, even while Display is folded. These
+**1D** and **2D** layers. The **RF overlap** master checkbox or **Shift+0** shows or
+hides all selected layers without changing their checkboxes, even while Display is folded. These
 controls apply to the current window; save defaults in **Settings → RF Map**.
 
 Press **Command+Shift+.** (or use **View → Show Filtered Units / Hide Units
@@ -565,7 +579,7 @@ Opening the app without a path shows the native file chooser. Release packages
 do not contain or auto-load sample RF data.
 
 Its macOS identity is `RF Map Viewer.app`, bundle ID
-`org.local.rfmapping.viewer`, and version/build `1.11.5` / `111005`. Build it with:
+`org.local.rfmapping.viewer`, and version/build `1.11.7` / `111007`. Build it with:
 
 ```sh
 script/build_python_stable_macos_app.sh

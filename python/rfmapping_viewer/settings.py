@@ -81,6 +81,7 @@ class ViewerSettings:
     show_waveform: bool = True
     show_probe_layout: bool = True
     auto_load_probe_layout: bool = True
+    show_probe_unit_info: bool = True
     rf_sum_start_ms: float = DEFAULT_RF_SUM_START_MS
     rf_sum_end_ms: float = DEFAULT_RF_SUM_END_MS
     rf_subtract: bool = False
@@ -100,6 +101,7 @@ class ViewerSettings:
     rf_polar_radius: str = POLAR_RADIUS_MODES[1]
     rf_polar_layout: bool = False
     rf_rgb_mode: bool = False
+    rf_result_overlay_enabled: bool = True
     rf_result_overlay_layers: tuple[str, ...] = ()
     rf_result_overlay_width: float = 2.0
     rf_result_overlay_2d_color: str = "#34c759"
@@ -222,6 +224,7 @@ class ViewerSettings:
             show_waveform=boolean("show_waveform"),
             show_probe_layout=boolean("show_probe_layout"),
             auto_load_probe_layout=boolean("auto_load_probe_layout"),
+            show_probe_unit_info=boolean("show_probe_unit_info"),
             rf_sum_start_ms=start_ms,
             rf_sum_end_ms=end_ms,
             rf_subtract=boolean("rf_subtract"),
@@ -242,6 +245,7 @@ class ViewerSettings:
             rf_polar_radius=polar_radius,
             rf_polar_layout=boolean("rf_polar_layout"),
             rf_rgb_mode=boolean("rf_rgb_mode"),
+            rf_result_overlay_enabled=boolean("rf_result_overlay_enabled"),
             rf_result_overlay_layers=overlay_layers,
             rf_result_overlay_width=finite_float("rf_result_overlay_width", positive=True),
             rf_result_overlay_2d_color=color("rf_result_overlay_2d_color"),

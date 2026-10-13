@@ -360,15 +360,41 @@ def test_all_four_checkboxes_preserve_each_polarity_and_native_bins(app, polar):
     assert {path: path.read_bytes() for path in originals} == originals
 
 
-def test_overlay_shortcuts_toggle_one_layer_and_clear_all(app):
+def test_overlay_shortcuts_toggle_one_layer_and_preserve_choices_when_hidden(app):
     app.rf_result_overlay_checks["inhibitory_1d"].invoke()
     app._toggle_rf_result_overlay("excitatory_1d")
     assert app.settings.rf_result_overlay_layers == ("excitatory_2d", "inhibitory_1d")
     app._toggle_rf_result_overlay("excitatory_1d")
     assert app.settings.rf_result_overlay_layers == ("excitatory_2d", "excitatory_1d", "inhibitory_1d")
     app._toggle_rf_result_overlay(None)
-    assert app.settings.rf_result_overlay_layers == ()
-    assert not any(variable.get() for variable in app.rf_result_overlay_vars.values())
+    selected = ("excitatory_2d", "excitatory_1d", "inhibitory_1d")
+    assert app.settings.rf_result_overlay_layers == selected
+    assert not app.settings.rf_result_overlay_enabled
+    assert tuple(layer for layer, variable in app.rf_result_overlay_vars.items() if variable.get()) == selected
+    draw(app, "rf")
+    assert not native_overlay(app)
+    app._toggle_rf_result_overlay(None)
+    draw(app, "rf")
+    assert app.settings.rf_result_overlay_enabled
+    assert app.settings.rf_result_overlay_layers == selected
+    assert native_overlay(app)
+
+
+@pytest.mark.parametrize("polar", [False, True])
+def test_overlay_master_switch_preserves_layers_and_results_view(app, polar):
+    app.polar_layout_var.set(polar)
+    draw(app, "rf")
+    original = native_overlay(app)
+    layers = app.settings.rf_result_overlay_layers
+    app.rf_result_overlay_toggle.invoke()
+    draw(app, "rf")
+    assert not native_overlay(app)
+    assert app.settings.rf_result_overlay_layers == layers
+    draw(app, "results")
+    assert native_overlay(app)
+    app.rf_result_overlay_toggle.invoke()
+    draw(app, "rf")
+    assert native_overlay(app) == original
 
 
 def test_pooled_display_bins_preserve_native_boundaries_without_false_overlap(app):

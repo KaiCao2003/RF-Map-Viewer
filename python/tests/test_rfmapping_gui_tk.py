@@ -812,7 +812,8 @@ class TkViewerTests(unittest.TestCase):
         settings.rf_subtract_end_var.set("50")  # An unrelated, unsaved edit.
         self.app._bind_unit_filter_shortcut()
         canvas = self.app.canvases["rf"]
-        sequences = ["<Command-Shift-period>", "<Command-Shift-greater>"]
+        primary = "Command" if sys.platform == "darwin" else "Control"
+        sequences = [f"<{primary}-Shift-period>", f"<{primary}-Shift-greater>"]
         # Xvfb cannot map kana_fullstop to a keycode and generates "??".
         # Exercise the IME keysym on Aqua, where the physical key reports it.
         if self.app.tk.call("tk", "windowingsystem") == "aqua":
@@ -1868,9 +1869,38 @@ class TkViewerTests(unittest.TestCase):
                 self.assertEqual(self.app.palette_var.get(), "Viridis")
                 self.assertEqual(self.app.polar_layout_var.get(), before)
 
+    def test_caps_lock_preserves_open_export_and_close_shortcuts(self) -> None:
+        canvas = self.app.canvases["timeline"]
+        canvas.focus_force()
+        self.app.update()
+        primary = "Command" if sys.platform == "darwin" else "Control"
+        primary_state = 0x0008 if primary == "Command" else 0x0004
+        for lock_state in (0, 0x0002):
+            for key, action_name in (
+                ("o", "_open_json"), ("e", "_open_figure_exporter"),
+                ("w", "_close_window"),
+            ):
+                with self.subTest(key=key, lock_state=lock_state):
+                    with mock.patch.object(self.app, action_name) as action:
+                        canvas.event_generate("<KeyPress>", keysym=key, state=primary_state | lock_state)
+                        self.app.update()
+                        action.assert_called_once_with()
+            with self.subTest(key="Shift+e", lock_state=lock_state):
+                with (
+                    mock.patch.object(self.app, "_export_current_matrix") as matrix,
+                    mock.patch.object(self.app, "_open_figure_exporter") as figure,
+                ):
+                    canvas.event_generate("<KeyPress>", keysym="e", state=primary_state | lock_state | 0x0001)
+                    self.app.update()
+                    matrix.assert_called_once_with()
+                    figure.assert_not_called()
+
     def test_native_arrow_flags_work_through_tk_bindings(self) -> None:
-        # Cocoa marks arrows as keypad/function keys even without a held Fn key.
-        state = 0x0060 if self.app.tk.call("tk", "windowingsystem") == "aqua" else 0x0010
+        # Windows uses an extended-key flag for arrows and Mod1 for NumLock;
+        # Cocoa uses keypad/function flags, while X11 uses Mod2 for NumLock.
+        state = {"aqua": 0x0060, "win32": 0x40008, "x11": 0x0010}[
+            self.app.tk.call("tk", "windowingsystem")
+        ]
         self.app.notebook.focus_force()
         self.app.update()
         self.app.notebook.event_generate("<KeyPress-Right>", state=state)
@@ -1934,9 +1964,9 @@ class TkViewerTests(unittest.TestCase):
                 self.assertTrue(self.app.polar_layout_var.get())
 
     def test_modified_keys_do_not_trigger_plain_view_shortcuts(self) -> None:
-        modifiers = ["Control", "Command", "Alt"]
+        modifiers = ["Control", "Alt"]
         if self.app.tk.call("tk", "windowingsystem") == "aqua":
-            modifiers.append("Option")
+            modifiers.extend(("Command", "Option"))
         for widget in (self.app.canvases["timeline"], self.app.notebook):
             widget.focus_force()
             self.app.update()
@@ -3646,14 +3676,15 @@ class TkViewerTests(unittest.TestCase):
     def test_inspector_opens_from_view_menu_updates_and_closes_independently(self) -> None:
         self.app.notebook.select(0)
         self.app._update_all()
-        self.app.update_idletasks()
+        self.app.update()
         inspector = self.app.inspector_window
         self.assertFalse(inspector.winfo_ismapped())
         self.assertFalse(self.app.cell_label.winfo_ismapped())
         self.assertFalse(self.app.unit_stats_label.winfo_ismapped())
         initial_rf_size = (self.app.canvases["rf"].winfo_width(), self.app.canvases["rf"].winfo_height())
         self.app._view_menu.invoke("Inspector…")
-        self.app.update_idletasks()
+        # Deiconifying also queues native map events for the Notebook's children.
+        self.app.update()
         self.assertTrue(inspector.winfo_ismapped())
         self.assertTrue(self.app.cell_label.winfo_ismapped())
         self.assertIn("bin", self.app.cell_label.cget("text"))
@@ -3672,17 +3703,17 @@ class TkViewerTests(unittest.TestCase):
         self.assertIn("cluster 8", self.app.unit_stats_label.cget("text"))
         self.assertNotEqual(self.app.cell_label.cget("text"), previous_response)
         inspector.tk.call(inspector.protocol("WM_DELETE_WINDOW"))
-        self.app.update_idletasks()
+        self.app.update()
         self.assertFalse(inspector.winfo_ismapped())
         self.assertTrue(self.app.winfo_ismapped())
         self.app._view_menu.invoke("Inspector…")
-        self.app.update_idletasks()
+        self.app.update()
         self.assertIs(self.app.inspector_window, inspector)
         self.assertTrue(inspector.winfo_ismapped())
         inspector.focus_force()
         self.app.update()
         self.app._app_root._rfm_application.close_active_window()
-        self.app.update_idletasks()
+        self.app.update()
         self.assertFalse(inspector.winfo_ismapped())
         self.assertTrue(self.app.winfo_ismapped())
         self.app._view_menu.invoke("Inspector…")

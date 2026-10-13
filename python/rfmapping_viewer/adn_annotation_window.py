@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 from rfmapping_viewer.adn_selection import (
@@ -14,11 +14,20 @@ from rfmapping_viewer.companions import ProbeGeometry, ProbeUnitPosition
 from rfmapping_viewer.tk_support import messagebox, scroll_canvas_precise, tk, ttk
 
 
+HD_CLASS_STYLES = {
+    0: ("Class 0", "#475467"),
+    1: ("Class 1", "#805b00"),
+    2: ("Class 2", "#08783f"),
+    3: ("Class 3", "#185da8"),
+    None: ("Unknown", "#8064a2"),
+}
+
+
 def draw_unit_tooltip(canvas: tk.Canvas, event: tk.Event, unit: ProbeUnitPosition) -> None:
     pointer_x, pointer_y = canvas.canvasx(event.x), canvas.canvasy(event.y)
     text = canvas.create_text(
         pointer_x + 12, pointer_y + 12, anchor="nw", tags=("hover",),
-        text=f"ID: {unit.unit_id}\nx: {unit.x_um:g} µm\ny: {unit.y_um:g} µm",
+        text=f"Unit ID: {unit.unit_id}\nx: {unit.x_um:g} µm\ny: {unit.y_um:g} µm",
         fill="#1d1d1f", font=("TkDefaultFont", 11),
     )
     left, top, right, bottom = canvas.bbox(text)
@@ -40,6 +49,8 @@ class ADNAnnotationWindow(tk.Toplevel):
         geometry: ProbeGeometry,
         output_path: Path,
         on_saved: Callable[[set[int]], None],
+        *,
+        hd_classes: Mapping[int, int | None],
     ) -> None:
         selected = load_adn_units(output_path, geometry.probe_name)
         super().__init__(parent)
@@ -50,6 +61,7 @@ class ADNAnnotationWindow(tk.Toplevel):
         self.probe_geometry = geometry
         self.output_path = output_path
         self.on_saved = on_saved
+        self.hd_classes = hd_classes
         self.selected_ids = selected
         self._contours: list[list[tuple[float, float]]] = []
         self._history: list[tuple[set[int], list[list[tuple[float, float]]]]] = []
@@ -63,6 +75,10 @@ class ADNAnnotationWindow(tk.Toplevel):
         self.selection_var = tk.StringVar(self)
         self.status_var = tk.StringVar(self, value=str(output_path))
         self.zoom_var = tk.StringVar(self, value="Depth: 1×")
+        self.class_visible_vars = {
+            hd_class: tk.BooleanVar(self, value=True)
+            for hd_class in HD_CLASS_STYLES
+        }
         self._build()
         self._update_selection()
 
@@ -103,18 +119,31 @@ class ADNAnnotationWindow(tk.Toplevel):
 
         inspector = tk.Frame(self, background="white", padx=16)
         inspector.grid(row=1, column=1, sticky="ns")
-        tk.Label(inspector, textvariable=self.selection_var, background="white", foreground="#1d1d1f").pack(anchor="w", pady=(0, 8))
+        inspector.columnconfigure(0, weight=1)
+        inspector.rowconfigure(2, weight=1)
+        class_filters = tk.Frame(inspector, background="white")
+        class_filters.grid(row=0, column=0, sticky="ew")
+        tk.Label(class_filters, text="HD cell class", background="white", foreground="#1d1d1f").pack(anchor="w")
+        for hd_class, (label, color) in HD_CLASS_STYLES.items():
+            row = tk.Frame(class_filters, background="white")
+            row.pack(fill="x")
+            tk.Label(row, text="●", foreground=color, background="white").pack(side="left")
+            ttk.Checkbutton(
+                row, text=label, variable=self.class_visible_vars[hd_class],
+                command=self._on_class_filter_changed,
+            ).pack(side="left")
+        tk.Label(inspector, textvariable=self.selection_var, background="white", foreground="#1d1d1f").grid(row=1, column=0, sticky="w", pady=(0, 8))
         self.unit_list = tk.Text(
             inspector, width=23, height=12, wrap="word", state="disabled",
             background="white", foreground="#1d1d1f", relief="solid", borderwidth=1,
         )
-        self.unit_list.pack(fill="both", expand=True)
-        tk.Label(inspector, text="Orange = selected ADN", background="white", foreground="#1d1d1f").pack(anchor="w", pady=8)
+        self.unit_list.grid(row=2, column=0, sticky="nsew")
+        tk.Label(inspector, text="Orange ring = selected ADN", background="white", foreground="#1d1d1f").grid(row=3, column=0, sticky="w", pady=8)
         self.undo_button = ttk.Button(inspector, text="Undo", command=self._undo)
-        self.undo_button.pack(fill="x", pady=(8, 4))
-        ttk.Button(inspector, text="Clear selection", command=self._clear).pack(fill="x", pady=4)
-        ttk.Button(inspector, text="Save ADN", command=self._save).pack(fill="x", pady=(12, 4))
-        ttk.Button(inspector, text="Close", command=self.destroy).pack(fill="x", pady=(4, 12))
+        self.undo_button.grid(row=4, column=0, sticky="ew", pady=(8, 4))
+        ttk.Button(inspector, text="Clear selection", command=self._clear).grid(row=5, column=0, sticky="ew", pady=4)
+        ttk.Button(inspector, text="Save ADN", command=self._save).grid(row=6, column=0, sticky="ew", pady=(12, 4))
+        ttk.Button(inspector, text="Close", command=self.destroy).grid(row=7, column=0, sticky="ew", pady=(4, 12))
         tk.Label(
             self, textvariable=self.status_var, background="white", foreground="#475467",
             anchor="w", justify="left", wraplength=900,
@@ -124,6 +153,18 @@ class ADNAnnotationWindow(tk.Toplevel):
         self._zoom = min(8.0, max(1.0, zoom))
         self.zoom_var.set(f"Depth: {self._zoom:g}×")
         self._draw()
+
+    def _on_class_filter_changed(self) -> None:
+        self._lasso = []
+        self._update_selection()
+        self._draw()
+
+    def _visible_unit_ids(self) -> set[int]:
+        return {
+            unit.unit_id
+            for unit in self.probe_geometry.positioned_units
+            if self.class_visible_vars[self.hd_classes.get(unit.unit_id)].get()
+        }
 
     def _scroll(self, event: tk.Event, *, precise: bool = False) -> str:
         if precise:
@@ -183,12 +224,23 @@ class ADNAnnotationWindow(tk.Toplevel):
         for channel in self.probe_geometry.channels:
             x, y = self._to_canvas(channel.x_um, channel.y_um)
             canvas.create_rectangle(x - 2, y - 2, x + 2, y + 2, fill="#e4e7ec", outline="")
+        visible_ids = self._visible_unit_ids()
         for unit in units:
+            if unit.unit_id not in visible_ids:
+                continue
             x, y = self._to_canvas(float(unit.x_um), float(unit.y_um))
             self._unit_points.append((x, y, unit))
-            fill = "#f79009" if unit.unit_id in self.selected_ids else "#1570ef"
-            canvas.create_oval(x - 4, y - 4, x + 4, y + 4, fill=fill, outline="white")
-            canvas.create_text(x + 6, y, text=str(unit.unit_id), anchor="w", fill="#344054", font=("TkDefaultFont", 9))
+            if unit.unit_id in self.selected_ids:
+                canvas.create_oval(
+                    x - 7, y - 7, x + 7, y + 7, outline="#f79009", width=2,
+                    tags=("selection-ring",),
+                )
+            fill = HD_CLASS_STYLES[self.hd_classes.get(unit.unit_id)][1]
+            canvas.create_oval(
+                x - 4, y - 4, x + 4, y + 4, fill=fill, outline="white",
+                tags=("unit-dot", f"unit-{unit.unit_id}"),
+            )
+            canvas.create_text(x + 9, y, text=str(unit.unit_id), anchor="w", fill="#344054", font=("TkDefaultFont", 9))
         for contour in self._contours:
             self._draw_contour(contour, "contour", closed=True)
         self._draw_contour(self._lasso, "lasso", closed=False)
@@ -218,7 +270,8 @@ class ADNAnnotationWindow(tk.Toplevel):
             return
         self._lasso.append(self._from_event(event))
         if len(self._lasso) >= 3:
-            included = unit_ids_in_polygon(self.probe_geometry, self._lasso)
+            included = set(unit_ids_in_polygon(self.probe_geometry, self._lasso))
+            included.intersection_update(self._visible_unit_ids())
             self._history.append((self.selected_ids.copy(), self._contours.copy()))
             self.selected_ids.update(included)
             self._contours.append(self._lasso)
@@ -228,7 +281,12 @@ class ADNAnnotationWindow(tk.Toplevel):
         self._draw()
 
     def _update_selection(self) -> None:
-        self.selection_var.set(f"{len(self.selected_ids)} ADN units · {self.probe_geometry.probe_name}")
+        visible_count = len(self._visible_unit_ids())
+        total_count = len(self.probe_geometry.positioned_units)
+        self.selection_var.set(
+            f"{len(self.selected_ids)} ADN units · {self.probe_geometry.probe_name}\n"
+            f"Showing {visible_count} / {total_count} units"
+        )
         self.unit_list.configure(state="normal")
         self.unit_list.delete("1.0", "end")
         self.unit_list.insert("1.0", ", ".join(str(unit_id) for unit_id in sorted(self.selected_ids)))

@@ -12,10 +12,11 @@ from rfmapping_viewer.tk_support import TK_AVAILABLE, tk
 def test_overlay_defaults_and_persisted_custom_style(tmp_path):
     defaults = ViewerSettings()
     assert defaults.rf_result_overlay_layers == ()
+    assert defaults.rf_result_overlay_enabled
     assert (defaults.rf_result_overlay_2d_color, defaults.rf_result_overlay_1d_color,
             defaults.rf_result_overlay_overlap_color) == ("#34c759", "#ffcc00", "#ff9500")
     custom = replace(
-        defaults, rf_result_overlay_layers=("excitatory_2d", "inhibitory_1d"),
+        defaults, rf_result_overlay_enabled=False, rf_result_overlay_layers=("excitatory_2d", "inhibitory_1d"),
         rf_result_overlay_width=3.5, rf_result_overlay_2d_color="#135724",
         rf_result_overlay_1d_color="#246813", rf_result_overlay_overlap_color="#abcdef",
     )
@@ -68,10 +69,12 @@ def test_settings_overlay_controls_validate_and_enable_together():
         window.rf_result_overlay_vars["excitatory_2d"].set(True)
         assert window.rf_result_overlay_width_entry.instate(["!disabled"])
         window.rf_result_overlay_vars["inhibitory_1d"].set(True)
+        window.rf_result_overlay_enabled_var.set(False)
         window.rf_result_overlay_width_var.set("3.5")
         window.rf_result_overlay_overlap_color_var.set("#ABcDef")
         settings = window._validated_settings()
         assert settings.rf_result_overlay_layers == ("excitatory_2d", "inhibitory_1d")
+        assert not settings.rf_result_overlay_enabled
         assert settings.rf_result_overlay_width == 3.5
         assert settings.rf_result_overlay_overlap_color == "#abcdef"
         window.rf_result_overlay_width_var.set("0")

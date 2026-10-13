@@ -139,7 +139,7 @@ def test_probe_hover_reports_unit_id_and_physical_coordinates(make_viewer):
         for item in viewer.probe_canvas.find_withtag("hover")
         if viewer.probe_canvas.type(item) == "text"
     ]
-    assert texts == ["ID: 7\nx: 7.5 µm\ny: 120 µm"]
+    assert texts == ["Unit ID: 7\nx: 7.5 µm\ny: 120 µm"]
     left, top, right, bottom = viewer.probe_canvas.bbox("hover")
     assert 0 <= left < right <= viewer.probe_canvas.winfo_width()
     assert 0 <= top < bottom <= viewer.probe_canvas.winfo_height()
@@ -287,7 +287,7 @@ def test_annotation_zoom_and_scroll_preserve_hover_and_lasso_coordinates(make_vi
         for item in dialog.canvas.find_withtag("hover")
         if dialog.canvas.type(item) == "text"
     ]
-    assert texts == ["ID: 99\nx: 20 µm\ny: 130 µm"]
+    assert texts == ["Unit ID: 99\nx: 20 µm\ny: 130 µm"]
 
     draw_lasso(dialog, [(0, 110), (30, 110), (30, 140), (0, 140)])
     assert dialog.selected_ids == {7, 99}
