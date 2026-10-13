@@ -80,6 +80,13 @@ jobs:
       - name: Build stable Python macOS archive
         working-directory: python
         run: RF_MAPPING_PYTHON_BIN="$(command -v python)" script/build_python_stable_macos_app.sh
+      - name: Upload waveform repaint evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: python-waveform-repaint
+          path: python/.test-artifacts/waveform-zoom/
+          if-no-files-found: ignore
       - uses: actions/upload-artifact@v6
         with:
           name: python-stable-${{ needs.validate-versions.outputs.python_stable_release }}

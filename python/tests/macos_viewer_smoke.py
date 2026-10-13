@@ -1,15 +1,161 @@
 """Exercise Cocoa menus with one application interpreter, as in the bundled app."""
 
+import json
+import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from unittest import mock
+
+from PIL import Image, ImageChops
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import rfmapping_gui as gui
-from macos_key_events import send_key
+from macos_key_events import send_double_click, send_key, window_number
 from rfmapping_viewer.rf_model import RFMappingData
+
+
+def settle(app) -> None:
+    # Allow the viewer's delayed redraw and Cocoa's display pass to complete.
+    deadline = time.monotonic() + 0.2
+    while time.monotonic() < deadline:
+        app.update()
+        time.sleep(0.01)
+
+
+def capture_rf_canvas(app, path: Path):
+    result = subprocess.run(
+        ["/usr/sbin/screencapture", "-x", "-o", "-l", str(window_number(app)), str(path)],
+        capture_output=True, text=True, timeout=10,
+    )
+    assert result.returncode == 0, f"Native screen capture failed: {result.stdout}{result.stderr}"
+    with Image.open(path) as screenshot:
+        scale = screenshot.width / app.winfo_width()
+        content_top = screenshot.height - app.winfo_height() * scale
+        canvas = app.canvases["rf"]
+        left = (canvas.winfo_rootx() - app.winfo_rootx()) * scale
+        top = content_top + (canvas.winfo_rooty() - app.winfo_rooty()) * scale
+        return screenshot.convert("RGB").crop(tuple(round(value) for value in (
+            left + 5 * scale, top + 5 * scale,
+            left + (canvas.winfo_width() - 5) * scale,
+            top + (canvas.winfo_height() - 5) * scale,
+        )))
+
+
+def check_native_waveform(app) -> None:
+    evidence = Path(__file__).resolve().parents[1] / ".test-artifacts" / "waveform-zoom" / f"window-{window_number(app)}"
+    evidence.mkdir(parents=True, exist_ok=True)
+    events = []
+    states = []
+    trace_tag = f"NativeWaveformTrace:{app}"
+    original_tags = {}
+
+    def record_event(event):
+        events.append({
+            "type": str(event.type), "widget": str(event.widget),
+            "keysym": str(event.keysym), "keycode": str(event.keycode),
+            "state": str(event.state), "focus": str(app.focus_get()),
+            "zoomed": app._waveform_zoomed,
+        })
+
+    sequences = ("<KeyPress>", "<KeyRelease>", "<ButtonPress-1>", "<ButtonRelease-1>",
+                 "<FocusIn>", "<FocusOut>", "<Map>", "<Unmap>")
+    commands = [app._app_root.bind_class(trace_tag, sequence, record_event) for sequence in sequences]
+    pending = [app._app_root]
+    while pending:
+        widget = pending.pop()
+        original_tags[widget] = widget.bindtags()
+        widget.bindtags((trace_tag, *original_tags[widget]))
+        pending.extend(widget.winfo_children())
+
+    def checkpoint(phase):
+        widgets = (app.waveform_canvas, app.waveform_zoom_overlay, app.waveform_zoom_canvas,
+                   app.waveform_zoom_done_button, app.canvases["rf"])
+        states.append({
+            "phase": phase, "zoomed": app._waveform_zoomed,
+            "focus": str(app.focus_get()), "display_focus": str(app.focus_displayof()),
+            "grab": str(app.grab_current()),
+            "widgets": [{
+                "path": str(widget), "mapped": bool(widget.winfo_ismapped()),
+                "manager": widget.winfo_manager(), "geometry": widget.winfo_geometry(),
+                "bindtags": widget.bindtags(),
+                "center_hit": str(app.winfo_containing(
+                    widget.winfo_rootx() + widget.winfo_width() // 2,
+                    widget.winfo_rooty() + widget.winfo_height() // 2,
+                )),
+            } for widget in widgets],
+        })
+
+    try:
+        with mock.patch.object(app, "_request_waveform_payload"):
+            app._waveform_generation += 1
+            app._waveform_loading_key = None
+            app._waveform_error_key = None
+            app.waveform_payload = {
+                "matrix": [[-1.0, 0.0, 1.0], [1.0, 0.0, -1.0]],
+                "times_ms": [-0.1, 0.0, 0.1], "channel_labels": ["ch 1", "ch 2"],
+                "best_channel_row": 0, "amplitude_limit_uv": 1.0, "max_ptp_uv": 2.0,
+            }
+            app._waveform_payload_key = (
+                app._selected_unit_id_value(), app.waveform_channel_mode_var.get(),
+            )
+            app.show_waveform_var.set(True)
+            app._select_tab_key("rf")
+            app._draw_waveform()
+            settle(app)
+            checkpoint("before-double-click")
+            assert app.waveform_canvas.winfo_ismapped(), "Compact waveform is not visible"
+            assert len(app.waveform_canvas.find_all()) > 20, "Fixture did not draw waveform data"
+            before = capture_rf_canvas(app, evidence / "before.png")
+
+            send_double_click(app.waveform_canvas)
+            settle(app)
+            checkpoint("after-double-click")
+            assert app._waveform_zoomed, "Native double-click did not enlarge the waveform"
+            assert app.waveform_zoom_canvas.winfo_ismapped()
+            assert len(app.waveform_zoom_canvas.find_all()) > 20
+            assert app.focus_get() is app.waveform_zoom_canvas, "Zoom did not establish keyboard focus"
+            zoomed = capture_rf_canvas(app, evidence / "zoomed.png")
+            assert ImageChops.difference(before, zoomed).getbbox(), "Zoom did not cover the RF plot"
+
+            with (
+                mock.patch.object(app, "_clear_spatial_filter") as clear_spatial,
+                mock.patch.object(app, "_clear_timeline_selection") as clear_timeline,
+            ):
+                # No focus override: Escape must follow the real double-click's focus.
+                send_key("\x1b", 53)
+                settle(app)
+                checkpoint("after-escape")
+                assert not app._waveform_zoomed, "One native Escape did not close waveform zoom"
+                assert not app.waveform_zoom_overlay.winfo_ismapped()
+                clear_spatial.assert_not_called()
+                clear_timeline.assert_not_called()
+            after = capture_rf_canvas(app, evidence / "after-escape.png")
+            difference = ImageChops.difference(before, after)
+            difference.save(evidence / "rf-difference.png")
+            red, green, blue = difference.split()
+            histogram = ImageChops.lighter(ImageChops.lighter(red, green), blue).histogram()
+            print(json.dumps({
+                "native_waveform_evidence": str(evidence),
+                "rf_crop_size": before.size, "difference_bounds": difference.getbbox(),
+                "changed_pixel_fraction": 1 - histogram[0] / (before.width * before.height),
+            }))
+            assert difference.getbbox() is None, "Waveform pixels remain over the restored RF plot"
+    except BaseException:
+        print(json.dumps({
+            "native_waveform_evidence": str(evidence), "states": states, "events": events[-80:],
+            "callback_errors": repr(app._app_root.report_callback_exception.call_args_list),
+        }, indent=2), file=sys.stderr)
+        raise
+    finally:
+        for widget, tags in original_tags.items():
+            widget.bindtags(tags)
+        for sequence in sequences:
+            app._app_root.unbind_class(trace_tag, sequence)
+        for command in commands:
+            app._app_root.deletecommand(command)
 
 
 def check_native_keys(path: Path) -> None:
@@ -42,6 +188,8 @@ def check_native_keys(path: Path) -> None:
                     send_key(",", 43, 1 << 20)
                     child.update()
                     settings.assert_called()
+
+                check_native_waveform(child)
 
                 apple = child._menu.nametowidget(child._menu.entrycget(0, "menu"))
                 utilities = apple.nametowidget(apple.entrycget(0, "menu"))

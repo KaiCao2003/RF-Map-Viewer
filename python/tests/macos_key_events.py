@@ -1,13 +1,22 @@
-"""Send Cocoa key events through Tk's native event translation in macOS tests."""
+"""Send Cocoa input through Tk's native event translation in macOS tests."""
 
 import ctypes
+import time
 
 
 class NSPoint(ctypes.Structure):
     _fields_ = (("x", ctypes.c_double), ("y", ctypes.c_double))
 
 
-def send_key(characters: str, keycode: int, modifiers: int = 0) -> None:
+class NSSize(ctypes.Structure):
+    _fields_ = (("width", ctypes.c_double), ("height", ctypes.c_double))
+
+
+class NSRect(ctypes.Structure):
+    _fields_ = (("origin", NSPoint), ("size", NSSize))
+
+
+def _native_dispatch():
     objc = ctypes.CDLL("/usr/lib/libobjc.A.dylib")
     objc.objc_getClass.argtypes = (ctypes.c_char_p,)
     objc.objc_getClass.restype = ctypes.c_void_p
@@ -24,6 +33,11 @@ def send_key(characters: str, keycode: int, modifiers: int = 0) -> None:
     application = send(objc.objc_getClass(b"NSApplication"), b"sharedApplication", ctypes.c_void_p)
     window = send(application, b"keyWindow", ctypes.c_void_p)
     assert window, "The viewer did not become the native key window"
+    return objc, send, application, window
+
+
+def send_key(characters: str, keycode: int, modifiers: int = 0) -> None:
+    objc, send, application, window = _native_dispatch()
     number = send(window, b"windowNumber", ctypes.c_long)
     string = send(
         objc.objc_getClass(b"NSString"), b"stringWithUTF8String:", ctypes.c_void_p,
@@ -43,3 +57,54 @@ def send_key(characters: str, keycode: int, modifiers: int = 0) -> None:
         # Tk translates native events while draining the application queue;
         # calling sendEvent: directly bypasses tkProcessKeyEvent entirely.
         send(application, b"postEvent:atStart:", None, (ctypes.c_void_p, ctypes.c_bool), event, False)
+
+
+def _native_widget_dispatch(widget):
+    import _tkinter
+
+    objc, send, application, window = _native_dispatch()
+    toplevel = widget.winfo_toplevel()
+    library = ctypes.CDLL(_tkinter.__file__)
+    library.Tk_MacOSXGetNSWindowForDrawable.argtypes = (ctypes.c_void_p,)
+    library.Tk_MacOSXGetNSWindowForDrawable.restype = ctypes.c_void_p
+    assert library.Tk_MacOSXGetNSWindowForDrawable(toplevel.winfo_id()) == window, (
+        "The widget is not in the native key window"
+    )
+    return objc, send, application, window
+
+
+def window_number(widget) -> int:
+    _objc, send, _application, window = _native_widget_dispatch(widget)
+    return send(window, b"windowNumber", ctypes.c_long)
+
+
+def send_double_click(widget) -> None:
+    objc, send, application, window = _native_widget_dispatch(widget)
+    toplevel = widget.winfo_toplevel()
+    view = send(window, b"contentView", ctypes.c_void_p)
+    bounds = send(view, b"bounds", NSRect)
+    flipped = send(view, b"isFlipped", ctypes.c_bool)
+    x = widget.winfo_rootx() - toplevel.winfo_rootx() + widget.winfo_width() / 2
+    y = widget.winfo_rooty() - toplevel.winfo_rooty() + widget.winfo_height() / 2
+    point = NSPoint(bounds.origin.x + x, bounds.origin.y + (y if flipped else bounds.size.height - y))
+    location = send(
+        view, b"convertPoint:toView:", NSPoint,
+        (NSPoint, ctypes.c_void_p), point, None,
+    )
+    number = send(window, b"windowNumber", ctypes.c_long)
+    for click_count in (1, 2):
+        for event_type in (1, 2):  # NSEventTypeLeftMouseDown, NSEventTypeLeftMouseUp
+            event = send(
+                objc.objc_getClass(b"NSEvent"),
+                b"mouseEventWithType:location:modifierFlags:timestamp:windowNumber:context:"
+                b"eventNumber:clickCount:pressure:",
+                ctypes.c_void_p,
+                (ctypes.c_ulong, NSPoint, ctypes.c_ulong, ctypes.c_double, ctypes.c_long,
+                 ctypes.c_void_p, ctypes.c_long, ctypes.c_long, ctypes.c_float),
+                event_type, location, 0, time.monotonic(), number, None,
+                0, click_count, 1.0 if event_type == 1 else 0.0,
+            )
+            assert event, "Cocoa did not create the mouse event"
+            send(application, b"postEvent:atStart:", None, (ctypes.c_void_p, ctypes.c_bool), event, False)
+        # Preserve the focus and widget changes caused by the first real click.
+        widget.update()

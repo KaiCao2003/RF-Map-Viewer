@@ -31,10 +31,14 @@ def app(tmp_path):
             "channel_labels": ["ch 1"], "best_channel_row": 0,
             "amplitude_limit_uv": 1.0, "max_ptp_uv": 2.0,
         }
+        viewer._waveform_payload_key = (
+            viewer._selected_unit_id_value(), viewer.waveform_channel_mode_var.get(),
+        )
         viewer.geometry("1320x840")
         viewer._select_tab_key("rf")
         viewer._draw_waveform()
         viewer.update()
+        assert len(viewer.waveform_canvas.find_all()) > 20
         try:
             yield viewer
         finally:
@@ -54,6 +58,7 @@ def test_one_escape_closes_waveform_without_clearing_filters(app, focused_widget
     assert app.focus_get() is widget
     assert app._waveform_zoomed
     assert app.waveform_zoom_overlay.winfo_ismapped()
+    assert len(app.waveform_zoom_canvas.find_all()) > 20
 
     with (
         mock.patch.object(app, "_clear_spatial_filter") as clear_spatial,
