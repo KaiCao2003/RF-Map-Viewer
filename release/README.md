@@ -10,10 +10,16 @@ The Free-Moving alpha application has been retired from the active source and
 release workflow. Its historical Git tags and published artifacts are retained.
 The Python package and generic launcher now identify the stable viewer.
 
-Python 1.11.5 adds four independent excitatory/inhibitory 2D/1D overlay
-checkboxes and supports multiple saved RF component centers. It targets macOS
-Apple Silicon, build 111005. The published Windows
-release remains 1.11.2, build 11102, from its separate packaging commit.
+The current candidates are Python 1.11.6 (macOS build 111006, Windows build
+11106), Swift 1.10.5 (build 110005), and Web 1.10.3. Python adds a probe hover
+preference and repairs Windows shortcut routing. Swift and Web include recent
+Python viewing updates, including independent RF overlays and saved results;
+CCG and PDF output changes are excluded. Swift and Web retain the 1.10 feature
+series because their supported feature sets exclude those Python features.
+
+The latest published packages remain Python macOS 1.11.5, Windows 1.11.2,
+Swift 1.10.4, and Web 1.10.2 until these candidates are released. Existing tags
+and attachments are immutable; source versions do not imply publication.
 
 Python 1.11.2 adds configurable saved RF overlays and aligned RF/Results plots,
 restores native macOS welcome controls, and supports trackpad scrolling in
@@ -30,12 +36,12 @@ their existing release versions.
 Platform identity never becomes a fourth version component. It belongs in the
 component tag and artifact name:
 
-| Component | Release | Tag | Channel |
+| Component | Candidate | Intended tag | Channel |
 | --- | --- | --- | --- |
-| Python stable (macOS) | `1.11.5` | `python-v1.11.5` | stable |
-| Python stable (Windows x64) | `1.11.2` | `python-v1.11.2` | stable |
-| Swift | `1.10.4` | `swift-v1.10.4` | stable |
-| Web | `1.10.2` | `web-v1.10.2` | stable |
+| Python stable (macOS) | `1.11.6` | `python-v1.11.6` | stable |
+| Python stable (Windows x64) | `1.11.6` | `python-v1.11.6` | stable |
+| Swift | `1.10.5` | `swift-v1.10.5` | stable |
+| Web | `1.10.3` | `web-v1.10.3` | stable |
 
 Published downloads and checksums are available from the repository
 [Releases page](https://github.com/KaiCao2003/RF-Map-Viewer/releases). The root

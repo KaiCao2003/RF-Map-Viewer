@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-import sys
 from typing import Sequence
 
 from rfmapping_viewer.constants import (
@@ -58,8 +57,7 @@ class SettingsWindow(tk.Toplevel):
         self._build()
         self._select_remembered_tab()
         self._sync_dependent_controls()
-        if sys.platform == "darwin":
-            owner._bind_unit_filter_shortcut(self)
+        owner._bind_unit_filter_shortcut(self)
 
     def transient(self, master: tk.Misc | None = None) -> str | None:
         """Normalize Tk's queried window object to its stable path string."""
@@ -78,6 +76,7 @@ class SettingsWindow(tk.Toplevel):
         self.show_waveform_var = tk.BooleanVar(value=settings.show_waveform)
         self.show_probe_layout_var = tk.BooleanVar(value=settings.show_probe_layout)
         self.auto_load_probe_layout_var = tk.BooleanVar(value=settings.auto_load_probe_layout)
+        self.show_probe_unit_info_var = tk.BooleanVar(value=settings.show_probe_unit_info)
         self.rf_sum_start_var = tk.StringVar(value=format_ms(settings.rf_sum_start_ms))
         self.rf_sum_end_var = tk.StringVar(value=format_ms(settings.rf_sum_end_ms))
         self.rf_window_mode_var = tk.StringVar(value="A − B" if settings.rf_subtract else "Sum")
@@ -330,13 +329,17 @@ class SettingsWindow(tk.Toplevel):
             variable=self.auto_load_probe_layout_var,
         )
         self.auto_probe_check.grid(row=4, column=0, columnspan=2, sticky="w", padx=(22, 0))
-        self._section_label(tab, "Visible tabs", 5)
-        for row, (key, label) in enumerate(VIEWER_TABS.items(), start=6):
+        self.probe_unit_info_check = ttk.Checkbutton(
+            tab, text="Unit info on hover", variable=self.show_probe_unit_info_var,
+        )
+        self.probe_unit_info_check.grid(row=5, column=0, columnspan=2, sticky="w", padx=(22, 0))
+        self._section_label(tab, "Visible tabs", 6)
+        for row, (key, label) in enumerate(VIEWER_TABS.items(), start=7):
             ttk.Checkbutton(
                 tab, text=label, variable=self.visible_tab_vars[key],
             ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 6))
         self._labeled_combo(
-            tab, 10, "Initial tab", self.default_viewer_tab_var,
+            tab, 11, "Initial tab", self.default_viewer_tab_var,
             tuple(VIEWER_TABS.values()),
         )
 
@@ -622,6 +625,9 @@ class SettingsWindow(tk.Toplevel):
         self.auto_probe_check.state(
             ["!disabled"] if self.show_probe_layout_var.get() else ["disabled"]
         )
+        self.probe_unit_info_check.state(
+            ["!disabled"] if self.show_probe_layout_var.get() else ["disabled"]
+        )
         self.waveform_channel_mode_combo.state(
             ["!disabled"] if self.show_waveform_var.get() else ["disabled"]
         )
@@ -822,6 +828,7 @@ class SettingsWindow(tk.Toplevel):
             show_waveform=bool(self.show_waveform_var.get()),
             show_probe_layout=bool(self.show_probe_layout_var.get()),
             auto_load_probe_layout=bool(self.auto_load_probe_layout_var.get()),
+            show_probe_unit_info=bool(self.show_probe_unit_info_var.get()),
             rf_sum_start_ms=start_ms,
             rf_sum_end_ms=end_ms,
             rf_subtract=self.rf_window_mode_var.get() == "A − B",

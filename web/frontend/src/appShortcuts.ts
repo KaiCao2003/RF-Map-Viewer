@@ -1,5 +1,5 @@
 import { baseBinMs } from "./math";
-import type { DatasetMeta } from "./types";
+import type { DatasetMeta, RfOverlayLayer } from "./types";
 
 export type ExportShortcutAction = "figure-composer" | "displayed-csv" | null;
 
@@ -21,4 +21,12 @@ export function steppedTimeResolutionMs(
   direction: -1 | 1,
 ): number {
   return currentResolutionMs + direction * baseBinMs(meta);
+}
+
+export function rfOverlapShortcut(event: Pick<KeyboardEvent, "code" | "shiftKey" | "metaKey" | "ctrlKey" | "altKey">): RfOverlayLayer | "None" | null {
+  if (!event.shiftKey || event.metaKey || event.ctrlKey || event.altKey) return null;
+  if (event.code === "Digit1") return "excitatory_1d";
+  if (event.code === "Digit2") return "excitatory_2d";
+  if (event.code === "Digit0") return "None";
+  return null;
 }

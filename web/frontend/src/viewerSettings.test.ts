@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_VIEWER_SETTINGS, invalidSettingsSection, loadViewerSettings, saveViewerSettings, viewerSettingsPatch, VIEWER_SETTINGS_KEY } from "./viewerSettings";
-import type { DatasetMeta } from "./types";
+import { DEFAULT_VIEWER_SETTINGS, invalidSettingsSection, loadViewerSettings, saveViewerSettings, viewerSettingsPatch, VIEWER_SETTINGS_KEY, toggleRfOverlayLayer } from "./viewerSettings";
+import type { DatasetMeta, RfOverlayLayer } from "./types";
 
 function storage(entries: Record<string, string> = {}) {
   const values = new Map(Object.entries(entries));
@@ -26,7 +26,7 @@ describe("viewer settings", () => {
 
   it("round trips all four settings groups without losing HD or RF defaults", () => {
     const saved = storage();
-    const settings = { ...DEFAULT_VIEWER_SETTINGS, showHd: false, autoLoadProbe: false,
+    const settings = { ...DEFAULT_VIEWER_SETTINGS, showHd: false, autoLoadProbe: false, showProbeUnitInfo: false,
       valueMode: "Spike count" as const, palette: "Viridis" as const, xBins: 5,
       hd: { ...DEFAULT_VIEWER_SETTINGS.hd, displayBins: 30, plotMode: "polar" as const, compareScale: true } };
     saveViewerSettings(saved, settings);
@@ -67,4 +67,22 @@ describe("viewer settings", () => {
     expect(patch).not.toHaveProperty("timelineEndMs");
     expect(patch).not.toHaveProperty("clusterId");
   });
+});
+
+it("round trips overlays and visible tabs while retaining a visible initial tab", () => {
+  const saved = storage();
+  const settings = { ...DEFAULT_VIEWER_SETTINGS, visibleTabs: ["timeline", "results"] as const,
+    initialTab: "results" as const, rfOverlay: { ...DEFAULT_VIEWER_SETTINGS.rfOverlay, layers: ["excitatory_1d", "inhibitory_2d"] as RfOverlayLayer[], width: 3, color1d: "#123456" } };
+  saveViewerSettings(saved, { ...settings, visibleTabs: [...settings.visibleTabs] });
+  expect(loadViewerSettings(saved)).toEqual(settings);
+  saved.setItem(VIEWER_SETTINGS_KEY, JSON.stringify({ ...settings, initialTab: "rf" }));
+  expect(loadViewerSettings(saved).initialTab).toBe("timeline");
+});
+
+it("migrates earlier single-polarity overlays and keeps independent toggles", () => {
+  expect(loadViewerSettings(storage({ [VIEWER_SETTINGS_KEY]: JSON.stringify({ rfOverlay: { mode: "Both", polarity: "inhibitory" } }) })).rfOverlay.layers)
+    .toEqual(["inhibitory_2d", "inhibitory_1d"]);
+  const layers: RfOverlayLayer[] = ["excitatory_2d", "inhibitory_1d"];
+  expect(toggleRfOverlayLayer(layers, "excitatory_1d")).toEqual(["excitatory_2d", "excitatory_1d", "inhibitory_1d"]);
+  expect(toggleRfOverlayLayer(layers, "excitatory_2d")).toEqual(["inhibitory_1d"]);
 });

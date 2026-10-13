@@ -368,7 +368,7 @@ def test_health_and_lazy_browse_are_root_confined(
         ]
         assert health.json() == {
             "status": "ok",
-            "version": "1.10.2",
+            "version": "1.10.3",
             "rfRoot": str(settings.rf_root),
             "rfRootAvailable": True,
             "outputRoot": str(settings.output_root),
@@ -567,6 +567,7 @@ def test_open_metadata_binary_probe_and_hd(app, settings: Settings) -> None:
             "yPositions": [-5.0, 5.0],
             "timeBinEdges": [-0.1, 0.0, 0.1, 0.2],
             "occupancyTimeSec": [[0.2, 0.3], [0.4, 0.5]],
+            "stimulusPresentationCounts": None,
             "responseUnits": "spike_count",
             "responseNormalization": "none",
             "capabilities": {
@@ -1570,7 +1571,9 @@ def test_displayed_csv_is_written_on_linux_with_exact_tk_schema(
 def test_csv_export_normalization_and_output_path_confinement(
     app, settings: Settings, tmp_path: Path
 ) -> None:
-    source = write_json(settings.rf_root / "rf.json")
+    payload = sample_payload()
+    payload["stimulusPresentationCounts"] = [[2, 3], [4, 5]]
+    source = write_json(settings.rf_root / "rf.json", payload)
     outside = tmp_path / "outside"
     outside.mkdir()
     (settings.output_root / "escape-link").symlink_to(outside, target_is_directory=True)
@@ -1591,7 +1594,7 @@ def test_csv_export_normalization_and_output_path_confinement(
             row = next(csv.DictReader(handle))
         assert row["value_mode"] == "Mean firing rate (Hz)"
         assert row["value_unit"] == "Hz"
-        assert float(row["value"]) == pytest.approx(136.0 / 1.4)
+        assert float(row["value"]) == pytest.approx(136.0 / (14 * .2))
 
         for output_path in (
             "../outside.csv",
@@ -3102,7 +3105,7 @@ def test_figure_manifest_records_hashed_frozen_source_and_companions(
     assert provenance["provenanceVersion"] == 1
     assert provenance["application"] == {
         "name": "RF Map Viewer",
-        "version": "1.10.2",
+        "version": "1.10.3",
         "edition": "Web",
     }
     assert provenance["snapshot"] == {
@@ -4404,7 +4407,9 @@ def test_indexed_preserves_singleton_axes_uint64_and_complete_timeline(tmp_path)
 
 
 def test_subtracted_csv_and_composer_share_pooled_smoothed_values(app, settings):
-    source = write_json(settings.rf_root / "difference.rfmap")
+    payload = sample_payload()
+    payload["stimulusPresentationCounts"] = [[2, 3], [4, 5]]
+    source = write_json(settings.rf_root / "difference.rfmap", payload)
     with authenticated_client(app) as client:
         meta = _open(client, source)
         request = {**_csv_export_payload(), "rfStartMs": 100, "rfEndMs": 200,

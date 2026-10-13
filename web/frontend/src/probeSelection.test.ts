@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { nearestProbeUnitToRegionCenter, probeUnitsInRegion } from "./probeSelection";
+import { nearestProbeUnitToRegionCenter, probeUnitsInRegion, probeUnitsInPolygon, probeUnitInfo } from "./probeSelection";
 import { navigationUnitIds } from "./unitFilter";
 import type { ProbeGeometry } from "./types";
 
@@ -49,4 +49,10 @@ describe("probe selection", () => {
     expect(widened).toEqual([11, 22]);
     expect(navigationUnitIds([11, 22, 33], widened)).toEqual([11, 22]);
   });
+});
+
+it("selects lasso interior and boundary in physical micrometres, excluding missing positions", () => {
+  expect(probeUnitsInPolygon(geometry, [[0, 0], [200, 0], [200, 200], [0, 200]])).toEqual([11, 22]);
+  expect(probeUnitsInPolygon(geometry, [[0, 0], [200, 0]])).toEqual([]);
+  expect(probeUnitInfo({ unitId: 22, x: 12.345, y: 567.8 })).toBe("Unit 22 · x 12.3 µm · y 567.8 µm");
 });

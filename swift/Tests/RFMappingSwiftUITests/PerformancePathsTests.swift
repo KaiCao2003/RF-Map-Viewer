@@ -20,6 +20,7 @@ final class PerformancePathsTests: XCTestCase {
             "xPositions": [-1.0, 0.0, 1.0],
             "yPositions": [0.0, 1.0],
             "timeBinEdges": [-0.1, 0.0, 0.1, 0.2, 0.3],
+            "stimulusPresentationCounts": [[5, 0, 50], [10, 5, 0]],
         ], occupancyTimeSec: [[1.0, 0.0, 10.0], [2.0, 1.0, 0.0]],
            occupancyTimeSecSize: [2, 3])
         return try RFMappingData(
@@ -103,7 +104,9 @@ final class PerformancePathsTests: XCTestCase {
         ])
         XCTAssertEqual(initial.matrices[0][0][0] ?? .nan, 24.0 / 14.0, accuracy: 1e-12)
         XCTAssertEqual(initial.matrices[1][0][0] ?? .nan, 34.0 / 14.0, accuracy: 1e-12)
-        XCTAssertEqual(initial.totals, [24.0 / 14.0, 34.0 / 14.0])
+        XCTAssertEqual(initial.totals.count, 2)
+        XCTAssertEqual(initial.totals[0], 24.0 / 14.0, accuracy: 1e-12)
+        XCTAssertEqual(initial.totals[1], 34.0 / 14.0, accuracy: 1e-12)
 
         store.plotRangeStartMS = 0
         store.plotRangeEndMS = 100

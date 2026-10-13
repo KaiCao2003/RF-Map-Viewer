@@ -18,7 +18,7 @@ def draw_unit_tooltip(canvas: tk.Canvas, event: tk.Event, unit: ProbeUnitPositio
     pointer_x, pointer_y = canvas.canvasx(event.x), canvas.canvasy(event.y)
     text = canvas.create_text(
         pointer_x + 12, pointer_y + 12, anchor="nw", tags=("hover",),
-        text=f"ID: {unit.unit_id}\nx: {unit.x_um:g} µm\ny: {unit.y_um:g} µm",
+        text=f"Unit ID: {unit.unit_id}\nx: {unit.x_um:g} µm\ny: {unit.y_um:g} µm",
         fill="#1d1d1f", font=("TkDefaultFont", 11),
     )
     left, top, right, bottom = canvas.bbox(text)

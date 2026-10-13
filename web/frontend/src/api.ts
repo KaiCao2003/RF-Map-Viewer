@@ -1,5 +1,9 @@
 import type {
   DatasetMeta,
+  AdnSelection,
+  SavedRfResult,
+  RfResultDimension,
+  RfResultPolarity,
   CacheProgress,
   FsPage,
   HdDatasetArtifact,
@@ -175,6 +179,9 @@ function normalizeMeta(payload: unknown): DatasetMeta {
     yPositions: numbers(source.yPositions),
     timeBinEdges: numbers(source.timeBinEdges),
     occupancyTimeSec,
+    stimulusPresentationCounts: source.stimulusPresentationCounts == null ? null
+      : Array.isArray(source.stimulusPresentationCounts)
+        ? source.stimulusPresentationCounts.map((row) => Array.isArray(row) ? row.map(Number) : []) : [],
     isVerticalBar: typeof source.isVerticalBar === "boolean" ? source.isVerticalBar : undefined,
     responseUnits: source.responseUnits as "spike_count",
     responseNormalization: source.responseNormalization as "none",
@@ -196,6 +203,8 @@ function normalizeMeta(payload: unknown): DatasetMeta {
     meta.occupancyTimeSec.length !== shape[1] ||
     meta.occupancyTimeSec.some((row) => row.length !== shape[2]) ||
     meta.occupancyTimeSec.some((row) => row.some((value) => !Number.isFinite(value) || value < 0)) ||
+    (meta.stimulusPresentationCounts != null && (meta.stimulusPresentationCounts.length !== shape[1]
+      || meta.stimulusPresentationCounts.some((row) => row.length !== shape[2] || row.some((value) => !Number.isInteger(value) || value < 0)))) ||
     meta.responseUnits !== "spike_count" ||
     meta.responseNormalization !== "none" ||
     !meta.capabilities.occupancy
@@ -881,4 +890,23 @@ export async function exportFigurePlan(
         : [],
     },
   };
+}
+
+export async function getSavedRfResult(datasetId: string, dimension: RfResultDimension,
+  polarity: RfResultPolarity, forceReload = false, signal?: AbortSignal): Promise<SavedRfResult> {
+  const params = new URLSearchParams({ dimension, polarity, force_reload: String(forceReload) });
+  const response = await checked(await protectedFetch(apiUrl(`datasets/${encodeURIComponent(datasetId)}/rf-results?${params}`), { signal }));
+  return await response.json() as SavedRfResult;
+}
+
+export async function getAdnSelection(id: string, positionsPath: string | null, signal?: AbortSignal): Promise<AdnSelection> {
+  const url = new URL(`datasets/${encodeURIComponent(id)}/adn-selection`, apiBase);
+  if (positionsPath) url.searchParams.set("path", positionsPath);
+  return (await checked(await protectedFetch(url, { signal }))).json();
+}
+
+export async function saveAdnSelection(id: string, positionsPath: string | null, unitIds: number[]): Promise<AdnSelection> {
+  return (await checked(await protectedFetch(apiUrl(`datasets/${encodeURIComponent(id)}/adn-selection`), {
+    method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ unitIds, positionsPath }),
+  }))).json();
 }

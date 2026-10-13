@@ -1,4 +1,4 @@
-# SwiftUI Viewer 1.10.4
+# SwiftUI Viewer 1.10.5
 
 This is the native SwiftUI implementation for macOS 15 on Apple silicon. It
 parses RF/HD/probe files itself and has no Python dependency. RF mapping files
@@ -17,6 +17,8 @@ neurons. The annotation view uses every unit in the original probe positions,
 including units absent from the loaded RF file. Use **Undo**, **Clear selection**,
 and **Depth zoom** with vertical scrolling to refine the selection. Hover over
 a unit in either probe view to see its ID and physical x/y coordinates in µm.
+**Settings → General → Unit info on hover** turns these labels on or off and
+persists the preference for open and new windows; it is enabled by default.
 
 **Save ADN** writes `session/data/adn_neuron.npy` under the RF document’s recording
 session. It replaces only the current probe’s IDs and preserves other probes.
@@ -31,6 +33,26 @@ export choices. Exported figure metadata records the ADN filter and saved IDs.
 Annotation remains available over the full probe geometry while Only ADN is on.
 
 ## Display and input behavior
+
+The current source includes the Python 1.11.5 viewer behavior below.
+
+- RF Hz uses `counts / (stimulusPresentationCounts × response-window seconds)`;
+  files without presentation counts remain viewable in Spike count mode.
+- **RF Results** reads saved 1D/2D excitatory/inhibitory masks and centers, using
+  the same plot geometry as RF. **Reload** rereads sidecars without detection.
+- **RF overlap** independently toggles excitatory 1D/2D and inhibitory 1D/2D
+  outlines on their native bins. Each polarity has its own 1D, 2D and intersection
+  colors; inhibitory outlines are dashed. Border width is configurable.
+  **Shift+1 / Shift+2** toggle excitatory 1D / 2D; **Shift+0** clears all layers.
+  Saved results support multiple centers within a nonempty mask.
+- Saved settings control RF display defaults, visible/initial tabs, and HD plot
+  style, bins, smoothing, arrangement and shared scale. **Inspector** provides
+  selected-cell information and saved-result parameters, QC and provenance.
+- Missing companion panes start folded; loading data opens them unless manually
+  folded. HD readers accept classes 0–3, columnar and nested tuning documents,
+  and legacy rate-only files without inventing observations.
+
+PDF/Figure Studio and CCG updates are excluded from this source update.
 
 Version 1.10.3 aligns HD tuning with clockwise RF angles in the viewer and
 exported figures: RF −90° matches HD 270°, RF 90° matches HD 90°, and 0° matches
@@ -94,7 +116,7 @@ used for indexed input.
 
 Press `-` or use **View → Subtract RF Windows (A − B)** to subtract two
 independent, half-open response windows. The initial A/B windows are 80–160 ms
-and 0–80 ms. Each window pools counts and occupancy and applies smoothing before
+and 0–80 ms. Each window pools counts and response exposure and applies smoothing before
 subtraction; negative differences are gray/missing, while zero stays zero.
 Sum and difference modes restore their own last-used windows. **Save timing
 defaults** under Display saves both modes and B for new windows and Reset.
@@ -110,11 +132,11 @@ smoothed count histograms, accounts for bin duration, and retains the first
 equal peak. RGB distinguishes black zero response from gray missing occupancy.
 Waveform navigation maintains one active read plus the latest pending unit.
 
-Mean firing rate is the default response display and is computed as pooled raw
-count divided by pooled occupancy seconds. Spatial reduction and smoothing pool
-counts and occupancy independently before division, so unequal occupancy does
-not bias the display or initial strongest-cell selection. Raw spike count
-remains available as the alternate response display.
+Mean firing rate is available when the RF document has presentation counts.
+Spatial reduction and smoothing pool counts and presentation-based exposure
+independently before division. Each response window and Timeline frame uses its
+actual duration, including nonuniform time bins. Occupancy describes stimulus
+display time. Raw spike count remains available when presentation counts are absent.
 
 The main viewer discovers and independently parses the same read-only
 companions as Python: probe positions, an exact positive HD tuning session

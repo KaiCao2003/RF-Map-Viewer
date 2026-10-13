@@ -44,6 +44,11 @@ class IndexedUnits:
                 if key == "unitPool" and value.dtype.kind not in "ui":
                     raise ValueError("unitPool must contain integer unit IDs")
                 raw[key] = value.tolist()
+            if "stimulusPresentationCounts" in self._archive.files:
+                presentations = self._archive["stimulusPresentationCounts"]
+                if presentations.ndim != 2 or presentations.dtype.kind not in "uif":
+                    raise ValueError("stimulusPresentationCounts must be a 2-dimensional numeric array")
+                raw["stimulusPresentationCounts"] = presentations.tolist()
             raw["countsDtype"] = "<u8"
             self.metadata = _normalize_metadata(raw)
             self.metadata["source"] = self.signature
@@ -77,6 +82,9 @@ class IndexedUnits:
             occupancy = np.asarray(self.metadata["occupancyTimeSec"])
             if np.any(counts[occupancy == 0, :] != 0):
                 raise ValueError("occupancyTimeSec is zero where spike counts are nonzero")
+            presentations = self.metadata.get("stimulusPresentationCounts")
+            if presentations is not None and np.any(counts[np.asarray(presentations) == 0, :] != 0):
+                raise ValueError("stimulusPresentationCounts is zero where spike counts are nonzero")
             maximum = int(counts.max())
             dtype = next(dtype for dtype in (np.uint8, np.uint16, np.uint32, np.uint64) if maximum <= np.iinfo(dtype).max)
             values = counts.astype(dtype, order="C", copy=True)

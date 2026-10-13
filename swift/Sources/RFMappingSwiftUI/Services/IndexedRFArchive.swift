@@ -17,6 +17,7 @@ struct IndexedRFArchive: Sendable {
     private let source: RFArchiveSource
     private let entries: [String: Entry]
     var byteCount: Int { source.count }
+    var arrayNames: Set<String> { Set(entries.keys) }
 
     static func isArchive(_ data: Data) -> Bool {
         data.count >= 4 && data.prefix(4) == Data([0x50, 0x4b, 0x03, 0x04])
@@ -91,6 +92,16 @@ struct IndexedRFArchive: Sendable {
         header["occupancyTimeSec"] = (0..<occupancy.shape[0]).map { y in
             Array(values[(y * occupancy.shape[1])..<((y + 1) * occupancy.shape[1])])
         }
+        if entries["stimulusPresentationCounts"] != nil {
+            let presentations = try array(named: "stimulusPresentationCounts")
+            guard presentations.shape == occupancy.shape else {
+                throw invalid("stimulusPresentationCounts must match the occupancy y-by-x shape.")
+            }
+            let counts = try presentations.doubleValues()
+            header["stimulusPresentationCounts"] = (0..<occupancy.shape[0]).map { y in
+                Array(counts[(y * occupancy.shape[1])..<((y + 1) * occupancy.shape[1])])
+            }
+        }
         header["unitsSpikeCounts"] = [Any]()
         return try JSONSerialization.data(withJSONObject: header)
     }
@@ -118,7 +129,7 @@ struct IndexedRFArchive: Sendable {
         return counts
     }
 
-    private func array(named name: String) throws -> RFNPYArray {
+    func array(named name: String) throws -> RFNPYArray {
         guard let entry = entries[name] else { throw invalid("Missing NPZ entry \(name).") }
         let local = try source.read(offset: entry.offset, count: 30)
         guard try local.integer(at: 0, width: 4) == 0x04034b50,
@@ -395,7 +406,7 @@ private struct RFArchiveSource: Sendable {
 
 /// NPY's axis order is independent of its C/Fortran byte order. Decode the
 /// strides explicitly, retaining singleton axes and the full time dimension.
-private struct RFNPYArray {
+struct RFNPYArray {
     let shape: [Int]
     let kind: Character
     let itemSize: Int
@@ -430,15 +441,18 @@ private struct RFNPYArray {
         }
         let descriptor = Array(try field("['\"]descr['\"]\\s*:\\s*['\"]([^'\"]+)['\"]"))
         guard descriptor.count >= 3, "<>=|".contains(descriptor[0]),
-              "uif".contains(descriptor[1]),
+              "uifbU".contains(descriptor[1]),
               let width = Int(String(descriptor.dropFirst(2))),
-              [1, 2, 4, 8].contains(width),
+              (descriptor[1] == "U" ? width > 0 : [1, 2, 4, 8].contains(width)),
               descriptor[1] != "f" || [4, 8].contains(width),
+              descriptor[1] != "b" || width == 1,
               descriptor[0] != "|" || width == 1 else {
             throw invalid("Unsupported NPY dtype; expected real integer or float data.")
         }
         kind = descriptor[1]
-        itemSize = width
+        let byteWidth = width.multipliedReportingOverflow(by: descriptor[1] == "U" ? 4 : 1)
+        guard !byteWidth.overflow else { throw invalid("NPY dtype size overflows.") }
+        itemSize = byteWidth.partialValue
         littleEndian = descriptor[0] != ">"
         fortranOrder = try field("['\"]fortran_order['\"]\\s*:\\s*(True|False)") == "True"
         let dimensions = try field("['\"]shape['\"]\\s*:\\s*\\(([^)]*)\\)")
@@ -450,7 +464,6 @@ private struct RFNPYArray {
             guard let value = Int(token), value > 0 else { throw invalid("Invalid NPY dimensions.") }
             parsed.append(value)
         }
-        guard !parsed.isEmpty else { throw invalid("NPY scalar arrays are unsupported.") }
         shape = parsed
         var count = 1
         for dimension in shape {
@@ -478,8 +491,11 @@ private struct RFNPYArray {
         }
     }
 
-    func doubleValues() throws -> [Double] {
-        try decode { raw in
+    func doubleValues(allowBoolean: Bool = false) throws -> [Double] {
+        guard "uif".contains(kind) || (allowBoolean && kind == "b") else {
+            throw invalid("Expected numeric NPY data.")
+        }
+        return try decode { raw in
             let value: Double
             switch kind {
             case "f":
@@ -499,6 +515,23 @@ private struct RFNPYArray {
             guard value.isFinite else { throw invalid("NPY values must be finite.") }
             return value
         }
+    }
+
+    func stringValue() throws -> String {
+        guard kind == "U", shape.isEmpty else { throw invalid("Expected a Unicode NPY scalar.") }
+        var scalars = String.UnicodeScalarView()
+        for offset in stride(from: 0, to: bytes.count, by: 4) {
+            var value: UInt32 = 0
+            for index in 0..<4 {
+                value |= UInt32(bytes[offset + index]) << ((littleEndian ? index : 3 - index) * 8)
+            }
+            if value == 0 { continue }
+            guard let scalar = UnicodeScalar(value) else { throw invalid("Invalid NPY Unicode scalar.") }
+            scalars.append(scalar)
+        }
+        let value = String(scalars)
+        guard !value.isEmpty else { throw invalid("NPY text must not be empty.") }
+        return value
     }
 
     private func signedValue(_ raw: UInt64) -> Int64 {

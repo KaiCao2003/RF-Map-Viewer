@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { canvasFont } from "../canvasFont";
-import { hasProbePosition, probeUnitsInRegion, type PositionedProbeUnit } from "../probeSelection";
+import { hasProbePosition, probeUnitsInRegion, probeUnitInfo, type PositionedProbeUnit } from "../probeSelection";
 import type { ProbeGeometry } from "../types";
 
 export interface ProbeSelection {
@@ -12,6 +12,10 @@ export interface ProbeSelection {
 
 interface ProbeLayoutProps {
   geometry: ProbeGeometry;
+  showUnitInfo?: boolean;
+  selectedAdnIds?: number[];
+  onLasso?: (vertices: Array<readonly [number, number]>) => void;
+  depthZoom?: number;
   availableUnitIds: number[];
   currentClusterId: number;
   selection: ProbeSelection | null;
@@ -74,6 +78,10 @@ function fromCanvas(transform: PlotTransform, x: number, y: number): readonly [n
 
 export default function ProbeLayout({
   geometry,
+  showUnitInfo = true,
+  selectedAdnIds,
+  onLasso,
+  depthZoom = 1,
   availableUnitIds,
   currentClusterId,
   selection,
@@ -87,9 +95,12 @@ export default function ProbeLayout({
   const draftSelection = useRef<ProbeSelection | null>(null);
   const [size, setSize] = useState({ width: 300, height: 420 });
   const [draft, setDraft] = useState<ProbeSelection | null>(null);
+  const lassoPoints = useRef<Array<readonly [number, number]>>([]);
+  const [lasso, setLasso] = useState<Array<readonly [number, number]>>([]);
+  const [hoverPosition, setHoverPosition] = useState<readonly [number, number]>([0, 0]);
   const [hoverUnit, setHoverUnit] = useState<number | null>(null);
   const width = size.width;
-  const height = Math.max(280, Math.min(430, size.height - 43));
+  const height = Math.max(280, Math.min(onLasso ? 660 : 430, size.height - 43)) * depthZoom;
   const availableSet = useMemo(() => new Set(availableUnitIds), [availableUnitIds]);
   const units = useMemo(
     () => geometry.units.filter((unit) => availableSet.has(unit.unitId)),
@@ -100,6 +111,7 @@ export default function ProbeLayout({
     () => units.find((unit) => unit.unitId === currentClusterId) ?? null,
     [currentClusterId, units],
   );
+  const hoveredUnit = positionedUnits.find((unit) => unit.unitId === hoverUnit);
   const currentPositionMissing = currentUnit != null && !hasProbePosition(currentUnit);
 
   useEffect(() => {
@@ -193,7 +205,7 @@ export default function ProbeLayout({
       const isHover = unit.unitId === hoverUnit;
       context.beginPath();
       context.arc(x, y, isCurrent ? 6 : isHover ? 5 : 3.4, 0, Math.PI * 2);
-      context.fillStyle = isCurrent ? "#dc2626" : "#111827";
+      context.fillStyle = selectedAdnIds?.includes(unit.unitId) ? "#ff9500" : isCurrent && !onLasso ? "#dc2626" : "#111827";
       context.fill();
       if (isCurrent) {
         context.strokeStyle = "white";
@@ -201,6 +213,13 @@ export default function ProbeLayout({
         context.stroke();
       }
     });
+    if (lasso.length) {
+      context.beginPath();
+      lasso.forEach(([x, y], index) => index === 0 ? context.moveTo(x, y) : context.lineTo(x, y));
+      context.strokeStyle = "#2563eb";
+      context.lineWidth = 1.5;
+      context.stroke();
+    }
     context.fillStyle = "#475467";
     context.font = canvasFont(10);
     context.textAlign = "center";
@@ -210,7 +229,7 @@ export default function ProbeLayout({
     context.rotate(-Math.PI / 2);
     context.fillText("depth / y (µm)", 0, 0);
     context.restore();
-  }, [availableUnitIds.length, currentClusterId, draft, geometry, height, hoverUnit, positionedUnits, selection, shankColors, width]);
+  }, [availableUnitIds.length, currentClusterId, draft, geometry, height, hoverUnit, positionedUnits, selection, shankColors, width, lasso, selectedAdnIds, onLasso]);
 
   const pointerCoordinates = (event: React.PointerEvent<HTMLCanvasElement>) => {
     const bounds = event.currentTarget.getBoundingClientRect();
@@ -242,17 +261,26 @@ export default function ProbeLayout({
           event.currentTarget.setPointerCapture(event.pointerId);
           dragStart.current = pointerCoordinates(event);
           draftSelection.current = null;
+          setHoverUnit(null);
+          if (onLasso) { lassoPoints.current = [dragStart.current]; setLasso([...lassoPoints.current]); }
           setDraft(null);
         }}
         onPointerMove={(event) => {
           const [x, y] = pointerCoordinates(event);
-          setHoverUnit(transform.current ? nearestProbeUnit(positionedUnits, transform.current, x, y, 11) : null);
-          updateDrag(x, y);
+          setHoverUnit(!dragStart.current && showUnitInfo && transform.current ? nearestProbeUnit(positionedUnits, transform.current, x, y, 11) : null);
+          setHoverPosition([x, y]);
+          if (onLasso && dragStart.current) {
+            lassoPoints.current.push([x, y]); setLasso([...lassoPoints.current]);
+          } else updateDrag(x, y);
         }}
         onPointerLeave={() => setHoverUnit(null)}
         onPointerUp={(event) => {
           if (!dragStart.current) return;
           const [x, y] = pointerCoordinates(event);
+          if (onLasso && transform.current) {
+            const points = [...lassoPoints.current, [x, y] as const].map(([px, py]) => fromCanvas(transform.current!, px, py));
+            dragStart.current = null; lassoPoints.current = []; setLasso([]); onLasso(points); return;
+          }
           updateDrag(x, y);
           const dragged = draftSelection.current;
           dragStart.current = null;
@@ -271,16 +299,18 @@ export default function ProbeLayout({
         onPointerCancel={() => {
           dragStart.current = null;
           draftSelection.current = null;
-          setDraft(null);
+          setDraft(null); lassoPoints.current = []; setLasso([]);
         }}
       />
+      {showUnitInfo && hoveredUnit && <div className="probe-unit-tooltip" role="tooltip"
+        style={{ left: Math.max(4, Math.min(hoverPosition[0] + 12, width - 245)), top: hoverPosition[1] + 14 }}>{probeUnitInfo(hoveredUnit)}</div>}
       {currentPositionMissing && (
         <div className="probe-position-missing" role="status" aria-label={`Cluster ${currentClusterId} probe position is NaN`}>
           <span>Cluster {currentClusterId} position</span>
           <strong>NaN</strong>
         </div>
       )}
-      <div className="probe-toolbar">
+      {!onLasso && <div className="probe-toolbar">
         <span>
           {selection
               ? `${probeUnitsInRegion(geometry, selection, availableUnitIds).length
@@ -288,7 +318,6 @@ export default function ProbeLayout({
                 : "No units in region"}`
               : "Click to select the nearest unit; drag to filter a region."}
         </span>
-        {hoverUnit != null && <span className="probe-hover">Cluster {hoverUnit}</span>}
         <button
           className="secondary-button compact"
           type="button"
@@ -297,7 +326,7 @@ export default function ProbeLayout({
         >
           Clear filter
         </button>
-      </div>
+      </div>}
     </div>
   );
 }

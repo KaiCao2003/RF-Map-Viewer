@@ -58,3 +58,24 @@ export function nearestProbeUnitToRegionCenter(
   }
   return nearest;
 }
+
+export function probeUnitsInPolygon(geometry: ProbeGeometry, vertices: ReadonlyArray<readonly [number, number]>): number[] {
+  if (vertices.length < 3) return [];
+  return geometry.units.filter(hasProbePosition).filter(({ x, y }) => {
+    let inside = false;
+    for (let i = 0; i < vertices.length; i += 1) {
+      const [x0, y0] = vertices[i], [x1, y1] = vertices[(i + 1) % vertices.length];
+      const dx = x1 - x0, dy = y1 - y0, length = Math.hypot(dx, dy);
+      if (!length) continue;
+      const cross = (x - x0) * dy - (y - y0) * dx;
+      const along = ((x - x0) * dx + (y - y0) * dy) / length;
+      if (Math.abs(cross) <= 1e-9 * length && along >= -1e-9 && along <= length + 1e-9) return true;
+      if ((y0 > y) !== (y1 > y) && x < x0 + (y - y0) * dx / dy) inside = !inside;
+    }
+    return inside;
+  }).map((unit) => unit.unitId);
+}
+
+export function probeUnitInfo(unit: PositionedProbeUnit): string {
+  return `Unit ${unit.unitId} · x ${unit.x.toFixed(1)} µm · y ${unit.y.toFixed(1)} µm`;
+}

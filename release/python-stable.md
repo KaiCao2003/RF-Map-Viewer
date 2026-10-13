@@ -1,9 +1,9 @@
-## Python 1.11.5: RF overlay multiselect
+## Python 1.11.6: probe hover and Windows shortcuts
 
-macOS Apple Silicon · Full edition · build **111005**
+macOS Apple Silicon · Windows x64 · Full edition
 
-- Show excitatory and inhibitory 2D/1D RF overlays together using four independent checkboxes.
-- Save selected overlays and distinguish inhibitory borders by color and dashes.
-- Open saved RF results with multiple component centers per neuron.
+- Turn probe unit ID and x/y hover information on or off in Settings.
+- Restore Windows keyboard shortcuts with NumLock/ScrollLock enabled.
+- Bring Windows up to date with independent RF overlays, saved results, and ADN selection.
 
-[Download macOS app](https://github.com/KaiCao2003/RF-Map-Viewer/releases/download/python-v1.11.5/RF_Map_Viewer-python-1.11.5-full-macos-arm64.zip) · [SHA-256 checksum](https://github.com/KaiCao2003/RF-Map-Viewer/releases/download/python-v1.11.5/SHA256SUMS-python-1.11.5-full.txt)
+Builds: macOS **111006**; Windows **11106**.

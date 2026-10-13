@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -7,10 +8,14 @@ struct ContentView: View {
     let pairingWindowID: UUID
     let openFigureExporter: () -> Void
     let openRFMapInNewWindow: (URL) -> Void
+    @State private var inspectorWindow: NSWindow?
 
     var body: some View {
         viewerContent
         .preferredColorScheme(.light)
+        .sheet(isPresented: $store.isShowingSettings) { ViewerSettingsView(store: store) }
+        .onChange(of: store.inspectorRequest) { _, _ in showInspector() }
+        .onDisappear { inspectorWindow?.close(); inspectorWindow = nil }
         .overlay {
             if store.isWaveformZoomed {
                 WaveformZoomOverlay(store: store)
@@ -62,6 +67,21 @@ struct ContentView: View {
         .onChange(of: hoverContext) { _, _ in
             store.clearHover()
         }
+    }
+
+    private func showInspector() {
+        if let inspectorWindow {
+            inspectorWindow.makeKeyAndOrderFront(nil)
+            return
+        }
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 600),
+                              styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        window.title = "Inspector — RF Map Viewer"
+        window.isReleasedWhenClosed = false
+        window.contentViewController = NSHostingController(rootView: RFInspectorView(store: store))
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        inspectorWindow = window
     }
 
     private var viewerContent: some View {
@@ -269,6 +289,7 @@ private struct PlotControlBar: View {
                         ForEach(ResponseValueMode.allCases) { mode in
                             Text(mode.rawValue)
                                 .tag(mode)
+                                .disabled(mode == .meanFiringRate && store.data?.supportsMeanFiringRate != true)
                         }
                     }
                     .labelsHidden()
@@ -299,6 +320,7 @@ private struct PlotControlBar: View {
                 Spacer(minLength: 0)
             }
 
+            Group {
             switch store.selectedTab {
             case .rf:
                 HStack(spacing: 8) {
@@ -356,6 +378,19 @@ private struct PlotControlBar: View {
                         .foregroundStyle(.tertiary)
                     Spacer(minLength: 0)
                 }
+            case .results:
+                HStack {
+                    Picker("Saved detection", selection: $store.resultsMode) {
+                        ForEach([RFOverlayMode.twoD, .oneD, .both]) { Text($0.rawValue).tag($0) }
+                    }
+                    Picker("Polarity", selection: $store.resultsPolarity) {
+                        ForEach(RFResultPolarity.allCases) { Text($0.rawValue).tag($0) }
+                    }
+                    Text(store.savedResultStatus).font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Reload", action: store.reloadSavedResults)
+                    Button("Inspector…") { store.inspectorRequest += 1 }
+                }
             case .delayRGB:
                 HStack(spacing: 8) {
                     Toggle("RGB composite", isOn: Binding(
@@ -378,6 +413,7 @@ private struct PlotControlBar: View {
                     Spacer(minLength: 0)
                 }
             }
+            }.frame(height: 28)
         }
         .controlSize(.small)
         .padding(.horizontal, 12)
@@ -423,7 +459,7 @@ private struct PlotTabsView: View {
     var body: some View {
         VStack(spacing: 0) {
             Picker("View", selection: $store.selectedTab) {
-                ForEach(PlotTab.allCases) { tab in
+                ForEach(store.visibleTabs) { tab in
                     Text(tab.rawValue).tag(tab)
                 }
             }
@@ -434,18 +470,32 @@ private struct PlotTabsView: View {
 
             Group {
                 switch store.selectedTab {
-                case .rf:
-                    HSplitView {
+                case .rf, .results:
+                    let stacked = store.displayDefaults.tuningLayout == .stacked && store.isTuningExpanded
+                    let layout = stacked ? AnyLayout(VStackLayout(spacing: 0)) : AnyLayout(HStackLayout(spacing: 0))
+                    layout {
                         Group {
                             if store.spatialPlotFormat == .polar {
-                                PolarMapView(store: store, kind: .rf)
+                                PolarMapView(store: store, kind: store.selectedTab == .results ? .results : .rf)
                             } else {
-                                HeatmapView(store: store, kind: .rf)
+                                HeatmapView(store: store, kind: store.selectedTab == .results ? .results : .rf)
                             }
                         }
                         .frame(minWidth: 460, maxWidth: .infinity, maxHeight: .infinity)
-                        HDTuningCompanionView(store: store)
-                            .frame(minWidth: 260, idealWidth: 330, maxWidth: 420)
+                        if store.displayDefaults.showTuning {
+                            if store.isTuningExpanded {
+                                HDTuningCompanionView(store: store)
+                                    .frame(minWidth: stacked ? 460 : 260,
+                                           maxWidth: stacked ? .infinity : 420,
+                                           minHeight: stacked ? 240 : 0,
+                                           maxHeight: .infinity)
+                            } else {
+                                Button { store.tuningExpanded = true } label: {
+                                    Label("HD tuning", systemImage: "sidebar.right")
+                                }
+                                .padding(8)
+                            }
+                        }
                     }
                 case .delayRGB:
                     if store.delayRGBMode == .rgb {

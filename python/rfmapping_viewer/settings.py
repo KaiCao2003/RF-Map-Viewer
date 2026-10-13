@@ -81,6 +81,7 @@ class ViewerSettings:
     show_waveform: bool = True
     show_probe_layout: bool = True
     auto_load_probe_layout: bool = True
+    show_probe_unit_info: bool = True
     rf_sum_start_ms: float = DEFAULT_RF_SUM_START_MS
     rf_sum_end_ms: float = DEFAULT_RF_SUM_END_MS
     rf_subtract: bool = False
@@ -222,6 +223,7 @@ class ViewerSettings:
             show_waveform=boolean("show_waveform"),
             show_probe_layout=boolean("show_probe_layout"),
             auto_load_probe_layout=boolean("auto_load_probe_layout"),
+            show_probe_unit_info=boolean("show_probe_unit_info"),
             rf_sum_start_ms=start_ms,
             rf_sum_end_ms=end_ms,
             rf_subtract=boolean("rf_subtract"),

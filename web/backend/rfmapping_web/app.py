@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt
 from starlette.concurrency import run_in_threadpool
 
 from .asgi_access_gate import install_access_gate
+from .adn_selection import adn_selection_path, load_adn_units, save_adn_units
 from .companions import (
     companion_for_positions,
     discover_companions,
@@ -53,6 +54,7 @@ from .figure_exports import (
 )
 from .middleware import DirectAccessMiddleware
 from .paths import PathAccessError, list_directory, resolve_under
+from .rf_results import RFResultSource, load_saved_rf_result, rf_result_path
 from .waveforms import (
     DEFAULT_WAVEFORM_CHANNEL_MODE,
     WaveformArtifactError,
@@ -61,11 +63,16 @@ from .waveforms import (
 )
 
 
-WEB_VERSION = "1.10.2"
+WEB_VERSION = "1.10.3"
 
 
 class StrictRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+
+class AdnSelectionRequest(StrictRequest):
+    unitIds: list[StrictInt]
+    positionsPath: str | None = Field(default=None, max_length=4096)
 
 
 class OpenDatasetRequest(StrictRequest):
@@ -356,6 +363,48 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def dataset_cache(dataset_id: str) -> dict[str, Any]:
         record = _get_record(services, dataset_id)
         return services.datasets.response_metadata(record)["cacheProgress"]
+
+    @application.get("/api/datasets/{dataset_id}/rf-results")
+    def saved_rf_results(
+        dataset_id: str,
+        dimension: Literal["1d", "2d"] = "2d",
+        polarity: Literal["excitatory", "inhibitory"] = "excitatory",
+        force_reload: bool = False,
+    ) -> dict[str, Any]:
+        record = _get_record(services, dataset_id)
+        key = (dimension, polarity)
+        # Sidecars are explicitly reloaded, independently of progressive RF counts.
+        with record.saved_results_lock:
+            if not force_reload and key in record.saved_results:
+                return record.saved_results[key]
+            metadata = record.cache.metadata
+            source = RFResultSource(
+                record.source, tuple(metadata["unitPool"]),
+                tuple(metadata["xPositions"]), tuple(metadata["yPositions"]),
+                tuple(metadata["timeBinEdges"]),
+            )
+            payload: dict[str, Any] = {
+                "dimension": dimension, "polarity": polarity,
+                "sourcePath": record.public_source_path,
+                "resultPath": str(rf_result_path(record.source, dimension=dimension, rf_type=polarity)),
+            }
+            try:
+                result = load_saved_rf_result(
+                    source, dimension=dimension, rf_type=polarity,
+                    scope_root=record.scope_root,
+                )
+            except (OSError, ValueError, TypeError, KeyError) as error:
+                payload.update(available=False, detail=str(error))
+            else:
+                payload.update(
+                    available=True, unitIds=list(result.unit_ids),
+                    masks=result.mask.tolist(), centers=result.center.tolist(),
+                    axis=result.axis, projectedFrom2d=result.projected_from_2d,
+                    manifest=result.manifest, cacheKey=result.cache_key,
+                    summary=result.summary, summaryWarning=result.summary_warning,
+                )
+            record.saved_results[key] = payload
+            return payload
 
     @application.post("/api/datasets/{dataset_id}/cache/retry")
     def retry_dataset_cache(dataset_id: str) -> dict[str, Any]:
@@ -1021,6 +1070,43 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             OSError,
         ) as exc:
             raise _http_from_export_error(exc) from exc
+
+    def adn_context(dataset_id: str, positions_path: str | None):
+        record = _get_record(services, dataset_id)
+        companions = record.companions
+        if positions_path is not None:
+            positions = resolve_under(configured.rf_root, positions_path, expect="file")
+            companions = companion_for_positions(companions, positions, record.scope_root)
+        geometry = load_probe_geometry(companions, record.cache.metadata["unitPool"])
+        return record, geometry, adn_selection_path(record.source, record.scope_root)
+
+    @application.get("/api/datasets/{dataset_id}/adn-selection")
+    def adn_selection(dataset_id: str, path: str | None = Query(default=None)) -> dict[str, Any]:
+        try:
+            _record, geometry, output = adn_context(dataset_id, path)
+            if geometry is None or output is None:
+                return {"available": False, "detail": "ADN annotation needs a recording session and probe geometry."}
+            probe = geometry["probe"]
+            return {"available": True, "path": str(output), "probe": probe,
+                    "unitIds": load_adn_units(output, probe)}
+        except (PathAccessError, FileNotFoundError) as exc:
+            raise _http_from_path_error(exc) from exc
+        except (OSError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @application.put("/api/datasets/{dataset_id}/adn-selection")
+    def update_adn_selection(dataset_id: str, request: AdnSelectionRequest) -> dict[str, Any]:
+        try:
+            _record, geometry, output = adn_context(dataset_id, request.positionsPath)
+            if geometry is None or output is None:
+                raise HTTPException(status_code=422, detail="ADN annotation needs a recording session and probe geometry.")
+            probe = geometry["probe"]
+            ids = save_adn_units(output, probe, request.unitIds)
+            return {"available": True, "path": str(output), "probe": probe, "unitIds": ids}
+        except (PathAccessError, FileNotFoundError) as exc:
+            raise _http_from_path_error(exc) from exc
+        except (OSError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @application.get("/api/datasets/{dataset_id}/probe")
     def probe_geometry(

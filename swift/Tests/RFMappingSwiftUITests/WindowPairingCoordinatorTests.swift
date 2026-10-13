@@ -159,6 +159,7 @@ final class WindowPairingCoordinatorTests: XCTestCase {
             "xPositions": [0.0],
             "yPositions": [0.0],
             "timeBinEdges": [-0.1, 0.0, 0.1, 0.2, 0.3],
+            "stimulusPresentationCounts": [[2]],
         ], occupancyTimeSec: 0.4, occupancyTimeSecSize: [1, 1])
         let data = try RFMappingData(
             data: JSONSerialization.data(withJSONObject: object),

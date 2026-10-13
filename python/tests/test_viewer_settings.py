@@ -14,6 +14,19 @@ import rfmapping_viewer.settings as settings_module
 from gui_test_support import base_payload
 
 
+class ProbeSettingsTests(unittest.TestCase):
+    def test_hover_defaults_on_and_round_trips_disabled(self) -> None:
+        self.assertTrue(settings_module.ViewerSettings.from_mapping({}).show_probe_unit_info)
+        settings = replace(settings_module.ViewerSettings(), show_probe_unit_info=False)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.json"
+            settings_module.save_viewer_settings(settings, path)
+            self.assertEqual(settings_module.load_viewer_settings(path), settings)
+        self.assertTrue(settings_module.ViewerSettings.from_mapping({
+            "show_probe_unit_info": "false",
+        }).show_probe_unit_info)
+
+
 class UnitFilterSettingsTests(unittest.TestCase):
     def test_rf_subtraction_defaults_round_trip_and_validate_ranges(self) -> None:
         defaults = settings_module.ViewerSettings()

@@ -15,18 +15,38 @@ struct SidebarView: View {
                 Divider()
                 pairingSection
                 Divider()
-                ProbeSidebarSection(store: store)
+                if store.displayDefaults.showProbe {
+                    DisclosureGroup("Probe", isExpanded: Binding(get: { store.isProbeExpanded }, set: { store.probeExpanded = $0 })) {
+                        ProbeSidebarSection(store: store)
+                    }
+                }
                 Divider()
                 unitSection
                 Divider()
-                WaveformSidebarSection(store: store)
+                if store.showWaveform {
+                    DisclosureGroup("Waveform", isExpanded: Binding(get: { store.isWaveformExpanded }, set: { store.waveformExpanded = $0 })) {
+                        WaveformSidebarSection(store: store)
+                    }
+                }
                 Divider()
                 Button(store.showDisplayOptions ? "Hide (D)" : "Display Options (D)") {
                     store.showDisplayOptions.toggle()
                 }
+                Text("RF overlap").font(.headline)
+                RFOverlayLayerControls(store: store)
+                if !store.activeResultLayers.isEmpty {
+                    SavedRFOverlayLegend(settings: store.displayDefaults, layers: store.activeResultLayers,
+                                         resultOnly: store.selectedTab == .results)
+                }
+                if !store.savedResultInterval.isEmpty {
+                    Text("Saved " + store.savedResultInterval).font(.caption).foregroundStyle(.secondary)
+                }
                 if store.showDisplayOptions { displaySection }
                 Divider()
-                selectedCellSection
+                HStack {
+                    Button("Settings…") { store.isShowingSettings = true }
+                    Button("Inspector…") { store.inspectorRequest += 1 }
+                }
                 actionSection
                 shortcutHint
                 Spacer(minLength: 12)
@@ -284,7 +304,7 @@ struct SidebarView: View {
     }
 
     private var shortcutHint: some View {
-        Text("←/→ unit   ↑/↓ timeline   1–3 views\nP rectangle/polar   ⇧P palette   Esc close/clear/full range")
+        Text("←/→ unit   ↑/↓ timeline   1–4 views\nP rectangle/polar   ⇧P palette   Esc close/clear/full range")
             .font(.caption)
             .foregroundStyle(.tertiary)
     }

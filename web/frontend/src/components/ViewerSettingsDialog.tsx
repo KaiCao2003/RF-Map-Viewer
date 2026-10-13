@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { normalizeHdBinCount } from "../hdMath";
-import { DEFAULT_VIEWER_SETTINGS, invalidSettingsSection, type ViewerSettings } from "../viewerSettings";
+import { DEFAULT_VIEWER_SETTINGS, RF_OVERLAY_LAYERS, RF_OVERLAY_COLORS, toggleRfOverlayLayer, invalidSettingsSection, type ViewerSettings } from "../viewerSettings";
 import { PALETTES, POLAR_RADIUS_MODES, VALUE_MODES } from "../types";
+
+import { VIEWER_TABS } from "../viewTabs";
 
 const TABS = ["General", "RF Map", "Waveform", "Tuning Curve"] as const;
 
@@ -77,7 +79,15 @@ export default function ViewerSettingsDialog({ settings, onSave, onClose }: {
           {checkbox("Auto-load HD tuning curve", "autoLoadHd", !draft.showHd)}
           {checkbox("Probe layout", "showProbe")}
           {checkbox("Auto-load Probe layout", "autoLoadProbe", !draft.showProbe)}
+          {checkbox("Unit info on hover", "showProbeUnitInfo", !draft.showProbe)}
           <p className="muted-copy">Choose companion files manually when auto-load is off.</p>
+          <h3>Visible tabs</h3>
+          {VIEWER_TABS.map(({ key, label }) => <label className="check-row" key={key}><input type="checkbox" checked={draft.visibleTabs.includes(key)}
+            disabled={draft.visibleTabs.length === 1 && draft.visibleTabs.includes(key)} onChange={(event) => {
+              const visibleTabs = VIEWER_TABS.map((tab) => tab.key).filter((tab) => tab === key ? event.target.checked : draft.visibleTabs.includes(tab));
+              patch({ visibleTabs, initialTab: visibleTabs.includes(draft.initialTab) ? draft.initialTab : visibleTabs[0] });
+            }} /><span>{label}</span></label>)}
+          {select("Initial tab", "initialTab", VIEWER_TABS.filter((item) => draft.visibleTabs.includes(item.key)).map((item) => [item.key, item.label]))}
         </fieldset>}
         {tab === "RF Map" && <>
           <fieldset><legend>Timing</legend>
@@ -98,9 +108,14 @@ export default function ViewerSettingsDialog({ settings, onSave, onClose }: {
             {select("Polar radius", "polarRadius", POLAR_RADIUS_MODES.map((value) => [value, value]))}
             {number("RF smoothing radius", "smoothRadius", 0, 1, 3)}
             {checkbox("Flip Y", "flipY")}{checkbox("RGB composite", "rgbMode")}
-            {select("Initial tab", "initialTab", [["rf", "RF"], ["delay", "Delay / RGB"], ["timeline", "Timeline"]])}
           </fieldset>
         </>}
+        {tab === "RF Map" && <fieldset><legend>Saved RF overlay</legend>
+          {RF_OVERLAY_LAYERS.map((layer) => <label className="check-row" key={layer}><input type="checkbox" checked={draft.rfOverlay.layers.includes(layer)}
+            onChange={() => patch({ rfOverlay: { ...draft.rfOverlay, layers: toggleRfOverlayLayer(draft.rfOverlay.layers, layer) } })} /><span>{layer.replace("_", " ").replace("1d", "1D").replace("2d", "2D")}</span></label>)}
+          <label className="settings-row"><span>Border width (px)</span><input type="number" required min="0.1" step="any" value={draft.rfOverlay.width} onChange={(event) => patch({ rfOverlay: { ...draft.rfOverlay, width: Number(event.target.value) } })} /></label>
+          {RF_OVERLAY_COLORS.map(([key, label]) => <label key={key} className="settings-row"><span>{label}</span><input type="color" value={draft.rfOverlay[key]} onChange={(event) => patch({ rfOverlay: { ...draft.rfOverlay, [key]: event.target.value } })} /></label>)}
+        </fieldset>}
         {tab === "Waveform" && <fieldset><legend>Local average waveform</legend>
           {checkbox("Show waveform", "showWaveform")}
           {select("Nearby channels", "waveformChannelMode", [["same_x_column", "Same x column"], ["same_shank", "Same shank"]])}
