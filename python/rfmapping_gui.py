@@ -2297,6 +2297,9 @@ class RFMViewer(tk.Toplevel):
             return
         self._waveform_zoomed = False
         self.waveform_zoom_overlay.place_forget()
+        # Aqua can unmap the overlay without repainting the canvases beneath it.
+        # Restacking invalidates the parent window's backing store as well.
+        self.waveform_zoom_overlay.lower()
         if refocus and self.waveform_canvas.winfo_ismapped():
             self.waveform_canvas.focus_set()
 

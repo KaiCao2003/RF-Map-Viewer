@@ -1,6 +1,6 @@
 # Python RF Map Viewers
 
-This directory contains the Python/Tk RF Map Viewer `1.11.7`, launched by
+This directory contains the Python/Tk RF Map Viewer `1.11.8`, launched by
 `rfmapping_gui.py` or the installed `rfmapping-viewer` command. The separate
 Free-Moving alpha and its HDF5 Square/Bar, 3D-sphere, and exposure-QA paths have
 been retired. The offline session/EBC HTML report script remains available.
@@ -369,12 +369,17 @@ of **⌘** on Windows. NumLock and ScrollLock do not disable viewer shortcuts.
 
 ---
 
+## Stable viewer 1.11.8
+
+Version 1.11.8 repaints the covered plots when leaving waveform zoom on macOS,
+so one Escape restores the main view without enlarged waveform remnants.
+
 ## Stable viewer 1.11.7
 
 Version 1.11.7 moves ADN annotation to Utilities, adds HD-class colors and
 filters to its probe view, and keeps the sidebar available for waveform.
-Escape closes the enlarged waveform with one keypress. The RF overlap master
-switch hides and restores the selected layers without changing their checks.
+The RF overlap master switch hides and restores the selected layers without
+changing their checks.
 
 Version 1.11.6 adds the probe unit-info hover preference.
 
@@ -579,7 +584,7 @@ Opening the app without a path shows the native file chooser. Release packages
 do not contain or auto-load sample RF data.
 
 Its macOS identity is `RF Map Viewer.app`, bundle ID
-`org.local.rfmapping.viewer`, and version/build `1.11.7` / `111007`. Build it with:
+`org.local.rfmapping.viewer`, and version/build `1.11.8` / `111008`. Build it with:
 
 ```sh
 script/build_python_stable_macos_app.sh
