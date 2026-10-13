@@ -56,6 +56,7 @@ def check_native_waveform(app) -> None:
         events.append({
             "type": str(event.type), "widget": str(event.widget),
             "keysym": str(event.keysym), "keycode": str(event.keycode),
+            "x": event.x, "y": event.y, "x_root": event.x_root, "y_root": event.y_root,
             "state": str(event.state), "focus": str(app.focus_get()),
             "zoomed": app._waveform_zoomed,
         })

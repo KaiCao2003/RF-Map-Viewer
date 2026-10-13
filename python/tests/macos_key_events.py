@@ -84,14 +84,26 @@ def send_double_click(widget) -> None:
     view = send(window, b"contentView", ctypes.c_void_p)
     bounds = send(view, b"bounds", NSRect)
     flipped = send(view, b"isFlipped", ctypes.c_bool)
-    x = widget.winfo_rootx() - toplevel.winfo_rootx() + widget.winfo_width() / 2
-    y = widget.winfo_rooty() - toplevel.winfo_rooty() + widget.winfo_height() / 2
+    root_x = widget.winfo_rootx() + widget.winfo_width() // 2
+    root_y = widget.winfo_rooty() + widget.winfo_height() // 2
+    x = root_x - toplevel.winfo_rootx()
+    y = root_y - toplevel.winfo_rooty()
     point = NSPoint(bounds.origin.x + x, bounds.origin.y + (y if flipped else bounds.size.height - y))
     location = send(
         view, b"convertPoint:toView:", NSPoint,
         (NSPoint, ctypes.c_void_p), point, None,
     )
     number = send(window, b"windowNumber", ctypes.c_long)
+    # Aqua hit-tests using NSEvent.mouseLocation, not the posted event's location.
+    graphics = ctypes.CDLL("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics")
+    graphics.CGWarpMouseCursorPosition.argtypes = (NSPoint,)
+    graphics.CGWarpMouseCursorPosition.restype = ctypes.c_int32
+    result = graphics.CGWarpMouseCursorPosition(NSPoint(root_x, root_y))
+    assert result == 0, f"Cocoa cursor positioning failed: {result}"
+    widget.update()
+    pointer = widget.winfo_pointerxy()
+    assert pointer == (root_x, root_y), f"Native pointer is at {pointer}, expected {(root_x, root_y)}"
+    assert widget.winfo_containing(*pointer) is widget, "Native pointer does not target the widget"
     for click_count in (1, 2):
         for event_type in (1, 2):  # NSEventTypeLeftMouseDown, NSEventTypeLeftMouseUp
             event = send(
