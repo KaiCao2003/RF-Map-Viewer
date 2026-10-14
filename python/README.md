@@ -1,6 +1,6 @@
 # Python RF Map Viewers
 
-This directory contains the Python/Tk RF Map Viewer `1.11.9`, launched by
+This directory contains the Python/Tk RF Map Viewer `1.11.10`, launched by
 `rfmapping_gui.py` or the installed `rfmapping-viewer` command. The separate
 Free-Moving alpha and its HDF5 Square/Bar, 3D-sphere, and exposure-QA paths have
 been retired. The offline session/EBC HTML report script remains available.
@@ -44,6 +44,15 @@ input is never edited; exports are created only when you request them.
    cache indicator while later units load. You can inspect units as they
    become available; **Export…** becomes available after the archive cache
    finishes. If caching reports an error, use **Retry**.
+
+Use **File → Reload Current Document** (**⌘R**) after updating a recording's
+files. The current unit and display controls stay selected, with a separate
+progress bar at the bottom right. Indexed RF maps reload the current unit first,
+then alternate through its left and right neighbors to both ends. Previously
+loaded unit plots remain available until their replacements arrive. JSON RF,
+tuning curves, probe geometry, waveforms, and saved RF results are replaced
+after their full read; a failed read keeps the previous display. Changed RF
+coordinates or time bins require a complete RF load before replacement.
 
 On macOS, recent documents use the application's native `NSDocumentController`
 history. Open one from the welcome window or **File → Open Recent**.
@@ -161,6 +170,10 @@ borders are solid (green/yellow/orange); inhibitory borders are dashed
 width and colors in Settings. Borders retain the original detection bins when the RF display
 combines bins; orange marks only an actual original-bin intersection. The saved
 detection interval appears beside the RF response interval.
+
+The **RF overlap** switch and checked overlay layers remember their last use
+automatically, including after closing and reopening the app. Hiding overlays
+keeps the layer selection.
 
 In **Settings → General → Visible tabs**, show or hide RF, Delay / RGB,
 Timeline and RF Results. At least one tab must remain visible. The preference
@@ -368,6 +381,12 @@ of **⌘** on Windows. NumLock and ScrollLock do not disable viewer shortcuts.
   displayed as zero.
 
 ---
+
+## Stable viewer 1.11.10
+
+Version 1.11.10 remembers live overlay selections, reloads with ⌘R while keeping
+existing plots visible, and loads indexed RF units outward from the current
+unit. The waveform panel has a single-line header and a taller plot.
 
 ## Stable viewer 1.11.9
 
@@ -589,7 +608,7 @@ Opening the app without a path shows the native file chooser. Release packages
 do not contain or auto-load sample RF data.
 
 Its macOS identity is `RF Map Viewer.app`, bundle ID
-`org.local.rfmapping.viewer`, and version/build `1.11.9` / `111009`. Build it with:
+`org.local.rfmapping.viewer`, and version/build `1.11.10` / `111010`. Build it with:
 
 ```sh
 script/build_python_stable_macos_app.sh

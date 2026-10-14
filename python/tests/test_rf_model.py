@@ -1,3 +1,4 @@
+import json
 import math
 import unittest
 from types import SimpleNamespace
@@ -8,6 +9,66 @@ import rfmapping_viewer.constants as constants_module
 import rfmapping_viewer.display as display_module
 import rfmapping_viewer.rf_model as rf_model_module
 from gui_test_support import base_payload, current_rf_payload, write_payload
+
+
+class RFMappingReloadCompanionTests(unittest.TestCase):
+    def test_retained_companions_keep_loaded_objects_and_original_export_identities(self) -> None:
+        from test_gui_figure_export import _write_waveform_fixture
+        from rfmapping_viewer.figure_composer import FigureExportWindow
+
+        directory, fixture_path = write_payload(base_payload())
+        self.addCleanup(directory.cleanup)
+        path, _artifact = _write_waveform_fixture(fixture_path.parent)
+        previous = rf_model_module.RFMappingData(path)
+        data = rf_model_module.RFMappingData(path)
+        self.addCleanup(previous.close)
+        self.addCleanup(data.close)
+        tuning_path = path.with_suffix(".tc")
+        tuning_path.write_text(json.dumps({"42": [1.0] * 180}), encoding="utf-8")
+        tuning = previous.attach_hd_tuning(tuning_path)
+        positions_path = path.with_suffix(".probe")
+        positions_path.write_text(
+            "unit_index,unit_id,x_um,y_um\n0,42,10,20\n", encoding="utf-8"
+        )
+        geometry = previous.attach_probe_geometry(positions_path, probe_name="ProbeA")
+        waveform = previous.waveform_store()
+        previous.waveform_payload(42, "same_x_column")
+        previous.capture_waveform_inputs([42])
+
+        data.retain_previous_companions(previous, tuning=True, probe=True, waveform=True)
+        previous.close()
+        self.assertIs(data.hd_tuning(), tuning)
+        self.assertIs(data.probe_geometry(), geometry)
+        self.assertIs(data.waveform_store(), waveform)
+        self.assertIs(data._hd_tuning_identity, previous._hd_tuning_identity)
+        self.assertIs(data._probe_file_identities, previous._probe_file_identities)
+        self.assertIs(data._waveform_file_identities, previous._waveform_file_identities)
+        self.assertIsNone(data.hd_tuning_error)
+        self.assertIsNone(data.probe_geometry_error)
+        self.assertIsNone(data.waveform_error)
+        composer = SimpleNamespace(data=data)
+        FigureExportWindow._verify_export_inputs(composer)
+        tuning_path.write_text("incomplete replacement", encoding="utf-8")
+        self.assertIs(data.hd_tuning(), tuning)
+        with self.assertRaisesRegex(RuntimeError, "changed after it was loaded"):
+            FigureExportWindow._verify_export_inputs(composer)
+
+    def test_missing_previous_companion_does_not_replace_loaded_data(self) -> None:
+        directory, path = write_payload(base_payload())
+        self.addCleanup(directory.cleanup)
+        previous = rf_model_module.RFMappingData(path)
+        data = rf_model_module.RFMappingData(path)
+        self.addCleanup(previous.close)
+        self.addCleanup(data.close)
+        tuning_path = path.with_suffix(".tc")
+        tuning_path.write_text(json.dumps({"42": [2.0] * 180}), encoding="utf-8")
+        tuning = data.attach_hd_tuning(tuning_path)
+
+        data.retain_previous_companions(previous, tuning=True, probe=True, waveform=True)
+
+        self.assertIs(data.hd_tuning(), tuning)
+        self.assertFalse(data._probe_geometry_checked)
+        self.assertFalse(data._waveform_checked)
 
 
 class RFMappingRateTests(unittest.TestCase):

@@ -82,7 +82,7 @@ def draw_saved_rf_result(figure, result: SavedRFResult, unit_id: int, *, flip_y:
 class RFResultsPane(ttk.Frame):
     """Saved-result selectors for the viewer's shared spatial canvas."""
 
-    def __init__(self, parent, data=None, *, controls_parent=None, on_change=None):
+    def __init__(self, parent, data=None, *, controls_parent=None, on_change=None, on_reload=None):
         super().__init__(parent)
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
@@ -104,7 +104,7 @@ class RFResultsPane(ttk.Frame):
             control.pack(side="left", padx=(0, 10))
             control.bind("<<ComboboxSelected>>", self._selection_changed)
         ttk.Label(self.controls, textvariable=self.status, style="Muted.TLabel").pack(side="left")
-        ttk.Button(self.controls, text="Reload", command=self.refresh).pack(side="right", padx=(10, 0))
+        ttk.Button(self.controls, text="Reload", command=on_reload or self.refresh).pack(side="right", padx=(10, 0))
         self.set_document(data)
 
     def set_document(self, data):

@@ -15,7 +15,7 @@ from rfmapping_viewer.hd_tuning import (
 )
 from rfmapping_viewer.rf_archive import IndexedRFMapList, RFCountSequence
 from rfmapping_viewer.rf_dataset import (
-    RFMap, _count_sum_dtype, is_indexed_rfmap, load_rf_maps,
+    RFMap, _count_sum_dtype, _lookup_integer, is_indexed_rfmap, load_rf_maps,
 )
 from rfmapping_viewer.rf_loading import load_rf_maps_isolated
 from rfmapping_viewer.waveform import (
@@ -89,12 +89,16 @@ class RFMappingData:
         *,
         isolated: bool = False,
         cancelled: Callable[[], bool] | None = None,
+        preferred_unit_id: int | None = None,
     ):
         source_identity = FrozenFileIdentity.capture(path)
         self.path = source_identity.path
+        self._previous_unit_maps: dict[int, RFMap] = {}
         self.unit_archive: IndexedRFMapList | None = None
         if is_indexed_rfmap(self.path):
-            self.unit_archive = IndexedRFMapList(self.path)
+            self.unit_archive = IndexedRFMapList(
+                self.path, preferred_unit_id=preferred_unit_id
+            )
             self.rf_maps = self.unit_archive
         else:
             self.rf_maps = (
@@ -107,7 +111,9 @@ class RFMappingData:
             self.close()
             raise
         self.source_identity = source_identity
-        first = self.rf_maps[0]
+        first = self.rf_maps[
+            self.unit_archive.initial_unit_index if self.unit_archive is not None else 0
+        ]
         self.n_units = len(self.rf_maps)
         self.n_y = first.n_y
         self.n_x = first.n_x
@@ -159,17 +165,140 @@ class RFMappingData:
         self._waveform_file_identities: tuple[FrozenFileIdentity, ...] = ()
 
     def close(self) -> None:
+        self._previous_unit_maps.clear()
         if self.unit_archive is not None:
+            self.counts = RFCountSequence(self.unit_archive)
             self.unit_archive.close()
+
+    def retain_previous_companions(
+        self,
+        previous: RFMappingData,
+        *,
+        tuning: bool = False,
+        probe: bool = False,
+        waveform: bool = False,
+    ) -> None:
+        """Keep parsed companion data and its original export identities.
+
+        Do not recapture file identities: a failed replacement may have changed
+        the file, and export validation must still reject that changed source.
+        """
+        if tuning:
+            with previous._hd_tuning_lock, self._hd_tuning_lock:
+                if previous._hd_tuning is not None:
+                    self._hd_tuning = previous._hd_tuning
+                    self._hd_tuning_identity = previous._hd_tuning_identity
+                    self._hd_tuning_error = previous._hd_tuning_error
+                    self._hd_tuning_checked = previous._hd_tuning_checked
+        if probe:
+            with previous._probe_geometry_lock, self._probe_geometry_lock:
+                if previous._probe_geometry is not None:
+                    self._probe_geometry = previous._probe_geometry
+                    self._probe_file_identities = previous._probe_file_identities
+                    self._probe_geometry_error = previous._probe_geometry_error
+                    self._probe_geometry_checked = previous._probe_geometry_checked
+        if waveform:
+            with previous._waveform_lock, self._waveform_lock:
+                if previous._waveform_store is not None:
+                    self._waveform_store = previous._waveform_store
+                    self._waveform_file_identities = previous._waveform_file_identities
+                    self._waveform_error = previous._waveform_error
+                    self._waveform_checked = previous._waveform_checked
+
+    def retain_previous_units(self, previous: RFMappingData) -> bool:
+        """Retain already loaded plots while a compatible archive is refreshed.
+
+        Immutable maps are retained by ID without reading the previous source,
+        which may already have been replaced on disk. The caller can close the
+        previous model after this method returns.
+        """
+        if self.unit_archive is None:
+            return False
+        previous_metadata = (
+            previous.unit_archive.header.metadata
+            if previous.unit_archive is not None else previous.rf_maps[0].metadata
+        )
+        if (
+            self.size[1:] != previous.size[1:]
+            or self.x_positions != previous.x_positions
+            or self.y_positions != previous.y_positions
+            or self.time_bin_edges != previous.time_bin_edges
+            or self.occupancy_time_s != previous.occupancy_time_s
+            or self.presentation_counts != previous.presentation_counts
+            or dict(self.unit_archive.header.metadata) != dict(previous_metadata)
+        ):
+            return False
+        previous_indices = {unit_id: index for index, unit_id in enumerate(previous.unit_pool)}
+        for index, unit_id in enumerate(self.unit_pool):
+            previous_index = previous_indices.get(unit_id)
+            if (
+                not self.unit_archive.is_cached(index)
+                and previous_index is not None
+                and previous.unit_is_available(previous_index)
+            ):
+                self._previous_unit_maps[index] = replace(
+                    previous.rf_map(previous_index), unit_index=index
+                )
+        if self._previous_unit_maps:
+            self.counts = RFCountSequence(self.unit_archive, map_lookup=self.rf_map)
+        return True
+
+    def unit_is_available(self, unit_idx: int) -> bool:
+        return (
+            self.unit_archive is None
+            or unit_idx in self._previous_unit_maps
+            or self.unit_archive.is_cached(unit_idx)
+        )
+
+    def refresh_reloaded_units(self) -> bool:
+        """Publish newly cached units and invalidate their previous display data."""
+        refreshed = {
+            index for index in self._previous_unit_maps
+            if self.unit_archive.is_cached(index)
+        }
+        if not refreshed:
+            return False
+        for index in refreshed:
+            self._previous_unit_maps.pop(index)
+            self._metrics_cache.pop(index, None)
+            self._best_cell_cache.pop(index, None)
+        for key in list(self._zero_spike_bin_count_cache):
+            if key[0] in refreshed:
+                self._zero_spike_bin_count_cache.pop(key)
+        with self._count_cache_lock:
+            for index in refreshed:
+                self._count_prefix_cache.pop(index, None)
+            for cache in (self._count_window_cache, self._temporal_array_cache):
+                for key in list(cache):
+                    if key[0] in refreshed:
+                        cache.pop(key)
+        return True
+
+    def release_previous_units(self) -> None:
+        """Release retained plots after the replacement archive has finished."""
+        self.refresh_reloaded_units()
+        self._previous_unit_maps.clear()
+        if self.unit_archive is not None:
+            self.counts = RFCountSequence(self.unit_archive)
 
     def rf_map(self, unit_idx: int) -> RFMap:
         """Return one unit by its original unitPool index."""
 
+        if self._previous_unit_maps:
+            unit_idx = _lookup_integer(unit_idx, "unit_index")
+            previous = self._previous_unit_maps.get(unit_idx)
+            if previous is not None:
+                return previous
         return self.rf_maps.by_index(unit_idx)
 
     def rf_map_by_unit_id(self, unit_id: int) -> RFMap:
         """Return a per-unit object by its recorded cluster/unit ID."""
 
+        if self._previous_unit_maps:
+            unit_id = _lookup_integer(unit_id, "unit_id")
+            for previous in self._previous_unit_maps.values():
+                if previous.unit_id == unit_id:
+                    return previous
         return self.rf_maps.by_unit_id(unit_id)
 
     @property

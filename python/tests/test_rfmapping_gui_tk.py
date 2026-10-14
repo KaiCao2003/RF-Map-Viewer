@@ -1401,12 +1401,21 @@ class TkViewerTests(unittest.TestCase):
         self.assertIs(self.app.cell_label.master, self.app.unit_info_pane)
         self.assertIs(self.app.cell_label.winfo_toplevel(), self.app.inspector_window)
         self.assertFalse(self.app.inspector_window.winfo_ismapped())
-        self.assertLessEqual(self.app.waveform_pane.winfo_height(), 200)
+        self.assertGreaterEqual(self.app.waveform_canvas.winfo_height(), 220)
+        self.assertEqual(int(self.app.waveform_subtitle_label.grid_info()["row"]), 0)
+        self.assertIn(str(self.app.waveform_subtitle_label.cget("wraplength")), ("", "0"))
+        self.assertGreaterEqual(
+            self.app.waveform_subtitle_label.winfo_width(),
+            self.app.waveform_subtitle_label.winfo_reqwidth(),
+        )
         self.assertFalse(self.app.tuning_curve_status_label.winfo_ismapped())
         self.assertIn("bin", self.app.cell_label.cget("text"))
         self.assertIn("cluster 7", self.app.unit_stats_label.cget("text"))
         self.assertGreater(len(self.app.canvases["waveform"].find_all()), 20)
-        self.assertIn("Same x column", self.app.waveform_subtitle_label.cget("text"))
+        self.assertEqual(
+            self.app.waveform_subtitle_label.cget("text"),
+            "5 ch · PTP 80 µV",
+        )
         self.assertTrue(self.app.waveform_canvas.bind("<Double-Button-1>"))
 
         self.app._toggle_waveform_zoom()
@@ -1439,7 +1448,7 @@ class TkViewerTests(unittest.TestCase):
 
         wait_for_payload((7, "same_shank"))
         self.assertEqual(self.app.waveform_channel_mode_var.get(), "same_shank")
-        self.assertIn("Same shank", self.app.waveform_subtitle_label.cget("text"))
+        self.assertEqual(self.app.waveform_subtitle_label.cget("text"), "5 ch · PTP 80 µV")
         saved = json.loads(
             self.app._app_root._rfm_settings_path.read_text(encoding="utf-8")
         )

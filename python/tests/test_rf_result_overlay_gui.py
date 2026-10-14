@@ -12,7 +12,7 @@ import rfmapping_gui as gui
 from gui_test_support import current_rf_payload, tk_test_root
 from rfmapping_viewer.rf_model import RFMappingData
 from rfmapping_viewer.rf_results import RFResultSource
-from rfmapping_viewer.settings import ViewerSettings, save_viewer_settings
+from rfmapping_viewer.settings import ViewerSettings, load_viewer_settings, save_viewer_settings
 from rfmapping_viewer.tk_support import TK_AVAILABLE, tk, ttk
 from test_rf_results import write_result
 
@@ -378,6 +378,36 @@ def test_overlay_shortcuts_toggle_one_layer_and_preserve_choices_when_hidden(app
     assert app.settings.rf_result_overlay_enabled
     assert app.settings.rf_result_overlay_layers == selected
     assert native_overlay(app)
+
+
+def test_overlay_last_selection_is_saved_without_other_window_settings(app):
+    defaults = app._app_root._rfm_settings
+    app.settings = replace(app.settings, rf_palette="Viridis")
+    app._show_settings()
+    settings_window = app._app_root._rfm_settings_window
+    settings_window.rf_sum_start_var.set("25")
+
+    app.rf_result_overlay_checks["inhibitory_1d"].invoke()
+    app._toggle_rf_result_overlay("excitatory_1d")
+    app._toggle_rf_result_overlay(None)
+    expected = replace(
+        defaults, rf_result_overlay_enabled=False,
+        rf_result_overlay_layers=("excitatory_2d", "inhibitory_1d"),
+    )
+    assert load_viewer_settings(app._app_root._rfm_settings_path) == expected
+    assert app._app_root._rfm_settings == expected
+    assert app.settings.rf_palette == "Viridis"
+    assert not settings_window.rf_result_overlay_enabled_var.get()
+    assert tuple(
+        layer for layer, variable in settings_window.rf_result_overlay_vars.items()
+        if variable.get()
+    ) == expected.rf_result_overlay_layers
+    assert settings_window.rf_sum_start_var.get() == "25"
+
+    app._toggle_rf_result_overlay(None)
+    expected = replace(expected, rf_result_overlay_enabled=True)
+    assert load_viewer_settings(app._app_root._rfm_settings_path) == expected
+    assert app._app_root._rfm_settings == expected
 
 
 @pytest.mark.parametrize("polar", [False, True])

@@ -124,6 +124,7 @@ from rfmapping_viewer.paths import (
 )
 from rfmapping_viewer.rf_dataset import is_indexed_rfmap
 from rfmapping_viewer.rf_model import RFMappingData
+from rfmapping_viewer.document_reload import ReloadRequest, reload_document
 from rfmapping_viewer.rf_results_view import RFResultsPane
 from rfmapping_viewer.recent_documents import (
     clear_recent_documents,
@@ -444,6 +445,15 @@ class RFMViewer(tk.Toplevel):
         self._unit_cache_after: str | None = None
         self._unit_cache_count = 0
         self._unit_cache_waiting = False
+        self._reload_generation = 0
+        self._reload_active = False
+        self._reload_after = None
+        self._reload_cancel_event = None
+        self._reload_result_queue = queue.SimpleQueue()
+        self._reload_candidate = None
+        self._reload_companions = None
+        self._reload_request = None
+        self._reload_previous = None
         self._startup_after: str | None = None
         self._startup_poll_after: str | None = None
         self._startup_generation = 0
@@ -647,7 +657,7 @@ class RFMViewer(tk.Toplevel):
     def _unit_loading_message(self) -> str | None:
         index = self._local_unit_index(self._selected_unit_id_value())
         archive = self.data.unit_archive
-        if archive is None or index is None or archive.is_cached(index):
+        if archive is None or index is None or self.data.unit_is_available(index):
             return None
         error = archive.error
         if error is not None:
@@ -918,6 +928,7 @@ class RFMViewer(tk.Toplevel):
             )
             return
         self._quitting = True
+        self._cancel_document_reload()
         self._stop_unit_cache()
         if self._viewer_ready:
             self.data.close()
@@ -1101,6 +1112,11 @@ class RFMViewer(tk.Toplevel):
             command=self._open_json,
         )
         self._add_recent_menu(file_menu)
+        file_menu.add_command(
+            label="Reload Current Document",
+            accelerator="⌘R" if sys.platform == "darwin" else "Ctrl+R",
+            command=self._reload_current_document,
+        )
         self._discovered_json_menu = tk.Menu(file_menu, tearoff=False)
         file_menu.add_cascade(
             label="Open Discovered RF Map",
@@ -1437,6 +1453,14 @@ class RFMViewer(tk.Toplevel):
         self.unit_cache_retry.grid_remove()
         self.unit_cache_frame.grid_remove()
 
+        self.reload_frame = ttk.Frame(status_bar, padding=(8, 2))
+        self.reload_frame.grid(row=0, column=2, sticky="e")
+        self.reload_label = ttk.Label(self.reload_frame, style="Status.TLabel")
+        self.reload_label.grid(row=0, column=0, padx=(0, 8))
+        self.reload_progress = ttk.Progressbar(self.reload_frame, length=120)
+        self.reload_progress.grid(row=0, column=1)
+        self.reload_frame.grid_remove()
+
         self.canvases: dict[str, tk.Canvas] = {}
         self._tab_keys = {}
         for key, title in (
@@ -1594,7 +1618,7 @@ class RFMViewer(tk.Toplevel):
                     padding=(0, 4),
                 )
                 waveform_header.grid(row=0, column=0, sticky="ew")
-                waveform_header.columnconfigure(0, weight=1)
+                waveform_header.columnconfigure(1, weight=1)
                 ttk.Label(
                     waveform_header,
                     text="Waveform",
@@ -1605,18 +1629,17 @@ class RFMViewer(tk.Toplevel):
                     text="",
                     style="SidebarMuted.TLabel",
                     font=("TkDefaultFont", 8),
-                    wraplength=240,
                     justify="left",
                 )
                 self.waveform_subtitle_label.grid(
-                    row=1, column=0, sticky="w", pady=(1, 0)
+                    row=0, column=1, sticky="e", padx=(8, 0)
                 )
                 self.waveform_canvas = tk.Canvas(
                     self.waveform_pane,
                     background="#ffffff",
                     highlightthickness=1,
                     highlightbackground="#d7d9de",
-                    height=100,
+                    height=220,
                 )
                 self.waveform_canvas.grid(row=1, column=0, sticky="nsew")
                 self.canvases["waveform"] = self.waveform_canvas
@@ -1651,6 +1674,7 @@ class RFMViewer(tk.Toplevel):
         self.results_pane = RFResultsPane(
             self.notebook, self.data, controls_parent=self.rf_map_header,
             on_change=self._on_saved_results_changed,
+            on_reload=self._reload_current_document,
         )
         self.notebook.add(self.results_pane, text=VIEWER_TABS["results"])
         self._tab_keys[str(self.results_pane)] = "results"
@@ -1669,7 +1693,7 @@ class RFMViewer(tk.Toplevel):
 
         header = ttk.Frame(overlay, style="Panel.TFrame")
         header.grid(row=0, column=0, sticky="ew", pady=(0, 10))
-        header.columnconfigure(0, weight=1)
+        header.columnconfigure(1, weight=1)
         ttk.Label(
             header,
             text="Waveform",
@@ -1683,10 +1707,10 @@ class RFMViewer(tk.Toplevel):
             justify="left",
         )
         self.waveform_zoom_subtitle_label.grid(
-            row=1,
-            column=0,
+            row=0,
+            column=1,
             sticky="w",
-            pady=(2, 0),
+            padx=(12, 0),
         )
         self.waveform_zoom_done_button = ttk.Button(
             header,
@@ -1696,7 +1720,6 @@ class RFMViewer(tk.Toplevel):
         self.waveform_zoom_done_button.grid(
             row=0,
             column=2,
-            rowspan=2,
             sticky="e",
         )
         self.waveform_zoom_canvas = tk.Canvas(
@@ -1750,7 +1773,7 @@ class RFMViewer(tk.Toplevel):
             self.sidebar_frame.rowconfigure(
                 self._waveform_section_row,
                 weight=0,
-                minsize=180,
+                minsize=260,
             )
 
     def _layout_rf_and_tuning(self) -> None:
@@ -2201,6 +2224,8 @@ class RFMViewer(tk.Toplevel):
             widget.bind("<Escape>", self._on_escape_key)
         modifiers = ("Control", "Command") if sys.platform == "darwin" else ("Control",)
         for modifier in modifiers:
+            for keysym in ("r", "R"):
+                self.bind(f"<{modifier}-{keysym}>", self._reload_current_document)
             # CapsLock changes letter keysyms, including Shift+letter on Windows.
             for keysym in ("e", "E"):
                 self.bind(f"<{modifier}-{keysym}>", lambda _event: self._open_figure_exporter())
@@ -2448,11 +2473,27 @@ class RFMViewer(tk.Toplevel):
 
     def _on_rf_result_overlays_changed(self) -> None:
         layers = tuple(layer for layer, variable in self.rf_result_overlay_vars.items() if variable.get())
+        enabled = self.rf_result_overlay_enabled_var.get()
         self.settings = replace(
             self.settings, rf_result_overlay_layers=layers,
-            rf_result_overlay_enabled=self.rf_result_overlay_enabled_var.get(),
+            rf_result_overlay_enabled=enabled,
         )
         self._on_control_changed()
+        defaults = replace(
+            self._app_root._rfm_settings, rf_result_overlay_layers=layers,
+            rf_result_overlay_enabled=enabled,
+        )
+        try:
+            save_viewer_settings(defaults, self._app_root._rfm_settings_path)
+        except OSError as exc:
+            messagebox.showerror("Could not save settings", str(exc), parent=self)
+            return
+        self._app_root._rfm_settings = defaults
+        settings_window = self._app_root._rfm_settings_window
+        if settings_window is not None and settings_window.winfo_exists():
+            settings_window.rf_result_overlay_enabled_var.set(enabled)
+            for layer, variable in settings_window.rf_result_overlay_vars.items():
+                variable.set(layer in layers)
 
     def _toggle_rf_result_overlay(self, layer: str | None) -> None:
         if layer is None:
@@ -2488,6 +2529,7 @@ class RFMViewer(tk.Toplevel):
             "Esc   Show Full Timeline Range\n"
             "[ / ]   Previous / next unit (legacy)\n"
             f"{primary}+O   Open an RF map in a new window\n"
+            f"{primary}+R   Reload current document and companions\n"
             f"{primary}+E   Open figure exporter\n"
             f"{primary}+Shift+E   Export displayed data CSV\n"
             f"{primary}+W   Close current window",
@@ -2603,7 +2645,8 @@ class RFMViewer(tk.Toplevel):
         if archive is not None and not archive.is_cached(local_index):
             archive.request(local_index)
             self._unit_cache_waiting = True
-            return None
+            if not self.data.unit_is_available(local_index):
+                return None
         return local_index
 
     def _set_selected_unit_id(self, unit_id: int) -> None:
@@ -6023,19 +6066,20 @@ class RFMViewer(tk.Toplevel):
         mode_label = WAVEFORM_CHANNEL_MODE_LABELS.get(
             key[1], key[1]
         )
+        sidebar = canvas is self.waveform_canvas
+        ptp_label = "PTP" if sidebar else "max PTP"
         max_ptp = payload.get("max_ptp_uv")
         ptp_text = (
-            f" · max PTP {float(max_ptp):.3g} µV"
+            f" · {ptp_label} {float(max_ptp):.3g} µV"
             if isinstance(max_ptp, (int, float))
             and math.isfinite(float(max_ptp))
             else ""
         )
-        subtitle_label.configure(
-            text=(
-                f"{mode_label} · "
-                f"best + {len(matrix) - 1} nearest{ptp_text}"
-            )
-        )
+        if sidebar:
+            subtitle = f"{len(matrix)} ch{ptp_text}"
+        else:
+            subtitle = f"{mode_label} · best + {len(matrix) - 1} nearest{ptp_text}"
+        subtitle_label.configure(text=subtitle)
 
     def _draw_unavailable_unit(
         self,
@@ -8770,12 +8814,211 @@ class RFMViewer(tk.Toplevel):
         canvas.create_rectangle(x, y, x + width, y + height, fill="#111827", outline="#111827", tags="hover")
         canvas.create_text(x + pad, y + pad, anchor="nw", text=text, fill="#f8fafc", font=("TkDefaultFont", 10), tags="hover")
 
+    def _cancel_document_reload(self) -> None:
+        was_active = self._reload_active
+        self._reload_generation += 1
+        if self._reload_cancel_event is not None:
+            self._reload_cancel_event.set()
+        if self._reload_after is not None:
+            self.after_cancel(self._reload_after)
+            self._reload_after = None
+        candidate = self._reload_candidate
+        if candidate is not None and candidate is not getattr(self, "data", None):
+            candidate.close()
+        self._reload_candidate = None
+        self._reload_companions = None
+        self._reload_companions_installed = False
+        self._reload_unit_count = 0
+        self._reload_previous = None
+        self._reload_active = False
+        if was_active:
+            self.reload_progress.stop()
+            self.reload_frame.grid_remove()
+
+    def _reload_current_document(self, _event=None) -> str:
+        if not self._viewer_ready or self._reload_active:
+            return "break"
+        self._cancel_document_reload()
+        self._reload_active = True
+        self._reload_previous = self.data
+        self._stop_unit_cache()
+        self.unit_cache_frame.grid_remove()
+        # Invalidate outstanding companion reads; keep their displayed data
+        # until the replacement files have been fully parsed.
+        self._optional_autoload_generation += 1
+        for name in ("_optional_autoload_after", "_optional_poll_after"):
+            pending = getattr(self, name)
+            if pending is not None:
+                self.after_cancel(pending)
+                setattr(self, name, None)
+        self._waveform_generation += 1
+        self._waveform_pending_request = None
+        self._waveform_loading_key = None
+        request = ReloadRequest(
+            generation=self._reload_generation,
+            path=self.data.path,
+            preferred_unit_id=self._selected_unit_id_value(),
+            tuning_path=self.tuning_curve_data.path if self.tuning_curve_data is not None else None,
+            probe_geometry=self.probe_geometry,
+            load_tuning=self.show_tuning_curve_var.get() and self.settings.auto_load_tuning_curve,
+            load_probe=self.show_probe_layout_var.get() and self.settings.auto_load_probe_layout,
+            load_waveform=self.show_waveform_var.get(),
+            tuning_session=self.settings.tuning_curve_session,
+            waveform_channel_mode=self.waveform_channel_mode_var.get(),
+        )
+        self._reload_request = request
+        self._reload_cancel_event = threading.Event()
+        self.reload_label.configure(text=f"Reloading unit {request.preferred_unit_id}…")
+        self.reload_progress.configure(mode="indeterminate")
+        self.reload_progress.start(15)
+        self.reload_frame.grid()
+        self.export_toolbar_button.state(["disabled"])
+        threading.Thread(
+            target=reload_document,
+            args=(request, self._reload_result_queue),
+            kwargs={"cancelled": self._reload_cancel_event.is_set},
+            name=f"rfmap-reload-{request.generation}", daemon=True,
+        ).start()
+        self._reload_after = self.after(30, self._poll_document_reload)
+        return "break"
+
+    def _install_reloaded_document(self, data: RFMappingData, *, progressive: bool = False) -> None:
+        previous = self.data
+        self.data = data
+        previous.close()
+        self._base_bin_cache = None
+        self._time_groups_cache = None
+        self._timeline_preview_cache_key = None
+        self._timeline_preview_images = {}
+        self._probe_static_signature = None
+        self._unit_cache_waiting = False
+        selected = self._selected_unit_id_value()
+        if selected not in data.unit_pool:
+            selected = self._next_union_unit_id(data.unit_pool, selected)
+        self._set_selected_unit_id(selected)
+        self.value_mode_combo.configure(values=tuple(
+            mode for mode in VALUE_MODES if data.supports_value_mode(mode)
+        ))
+        if not data.supports_value_mode(self.value_mode_var.get()):
+            self.value_mode_var.set(VALUE_MODE_COUNT)
+        self.time_res_spin.configure(from_=self._base_bin_ms(), to=self._total_time_ms(), increment=self._base_bin_ms())
+        self.x_bins_spin.configure(to=data.n_x)
+        self.y_bins_spin.configure(to=data.n_y)
+        self._normalize_control_values()
+        if progressive:
+            self._update_all()
+
+    def _apply_reloaded_companions(self, result) -> None:
+        request = self._reload_request
+        self.data.retain_previous_companions(
+            self._reload_previous, tuning="tuning" not in result.loaded,
+            probe="probe" not in result.loaded, waveform="waveform" not in result.loaded,
+        )
+        if result.tuning_data is not None:
+            self.tuning_curve_data = result.tuning_data
+            self._tuning_curve_candidate = result.tuning_data.path
+            self._tuning_curve_error = None
+            self._tuning_processed_cache = None
+            self._tuning_scale_cache = None
+        if result.probe_geometry is not None:
+            self.probe_geometry = result.probe_geometry
+            self._probe_static_signature = None
+        if result.waveform_payload is not None:
+            self._waveform_generation += 1
+            self.waveform_payload = result.waveform_payload
+            self._waveform_payload_key = (request.preferred_unit_id, request.waveform_channel_mode)
+            self._waveform_loading_key = None
+            self._waveform_error = None
+            self._waveform_error_key = None
+        if result.result_cache is not None:
+            source = result.result_cache.source
+            previous = self.results_pane.source
+            same_grid = all(
+                getattr(source, field) == getattr(previous, field)
+                for field in ("x_positions", "y_positions", "time_bin_edges")
+            )
+            if "results" in result.loaded or not same_grid:
+                self.results_pane.source = source
+                self.results_pane.cache = result.result_cache
+        self._sync_sidebar_companions()
+        self._sync_tuning_collapsed_state(schedule_redraw=False)
+        self._update_all()
+
+    def _poll_document_reload(self) -> None:
+        self._reload_after = None
+        error = None
+        while True:
+            try:
+                event = self._reload_result_queue.get_nowait()
+            except queue.Empty:
+                break
+            if event.generation != self._reload_generation:
+                if event.stage == "rf" and event.data is not self.data:
+                    event.data.close()
+                continue
+            if event.stage == "rf":
+                self._reload_candidate = event.data
+                if event.data.unit_archive is not None and event.data.retain_previous_units(self.data):
+                    self._install_reloaded_document(event.data, progressive=True)
+            elif event.stage == "complete":
+                self._reload_companions = event
+            elif event.stage == "error":
+                error = "; ".join(event.errors.values())
+        candidate = self._reload_candidate
+        complete = self._reload_companions
+        archive = candidate.unit_archive if candidate is not None else None
+        ready = candidate is not None and (archive is None or archive.cache_count == candidate.n_units)
+        if archive is not None:
+            self.reload_progress.stop()
+            self.reload_progress.configure(mode="determinate", maximum=candidate.n_units, value=archive.cache_count)
+            self.reload_label.configure(text=f"Reloading {archive.cache_count} / {candidate.n_units}")
+            if archive.error is not None:
+                error = archive.error[1]
+            refreshed = candidate.refresh_reloaded_units() if candidate is self.data else False
+            if candidate is self.data and (refreshed or archive.cache_count != self._reload_unit_count):
+                self._reload_unit_count = archive.cache_count
+                self._timeline_preview_cache_key = None
+                self._unit_cache_waiting = False
+                self._update_all()
+        if error is not None:
+            self._cancel_document_reload()
+            self.status_label.configure(text=f"Reload stopped: {error} — reload again to retry.")
+            self.export_toolbar_button.state(["disabled"] if self.data.unit_archive is not None and self.data.unit_archive.cache_count < self.data.n_units else ["!disabled"])
+            return
+        if ready and complete is not None:
+            if candidate is not self.data:
+                self._install_reloaded_document(candidate)
+            candidate.refresh_reloaded_units()
+            candidate.release_previous_units()
+            if not self._reload_companions_installed:
+                self._apply_reloaded_companions(complete)
+            self._reload_active = False
+            self._reload_candidate = None
+            self._reload_companions = None
+            self._reload_previous = None
+            self.reload_progress.stop()
+            self.reload_frame.grid_remove()
+            self.export_toolbar_button.state(["!disabled"])
+            self.status_label.configure(text=(
+                "Reloaded; kept previous companion data: " + "; ".join(complete.errors.values())
+                if complete.errors else "Reloaded current document and companions."
+            ))
+            self._pair_ready_viewer_set_changed(adopt_viewer=self)
+            return
+        # Companion files are replaced together only after their full read.
+        if complete is not None and candidate is self.data and not self._reload_companions_installed:
+            self._apply_reloaded_companions(complete)
+            self._reload_companions_installed = True
+        if not self._quitting:
+            self._reload_after = self.after(60, self._poll_document_reload)
+
     def _load_json_path(self, path: Path) -> None:
         try:
             data = RFMappingData(path)
         except Exception as exc:
             messagebox.showerror("Could not load RF map", str(exc))
             return
+        self._cancel_document_reload()
         if self._adn_window is not None and self._adn_window.winfo_exists():
             self._adn_window.destroy()
         self._adn_window = None
@@ -8881,6 +9124,9 @@ class RFMViewer(tk.Toplevel):
         self._start_unit_cache()
 
     def _open_figure_exporter(self) -> None:
+        if self._reload_active:
+            self.status_label.configure(text="Figures will be available when reloading finishes.")
+            return
         if self._active_tab_key() == "results":
             messagebox.showinfo("Saved RF results", "Switch to RF to export response figures.", parent=self)
             return
@@ -8907,6 +9153,10 @@ class RFMViewer(tk.Toplevel):
         self._figure_export_window = FigureExportWindow(self)
 
     def _export_current_matrix(self) -> None:
+        archive = self.data.unit_archive
+        if self._reload_active or (archive is not None and archive.cache_count < self.data.n_units):
+            self.status_label.configure(text="Export will be available when reloading finishes.")
+            return
         if self._active_tab_key() == "results":
             messagebox.showinfo(
                 "Saved RF results",

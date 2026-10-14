@@ -162,6 +162,121 @@ def test_archive_reads_only_first_unit_and_reuses_cached_objects(tmp_path, monke
         data.close()
 
 
+@pytest.mark.parametrize(("preferred", "expected"), [
+    (None, [41, 7, 200, 3]),
+    (41, [41, 7, 200, 3]),
+    (7, [7, 41, 200, 3]),
+    (200, [200, 7, 3, 41]),
+    (3, [3, 200, 7, 41]),
+    (999, [41, 7, 200, 3]),
+])
+def test_reload_reads_current_unit_then_neighbors_outward(
+    tmp_path, monkeypatch, preferred, expected
+):
+    _, path, _ = write_pair(tmp_path)
+    with np.load(path, allow_pickle=False) as archive:
+        archive_type = type(archive)
+    original = archive_type.__getitem__
+    reads = []
+
+    def read(self, key):
+        if key.startswith("unit_"):
+            reads.append(int(key[5:]))
+        return original(self, key)
+
+    monkeypatch.setattr(archive_type, "__getitem__", read)
+    data = RFMappingData(path, preferred_unit_id=preferred)
+    try:
+        assert reads == expected[:1]
+        assert data.unit_pool == [41, 7, 200, 3]
+        assert data.unit_archive.cache_count == 1
+        data.unit_archive.start_preload()
+        wait_for(lambda: data.unit_archive.cache_count == data.n_units)
+        assert reads == expected
+    finally:
+        data.close()
+        if data.unit_archive._worker:
+            data.unit_archive._worker.join(5)
+
+
+def test_reload_retains_cached_units_by_id_and_invalidates_old_calculations(tmp_path):
+    _, path, arrays = write_pair(tmp_path)
+    previous = RFMappingData(path)
+    for index in range(previous.n_units):
+        previous.rf_map(index)
+    old_counts = previous.rf_map_by_unit_id(3).spike_counts.copy()
+    arrays["unitPool"] = np.array([3, 41, 200, 7])
+    arrays["unit_3"] = np.zeros_like(arrays["unit_3"])
+    arrays["unit_3"][0, 0, -1] = 1000
+    with path.open("wb") as handle:
+        np.savez_compressed(handle, **arrays)
+    data = RFMappingData(path, preferred_unit_id=200)
+    try:
+        assert data.retain_previous_units(previous)
+        previous.close()
+        assert data.unit_archive.cache_count == 1
+        assert data.unit_is_available(0)
+        assert not data.unit_archive.is_cached(0)
+        assert data.rf_map(0).unit_index == 0
+        assert data.rf_map_by_unit_id(3) is data.rf_map(0)
+        np.testing.assert_array_equal(data.counts[0], old_counts)
+        np.testing.assert_array_equal(data.counts[-4], old_counts)
+        groups = [(0, 1), (2, 4)]
+        old_metrics = data.metrics(0)
+        old_windows = data.count_windows_array(0, groups)
+        y_groups, x_groups = [(0, 0), (1, 1)], [(0, 0), (1, 1), (2, 2)]
+        old_temporal = data.spatial_group_temporal_arrays(0, y_groups, x_groups, groups)
+        assert data.zero_spike_spatial_bin_count(0, 0, 4) == 0
+        assert data.unit_archive.cache_count == 1
+
+        data.unit_archive.by_index(0)
+        # Publish a loaded unit together with invalidating its derived plots.
+        assert data.metrics(0) is old_metrics
+        assert data.refresh_reloaded_units()
+        np.testing.assert_array_equal(data.counts[0], arrays["unit_3"])
+        assert data.metrics(0).total_spikes == 1000
+        assert data.best_cell(0) == (0, 0)
+        assert data.zero_spike_spatial_bin_count(0, 0, 4) == 5
+        assert not np.array_equal(data.count_windows_array(0, groups), old_windows)
+        new_temporal = data.spatial_group_temporal_arrays(0, y_groups, x_groups, groups)
+        assert not np.array_equal(new_temporal[0], old_temporal[0], equal_nan=True)
+        assert not data.refresh_reloaded_units()
+        data.unit_archive.start_preload()
+        wait_for(lambda: data.unit_archive.cache_count == data.n_units)
+        data.release_previous_units()
+        assert not data._previous_unit_maps
+        assert data.counts._map_lookup is None
+    finally:
+        previous.close()
+        data.close()
+        if data.unit_archive._worker:
+            data.unit_archive._worker.join(5)
+
+
+@pytest.mark.parametrize("field", ["timeBinEdges", "occupancyTimeSec",
+                                    "stimulusPresentationCounts", "metadata"])
+def test_reload_does_not_mix_incompatible_previous_units(tmp_path, field):
+    _, path, arrays = write_pair(tmp_path)
+    previous = RFMappingData(path)
+    if field == "metadata":
+        metadata = json.loads(arrays[field].tobytes())
+        metadata["stimulusGeometry"] = "horizontal_bar_full_width"
+        arrays[field] = np.frombuffer(json.dumps(metadata).encode(), dtype=np.uint8)
+    else:
+        arrays[field] = arrays[field] * 2
+    with path.open("wb") as handle:
+        np.savez_compressed(handle, **arrays)
+    data = RFMappingData(path, preferred_unit_id=200)
+    try:
+        assert not data.retain_previous_units(previous)
+        assert not data.unit_is_available(0)
+        assert data.unit_is_available(2)
+        assert not data._previous_unit_maps
+    finally:
+        previous.close()
+        data.close()
+
+
 @pytest.mark.parametrize("invalid", [np.nan, np.inf, -1.0, 0.25, float(2**64)])
 def test_invalid_later_unit_fails_when_requested(tmp_path, invalid):
     _, new, arrays = write_pair(tmp_path)

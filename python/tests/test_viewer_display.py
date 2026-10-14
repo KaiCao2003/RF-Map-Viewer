@@ -49,14 +49,18 @@ class WaveformCanvasTests(unittest.TestCase):
                 self.text = text
 
         canvas = Canvas()
+        zoom_canvas = Canvas()
         subtitle = Label()
+        zoom_subtitle = Label()
         viewer = SimpleNamespace(
             canvases={"waveform": canvas},
             waveform_canvas=canvas,
-            _waveform_zoomed=False,
+            waveform_zoom_canvas=zoom_canvas,
+            _waveform_zoomed=True,
             show_waveform_var=SimpleNamespace(get=lambda: True),
             waveform_channel_mode_var=Variable(),
             waveform_subtitle_label=subtitle,
+            waveform_zoom_subtitle_label=zoom_subtitle,
             waveform_payload={
                 "matrix": np.arange(20, dtype=float).reshape(5, 4) - 10.0,
                 "times_ms": np.asarray((-0.5, -0.25, 0.0, 0.25)),
@@ -81,9 +85,10 @@ class WaveformCanvasTests(unittest.TestCase):
         self.assertTrue(
             any(call[1].get("text") == "★ ch 2" for call in canvas.texts)
         )
-        self.assertIn("max PTP 22.5 µV", subtitle.text)
-        self.assertIn("Same x column", subtitle.text)
-        self.assertIn("best + 4 nearest", subtitle.text)
+        self.assertEqual(subtitle.text, "5 ch · PTP 22.5 µV")
+        self.assertIn("max PTP 22.5 µV", zoom_subtitle.text)
+        self.assertIn("Same x column", zoom_subtitle.text)
+        self.assertIn("best + 4 nearest", zoom_subtitle.text)
 
     def test_legacy_waveform_default_tab_migrates_to_rf(self) -> None:
         restored = settings_module.ViewerSettings.from_mapping(

@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import json
 import threading
+from collections import deque
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 
@@ -42,7 +44,7 @@ def _compact_array(counts: np.ndarray, shape: tuple[int, ...]) -> np.ndarray:
 
 
 class IndexedRFMapList(Sequence[RFMap]):
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, *, preferred_unit_id: int | None = None):
         self.source_path = Path(path)
         self._identity = FrozenFileIdentity.capture(self.source_path)
         self._archive = np.load(self.source_path, allow_pickle=False)
@@ -89,7 +91,16 @@ class IndexedRFMapList(Sequence[RFMap]):
             if missing:
                 raise ValueError(f"Missing unit arrays: {', '.join(sorted(missing))}")
             self._indices = {uid: i for i, uid in enumerate(self.header.unit_ids)}
-            self.by_index(0)
+            self.initial_unit_index = self._indices.get(preferred_unit_id, 0)
+            self._preload_order = deque([self.initial_unit_index])
+            for distance in range(1, len(self)):
+                for index in (
+                    self.initial_unit_index - distance,
+                    self.initial_unit_index + distance,
+                ):
+                    if 0 <= index < len(self):
+                        self._preload_order.append(index)
+            self.by_index(self.initial_unit_index)
         except BaseException:
             self._archive.close()
             raise
@@ -184,9 +195,9 @@ class IndexedRFMapList(Sequence[RFMap]):
                     pending = self._priority
                     self._priority = None
                     if pending is None or pending in self._cache:
-                        pending = next(
-                            (i for i in range(len(self)) if i not in self._cache), None
-                        )
+                        while self._preload_order and self._preload_order[0] in self._cache:
+                            self._preload_order.popleft()
+                        pending = self._preload_order[0] if self._preload_order else None
                 if pending is None:
                     return
                 try:
@@ -214,13 +225,21 @@ class IndexedRFMapList(Sequence[RFMap]):
 class RFCountSequence(Sequence[np.ndarray]):
     """Preserve indexed count access without materializing all lazy RF maps."""
 
-    def __init__(self, maps: IndexedRFMapList):
+    def __init__(
+        self, maps: IndexedRFMapList, *, map_lookup: Callable[[int], RFMap] | None = None
+    ):
         self.maps = maps
+        self._map_lookup = map_lookup
 
     def __len__(self) -> int:
         return len(self.maps)
 
     def __getitem__(self, index):
+        if self._map_lookup is not None:
+            if isinstance(index, slice):
+                return [self[i] for i in range(*index.indices(len(self)))]
+            index = _lookup_integer(index, "index")
+            return self._map_lookup(index + len(self) if index < 0 else index).spike_counts
         if isinstance(index, slice):
             return [m.spike_counts for m in self.maps[index]]
         return self.maps[index].spike_counts

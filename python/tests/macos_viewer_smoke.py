@@ -109,6 +109,10 @@ def check_native_waveform(app) -> None:
             checkpoint("before-double-click")
             assert app.waveform_canvas.winfo_ismapped(), "Compact waveform is not visible"
             assert len(app.waveform_canvas.find_all()) > 20, "Fixture did not draw waveform data"
+            subtitle = app.waveform_subtitle_label
+            assert int(subtitle.grid_info()["row"]) == 0, "Waveform header wrapped to a second row"
+            assert subtitle.winfo_width() >= subtitle.winfo_reqwidth(), "Waveform subtitle is clipped"
+            assert app.waveform_canvas.winfo_height() >= 220, "Waveform plot is too short"
             before = capture_rf_canvas(app, evidence / "before.png")
 
             send_double_click(app.waveform_canvas)
