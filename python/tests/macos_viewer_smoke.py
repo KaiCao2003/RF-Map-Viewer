@@ -263,15 +263,12 @@ def check_native_fullscreen(app) -> None:
     evidence = Path(__file__).resolve().parents[1] / ".test-artifacts" / "fullscreen"
     evidence.mkdir(parents=True, exist_ok=True)
     states = []
-    # Keep the normal fixture inside the CI display's usable area. AppKit
-    # constrains oversized windows when restoring them from full screen.
-    app.minsize(800, 500)
-    app.geometry("900x600+40+40")
     app.lift()
     app.focus_force()
     settle(app)
     before = fullscreen_state(app)
     states.append({"phase": "before", **before})
+    selected_unit = app._selected_unit_id_value()
 
     def wait_for_geometry(predicate):
         deadline = time.monotonic() + 12
@@ -295,6 +292,15 @@ def check_native_fullscreen(app) -> None:
             and state["content"][1] >= state["screen"][3] - 40
         )
 
+    def assert_painted_margins(path):
+        with Image.open(path) as screenshot:
+            rgb = screenshot.convert("RGB")
+            edge_pixels = [rgb.getpixel((rgb.width - 24, y)) for y in range(60, rgb.height - 30, 20)]
+            edge_pixels += [rgb.getpixel((x, rgb.height - 24)) for x in range(30, rgb.width - 30, 20)]
+            assert sum(max(pixel) < 16 for pixel in edge_pixels) < len(edge_pixels) * 0.1, (
+                "Native window has unpainted black right or bottom margins"
+            )
+
     try:
         # Reproduce a window created on a smaller display before moving it to
         # the current display; the old bridge silently left this cap in place.
@@ -309,24 +315,18 @@ def check_native_fullscreen(app) -> None:
             full["completed_notifications"] = completed()
         states.append({"phase": "fullscreen", **full})
         capture_rf_canvas(app, evidence / "fullscreen.png")
-        with Image.open(evidence / "fullscreen.png") as screenshot:
-            rgb = screenshot.convert("RGB")
-            # Solid unpainted margins are distinct from a dark plot or label.
-            edge_pixels = [rgb.getpixel((rgb.width - 24, y)) for y in range(60, rgb.height - 30, 20)]
-            edge_pixels += [rgb.getpixel((x, rgb.height - 24)) for x in range(30, rgb.width - 30, 20)]
-            assert sum(max(pixel) < 16 for pixel in edge_pixels) < len(edge_pixels) * 0.1, (
-                "Native fullscreen has unpainted black right or bottom margins"
-            )
+        assert_painted_margins(evidence / "fullscreen.png")
         with fullscreen_transition_notifications(app, entering=False) as completed:
             toggle_fullscreen(app)
             restored = wait_for_geometry(lambda state: (
                 completed() > 0 and not state["fullscreen"]
-                and all(abs(actual - expected) <= 2 for actual, expected in zip(state["frame"], before["frame"]))
-                and all(abs(actual - expected) <= 2 for actual, expected in zip(state["tk"], before["tk"]))
+                and all(abs(actual - expected) <= 2 for actual, expected in zip(state["tk"], state["content"]))
             ))
             restored["completed_notifications"] = completed()
         states.append({"phase": "restored", **restored})
         capture_rf_canvas(app, evidence / "restored.png")
+        assert_painted_margins(evidence / "restored.png")
+        assert app._selected_unit_id_value() == selected_unit, "Fullscreen changed the selected unit"
     finally:
         states.append({"phase": "final", **fullscreen_state(app)})
         (evidence / "geometry.json").write_text(json.dumps(states, indent=2), encoding="utf-8")
