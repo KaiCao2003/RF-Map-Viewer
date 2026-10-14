@@ -386,7 +386,8 @@ of **⌘** on Windows. NumLock and ScrollLock do not disable viewer shortcuts.
 
 Version 1.11.10 remembers live overlay selections, reloads with ⌘R while keeping
 existing plots visible, and loads indexed RF units outward from the current
-unit. The waveform panel has a single-line header and a taller plot.
+unit. The waveform panel has a single-line header and a taller plot. Native
+macOS full screen can expand beyond the display size recorded at launch.
 
 ## Stable viewer 1.11.9
 

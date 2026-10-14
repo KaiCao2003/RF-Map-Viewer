@@ -13,7 +13,10 @@ from PIL import Image, ImageChops
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import rfmapping_gui as gui
-from macos_key_events import close_window, send_click, send_double_click, send_key, window_number
+from macos_key_events import (
+    close_window, fullscreen_state, send_click, send_double_click, send_key,
+    set_fullscreen_content_limit, toggle_fullscreen, window_number,
+)
 from rfmapping_viewer.rf_model import RFMappingData
 
 
@@ -255,6 +258,75 @@ def check_native_adn_close(app, utilities) -> None:
                 print(json.dumps({"native_adn_close": states}, indent=2), flush=True)
 
 
+def check_native_fullscreen(app) -> None:
+    evidence = Path(__file__).resolve().parents[1] / ".test-artifacts" / "fullscreen"
+    evidence.mkdir(parents=True, exist_ok=True)
+    states = []
+    app.lift()
+    app.focus_force()
+    settle(app)
+    before = fullscreen_state(app)
+    states.append({"phase": "before", **before})
+
+    def wait_for_geometry(predicate):
+        deadline = time.monotonic() + 12
+        while time.monotonic() < deadline:
+            app.update()
+            state = fullscreen_state(app)
+            if predicate(state):
+                settle(app)
+                state = fullscreen_state(app)
+                if predicate(state):
+                    return state
+            time.sleep(0.02)
+        raise AssertionError(f"Native fullscreen geometry did not settle: {state}")
+
+    def fills_screen(state):
+        return (
+            state["fullscreen"]
+            and all(abs(actual - expected) <= 2 for actual, expected in zip(state["frame"], state["screen"]))
+            and all(abs(actual - expected) <= 2 for actual, expected in zip(state["tk"], state["content"]))
+            and state["content"][0] >= state["screen"][2] - 2
+            and state["content"][1] >= state["screen"][3] - 40
+        )
+
+    try:
+        # Reproduce a window created on a smaller display before moving it to
+        # the current display; the old bridge silently left this cap in place.
+        set_fullscreen_content_limit(app, before["screen"][2] / 2, before["screen"][3] / 2)
+        states.append({"phase": "stale-display-limit", **fullscreen_state(app)})
+        assert gui.allow_macos_fullscreen_resize(app), "Native fullscreen sizing helper did not apply"
+        states.append({"phase": "limit-cleared", **fullscreen_state(app)})
+        capture_rf_canvas(app, evidence / "before.png")
+        toggle_fullscreen(app)
+        full = wait_for_geometry(fills_screen)
+        states.append({"phase": "fullscreen", **full})
+        capture_rf_canvas(app, evidence / "fullscreen.png")
+        with Image.open(evidence / "fullscreen.png") as screenshot:
+            rgb = screenshot.convert("RGB")
+            # Solid unpainted margins are distinct from a dark plot or label.
+            edge_pixels = [rgb.getpixel((rgb.width - 24, y)) for y in range(60, rgb.height - 30, 20)]
+            edge_pixels += [rgb.getpixel((x, rgb.height - 24)) for x in range(30, rgb.width - 30, 20)]
+            assert sum(max(pixel) < 16 for pixel in edge_pixels) < len(edge_pixels) * 0.1, (
+                "Native fullscreen has unpainted black right or bottom margins"
+            )
+        toggle_fullscreen(app)
+        restored = wait_for_geometry(lambda state: (
+            not state["fullscreen"]
+            and all(abs(actual - expected) <= 2 for actual, expected in zip(state["frame"], before["frame"]))
+            and all(abs(actual - expected) <= 2 for actual, expected in zip(state["tk"], before["tk"]))
+        ))
+        states.append({"phase": "restored", **restored})
+        capture_rf_canvas(app, evidence / "restored.png")
+    finally:
+        states.append({"phase": "final", **fullscreen_state(app)})
+        (evidence / "geometry.json").write_text(json.dumps(states, indent=2), encoding="utf-8")
+        print(json.dumps({"native_fullscreen_evidence": str(evidence), "geometry": states}, indent=2), flush=True)
+        if fullscreen_state(app)["fullscreen"]:
+            toggle_fullscreen(app)
+            wait_for_geometry(lambda state: not state["fullscreen"])
+
+
 def check_native_keys(path: Path) -> None:
     with tempfile.TemporaryDirectory() as directory, mock.patch.object(
         gui, "viewer_settings_path", return_value=Path(directory) / "settings.json",
@@ -318,6 +390,7 @@ def check_native_keys(path: Path) -> None:
                 utility.destroy()
                 child.destroy()
                 app.update()
+            check_native_fullscreen(app)
             root.report_callback_exception.assert_not_called()
         finally:
             app._quit_application()

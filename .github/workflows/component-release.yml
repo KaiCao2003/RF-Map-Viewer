@@ -94,6 +94,13 @@ jobs:
           name: python-adn-close-navigation
           path: python/.test-artifacts/adn-close/
           if-no-files-found: ignore
+      - name: Upload native fullscreen evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: python-native-fullscreen
+          path: python/.test-artifacts/fullscreen/
+          if-no-files-found: ignore
       - uses: actions/upload-artifact@v6
         with:
           name: python-stable-${{ needs.validate-versions.outputs.python_stable_release }}

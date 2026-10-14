@@ -16,7 +16,7 @@ class NSRect(ctypes.Structure):
     _fields_ = (("origin", NSPoint), ("size", NSSize))
 
 
-def _native_dispatch():
+def _native_dispatch(*, require_key_window=True):
     objc = ctypes.CDLL("/usr/lib/libobjc.A.dylib")
     objc.objc_getClass.argtypes = (ctypes.c_char_p,)
     objc.objc_getClass.restype = ctypes.c_void_p
@@ -32,7 +32,7 @@ def _native_dispatch():
 
     application = send(objc.objc_getClass(b"NSApplication"), b"sharedApplication", ctypes.c_void_p)
     window = send(application, b"keyWindow", ctypes.c_void_p)
-    assert window, "The viewer did not become the native key window"
+    assert window or not require_key_window, "The viewer did not become the native key window"
     return objc, send, application, window
 
 
@@ -59,18 +59,18 @@ def send_key(characters: str, keycode: int, modifiers: int = 0) -> None:
         send(application, b"postEvent:atStart:", None, (ctypes.c_void_p, ctypes.c_bool), event, False)
 
 
-def _native_widget_dispatch(widget):
+def _native_widget_dispatch(widget, *, require_key_window=True):
     import _tkinter
 
-    objc, send, application, window = _native_dispatch()
+    objc, send, application, window = _native_dispatch(require_key_window=require_key_window)
     toplevel = widget.winfo_toplevel()
     library = ctypes.CDLL(_tkinter.__file__)
     library.Tk_MacOSXGetNSWindowForDrawable.argtypes = (ctypes.c_void_p,)
     library.Tk_MacOSXGetNSWindowForDrawable.restype = ctypes.c_void_p
-    assert library.Tk_MacOSXGetNSWindowForDrawable(toplevel.winfo_id()) == window, (
-        "The widget is not in the native key window"
-    )
-    return objc, send, application, window
+    native_window = library.Tk_MacOSXGetNSWindowForDrawable(toplevel.winfo_id())
+    if require_key_window:
+        assert native_window == window, "The widget is not in the native key window"
+    return objc, send, application, native_window
 
 
 def window_number(widget) -> int:
@@ -85,6 +85,41 @@ def close_window(widget) -> None:
         window, b"performSelector:withObject:afterDelay:", None,
         (ctypes.c_void_p, ctypes.c_void_p, ctypes.c_double),
         objc.sel_registerName(b"performClose:"), None, 0.0,
+    )
+
+
+def fullscreen_state(widget) -> dict:
+    _objc, send, _application, window = _native_widget_dispatch(widget, require_key_window=False)
+    view = send(window, b"contentView", ctypes.c_void_p)
+    screen = send(window, b"screen", ctypes.c_void_p)
+    frame = send(window, b"frame", NSRect)
+    bounds = send(view, b"bounds", NSRect)
+    screen_frame = send(screen, b"frame", NSRect)
+    maximum = send(window, b"maxFullScreenContentSize", NSSize)
+    return {
+        "fullscreen": bool(send(window, b"styleMask", ctypes.c_ulong) & (1 << 14)),
+        "frame": [frame.origin.x, frame.origin.y, frame.size.width, frame.size.height],
+        "content": [bounds.size.width, bounds.size.height],
+        "screen": [screen_frame.origin.x, screen_frame.origin.y,
+                   screen_frame.size.width, screen_frame.size.height],
+        "maximum": [maximum.width, maximum.height],
+        "tk": [widget.winfo_width(), widget.winfo_height()],
+        "wm_maxsize": list(widget.maxsize()),
+    }
+
+
+def set_fullscreen_content_limit(widget, width: float, height: float) -> None:
+    _objc, send, _application, window = _native_widget_dispatch(widget)
+    send(window, b"setMaxFullScreenContentSize:", None, (NSSize,), NSSize(width, height))
+
+
+def toggle_fullscreen(widget) -> None:
+    objc, send, _application, window = _native_widget_dispatch(widget, require_key_window=False)
+    # Enter through Cocoa's event loop, as the native green window button does.
+    send(
+        window, b"performSelector:withObject:afterDelay:", None,
+        (ctypes.c_void_p, ctypes.c_void_p, ctypes.c_double),
+        objc.sel_registerName(b"toggleFullScreen:"), None, 0.0,
     )
 
 

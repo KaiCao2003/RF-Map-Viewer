@@ -113,16 +113,18 @@ def set_macos_welcome_chrome(window: tk.Misc, enabled: bool) -> bool:
 
 
 def allow_macos_fullscreen_resize(window: tk.Misc) -> bool:
-    """Remove Tk 8.6's initial-display size cap from native full screen."""
+    """Remove Tk's initial-display size cap from native full screen."""
 
     if sys.platform != "darwin":
         return False
     try:
+        import _tkinter
+
         window.update_idletasks()
-        process = ctypes.CDLL(None)
-        process.TkMacOSXDrawable.argtypes = (ctypes.c_void_p,)
-        process.TkMacOSXDrawable.restype = ctypes.c_void_p
-        native_window = process.TkMacOSXDrawable(window.winfo_id())
+        library = ctypes.CDLL(_tkinter.__file__)
+        library.Tk_MacOSXGetNSWindowForDrawable.argtypes = (ctypes.c_void_p,)
+        library.Tk_MacOSXGetNSWindowForDrawable.restype = ctypes.c_void_p
+        native_window = library.Tk_MacOSXGetNSWindowForDrawable(window.winfo_id())
         if not native_window:
             return False
 
