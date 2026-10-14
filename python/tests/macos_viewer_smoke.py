@@ -277,6 +277,20 @@ def check_native_keys(path: Path) -> None:
                 send_key("\uf703", 124, (1 << 21) | (1 << 23))
                 child.update()
                 assert child.unit_idx.get() == 1, "Right did not select the next unit"
+                previous_data = child.data
+                selected_unit = child._selected_unit_id_value()
+                send_key("r", 15, 1 << 20)
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline:
+                    child.update()
+                    if child.data is not previous_data and not child._reload_active:
+                        break
+                    time.sleep(0.01)
+                assert child.data is not previous_data, "Native Command+R did not reload"
+                assert not child._reload_active, "Native reload did not finish"
+                assert child._selected_unit_id_value() == selected_unit, "Reload reset the selected unit"
+                assert child.polar_layout_var.get() and child.display_expanded_var.get(), "Reload reset display controls"
+                print(json.dumps({"native_reload_unit": selected_unit, "index": child.unit_idx.get()}))
                 with mock.patch.object(child, "_open_figure_exporter") as export:
                     send_key("e", 14, 1 << 20)
                     child.update()
