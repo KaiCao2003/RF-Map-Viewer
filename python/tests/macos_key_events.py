@@ -1,6 +1,7 @@
 """Send Cocoa input through Tk's native event translation in macOS tests."""
 
 import ctypes
+from contextlib import contextmanager
 import time
 
 
@@ -121,6 +122,27 @@ def toggle_fullscreen(widget) -> None:
         (ctypes.c_void_p, ctypes.c_void_p, ctypes.c_double),
         objc.sel_registerName(b"toggleFullScreen:"), None, 0.0,
     )
+
+
+@contextmanager
+def fullscreen_transition_notifications(widget, *, entering: bool):
+    """Count completed Cocoa transitions without calling Python from AppKit."""
+    objc, send, _application, window = _native_widget_dispatch(widget, require_key_window=False)
+    center = send(objc.objc_getClass(b"NSNotificationCenter"), b"defaultCenter", ctypes.c_void_p)
+    observer = send(objc.objc_getClass(b"NSMutableArray"), b"new", ctypes.c_void_p)
+    appkit = ctypes.CDLL("/System/Library/Frameworks/AppKit.framework/AppKit")
+    name = "NSWindowDidEnterFullScreenNotification" if entering else "NSWindowDidExitFullScreenNotification"
+    notification = ctypes.c_void_p.in_dll(appkit, name).value
+    send(
+        center, b"addObserver:selector:name:object:", None,
+        (ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p),
+        observer, objc.sel_registerName(b"addObject:"), notification, window,
+    )
+    try:
+        yield lambda: send(observer, b"count", ctypes.c_ulong)
+    finally:
+        send(center, b"removeObserver:", None, (ctypes.c_void_p,), observer)
+        send(observer, b"release", None)
 
 
 def send_click(widget, *, count: int = 1) -> None:

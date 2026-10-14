@@ -14,7 +14,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import rfmapping_gui as gui
 from macos_key_events import (
-    close_window, fullscreen_state, send_click, send_double_click, send_key,
+    close_window, fullscreen_state, fullscreen_transition_notifications,
+    send_click, send_double_click, send_key,
     set_fullscreen_content_limit, toggle_fullscreen, window_number,
 )
 from rfmapping_viewer.rf_model import RFMappingData
@@ -298,8 +299,10 @@ def check_native_fullscreen(app) -> None:
         assert gui.allow_macos_fullscreen_resize(app), "Native fullscreen sizing helper did not apply"
         states.append({"phase": "limit-cleared", **fullscreen_state(app)})
         capture_rf_canvas(app, evidence / "before.png")
-        toggle_fullscreen(app)
-        full = wait_for_geometry(fills_screen)
+        with fullscreen_transition_notifications(app, entering=True) as completed:
+            toggle_fullscreen(app)
+            full = wait_for_geometry(lambda state: completed() > 0 and fills_screen(state))
+            full["completed_notifications"] = completed()
         states.append({"phase": "fullscreen", **full})
         capture_rf_canvas(app, evidence / "fullscreen.png")
         with Image.open(evidence / "fullscreen.png") as screenshot:
@@ -310,12 +313,14 @@ def check_native_fullscreen(app) -> None:
             assert sum(max(pixel) < 16 for pixel in edge_pixels) < len(edge_pixels) * 0.1, (
                 "Native fullscreen has unpainted black right or bottom margins"
             )
-        toggle_fullscreen(app)
-        restored = wait_for_geometry(lambda state: (
-            not state["fullscreen"]
-            and all(abs(actual - expected) <= 2 for actual, expected in zip(state["frame"], before["frame"]))
-            and all(abs(actual - expected) <= 2 for actual, expected in zip(state["tk"], before["tk"]))
-        ))
+        with fullscreen_transition_notifications(app, entering=False) as completed:
+            toggle_fullscreen(app)
+            restored = wait_for_geometry(lambda state: (
+                completed() > 0 and not state["fullscreen"]
+                and all(abs(actual - expected) <= 2 for actual, expected in zip(state["frame"], before["frame"]))
+                and all(abs(actual - expected) <= 2 for actual, expected in zip(state["tk"], before["tk"]))
+            ))
+            restored["completed_notifications"] = completed()
         states.append({"phase": "restored", **restored})
         capture_rf_canvas(app, evidence / "restored.png")
     finally:
