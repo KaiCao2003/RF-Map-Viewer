@@ -263,6 +263,10 @@ def check_native_fullscreen(app) -> None:
     evidence = Path(__file__).resolve().parents[1] / ".test-artifacts" / "fullscreen"
     evidence.mkdir(parents=True, exist_ok=True)
     states = []
+    # Keep the normal fixture inside the CI display's usable area. AppKit
+    # constrains oversized windows when restoring them from full screen.
+    app.minsize(800, 500)
+    app.geometry("900x600+40+40")
     app.lift()
     app.focus_force()
     settle(app)
