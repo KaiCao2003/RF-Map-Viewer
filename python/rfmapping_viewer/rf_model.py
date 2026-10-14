@@ -183,27 +183,24 @@ class RFMappingData:
         Do not recapture file identities: a failed replacement may have changed
         the file, and export validation must still reject that changed source.
         """
-        if tuning:
+        if tuning and previous._hd_tuning is not None:
             with previous._hd_tuning_lock, self._hd_tuning_lock:
-                if previous._hd_tuning is not None:
-                    self._hd_tuning = previous._hd_tuning
-                    self._hd_tuning_identity = previous._hd_tuning_identity
-                    self._hd_tuning_error = previous._hd_tuning_error
-                    self._hd_tuning_checked = previous._hd_tuning_checked
-        if probe:
+                self._hd_tuning = previous._hd_tuning
+                self._hd_tuning_identity = previous._hd_tuning_identity
+                self._hd_tuning_error = previous._hd_tuning_error
+                self._hd_tuning_checked = previous._hd_tuning_checked
+        if probe and previous._probe_geometry is not None:
             with previous._probe_geometry_lock, self._probe_geometry_lock:
-                if previous._probe_geometry is not None:
-                    self._probe_geometry = previous._probe_geometry
-                    self._probe_file_identities = previous._probe_file_identities
-                    self._probe_geometry_error = previous._probe_geometry_error
-                    self._probe_geometry_checked = previous._probe_geometry_checked
-        if waveform:
+                self._probe_geometry = previous._probe_geometry
+                self._probe_file_identities = previous._probe_file_identities
+                self._probe_geometry_error = previous._probe_geometry_error
+                self._probe_geometry_checked = previous._probe_geometry_checked
+        if waveform and previous._waveform_store is not None:
             with previous._waveform_lock, self._waveform_lock:
-                if previous._waveform_store is not None:
-                    self._waveform_store = previous._waveform_store
-                    self._waveform_file_identities = previous._waveform_file_identities
-                    self._waveform_error = previous._waveform_error
-                    self._waveform_checked = previous._waveform_checked
+                self._waveform_store = previous._waveform_store
+                self._waveform_file_identities = previous._waveform_file_identities
+                self._waveform_error = previous._waveform_error
+                self._waveform_checked = previous._waveform_checked
 
     def retain_previous_units(self, previous: RFMappingData) -> bool:
         """Retain already loaded plots while a compatible archive is refreshed.

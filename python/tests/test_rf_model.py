@@ -70,6 +70,28 @@ class RFMappingReloadCompanionTests(unittest.TestCase):
         self.assertFalse(data._probe_geometry_checked)
         self.assertFalse(data._waveform_checked)
 
+    def test_missing_previous_companions_do_not_wait_for_old_disk_reads(self) -> None:
+        import threading
+
+        directory, path = write_payload(base_payload())
+        self.addCleanup(directory.cleanup)
+        previous = rf_model_module.RFMappingData(path)
+        data = rf_model_module.RFMappingData(path)
+        self.addCleanup(previous.close)
+        self.addCleanup(data.close)
+        done = threading.Event()
+
+        def retain():
+            data.retain_previous_companions(previous, tuning=True, probe=True, waveform=True)
+            done.set()
+
+        with previous._hd_tuning_lock, previous._probe_geometry_lock, previous._waveform_lock:
+            worker = threading.Thread(target=retain, daemon=True)
+            worker.start()
+            finished_without_disk = done.wait(1)
+        worker.join(1)
+        self.assertTrue(finished_without_disk)
+
 
 class RFMappingRateTests(unittest.TestCase):
     def load(self, payload: dict) -> rf_model_module.RFMappingData:
