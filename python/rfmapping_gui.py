@@ -8925,11 +8925,21 @@ class RFMViewer(tk.Toplevel):
             self._probe_static_signature = None
         if result.waveform_payload is not None:
             self._waveform_generation += 1
-            self.waveform_payload = result.waveform_payload
-            self._waveform_payload_key = (request.preferred_unit_id, request.waveform_channel_mode)
-            self._waveform_loading_key = None
-            self._waveform_error = None
-            self._waveform_error_key = None
+            requested_key = (request.preferred_unit_id, request.waveform_channel_mode)
+            current_key = (self._selected_unit_id_value(), self.waveform_channel_mode_var.get())
+            if requested_key == current_key:
+                self.waveform_payload = result.waveform_payload
+                self._waveform_payload_key = requested_key
+                self._waveform_loading_key = None
+                self._waveform_error = None
+                self._waveform_error_key = None
+            else:
+                # Navigation can change while the file is read. Keep that
+                # unit's displayed waveform until its fresh payload arrives.
+                self._waveform_loading_key = current_key
+                self._waveform_pending_request = (self._waveform_generation, self.data, current_key)
+                self._start_waveform_load()
+                self._schedule_waveform_result_poll()
         if result.result_cache is not None:
             source = result.result_cache.source
             previous = self.results_pane.source

@@ -220,6 +220,72 @@ def test_failed_reload_preserves_document_selection_and_canvas(tmp_path, make_ap
     assert "disabled" not in app.export_toolbar_button.state()
 
 
+def test_navigation_during_reload_keeps_current_waveform_until_its_refresh_finishes(
+    tmp_path, make_app, monkeypatch,
+):
+    path, _indexed, _arrays = write_pair(tmp_path)
+    app = make_app(path)
+    candidate = RFMappingData(path)
+    requests = paused_reload(monkeypatch, candidate)
+    mode = app.waveform_channel_mode_var.get()
+
+    def waveform(unit, amplitude):
+        return {
+            "unit_id": unit, "matrix": [[-amplitude, 0.0, amplitude]],
+            "times_ms": [-0.1, 0.0, 0.1], "channel_labels": ["ch 1"],
+            "best_channel_row": 0, "amplitude_limit_uv": amplitude,
+            "max_ptp_uv": 2 * amplitude,
+        }
+
+    app.show_waveform_var.set(True)
+    app.waveform_payload = waveform(200, 5.0)
+    app._waveform_payload_key = (200, mode)
+    app._draw_waveform()
+    app._reload_current_document()
+    wait_for(app, lambda: app._reload_candidate is candidate)
+    assert requests[0][0].preferred_unit_id == 200
+    old_current = waveform(3, 10.0)
+    app.waveform_payload = old_current
+    app._waveform_payload_key = (3, mode)
+    app.unit_combo.current(app._unit_combo_unit_ids.index(3))
+    app.unit_combo.event_generate("<<ComboboxSelected>>")
+    app.update()
+    new_current = waveform(3, 20.0)
+    blocked, release = threading.Event(), threading.Event()
+    reads = []
+
+    def load_waveform(unit, channel_mode):
+        reads.append((unit, channel_mode))
+        blocked.set()
+        assert release.wait(10), "Test did not release the current waveform read"
+        return new_current
+
+    monkeypatch.setattr(candidate, "waveform_plot_payload", load_waveform)
+    try:
+        complete_reload(
+            app, requests[0][0], candidate,
+            waveform_payload=waveform(200, 30.0), loaded=frozenset({"waveform"}),
+        )
+        wait_for(app, blocked.is_set)
+        assert reads == [(3, mode)]
+        assert app._selected_unit_id_value() == 3
+        assert app.waveform_payload is old_current
+        assert app._waveform_payload_key == (3, mode)
+        assert app.waveform_canvas.winfo_ismapped()
+        assert len(app.waveform_canvas.find_all()) > 20
+        assert "Loading…" not in [
+            app.waveform_canvas.itemcget(item, "text")
+            for item in app.waveform_canvas.find_all()
+            if app.waveform_canvas.type(item) == "text"
+        ]
+    finally:
+        release.set()
+    wait_for(app, lambda: app.waveform_payload is new_current)
+    assert app._selected_unit_id_value() == 3
+    assert app._waveform_payload_key == (3, mode)
+    assert app._waveform_loading_key is None
+
+
 def test_switching_document_cancels_reload_and_ignores_stale_completion(tmp_path, make_app, monkeypatch):
     path, _indexed, _arrays = write_pair(tmp_path)
     app = make_app(path)
