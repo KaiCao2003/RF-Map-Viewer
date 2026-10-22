@@ -1,9 +1,11 @@
-## Python 1.11.11: Windows Figure Studio preview
+## Python 1.11.11: Windows Figure Studio preview and exports
 
 Windows x64 · Full edition · build **11111**
 
 - Fix blank Figure Studio previews on Windows: themed preview frames could cover the rendered plots, including HD tuning curves.
-- Preserve the 1.11.10 viewer features and PDF/PNG export rendering.
+- Hash frozen export inputs in binary mode on Windows so saved SHA-256 values match the original RF/TC/probe bytes, including CRLF and Ctrl+Z.
+- Load the installed Windows Arial fonts for readable export labels instead of falling back to Pillow's small default font.
+- Preserve the shared Mac 1.11.10 viewer features.
 
 The installer and portable ZIP are built from the same source. Publish the exact
 Windows candidate artifacts after test-suite, packaging, and native preview

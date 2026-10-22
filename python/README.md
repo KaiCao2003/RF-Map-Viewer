@@ -386,8 +386,9 @@ of **⌘** on Windows. NumLock and ScrollLock do not disable viewer shortcuts.
 
 Windows build 11111 fixes a blank Figure Studio preview caused by themed
 preview frames covering their plots. Added panels render on the composition
-canvas, including HD tuning curves. PDF and image exports keep the same
-rendering path.
+canvas, including HD tuning curves. Export manifests hash the original input
+bytes in binary mode on Windows, and image exports resolve the installed
+Arial fonts for readable labels.
 
 ## Stable viewer 1.11.10
 
