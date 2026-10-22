@@ -10,8 +10,8 @@ The Free-Moving alpha application has been retired from the active source and
 release workflow. Its historical Git tags and published artifacts are retained.
 The Python package and generic launcher now identify the stable viewer.
 
-Windows 1.11.10 (build 11110) brings the shared Mac 1.11.10 viewer features
-to Windows x64, including ADN annotation, configurable RF overlays, Inspector,
+Windows 1.11.11 (build 11111) fixes blank Figure Studio previews and retains
+the shared Mac 1.11.10 viewer features on Windows x64, including ADN annotation, configurable RF overlays, Inspector,
 and Ctrl+R document reload. Its installer and portable ZIP are built from the
 same source and tested on Windows.
 
@@ -37,8 +37,8 @@ component tag and artifact name:
 
 | Component | Release | Tag | Channel |
 | --- | --- | --- | --- |
-| Python stable (macOS) | `1.11.5` | `python-v1.11.5` | stable |
-| Python stable (Windows x64) | `1.11.10` | `python-v1.11.10` | stable |
+| Python stable (macOS) | `1.11.10` | `python-v1.11.10` | stable |
+| Python stable (Windows x64) | `1.11.11` | `python-v1.11.11` | stable |
 | Swift | `1.10.4` | `swift-v1.10.4` | stable |
 | Web | `1.10.2` | `web-v1.10.2` | stable |
 
@@ -157,3 +157,14 @@ Windows tests and portable/installed smoke checks pass, publish the portable
 ZIP, installer, and Windows checksum file under `python-v1.11.10`, recording the
 build commit and workflow URL in the release notes. Preserve existing tags and
 assets. Windows build 11110 fits the 16-bit VERSIONINFO component limit.
+
+### Windows 1.11.11
+
+Create the final candidate commit with `[skip ci]` in its message and explicitly
+dispatch `python-stable-windows`. The dispatch runs the Windows tests and
+packaging checks; the commit marker prevents the later tag push from rebuilding
+and replacing the tested packages. Download the successful run artifacts, verify
+their checksums, and test the native Figure Studio preview before publishing.
+Create `python-v1.11.11` at that exact commit, confirm no tag build is running,
+then publish those three Windows artifacts with the commit and workflow URL
+in the release notes. Preserve every `python-v1.11.10` asset.

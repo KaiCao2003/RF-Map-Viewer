@@ -17,8 +17,8 @@ through versioned file contracts, principally the RF formats described in
 
 ## Component versions
 
-The stable Python macOS release is `1.11.5` (build `111005`). The published Windows
-release is `1.11.2` (build `11102`), Swift is at `1.10.4`, and Web at `1.10.2`.
+The stable Python macOS release is `1.11.10` (build `111010`). The Windows
+release is `1.11.11` (build `11111`), Swift is at `1.10.4`, and Web at `1.10.2`.
 Python 1.11.5 adds independent excitatory/inhibitory 2D and 1D RF overlay
 checkboxes, saved layer choices, and support for multiple RF component centers.
 Component identity belongs in release tags and artifact names, not in a fourth
@@ -28,15 +28,16 @@ policy.
 
 ## Downloads
 
-Windows 1.11.10 (build 11110) includes the shared Mac 1.11.10 viewer updates:
+Windows 1.11.11 (build 11111) fixes blank Figure Studio previews and includes
+the shared Mac 1.11.10 viewer updates:
 ADN annotation, RF overlay selection, Inspector, document reload with Ctrl+R,
 and current-unit-first indexed caching.
 
 GitHub Actions builds the stable packages published on the
 [Releases page](https://github.com/KaiCao2003/RF-Map-Viewer/releases):
 
-- [Python 1.11.5 macOS app](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/python-v1.11.5)
-- [Python 1.11.10 Windows installer and portable ZIP](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/python-v1.11.10)
+- [Python 1.11.10 macOS app](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/python-v1.11.10)
+- [Python 1.11.11 Windows installer and portable ZIP](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/python-v1.11.11)
 - [Swift 1.10.4 macOS app](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/swift-v1.10.4)
 - [Web 1.10.2 package](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/web-v1.10.2)
 

@@ -1,3 +1,14 @@
+## Python 1.11.11: Windows Figure Studio preview
+
+Windows x64 · Full edition · build **11111**
+
+- Fix blank Figure Studio previews on Windows: themed preview frames could cover the rendered plots, including HD tuning curves.
+- Preserve the 1.11.10 viewer features and PDF/PNG export rendering.
+
+The installer and portable ZIP are built from the same source. Publish the exact
+Windows candidate artifacts after test-suite, packaging, and native preview
+verification. Existing 1.11.10 release assets remain unchanged.
+
 ## Python 1.11.10: Windows feature parity
 
 Windows x64 · Full edition · build **11110**
