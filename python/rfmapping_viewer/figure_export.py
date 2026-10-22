@@ -373,6 +373,8 @@ def _font(size: int, *, bold: bool = False) -> ImageFont.ImageFont:
     candidates = (
         "DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf",
         "Arial Bold.ttf" if bold else "Arial.ttf",
+        # Pillow matches font-directory basenames case-sensitively on Windows.
+        "arialbd.ttf" if bold else "arial.ttf",
     )
     for candidate in candidates:
         try:
