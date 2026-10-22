@@ -5,6 +5,7 @@ Windows x64 · Full edition · build **11111**
 - Fix blank Figure Studio previews on Windows: themed preview frames could cover the rendered plots, including HD tuning curves.
 - Hash frozen export inputs in binary mode on Windows so saved SHA-256 values match the original RF/TC/probe bytes, including CRLF and Ctrl+Z.
 - Load the installed Windows Arial fonts for readable export labels instead of falling back to Pillow's small default font.
+- Keep the CSV Save dialog attached to the active viewer so it remains visible above the document window.
 - Preserve the shared Mac 1.11.10 viewer features.
 
 The installer and portable ZIP are built from the same source. Publish the exact

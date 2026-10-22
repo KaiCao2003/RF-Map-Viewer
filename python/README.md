@@ -388,7 +388,8 @@ Windows build 11111 fixes a blank Figure Studio preview caused by themed
 preview frames covering their plots. Added panels render on the composition
 canvas, including HD tuning curves. Export manifests hash the original input
 bytes in binary mode on Windows, and image exports resolve the installed
-Arial fonts for readable labels.
+Arial fonts for readable labels. CSV Save dialogs stay attached to the
+active document window.
 
 ## Stable viewer 1.11.10
 
