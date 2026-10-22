@@ -169,9 +169,14 @@ def _hash_frozen_file(
 
     check_cancelled()
     identity.verify_path()
+    # Windows text descriptors translate CRLF and stop at Ctrl-Z; provenance
+    # must hash every byte of both text and binary scientific inputs.
     descriptor = os.open(
         identity.path,
-        os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0),
     )
     try:
         before = os.fstat(descriptor)

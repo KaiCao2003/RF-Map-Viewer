@@ -1116,6 +1116,27 @@ def test_frozen_file_hash_rejects_changed_source(tmp_path: Path) -> None:
         export_inputs_module._hash_frozen_file(identity)
 
 
+@pytest.mark.parametrize(
+    "contents",
+    (
+        b"header\r\nrow\r\nend\r\n",
+        b"header\x1atail after the DOS end-of-file marker\r\n",
+        bytes(range(256)) * 8193 + b"\r\nfinal chunk\x1afinal byte",
+    ),
+    ids=("crlf", "ctrl-z", "multiple-binary-chunks"),
+)
+def test_frozen_file_hash_preserves_every_source_byte(tmp_path: Path, contents: bytes) -> None:
+    source = tmp_path / "scientific-input.bin"
+    source.write_bytes(contents)
+    identity = export_inputs_module.FrozenFileIdentity.capture(source)
+
+    digest = export_inputs_module._hash_frozen_file(identity)
+
+    assert digest == hashlib.sha256(source.read_bytes()).hexdigest()
+    assert identity.metadata(digest)["sizeBytes"] == len(contents)
+    assert digest != hashlib.sha256(contents.split(b"\x1a")[0].replace(b"\r\n", b"\n")).hexdigest()
+
+
 def test_frozen_file_hash_keeps_windows_path_and_handle_domains_separate(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
