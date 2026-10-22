@@ -1094,9 +1094,11 @@ class FigureExportWindow(tk.Toplevel):
         layout_button.pack(side="right", padx=(6, 0))
         ttk.Button(toolbar, text="Arrange", command=self._auto_arrange).pack(side="right")
 
-        self.preview_label = tk.Label(center, background="#eeeeee", borderwidth=0)
-        self.preview_label.grid(row=2, column=0, sticky="nsew")
-        self.page_canvas = FigurePageCanvas(self.preview_label, on_select=self._select_plot,
+        # A Label repaint can cover its child canvas on Windows. Keep the
+        # preview and its status text on the canvas, inside a plain container.
+        self.preview_frame = tk.Frame(center, background="#eeeeee", borderwidth=0)
+        self.preview_frame.grid(row=2, column=0, sticky="nsew")
+        self.page_canvas = FigurePageCanvas(self.preview_frame, on_select=self._select_plot,
             on_change=self._commit_frames,
             on_error=lambda text: self.preview_status.configure(text=text))
         self.page_canvas.pack(fill="both", expand=True)
@@ -1831,8 +1833,8 @@ class FigureExportWindow(tk.Toplevel):
         page_index = self._selected_page_index()
         unit_ids = (self.current_unit_id,)
         pages = self._export_pages(page_index=page_index)
-        available_width = max(480, self.preview_label.winfo_width() - 20)
-        available_height = max(360, self.preview_label.winfo_height() - 20)
+        available_width = max(480, self.preview_frame.winfo_width() - 20)
+        available_height = max(360, self.preview_frame.winfo_height() - 20)
         return unit_ids, pages, page_index, available_width, available_height
 
     def _preview_plan(
@@ -1955,7 +1957,6 @@ class FigureExportWindow(tk.Toplevel):
                     self._preview_photo = self.page_canvas._photo
                 finally:
                     image.close()
-                self.preview_label.configure(text="")
                 self.preview_status.configure(text="")
         # A stale result may arrive before the latest worker. Keep polling until
         # the current generation has either rendered or produced an error.
@@ -1966,7 +1967,6 @@ class FigureExportWindow(tk.Toplevel):
 
     def _show_preview_error(self, exc: Exception) -> None:
         self._preview_photo = None
-        self.preview_label.configure(text=f"Preview unavailable\n{exc}")
         self.page_canvas.set_message(
             "" if not self._current_plot_kinds()
             else f"Preview unavailable\n{exc}"

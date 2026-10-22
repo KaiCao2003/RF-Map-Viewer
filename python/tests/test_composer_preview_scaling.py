@@ -93,7 +93,7 @@ def test_preview_request_uses_current_unit_and_only_current_page() -> None:
         current_unit_id=42,
         _selected_page_index=lambda: 2,
         _export_pages=export_pages,
-        preview_label=SimpleNamespace(winfo_width=lambda: 800, winfo_height=lambda: 600),
+        preview_frame=SimpleNamespace(winfo_width=lambda: 800, winfo_height=lambda: 600),
     )
     units, requested_pages, index, _width, _height = FigureExportWindow._preview_request(composer)
     assert units == (42,)

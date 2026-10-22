@@ -1186,16 +1186,53 @@ class TkViewerTests(unittest.TestCase):
         self.assertEqual(callback_errors, [])
 
     def test_figure_composer_constructs_and_finishes_background_preview(self) -> None:
+        self.app.notebook.select(0)
+        tuning = companions_module.TuningCurveData(
+            path=self.app.data.path.with_suffix(".tc"),
+            curves={unit: tuple(float(i % 30) for i in range(180)) for unit in (7, 8)},
+        )
+        self.app.data.hd_tuning = lambda _session=None: tuning
         composer = figure_composer_module.FigureExportWindow(self.app)
         self.addCleanup(lambda: composer.winfo_exists() and composer.destroy())
-        deadline = __import__("time").monotonic() + 5.0
-        while __import__("time").monotonic() < deadline:
-            self.app.update()
-            if composer.page_canvas._photo is not None:
-                break
-        self.assertNotIn("AttributeError", str(composer.preview_label.cget("text")))
-        self.assertIsNotNone(composer.page_canvas._photo)
-        self.assertEqual(composer.preview_status.cget("text"), "")
+        callback_errors = []
+        self.app._app_root.report_callback_exception = lambda *exc: callback_errors.append(exc)
+
+        def finish_preview():
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                self.app.update()
+                if (composer._preview_after is None
+                        and composer._preview_future is None
+                        and composer.page_canvas._image is not None):
+                    break
+                time.sleep(0.01)
+            self.assertEqual(callback_errors, [])
+            self.assertEqual(composer.page_canvas._message, "")
+            self.assertIsNotNone(composer.page_canvas._photo)
+            self.assertEqual(composer.preview_status.cget("text"), "")
+
+        finish_preview()
+        original_pixels = composer.page_canvas._image.tobytes()
+        composer.view_combo.current(
+            composer.available_kinds.index(figure_composer_module.PlotKind.HD_LINE)
+        )
+        composer._add_plot()
+        finish_preview()
+        self.assertEqual(len(composer.pages[0]["plots"]), 2)
+        self.assertNotEqual(composer.page_canvas._image.tobytes(), original_pixels)
+        self.assertEqual(
+            [composer.page_canvas.type(item) for item in composer.page_canvas.find_all()].count("image"),
+            1,
+        )
+        composer.geometry("1160x800")
+        self.app.update()
+        composer._auto_arrange()
+        finish_preview()
+        composer._show_preview_error(ValueError("injected preview failure"))
+        self.assertIsNone(composer.page_canvas._image)
+        self.assertIn("injected preview failure", composer.page_canvas._message)
+        composer._schedule_preview()
+        finish_preview()
 
     def test_figure_composer_reopens_after_native_and_direct_close(self) -> None:
         root = self.app._app_root
