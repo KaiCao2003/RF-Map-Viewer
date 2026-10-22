@@ -3,11 +3,11 @@
 #define MyAppExecutable "RF Map Viewer.exe"
 
 #ifndef MyAppVersion
-  #define MyAppVersion "1.11.11"
+  #define MyAppVersion "1.11.10"
 #endif
 
 #ifndef MyAppBuild
-  #define MyAppBuild "11111"
+  #define MyAppBuild "11112"
 #endif
 
 #ifndef SourceRoot
@@ -19,7 +19,7 @@
 #endif
 
 #ifndef OutputBaseFilename
-  #define OutputBaseFilename "RF_Map_Viewer-python-" + MyAppVersion + "-full-windows-x64-setup"
+  #define OutputBaseFilename "RF_Map_Viewer-python-" + MyAppVersion + "-full-windows-x64-build" + MyAppBuild + "-setup"
 #endif
 
 [Setup]

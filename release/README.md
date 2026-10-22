@@ -10,7 +10,7 @@ The Free-Moving alpha application has been retired from the active source and
 release workflow. Its historical Git tags and published artifacts are retained.
 The Python package and generic launcher now identify the stable viewer.
 
-Windows 1.11.11 (build 11111) fixes blank Figure Studio previews and retains
+Windows 1.11.10 (build 11112) fixes blank Figure Studio previews and retains
 the shared Mac 1.11.10 viewer features on Windows x64, including ADN annotation, configurable RF overlays, Inspector,
 and Ctrl+R document reload. Its installer and portable ZIP are built from the
 same source and tested on Windows.
@@ -38,7 +38,7 @@ component tag and artifact name:
 | Component | Release | Tag | Channel |
 | --- | --- | --- | --- |
 | Python stable (macOS) | `1.11.10` | `python-v1.11.10` | stable |
-| Python stable (Windows x64) | `1.11.11` | `python-v1.11.11` | stable |
+| Python stable (Windows x64, build 11112) | `1.11.10` | `python-v1.11.10` | stable |
 | Swift | `1.10.4` | `swift-v1.10.4` | stable |
 | Web | `1.10.2` | `web-v1.10.2` | stable |
 
@@ -158,7 +158,7 @@ ZIP, installer, and Windows checksum file under `python-v1.11.10`, recording the
 build commit and workflow URL in the release notes. Preserve existing tags and
 assets. Windows build 11110 fits the 16-bit VERSIONINFO component limit.
 
-### Windows 1.11.11
+### Windows 1.11.11 (historical)
 
 Create the final candidate commit with `[skip ci]` in its message and explicitly
 dispatch `python-stable-windows`. The dispatch runs the Windows tests and
@@ -168,3 +168,15 @@ their checksums, and test the native Figure Studio preview before publishing.
 Create `python-v1.11.11` at that exact commit, confirm no tag build is running,
 then publish those three Windows artifacts with the commit and workflow URL
 in the release notes. Preserve every `python-v1.11.10` asset.
+
+### Windows 1.11.10, corrected build 11112
+
+Keep application, package, installer, and Windows ProductVersion at 1.11.10;
+Windows FileVersion is 1.11.10.11112. Windows artifact names include `build11112`
+so this revision can be attached alongside the original 1.11.10 downloads.
+Build with an explicit `python-stable-windows` dispatch from the correction
+branch. Validate the exact candidate and record its source commit and workflow.
+Upload only the three uniquely named Windows files to the existing
+`python-v1.11.10` release without clobbering or moving its tag. Preserve its
+macOS and original Windows assets. Point recommended downloads to build 11112,
+mark Windows 1.11.11 superseded in its notes, and mark 1.11.10 latest.

@@ -11,9 +11,9 @@ $ProgressPreference = "SilentlyContinue"
 
 $AppName = "RF Map Viewer"
 $ExecutableName = "RF Map Viewer.exe"
-$AppVersion = "1.11.11"
-# Windows VERSIONINFO components are 16-bit; macOS uses build 111011.
-$AppBuild = "11111"
+$AppVersion = "1.11.10"
+# Windows VERSIONINFO components are 16-bit; macOS uses build 111010.
+$AppBuild = "11112"
 $ReleaseEdition = "Full"
 $ReleaseFlavor = "full"
 $Architecture = "x64"
@@ -45,10 +45,10 @@ $MetadataAuditor = Join-Path $ScriptDir "verify_python_stable_release_metadata.p
 $VersionVerifier = Join-Path $RepoRoot "release\verify_versions.py"
 $VersionManifest = Join-Path $RepoRoot "release\versions.json"
 
-$PortableName = "RF_Map_Viewer-python-$AppVersion-$ReleaseFlavor-windows-$Architecture-portable.zip"
-$SetupBaseName = "RF_Map_Viewer-python-$AppVersion-$ReleaseFlavor-windows-$Architecture-setup"
+$PortableName = "RF_Map_Viewer-python-$AppVersion-$ReleaseFlavor-windows-$Architecture-build$AppBuild-portable.zip"
+$SetupBaseName = "RF_Map_Viewer-python-$AppVersion-$ReleaseFlavor-windows-$Architecture-build$AppBuild-setup"
 $SetupName = "$SetupBaseName.exe"
-$ChecksumName = "SHA256SUMS-python-$AppVersion-$ReleaseFlavor-windows-$Architecture.txt"
+$ChecksumName = "SHA256SUMS-python-$AppVersion-$ReleaseFlavor-windows-$Architecture-build$AppBuild.txt"
 $DistDir = Join-Path $RootDir "dist\windows"
 $PortablePath = Join-Path $DistDir $PortableName
 $SetupPath = Join-Path $DistDir $SetupName

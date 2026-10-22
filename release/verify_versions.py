@@ -187,18 +187,18 @@ def verify_manifest(manifest: dict[str, Any]) -> None:
     expect(
         python_stable.get("windows_portable_artifact"),
         "RF_Map_Viewer-"
-        f"python-{windows_release}-{stable_flavor}-windows-x64-portable.zip",
+        f"python-{windows_release}-{stable_flavor}-windows-x64-build{windows_build}-portable.zip",
         "Python stable Windows portable artifact",
     )
     expect(
         python_stable.get("windows_installer_artifact"),
         "RF_Map_Viewer-"
-        f"python-{windows_release}-{stable_flavor}-windows-x64-setup.exe",
+        f"python-{windows_release}-{stable_flavor}-windows-x64-build{windows_build}-setup.exe",
         "Python stable Windows installer artifact",
     )
     expect(
         python_stable.get("windows_checksum"),
-        f"SHA256SUMS-python-{windows_release}-{stable_flavor}-windows-x64.txt",
+        f"SHA256SUMS-python-{windows_release}-{stable_flavor}-windows-x64-build{windows_build}.txt",
         "Python stable Windows checksum",
     )
 

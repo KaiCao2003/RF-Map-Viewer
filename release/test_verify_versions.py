@@ -51,6 +51,21 @@ class ComponentVersionTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, label):
                     verify_manifest(candidate)
 
+    def test_windows_build_change_requires_distinct_artifact_names(self) -> None:
+        candidate = copy.deepcopy(MANIFEST)
+        stable = candidate["components"]["python_stable"]
+        previous_build = stable["windows_build"]
+        stable["windows_build"] = str(int(previous_build) + 1)
+        with self.assertRaisesRegex(ValueError, "Windows portable artifact"):
+            verify_manifest(candidate)
+        for field in (
+            "windows_portable_artifact", "windows_installer_artifact", "windows_checksum"
+        ):
+            stable[field] = stable[field].replace(
+                f"build{previous_build}", f"build{stable['windows_build']}"
+            )
+        verify_manifest(candidate)
+
     def test_github_outputs_include_python_stable_windows_assets(self) -> None:
         verifier = ROOT / "release/verify_versions.py"
         with tempfile.TemporaryDirectory() as temporary_directory:

@@ -1,3 +1,16 @@
+## Python 1.11.10: corrected Windows build 11112
+
+Windows x64 · Full edition · version **1.11.10** · build **11112**
+
+Keep Windows on the Mac 1.11.10 application version while retaining the four
+tested fixes: Figure Studio previews, full-byte input checksums, Windows Arial
+export fonts, and CSV Save dialog ownership. This replaces the recommended
+Windows 1.11.11 download without removing its release history.
+
+The corrected installer and portable ZIP use unique `build11112` filenames.
+The existing 1.11.10 tag, macOS downloads, and earlier Windows assets remain
+unchanged. Release notes identify this revision's own source commit and CI run.
+
 ## Python 1.11.11: Windows Figure Studio preview and exports
 
 Windows x64 · Full edition · build **11111**
