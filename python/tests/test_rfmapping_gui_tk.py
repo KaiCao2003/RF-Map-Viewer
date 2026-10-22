@@ -2200,7 +2200,12 @@ class TkViewerTests(unittest.TestCase):
         original_info = tk_support_module.messagebox.showinfo
         self.addCleanup(setattr, tk_support_module.filedialog, "asksaveasfilename", original_ask)
         self.addCleanup(setattr, tk_support_module.messagebox, "showinfo", original_info)
-        tk_support_module.filedialog.asksaveasfilename = lambda **_kwargs: str(destination)
+
+        def choose_destination(**options):
+            self.assertIs(options["parent"], self.app)
+            return str(destination)
+
+        tk_support_module.filedialog.asksaveasfilename = choose_destination
         tk_support_module.messagebox.showinfo = lambda *_args, **_kwargs: None
 
         self.app.value_mode_var.set(constants_module.VALUE_MODE_RATE)

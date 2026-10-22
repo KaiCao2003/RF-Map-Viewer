@@ -9197,6 +9197,7 @@ class RFMViewer(tk.Toplevel):
         )
         value_mode = self.value_mode_var.get()
         path = filedialog.asksaveasfilename(
+            parent=self,
             title=f"Export {export_space} RF matrix",
             defaultextension=".csv",
             filetypes=(("CSV files", "*.csv"), ("All files", "*.*")),
