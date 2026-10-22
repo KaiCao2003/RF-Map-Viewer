@@ -384,6 +384,9 @@ of **⌘** on Windows. NumLock and ScrollLock do not disable viewer shortcuts.
 
 ## Stable viewer 1.11.10
 
+Version 1.11.10 is also available on Windows x64 (build 11110), with the same
+ADN annotation, overlay, Inspector, and reload features. Use Ctrl+R on Windows.
+
 Version 1.11.10 remembers live overlay selections, reloads with ⌘R while keeping
 existing plots visible, and loads indexed RF units outward from the current
 unit. The waveform panel has a single-line header and a taller plot. Native
@@ -615,8 +618,8 @@ Its macOS identity is `RF Map Viewer.app`, bundle ID
 script/build_python_stable_macos_app.sh
 ```
 
-Stable 1.11.1 targets Windows x64 as a portable ZIP and an Inno Setup installer
-(Windows build 11101). On a Windows build host with Python 3.14, PyInstaller,
+Stable 1.11.10 targets Windows x64 as a portable ZIP and an Inno Setup installer
+(Windows build 11110). On a Windows build host with Python 3.14, PyInstaller,
 and Inno Setup 6 installed, build and smoke-test both artifacts with:
 
 ```powershell
@@ -625,9 +628,9 @@ script/build_python_stable_windows_app.ps1
 
 The Windows artifacts are:
 
-- `RF_Map_Viewer-python-1.11.1-full-windows-x64-portable.zip`
-- `RF_Map_Viewer-python-1.11.1-full-windows-x64-setup.exe`
-- `SHA256SUMS-python-1.11.1-full-windows-x64.txt`
+- `RF_Map_Viewer-python-1.11.10-full-windows-x64-portable.zip`
+- `RF_Map_Viewer-python-1.11.10-full-windows-x64-setup.exe`
+- `SHA256SUMS-python-1.11.10-full-windows-x64.txt`
 
 The versioned outputs are written under `dist/windows/`; the builder verifies
 the portable executable and a silent temporary installation with the RF
@@ -637,7 +640,7 @@ document loader inside the packaged executable.
 
 The release workflow also accepts `python-stable-windows` to build only a
 Windows candidate without publishing. See [release instructions](../release/README.md)
-for the Windows follow-up to the existing `python-v1.11.1` release.
+for Windows candidate validation and publishing.
 
 Windows and macOS use the same Python viewer source, including cancellable
 large-file loading, compact count storage, cached time-window calculations,

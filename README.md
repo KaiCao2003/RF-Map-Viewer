@@ -28,11 +28,15 @@ policy.
 
 ## Downloads
 
+Windows 1.11.10 (build 11110) includes the shared Mac 1.11.10 viewer updates:
+ADN annotation, RF overlay selection, Inspector, document reload with Ctrl+R,
+and current-unit-first indexed caching.
+
 GitHub Actions builds the stable packages published on the
 [Releases page](https://github.com/KaiCao2003/RF-Map-Viewer/releases):
 
 - [Python 1.11.5 macOS app](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/python-v1.11.5)
-- [Python 1.11.2 Windows installer and portable ZIP](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/python-v1.11.2)
+- [Python 1.11.10 Windows installer and portable ZIP](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/python-v1.11.10)
 - [Swift 1.10.4 macOS app](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/swift-v1.10.4)
 - [Web 1.10.2 package](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/web-v1.10.2)
 

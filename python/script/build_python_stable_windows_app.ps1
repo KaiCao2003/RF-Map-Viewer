@@ -11,9 +11,9 @@ $ProgressPreference = "SilentlyContinue"
 
 $AppName = "RF Map Viewer"
 $ExecutableName = "RF Map Viewer.exe"
-$AppVersion = "1.11.1"
-# Windows VERSIONINFO components are 16-bit; macOS uses build 111001.
-$AppBuild = "11101"
+$AppVersion = "1.11.10"
+# Windows VERSIONINFO components are 16-bit; macOS uses build 111010.
+$AppBuild = "11110"
 $ReleaseEdition = "Full"
 $ReleaseFlavor = "full"
 $Architecture = "x64"
@@ -106,6 +106,7 @@ function Invoke-WindowedSmoke(
         $Process = Start-Process `
             -FilePath $Executable `
             -ArgumentList $Arguments `
+            -WindowStyle Hidden `
             -PassThru
         if (-not $Process.WaitForExit(120000)) {
             # The isolated decoder is a child executable in frozen builds.

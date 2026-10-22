@@ -10,6 +10,11 @@ The Free-Moving alpha application has been retired from the active source and
 release workflow. Its historical Git tags and published artifacts are retained.
 The Python package and generic launcher now identify the stable viewer.
 
+Windows 1.11.10 (build 11110) brings the shared Mac 1.11.10 viewer features
+to Windows x64, including ADN annotation, configurable RF overlays, Inspector,
+and Ctrl+R document reload. Its installer and portable ZIP are built from the
+same source and tested on Windows.
+
 Python 1.11.5 adds four independent excitatory/inhibitory 2D/1D overlay
 checkboxes and supports multiple saved RF component centers. It targets macOS
 Apple Silicon, build 111005. The published Windows
@@ -33,7 +38,7 @@ component tag and artifact name:
 | Component | Release | Tag | Channel |
 | --- | --- | --- | --- |
 | Python stable (macOS) | `1.11.5` | `python-v1.11.5` | stable |
-| Python stable (Windows x64) | `1.11.2` | `python-v1.11.2` | stable |
+| Python stable (Windows x64) | `1.11.10` | `python-v1.11.10` | stable |
 | Swift | `1.10.4` | `swift-v1.10.4` | stable |
 | Web | `1.10.2` | `web-v1.10.2` | stable |
 
@@ -144,3 +149,11 @@ installer, and Windows checksum file to that release. Preserve the tag and
 all existing macOS assets; do not replace attachments. Record the Windows
 build commit in the GitHub release body so both platforms' provenance remains
 explicit.
+
+### Windows 1.11.10
+
+Dispatch `python-stable-windows` from the reviewed packaging branch. After the
+Windows tests and portable/installed smoke checks pass, publish the portable
+ZIP, installer, and Windows checksum file under `python-v1.11.10`, recording the
+build commit and workflow URL in the release notes. Preserve existing tags and
+assets. Windows build 11110 fits the 16-bit VERSIONINFO component limit.

@@ -1,3 +1,18 @@
+## Python 1.11.10: Windows feature parity
+
+Windows x64 · Full edition · build **11110**
+
+- Bring Windows up to the shared Mac 1.11.10 viewer source, including four independent excitatory/inhibitory RF overlay selections, saved overlay preferences, and multiple RF component centers.
+- Annotate ADN units from Utilities with HD-class colors and filters, Undo/Clear, per-probe saving, and Only ADN filtering for viewing and figure export. Configure probe unit-info hover in Settings.
+- Inspect unit and response details through View → Inspector, with aligned RF and RF Results plots.
+- Reload the document and companions with **Ctrl+R**, preserving visible plots until the new data is ready. Indexed RF caching starts at the current unit and proceeds outward.
+- Use the compact waveform header and taller plot, and restore keyboard focus after closing ADN annotation.
+- Keep Windows Ctrl shortcuts working with CapsLock, NumLock, and ScrollLock. Exports retain opaque white backgrounds and dark labels.
+
+The installer and portable ZIP contain the same viewer. Build verification covers the test suite, installed and portable loading, the spawned document loader, TkDND/TkAgg, PDF/PNG/CSV export, version resources, and SHA-256 checksums.
+
+This release targets Windows. Existing macOS release assets and tags remain unchanged; Mac 1.11.10 source provenance is commit `b319ed3b5723f59ecea01914345cae49d11411ba`.
+
 ## Python 1.11.5: RF overlay multiselect
 
 macOS Apple Silicon · Full edition · build **111005**

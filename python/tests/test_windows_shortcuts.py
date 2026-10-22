@@ -57,6 +57,6 @@ def test_windows_shortcut_help_uses_ctrl_labels():
         gui.RFMViewer._show_shortcuts(viewer)
 
     message = showinfo.call_args.args[1]
-    for key in ("O", "E", "Shift+E", "W", "Shift+."):
+    for key in ("O", "R", "E", "Shift+E", "W", "Shift+."):
         assert f"Ctrl+{key}" in message
     assert "Command" not in message
