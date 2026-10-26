@@ -1,3 +1,16 @@
+## Python 1.11.13: Inspector result statistics
+
+Full edition · macOS Apple Silicon build **111013** · Windows x64 build **11114**
+
+- Show saved SD threshold multipliers in **Inspector → Saved results**, separately for 1D and 2D detections.
+- Label mean and standard deviation as **computed current-source mean-rate statistics**, using the saved analysis time window and recorded spatial reference.
+- Original detector numerical statistics and temporal aggregation were not saved. The computed values describe the current RF source and do not reconstruct the original detector's mean/SD.
+- Show missing or unsupported window/reference provenance as unavailable. RF detection is not rerun, and source data is unchanged.
+
+This update is confined to Inspector reporting. The macOS app, Windows
+installer, and portable ZIP use the same viewer source. Swift and Web releases
+are unchanged.
+
 ## Python 1.11.12: configurable RF result paths
 
 Full edition · macOS Apple Silicon build **111012** · Windows x64 build **11113**

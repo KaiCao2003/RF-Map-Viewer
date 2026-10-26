@@ -1,6 +1,6 @@
 # Python RF Map Viewers
 
-This directory contains the Python/Tk RF Map Viewer `1.11.12`, launched by
+This directory contains the Python/Tk RF Map Viewer `1.11.13`, launched by
 `rfmapping_gui.py` or the installed `rfmapping-viewer` command. The separate
 Free-Moving alpha and its HDF5 Square/Bar, 3D-sphere, and exposure-QA paths have
 been retired. The offline session/EBC HTML report script remains available.
@@ -382,6 +382,23 @@ of **⌘** on Windows. NumLock and ScrollLock do not disable viewer shortcuts.
 
 ---
 
+## Stable viewer 1.11.13: Inspector result statistics
+
+**View → Inspector… → Saved results** shows the saved SD threshold multiplier
+and **computed current-source mean-rate statistics**, separately for 1D and 2D
+results. The computed mean and standard deviation use the saved analysis time
+window and recorded spatial reference.
+
+Original detector numerical statistics and temporal aggregation were not saved.
+The computed values therefore describe the current RF source; they are not a
+reconstruction of the original detector's mean/SD. Missing or unsupported
+window/reference provenance is shown as unavailable instead of substituting
+current display settings. The viewer does not rerun RF detection or change
+source data.
+
+The release includes macOS Apple Silicon build 111013 and Windows x64 build
+11114 from the same viewer source.
+
 ## Stable viewer 1.11.12: configurable RF result paths
 
 **Settings → Paths** controls the regex used to recognize RF documents stored
@@ -648,14 +665,14 @@ Opening the app without a path shows the native file chooser. Release packages
 do not contain or auto-load sample RF data.
 
 Its macOS identity is `RF Map Viewer.app`, bundle ID
-`org.local.rfmapping.viewer`, and version/build `1.11.12` / `111012`. Build it with:
+`org.local.rfmapping.viewer`, and version/build `1.11.13` / `111013`. Build it with:
 
 ```sh
 script/build_python_stable_macos_app.sh
 ```
 
-Stable 1.11.12 targets Windows x64 as a portable ZIP and an Inno Setup installer
-(Windows build 11113). On a Windows build host with Python 3.14, PyInstaller,
+Stable 1.11.13 targets Windows x64 as a portable ZIP and an Inno Setup installer
+(Windows build 11114). On a Windows build host with Python 3.14, PyInstaller,
 and Inno Setup 6 installed, build and smoke-test both artifacts with:
 
 ```powershell
@@ -664,9 +681,9 @@ script/build_python_stable_windows_app.ps1
 
 The Windows artifacts are:
 
-- `RF_Map_Viewer-python-1.11.12-full-windows-x64-build11113-portable.zip`
-- `RF_Map_Viewer-python-1.11.12-full-windows-x64-build11113-setup.exe`
-- `SHA256SUMS-python-1.11.12-full-windows-x64-build11113.txt`
+- `RF_Map_Viewer-python-1.11.13-full-windows-x64-build11114-portable.zip`
+- `RF_Map_Viewer-python-1.11.13-full-windows-x64-build11114-setup.exe`
+- `SHA256SUMS-python-1.11.13-full-windows-x64-build11114.txt`
 
 The versioned outputs are written under `dist/windows/`; the builder verifies
 the portable executable and a silent temporary installation with the RF

@@ -5372,9 +5372,9 @@ class RFMViewer(tk.Toplevel):
         pane = self.results_pane
         pane.unit_id = self._selected_unit_id_value() if self._selected_local_unit_index() is not None else None
         if self._active_tab_key() == "rf" and self.settings.rf_result_overlay_enabled and self.settings.rf_result_overlay_layers:
-            pane.update_details(layers=self.settings.rf_result_overlay_layers)
+            pane.update_details(layers=self.settings.rf_result_overlay_layers, include_statistics=True)
         else:
-            pane.update_details()
+            pane.update_details(include_statistics=True)
         self.inspector_window.set_results(pane.details.get())
 
     def _sync_context_controls(self) -> None:
@@ -5684,7 +5684,10 @@ class RFMViewer(tk.Toplevel):
         if key == "results":
             self.results_pane.set_unit(self._selected_unit_id_value())
             self._draw_rf()
-            self.inspector_window.set_results(self.results_pane.details.get())
+            if self.inspector_window.winfo_viewable():
+                self._sync_inspector_results()
+            else:
+                self.inspector_window.set_results(self.results_pane.details.get())
             if update_optional_views:
                 self._draw_tuning_curve()
                 self._draw_waveform()
@@ -5699,6 +5702,8 @@ class RFMViewer(tk.Toplevel):
             self._draw_timeline()
         if update_optional_views and self.show_waveform_var.get():
             self._draw_waveform()
+        if self.inspector_window.winfo_viewable():
+            self._sync_inspector_results()
 
     def _request_waveform_payload(self) -> None:
         if not self.show_waveform_var.get():
@@ -6187,8 +6192,6 @@ class RFMViewer(tk.Toplevel):
         if update_optional_views:
             self._draw_probe_canvas()
         self._draw_active_tab(update_optional_views=update_optional_views)
-        if self.inspector_window.state() != "withdrawn":
-            self._sync_inspector_results()
 
     def _current_matrix(self) -> list[list[float | None]]:
         unit_idx = self._selected_local_unit_index()
@@ -6942,7 +6945,8 @@ class RFMViewer(tk.Toplevel):
                 if dimensions:
                     selections.append(("Both" if len(dimensions) == 2 else dimensions[0].upper(), polarity))
             pane.update_details(layers=layers)
-        self.inspector_window.set_results(pane.details.get())
+        if not self.inspector_window.winfo_viewable():
+            self.inspector_window.set_results(pane.details.get())
         if not result_only and pane.status.get():
             self.rf_map_subtitle_label.configure(
                 text=f"{self._current_matrix_label()} · Saved {pane.status.get()}"
@@ -8890,6 +8894,7 @@ class RFMViewer(tk.Toplevel):
     def _install_reloaded_document(self, data: RFMappingData, *, progressive: bool = False) -> None:
         previous = self.data
         self.data = data
+        self.results_pane.data = data
         previous.close()
         self._base_bin_cache = None
         self._time_groups_cache = None

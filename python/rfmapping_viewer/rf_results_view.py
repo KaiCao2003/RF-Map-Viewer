@@ -9,6 +9,7 @@ import numpy as np
 from rfmapping_viewer.constants import SINGLETON_Y_REFERENCE_COLUMNS, SINGLETON_Y_REFERENCE_ROWS
 from rfmapping_viewer.rf_results import DEFAULT_RF_RESULT_LAYOUT_PATTERN, RFResultSource, SavedRFResult
 from rfmapping_viewer.rf_result_overlay import RFResultOverlayCache
+from rfmapping_viewer.rf_result_statistics import result_statistics_text
 from rfmapping_viewer.tk_support import tk, ttk
 
 
@@ -112,6 +113,7 @@ class RFResultsPane(ttk.Frame):
         self.set_document(data)
 
     def set_document(self, data):
+        self.data = data
         self.source = RFResultSource.from_document(
             data, layout_pattern=self.layout_pattern,
         ) if data is not None else None
@@ -143,7 +145,7 @@ class RFResultsPane(ttk.Frame):
             self.cache.clear()
         self._selection_changed()
 
-    def update_details(self, *, mode=None, rf_type=None, layers=None):
+    def update_details(self, *, mode=None, rf_type=None, layers=None, include_statistics=False):
         if self.cache is None or self.unit_id is None:
             self.status.set("No unit selected")
             self.details.set("")
@@ -174,6 +176,8 @@ class RFResultsPane(ttk.Frame):
             details.append(f"{dimension.upper()} {rf_type} · {text}\n{result.path}")
             details.append(f"Unit {self.unit_id}: " + (f"{int(saved[0].sum())} detected bins" if saved is not None else "not in saved results"))
             if saved is not None:
+                if include_statistics:
+                    details.append(result_statistics_text(result, self.data, self.unit_id))
                 if dimension == "2d":
                     centers = [(self.source.x_positions[x], self.source.y_positions[y])
                                for y, x in zip(*saved[1].nonzero())]

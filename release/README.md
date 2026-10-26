@@ -10,6 +10,14 @@ The Free-Moving alpha application has been retired from the active source and
 release workflow. Its historical Git tags and published artifacts are retained.
 The Python package and generic launcher now identify the stable viewer.
 
+Python 1.11.13 adds saved SD threshold multipliers and computed current-source
+mean-rate mean/SD to **Inspector → Saved results**, separately for 1D and 2D.
+Computed values use the saved time window and recorded spatial reference.
+Original detector numerical statistics and temporal aggregation were not saved;
+these values do not reconstruct them. Missing or unsupported window/reference
+provenance remains unavailable. macOS build 111013 and Windows build 11114
+share the viewer source, with no changes to Swift or Web releases.
+
 Python 1.11.12 adds **Settings → Paths** for RF result path regex rules,
 syntax validation, default restoration, and current-document path previews.
 macOS Apple Silicon build 111012 and Windows x64 build 11113 use the same
@@ -42,8 +50,8 @@ component tag and artifact name:
 
 | Component | Release | Tag | Channel |
 | --- | --- | --- | --- |
-| Python stable (macOS) | `1.11.12` | `python-v1.11.12` | stable |
-| Python stable (Windows x64, build 11113) | `1.11.12` | `python-v1.11.12` | stable |
+| Python stable (macOS) | `1.11.13` | `python-v1.11.13` | stable |
+| Python stable (Windows x64, build 11114) | `1.11.13` | `python-v1.11.13` | stable |
 | Swift | `1.10.4` | `swift-v1.10.4` | stable |
 | Web | `1.10.2` | `web-v1.10.2` | stable |
 
