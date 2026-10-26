@@ -1,3 +1,15 @@
+## Python 1.11.12: configurable RF result paths
+
+Full edition · macOS Apple Silicon build **111012** · Windows x64 build **11113**
+
+- Recognize RF documents in kind directories and read the four short-named saved result files: `rf_2d_ext.npz`, `rf_1d_ext.npz`, `rf_2d_inh.npz`, and `rf_1d_inh.npz`, plus optional `analysis_ext.json` and `analysis_inh.json`.
+- Configure the RF path matching regex in **Settings → Paths**, with syntax validation, default restoration, and a preview for the current RF document.
+- Use the same saved path rules in RF Results, saved overlays, and document reload. Older source-named result layouts remain supported.
+
+RF inputs and analysis files remain read-only. The viewer reads saved detections;
+it does not run RF analysis. The macOS app, Windows installer, and portable ZIP
+use the same viewer source. Swift and Web releases are unchanged.
+
 ## Python 1.11.10: corrected Windows build 11112
 
 Windows x64 · Full edition · version **1.11.10** · build **11112**

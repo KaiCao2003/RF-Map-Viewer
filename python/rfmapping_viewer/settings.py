@@ -12,6 +12,11 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Mapping
 
+from rfmapping_viewer.rf_results import (
+    DEFAULT_RF_RESULT_LAYOUT_PATTERN,
+    validate_rf_result_layout_pattern,
+)
+
 from rfmapping_viewer.constants import (
     DEFAULT_HD_DISPLAY_BINS,
     DEFAULT_HD_SMOOTH_SIGMA,
@@ -82,6 +87,7 @@ class ViewerSettings:
     show_probe_layout: bool = True
     auto_load_probe_layout: bool = True
     show_probe_unit_info: bool = True
+    rf_result_layout_pattern: str = DEFAULT_RF_RESULT_LAYOUT_PATTERN
     rf_sum_start_ms: float = DEFAULT_RF_SUM_START_MS
     rf_sum_end_ms: float = DEFAULT_RF_SUM_END_MS
     rf_subtract: bool = False
@@ -216,6 +222,12 @@ class ViewerSettings:
         raw_hd_bins = payload.get("tuning_display_bins", defaults.tuning_display_bins)
         if type(raw_hd_bins) is not int:
             raw_hd_bins = defaults.tuning_display_bins
+        try:
+            result_layout_pattern = validate_rf_result_layout_pattern(
+                payload.get("rf_result_layout_pattern", defaults.rf_result_layout_pattern)
+            )
+        except ValueError:
+            result_layout_pattern = defaults.rf_result_layout_pattern
 
         return cls(
             show_tuning_curve=boolean("show_tuning_curve"),
@@ -225,6 +237,7 @@ class ViewerSettings:
             show_probe_layout=boolean("show_probe_layout"),
             auto_load_probe_layout=boolean("auto_load_probe_layout"),
             show_probe_unit_info=boolean("show_probe_unit_info"),
+            rf_result_layout_pattern=result_layout_pattern,
             rf_sum_start_ms=start_ms,
             rf_sum_end_ms=end_ms,
             rf_subtract=boolean("rf_subtract"),

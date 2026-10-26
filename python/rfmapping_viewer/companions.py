@@ -969,17 +969,21 @@ def _probe_geometry_search_roots(
     data_root: Path | None,
 ) -> list[Path]:
     roots: list[Path] = []
-    if data_root is not None:
-        roots.append(data_root.expanduser())
-    elif configured := os.environ.get("RF_MAPPING_PROBE_DATA_ROOT"):
-        roots.append(Path(configured).expanduser())
-
     source = json_path.expanduser()
     parents = tuple(source.parents)
     session = next(
         (parent for parent in parents if _RECORDING_SESSION_RE.fullmatch(parent.name)),
         None,
     )
+    data_boundary = next((parent for parent in parents if parent.name == "data"), None)
+    if data_root is not None:
+        roots.append(data_root.expanduser())
+    elif session is None and data_boundary is None:
+        # A global legacy directory must not replace a known recording's
+        # positions, even when that recording has no position companion.
+        if configured := os.environ.get("RF_MAPPING_PROBE_DATA_ROOT"):
+            roots.append(Path(configured).expanduser())
+
     if session is not None:
         boundary = next(
             (
@@ -993,10 +997,7 @@ def _probe_geometry_search_roots(
             roots.append(parent)
             if parent == boundary:
                 break
-    elif data_boundary := next(
-        (parent for parent in parents if parent.name == "data"),
-        None,
-    ):
+    elif data_boundary is not None:
         for parent in parents:
             roots.append(parent)
             if parent == data_boundary:
@@ -1027,6 +1028,9 @@ def discover_probe_geometry_paths(
     and physical channels below ``data/waveform``. Both ``positions.probe``
     and the legacy ``positions.csv`` name are accepted in every supported
     layout; ``channels.csv`` remains the optional physical-channel companion.
+    Pass the RF document when RF and HD are both present; an HD/TC source on
+    its own uses its own session. Missing companions never select another
+    session implicitly.
     """
 
     source = Path(rf_path).expanduser()

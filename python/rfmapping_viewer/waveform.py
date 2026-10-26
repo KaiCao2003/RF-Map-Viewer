@@ -328,6 +328,9 @@ def discover_waveform_artifact(
     RF documents use their ProbeA/ProbeB filename vocabulary and search only
     nearby ancestors through the nearest ``data`` directory (or two ancestors
     for compact fixtures); there is no recursive filesystem walk.
+    With both RF and HD loaded, the caller supplies the RF path. An HD/TC
+    path by itself uses that session; a missing RF artifact never falls back
+    to the selected tuning session.
     """
 
     source = Path(rf_path).expanduser()

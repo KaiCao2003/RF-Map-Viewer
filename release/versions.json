@@ -2,7 +2,7 @@
   "schema_version": 1,
   "reference": {
     "component": "python_stable",
-    "version": "1.11.10",
+    "version": "1.11.12",
     "stable_series": "1.11"
   },
   "policy": {
@@ -11,22 +11,22 @@
   },
   "components": {
     "python_stable": {
-      "release_version": "1.11.10",
-      "marketing_version": "1.11.10",
-      "package_version": "1.11.10",
-      "build": "111010",
+      "release_version": "1.11.12",
+      "marketing_version": "1.11.12",
+      "package_version": "1.11.12",
+      "build": "111012",
       "channel": "stable",
       "feature_generation_offset": 0,
       "edition": "Full",
       "artifact_flavor": "full",
-      "artifact": "RF_Map_Viewer-python-1.11.10-full-macos-arm64.zip",
-      "checksum": "SHA256SUMS-python-1.11.10-full.txt",
-      "windows_portable_artifact": "RF_Map_Viewer-python-1.11.10-full-windows-x64-build11112-portable.zip",
-      "windows_installer_artifact": "RF_Map_Viewer-python-1.11.10-full-windows-x64-build11112-setup.exe",
-      "windows_checksum": "SHA256SUMS-python-1.11.10-full-windows-x64-build11112.txt",
-      "tag": "python-v1.11.10",
-      "windows_release_version": "1.11.10",
-      "windows_build": "11112"
+      "artifact": "RF_Map_Viewer-python-1.11.12-full-macos-arm64.zip",
+      "checksum": "SHA256SUMS-python-1.11.12-full.txt",
+      "windows_portable_artifact": "RF_Map_Viewer-python-1.11.12-full-windows-x64-build11113-portable.zip",
+      "windows_installer_artifact": "RF_Map_Viewer-python-1.11.12-full-windows-x64-build11113-setup.exe",
+      "windows_checksum": "SHA256SUMS-python-1.11.12-full-windows-x64-build11113.txt",
+      "tag": "python-v1.11.12",
+      "windows_release_version": "1.11.12",
+      "windows_build": "11113"
     },
     "swift": {
       "release_version": "1.10.4",

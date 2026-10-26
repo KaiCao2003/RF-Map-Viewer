@@ -41,7 +41,8 @@ def write_result(source, dimension="2d", rf_type="excitatory", *, ids=(42, 17), 
     return path, manifest
 
 
-def write_summary(source, path, manifest, *, dimension="2d", rf_type="excitatory", projection=False):
+def write_summary(source, path, manifest, *, dimension="2d", rf_type="excitatory", projection=False,
+                  filename=None):
     stem = source.path.stem + ("_inhibitory" if rf_type == "inhibitory" else "")
     summary = dict(source_path=str(source.path), probe="A", kept_unit_ids=[17, 42],
                    parameters=dict(rf_type=rf_type, time_range_s=[0., .2], max_zero_bins=2,
@@ -50,7 +51,7 @@ def write_summary(source, path, manifest, *, dimension="2d", rf_type="excitatory
                                    exclude_zero_bins=False, collapse_from_2d=projection),
                    bin_qc=dict(unit_ids=[17, 42, 99], zero_bins=[0, 1, 5], valid_bins=[6, 5, 1],
                                keep=[True, True, False]), output_paths={f"result_{dimension}": str(path)})
-    summary_path = source.path.with_name(stem + "_analysis.json")
+    summary_path = source.path.with_name(filename or stem + "_analysis.json")
     summary_path.write_text(json.dumps(summary))
     return summary_path, summary
 
@@ -74,6 +75,70 @@ def test_missing_sidecar_does_not_compute_or_create_a_result(source):
     with pytest.raises(FileNotFoundError):
         load_saved_rf_result(source)
     assert list(source.path.parent.iterdir()) == [source.path]
+
+
+@pytest.mark.parametrize("kind", [
+    "regular", "bar_3deg", "rotation", "rotation_30", "egocentric_30",
+    "allocentric_pixelbins_30", "free_moving",
+])
+@pytest.mark.parametrize("dimension,rf_type,polarity", [
+    ("2d", "excitatory", "ext"), ("1d", "excitatory", "ext"),
+    ("2d", "inhibitory", "inh"), ("1d", "inhibitory", "inh"),
+])
+def test_kind_directory_loads_short_results_and_summary(source, kind, dimension, rf_type, polarity):
+    folder = source.path.parent / "ProbeA" / kind
+    folder.mkdir(parents=True)
+    source = replace(source, path=folder / f"{kind}_261019_1.rfmap")
+    source.path.write_text("read-only source placeholder")
+    path, manifest = write_result(source, dimension, rf_type)
+    write_summary(source, path, manifest, dimension=dimension, rf_type=rf_type,
+                  filename=f"analysis_{polarity}.json")
+
+    result = load_saved_rf_result(source, dimension=dimension, rf_type=rf_type)
+
+    assert result.path == folder / f"rf_{dimension}_{polarity}.npz"
+    assert result.for_unit(42)[0].sum() == 1
+    assert result.for_unit(17)[0].sum() == 0
+    assert result.for_unit(99) is None
+    assert result.unit_qc(42) == dict(zero_bins=1, valid_bins=5, keep=True)
+    assert result.summary_warning is None
+    assert source.path.read_text() == "read-only source placeholder"
+
+
+@pytest.mark.parametrize("folder,name", [
+    ("regular", "regular_unitsSpikeCounts_261019_1.rfmap"),
+    ("ProbeA", "regular_261019_1.rfmap"),
+    ("bar_3deg", "regular_261019_1.rfmap"),
+    ("other", "other_261019_1.rfmap"),
+])
+def test_noncanonical_documents_keep_source_named_sidecars(tmp_path, folder, name):
+    source = tmp_path / folder / name
+    assert rf_result_path(source) == source.with_suffix(".npz")
+    assert rf_result_path(source, dimension="1d", rf_type="inhibitory") == source.with_name(
+        source.stem + "_inhibitory_1d.npz"
+    )
+
+
+def test_kind_directory_does_not_fall_back_to_source_named_results(source):
+    folder = source.path.parent / "regular"
+    folder.mkdir()
+    source = replace(source, path=folder / "regular_261019_1.rfmap")
+    path, _ = write_result(source)
+    path.rename(source.path.with_suffix(".npz"))
+    with pytest.raises(FileNotFoundError):
+        load_saved_rf_result(source)
+
+
+def test_kind_directory_legacy_projection_reads_short_summary(source):
+    folder = source.path.parent / "regular"
+    folder.mkdir()
+    source = replace(source, path=folder / "regular_261019_1.rfmap")
+    path, manifest = write_result(source, "1d", projection=True)
+    write_summary(source, path, manifest, dimension="1d", projection=True,
+                  filename="analysis_ext.json")
+    result = load_saved_rf_result(source, dimension="1d")
+    assert result.projected_from_2d
+    np.testing.assert_array_equal(result.for_unit(42)[0], [0, 0, 1])
 
 
 def test_qc_lookup_uses_its_own_unit_ids(source):

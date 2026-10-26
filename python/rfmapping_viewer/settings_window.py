@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import sys
+from pathlib import Path
 from typing import Sequence
 
 from rfmapping_viewer.constants import (
@@ -18,6 +19,11 @@ from rfmapping_viewer.constants import (
     WAVEFORM_CHANNEL_MODE_LABELS,
 )
 from rfmapping_viewer.display import format_ms
+from rfmapping_viewer.rf_results import (
+    DEFAULT_RF_RESULT_LAYOUT_PATTERN,
+    rf_result_path,
+    validate_rf_result_layout_pattern,
+)
 from rfmapping_viewer.settings import (
     RF_RESULT_OVERLAY_LAYERS,
     ViewerSettings,
@@ -43,7 +49,7 @@ class SettingsValidationError(ValueError):
 class SettingsWindow(tk.Toplevel):
     """Single native-style settings window shared by all viewer windows."""
 
-    TAB_NAMES = ("General", "RF Map", "Waveform", "Tuning Curve")
+    TAB_NAMES = ("General", "RF Map", "Waveform", "Tuning Curve", "Paths")
 
     def __init__(self, owner: RFMViewer):
         self.owner = owner
@@ -69,6 +75,8 @@ class SettingsWindow(tk.Toplevel):
         return result
 
     def _create_variables(self, settings: ViewerSettings) -> None:
+        self.rf_result_layout_pattern_var = tk.StringVar(value=settings.rf_result_layout_pattern)
+        self.rf_result_path_preview_var = tk.StringVar()
         self.show_tuning_curve_var = tk.BooleanVar(value=settings.show_tuning_curve)
         self.auto_load_tuning_curve_var = tk.BooleanVar(value=settings.auto_load_tuning_curve)
         self.tuning_curve_session_var = tk.StringVar(
@@ -169,11 +177,13 @@ class SettingsWindow(tk.Toplevel):
         rf_map = self._new_tab("RF Map")
         waveform = self._new_tab("Waveform")
         tuning = self._new_tab("Tuning Curve")
+        paths = self._new_tab("Paths")
         self._build_general_tab(general)
         self._build_rf_tab(rf_map)
         self._build_waveform_tab(waveform)
         self._build_tuning_tab(tuning)
-        for tab in (general, rf_map, waveform, tuning):
+        self._build_paths_tab(paths)
+        for tab in (general, rf_map, waveform, tuning, paths):
             self._style_form(tab)
         self.notebook.bind("<<NotebookTabChanged>>", self._remember_selected_tab)
         self._install_form_scrolling()
@@ -306,6 +316,51 @@ class SettingsWindow(tk.Toplevel):
                 widget.configure(style="Settings.TLabel")
             elif isinstance(widget, ttk.Checkbutton):
                 widget.configure(style="Settings.TCheckbutton")
+
+    def _build_paths_tab(self, tab: ttk.Frame) -> None:
+        self._section_label(tab, "Saved RF result paths", 0)
+        ttk.Label(
+            tab, text="Match the entire parent-folder/file-stem using a Python regular expression. "
+            "Use / on both Windows and macOS; omit the file extension.",
+            wraplength=590, justify="left",
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 12))
+        self.rf_result_layout_pattern_entry = ttk.Entry(
+            tab, textvariable=self.rf_result_layout_pattern_var, width=65,
+        )
+        self.rf_result_layout_pattern_entry.grid(row=2, column=0, columnspan=2, sticky="ew")
+        ttk.Button(
+            tab, text="Restore default rule",
+            command=lambda: self.rf_result_layout_pattern_var.set(DEFAULT_RF_RESULT_LAYOUT_PATTERN),
+        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=12)
+        ttk.Label(
+            tab, text="Matched .rfmap/.json files read rf_2d_ext.npz, rf_1d_ext.npz, "
+            "rf_2d_inh.npz and rf_1d_inh.npz, plus analysis_ext.json / analysis_inh.json "
+            "from the same folder. Other layouts retain source-named results. "
+            "Missing results never fall back to another layout.",
+            wraplength=590, justify="left",
+        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(0, 16))
+        self._section_label(tab, "Preview", 5)
+        ttk.Label(
+            tab, textvariable=self.rf_result_path_preview_var, wraplength=590, justify="left",
+        ).grid(row=6, column=0, columnspan=2, sticky="w")
+        self.rf_result_layout_pattern_var.trace_add("write", self._preview_result_paths)
+        self._preview_result_paths()
+
+    def _preview_result_paths(self, *_args) -> None:
+        active = self.owner._active_viewer()
+        source = getattr(active.data, "path", None)
+        example = source is None
+        source = Path("regular/regular_261019_1.rfmap") if example else Path(source)
+        try:
+            pattern = validate_rf_result_layout_pattern(self.rf_result_layout_pattern_var.get())
+            names = [rf_result_path(source, dimension=dimension, rf_type=polarity,
+                                    layout_pattern=pattern).name
+                     for polarity in ("excitatory", "inhibitory") for dimension in ("2d", "1d")]
+            label = "Example" if example else "Current document"
+            preview = f"{label}: {source.parent.name}/{source.stem}\n\n" + "\n".join(names)
+        except ValueError as exc:
+            preview = str(exc)
+        self.rf_result_path_preview_var.set(preview)
 
     def _build_general_tab(self, tab: ttk.Frame) -> None:
         self._section_label(tab, "Views", 0)
@@ -826,6 +881,12 @@ class SettingsWindow(tk.Toplevel):
             raise SettingsValidationError(
                 "Tuning Curve", "Choose Side by side or Stacked arrangement."
             )
+        try:
+            result_layout_pattern = validate_rf_result_layout_pattern(
+                self.rf_result_layout_pattern_var.get()
+            )
+        except ValueError as exc:
+            raise SettingsValidationError("Paths", str(exc)) from exc
         return ViewerSettings(
             show_tuning_curve=bool(self.show_tuning_curve_var.get()),
             auto_load_tuning_curve=bool(self.auto_load_tuning_curve_var.get()),
@@ -834,6 +895,7 @@ class SettingsWindow(tk.Toplevel):
             show_probe_layout=bool(self.show_probe_layout_var.get()),
             auto_load_probe_layout=bool(self.auto_load_probe_layout_var.get()),
             show_probe_unit_info=bool(self.show_probe_unit_info_var.get()),
+            rf_result_layout_pattern=result_layout_pattern,
             rf_sum_start_ms=start_ms,
             rf_sum_end_ms=end_ms,
             rf_subtract=self.rf_window_mode_var.get() == "A − B",

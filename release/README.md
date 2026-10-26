@@ -10,6 +10,11 @@ The Free-Moving alpha application has been retired from the active source and
 release workflow. Its historical Git tags and published artifacts are retained.
 The Python package and generic launcher now identify the stable viewer.
 
+Python 1.11.12 adds **Settings → Paths** for RF result path regex rules,
+syntax validation, default restoration, and current-document path previews.
+macOS Apple Silicon build 111012 and Windows x64 build 11113 use the same
+viewer source. Swift and Web retain their existing releases.
+
 Windows 1.11.10 (build 11112) fixes blank Figure Studio previews and retains
 the shared Mac 1.11.10 viewer features on Windows x64, including ADN annotation, configurable RF overlays, Inspector,
 and Ctrl+R document reload. Its installer and portable ZIP are built from the
@@ -37,8 +42,8 @@ component tag and artifact name:
 
 | Component | Release | Tag | Channel |
 | --- | --- | --- | --- |
-| Python stable (macOS) | `1.11.10` | `python-v1.11.10` | stable |
-| Python stable (Windows x64, build 11112) | `1.11.10` | `python-v1.11.10` | stable |
+| Python stable (macOS) | `1.11.12` | `python-v1.11.12` | stable |
+| Python stable (Windows x64, build 11113) | `1.11.12` | `python-v1.11.12` | stable |
 | Swift | `1.10.4` | `swift-v1.10.4` | stable |
 | Web | `1.10.2` | `web-v1.10.2` | stable |
 

@@ -2836,7 +2836,7 @@ class TkViewerTests(unittest.TestCase):
         self.addCleanup(settings.destroy)
         self.assertEqual(
             [settings.notebook.tab(tab, "text") for tab in settings.notebook.tabs()],
-            ["General", "RF Map", "Waveform", "Tuning Curve"],
+            ["General", "RF Map", "Waveform", "Tuning Curve", "Paths"],
         )
 
         settings.show_tuning_curve_var.set(False)

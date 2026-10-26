@@ -1,6 +1,6 @@
 # Python RF Map Viewers
 
-This directory contains the Python/Tk RF Map Viewer `1.11.10`, launched by
+This directory contains the Python/Tk RF Map Viewer `1.11.12`, launched by
 `rfmapping_gui.py` or the installed `rfmapping-viewer` command. The separate
 Free-Moving alpha and its HDF5 Square/Bar, 3D-sphere, and exposure-QA paths have
 been retired. The offline session/EBC HTML report script remains available.
@@ -80,8 +80,8 @@ signature. Ordinary JSON RF maps remain supported.
 
 Use the app's **Settings…** command (**⌘,** on macOS; **View → Settings…**
 where that menu is shown) to save defaults for future viewer windows.
-Settings are grouped under **General**, **RF Map**, **Waveform**, and
-**Tuning Curve**.
+Settings are grouped under **General**, **RF Map**, **Waveform**,
+**Tuning Curve**, and **Paths**.
 
 ### Choose units and use the Probe layout
 
@@ -382,6 +382,25 @@ of **⌘** on Windows. NumLock and ScrollLock do not disable viewer shortcuts.
 
 ---
 
+## Stable viewer 1.11.12: configurable RF result paths
+
+**Settings → Paths** controls the regex used to recognize RF documents stored
+in a kind directory and select their saved result filenames. The editor
+validates regex syntax, restores the default rule, and previews the paths for
+the current RF document. RF Results, saved overlays, and reload use the same
+configuration. RF source data and saved analysis files remain read-only.
+
+The regex matches the complete immediate parent-folder/file-stem pair, such as
+`regular/regular_261019_1`, without the extension. Use `/` on both platforms.
+Matched `.rfmap` and `.json` documents read `rf_2d_ext.npz`, `rf_1d_ext.npz`,
+`rf_2d_inh.npz`, and `rf_1d_inh.npz` from the source directory; optional analysis
+summaries are `analysis_ext.json` and `analysis_inh.json`. Documents that do not
+match retain source-named results. A missing result never selects a different
+layout. An empty or invalid regex cannot be saved.
+
+The release includes macOS Apple Silicon build 111012 and Windows x64 build
+11113 from the same viewer source.
+
 ## Stable viewer 1.11.10: Windows build 11112
 
 Windows uses the same 1.11.10 application version as macOS. Build 11112 retains
@@ -629,14 +648,14 @@ Opening the app without a path shows the native file chooser. Release packages
 do not contain or auto-load sample RF data.
 
 Its macOS identity is `RF Map Viewer.app`, bundle ID
-`org.local.rfmapping.viewer`, and version/build `1.11.10` / `111010`. Build it with:
+`org.local.rfmapping.viewer`, and version/build `1.11.12` / `111012`. Build it with:
 
 ```sh
 script/build_python_stable_macos_app.sh
 ```
 
-Stable 1.11.10 targets Windows x64 as a portable ZIP and an Inno Setup installer
-(Windows build 11112). On a Windows build host with Python 3.14, PyInstaller,
+Stable 1.11.12 targets Windows x64 as a portable ZIP and an Inno Setup installer
+(Windows build 11113). On a Windows build host with Python 3.14, PyInstaller,
 and Inno Setup 6 installed, build and smoke-test both artifacts with:
 
 ```powershell
@@ -645,9 +664,9 @@ script/build_python_stable_windows_app.ps1
 
 The Windows artifacts are:
 
-- `RF_Map_Viewer-python-1.11.10-full-windows-x64-build11112-portable.zip`
-- `RF_Map_Viewer-python-1.11.10-full-windows-x64-build11112-setup.exe`
-- `SHA256SUMS-python-1.11.10-full-windows-x64-build11112.txt`
+- `RF_Map_Viewer-python-1.11.12-full-windows-x64-build11113-portable.zip`
+- `RF_Map_Viewer-python-1.11.12-full-windows-x64-build11113-setup.exe`
+- `SHA256SUMS-python-1.11.12-full-windows-x64-build11113.txt`
 
 The versioned outputs are written under `dist/windows/`; the builder verifies
 the portable executable and a silent temporary installation with the RF

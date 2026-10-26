@@ -3,12 +3,31 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from zipfile import BadZipFile
 
 import numpy as np
+
+
+DEFAULT_RF_RESULT_LAYOUT_PATTERN = (
+    r"(?P<kind>regular|bar_\d+(?:\.\d+)?deg|"
+    r"(?:rotation|egocentric|allocentric_pixelbins)(?:_30)?|free_moving)"
+    r"/(?P=kind)_\d{6}_\d+"
+)
+
+
+def validate_rf_result_layout_pattern(pattern: str) -> str:
+    """Validate the expression matched against parent-directory/source-stem."""
+    if not isinstance(pattern, str) or not pattern.strip():
+        raise ValueError("Saved RF layout regex must not be empty.")
+    try:
+        re.compile(pattern)
+    except re.error as exc:
+        raise ValueError(f"Saved RF layout regex is invalid: {exc}") from exc
+    return pattern
 
 
 @dataclass(frozen=True)
@@ -18,12 +37,16 @@ class RFResultSource:
     x_positions: tuple[float, ...]
     y_positions: tuple[float, ...]
     time_bin_edges: tuple[float, ...]
+    layout_pattern: str = DEFAULT_RF_RESULT_LAYOUT_PATTERN
 
     @classmethod
-    def from_document(cls, data) -> RFResultSource:
+    def from_document(
+        cls, data, *, layout_pattern: str = DEFAULT_RF_RESULT_LAYOUT_PATTERN,
+    ) -> RFResultSource:
         return cls(
             Path(data.path).resolve(), tuple(data.unit_pool),
             tuple(data.x_positions), tuple(data.y_positions), tuple(data.time_bin_edges),
+            layout_pattern,
         )
 
 
@@ -70,13 +93,28 @@ class SavedRFResult:
         return {name: qc[name][index] for name in ("zero_bins", "valid_bins", "keep")}
 
 
-def rf_result_path(source_path: str | Path, *, dimension="2d", rf_type="excitatory") -> Path:
+def _uses_kind_directory(source: Path, layout_pattern: str) -> bool:
+    """Match the portable parent/stem pair that selects short sidecar names."""
+    return (
+        source.suffix.lower() in {".rfmap", ".json"}
+        and re.fullmatch(layout_pattern, f"{source.parent.name}/{source.stem}") is not None
+    )
+
+
+def rf_result_path(
+    source_path: str | Path, *, dimension="2d", rf_type="excitatory",
+    layout_pattern: str = DEFAULT_RF_RESULT_LAYOUT_PATTERN,
+) -> Path:
     """Match the upstream four-sidecar naming contract exactly."""
     if dimension not in {"1d", "2d"} or rf_type not in {"excitatory", "inhibitory"}:
         raise ValueError("Choose 1d/2d and excitatory/inhibitory")
     source = Path(source_path)
     if source.suffix.lower() == ".npz":
         raise ValueError("Select the source RF document, not a result .npz")
+    validate_rf_result_layout_pattern(layout_pattern)
+    if _uses_kind_directory(source, layout_pattern):
+        polarity = "inh" if rf_type == "inhibitory" else "ext"
+        return source.with_name(f"rf_{dimension}_{polarity}.npz")
     stem = source.stem + ("_inhibitory" if rf_type == "inhibitory" else "")
     return source.with_name(stem + ("_1d" if dimension == "1d" else "") + ".npz")
 
@@ -98,8 +136,12 @@ def _ids(value, label: str) -> tuple[int, ...]:
 
 
 def _summary(source: RFResultSource, path: Path, ids: tuple[int, ...], manifest, dimension, rf_type):
-    stem = source.path.stem + ("_inhibitory" if rf_type == "inhibitory" else "")
-    summary_path = source.path.with_name(stem + "_analysis.json")
+    if _uses_kind_directory(source.path, source.layout_pattern):
+        polarity = "inh" if rf_type == "inhibitory" else "ext"
+        summary_path = source.path.with_name(f"analysis_{polarity}.json")
+    else:
+        stem = source.path.stem + ("_inhibitory" if rf_type == "inhibitory" else "")
+        summary_path = source.path.with_name(stem + "_analysis.json")
     if not summary_path.exists():
         return None
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
@@ -148,7 +190,10 @@ def _summary(source: RFResultSource, path: Path, ids: tuple[int, ...], manifest,
 
 
 def load_saved_rf_result(source: RFResultSource, *, dimension="2d", rf_type="excitatory") -> SavedRFResult:
-    path = rf_result_path(source.path, dimension=dimension, rf_type=rf_type)
+    path = rf_result_path(
+        source.path, dimension=dimension, rf_type=rf_type,
+        layout_pattern=source.layout_pattern,
+    )
     fields = {"schema_version", "mask_2d", "center_2d", "unit_ids", "manifest_json", "cache_key"}
     try:
         with np.load(path, allow_pickle=False) as archive:

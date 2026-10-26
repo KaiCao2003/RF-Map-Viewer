@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 
 from rfmapping_viewer.constants import SINGLETON_Y_REFERENCE_COLUMNS, SINGLETON_Y_REFERENCE_ROWS
-from rfmapping_viewer.rf_results import RFResultSource, SavedRFResult
+from rfmapping_viewer.rf_results import DEFAULT_RF_RESULT_LAYOUT_PATTERN, RFResultSource, SavedRFResult
 from rfmapping_viewer.rf_result_overlay import RFResultOverlayCache
 from rfmapping_viewer.tk_support import tk, ttk
 
@@ -82,11 +84,13 @@ def draw_saved_rf_result(figure, result: SavedRFResult, unit_id: int, *, flip_y:
 class RFResultsPane(ttk.Frame):
     """Saved-result selectors for the viewer's shared spatial canvas."""
 
-    def __init__(self, parent, data=None, *, controls_parent=None, on_change=None, on_reload=None):
+    def __init__(self, parent, data=None, *, controls_parent=None, on_change=None, on_reload=None,
+                 layout_pattern=DEFAULT_RF_RESULT_LAYOUT_PATTERN):
         super().__init__(parent)
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
         self.on_change = on_change
+        self.layout_pattern = layout_pattern
         self.source = None
         self.cache = None
         self.unit_id = None
@@ -108,11 +112,22 @@ class RFResultsPane(ttk.Frame):
         self.set_document(data)
 
     def set_document(self, data):
-        self.source = RFResultSource.from_document(data) if data is not None else None
+        self.source = RFResultSource.from_document(
+            data, layout_pattern=self.layout_pattern,
+        ) if data is not None else None
         self.cache = RFResultOverlayCache(self.source) if self.source is not None else None
         self.unit_id = None
         self.status.set("")
         self.details.set("")
+
+    def set_layout_pattern(self, pattern: str) -> None:
+        if pattern == self.layout_pattern:
+            return
+        self.layout_pattern = pattern
+        if self.source is not None:
+            self.source = replace(self.source, layout_pattern=pattern)
+            self.cache = RFResultOverlayCache(self.source)
+        self._selection_changed()
 
     def set_unit(self, unit_id):
         self.unit_id = unit_id

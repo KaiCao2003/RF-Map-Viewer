@@ -1675,6 +1675,7 @@ class RFMViewer(tk.Toplevel):
             self.notebook, self.data, controls_parent=self.rf_map_header,
             on_change=self._on_saved_results_changed,
             on_reload=self._reload_current_document,
+            layout_pattern=self.settings.rf_result_layout_pattern,
         )
         self.notebook.add(self.results_pane, text=VIEWER_TABS["results"])
         self._tab_keys[str(self.results_pane)] = "results"
@@ -3378,6 +3379,7 @@ class RFMViewer(tk.Toplevel):
                 return False
             self._app_root._rfm_settings = settings
         self.settings = settings
+        self.results_pane.set_layout_pattern(settings.rf_result_layout_pattern)
         if not settings.show_probe_unit_info:
             self.probe_canvas.delete("hover")
         if persist:
@@ -3386,7 +3388,9 @@ class RFMViewer(tk.Toplevel):
                     window.settings = replace(
                         window.settings, visible_tabs=settings.visible_tabs,
                         default_viewer_tab=settings.default_viewer_tab,
+                        rf_result_layout_pattern=settings.rf_result_layout_pattern,
                     )
+                    window.results_pane.set_layout_pattern(settings.rf_result_layout_pattern)
                     window._sync_tab_visibility()
 
         old_show_probe = bool(self.show_probe_layout_var.get())
@@ -8865,6 +8869,7 @@ class RFMViewer(tk.Toplevel):
             load_waveform=self.show_waveform_var.get(),
             tuning_session=self.settings.tuning_curve_session,
             waveform_channel_mode=self.waveform_channel_mode_var.get(),
+            result_layout_pattern=self.settings.rf_result_layout_pattern,
         )
         self._reload_request = request
         self._reload_cancel_event = threading.Event()
@@ -8940,7 +8945,8 @@ class RFMViewer(tk.Toplevel):
                 self._waveform_pending_request = (self._waveform_generation, self.data, current_key)
                 self._start_waveform_load()
                 self._schedule_waveform_result_poll()
-        if result.result_cache is not None:
+        if (result.result_cache is not None
+                and result.result_cache.source.layout_pattern == self.settings.rf_result_layout_pattern):
             source = result.result_cache.source
             previous = self.results_pane.source
             same_grid = all(
@@ -8950,6 +8956,10 @@ class RFMViewer(tk.Toplevel):
             if "results" in result.loaded or not same_grid:
                 self.results_pane.source = source
                 self.results_pane.cache = result.result_cache
+        elif result.result_cache is not None:
+            # Settings can change during a read. Rebuild against the replacement
+            # RF grid with the current rule instead of retaining the old source.
+            self.results_pane.set_document(self.data)
         self._sync_sidebar_companions()
         self._sync_tuning_collapsed_state(schedule_redraw=False)
         self._update_all()
@@ -9039,6 +9049,7 @@ class RFMViewer(tk.Toplevel):
         self.data.close()
         self.data = data
         self.settings = self._app_root._rfm_settings
+        self.results_pane.layout_pattern = self.settings.rf_result_layout_pattern
         self.results_pane.set_document(data)
         self.value_mode_combo.configure(values=tuple(
             mode for mode in VALUE_MODES if data.supports_value_mode(mode)

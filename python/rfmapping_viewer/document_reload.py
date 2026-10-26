@@ -19,7 +19,7 @@ from rfmapping_viewer.constants import (
 from rfmapping_viewer.rf_dataset import is_indexed_rfmap
 from rfmapping_viewer.rf_model import RFMappingData
 from rfmapping_viewer.rf_result_overlay import RFResultOverlayCache
-from rfmapping_viewer.rf_results import RFResultSource, rf_result_path
+from rfmapping_viewer.rf_results import DEFAULT_RF_RESULT_LAYOUT_PATTERN, RFResultSource, rf_result_path
 
 
 @dataclass(frozen=True)
@@ -34,6 +34,7 @@ class ReloadRequest:
     load_waveform: bool = False
     tuning_session: int = DEFAULT_TUNING_CURVE_SESSION
     waveform_channel_mode: str = "same_x_column"
+    result_layout_pattern: str = DEFAULT_RF_RESULT_LAYOUT_PATTERN
 
 
 @dataclass(frozen=True)
@@ -138,7 +139,9 @@ def reload_document(
                     request.preferred_unit_id, request.waveform_channel_mode
                 )
             else:
-                result_cache = RFResultOverlayCache(RFResultSource.from_document(data))
+                result_cache = RFResultOverlayCache(RFResultSource.from_document(
+                    data, layout_pattern=request.result_layout_pattern,
+                ))
                 result_errors = []
                 result_count = 0
                 for polarity in ("excitatory", "inhibitory"):
@@ -146,7 +149,8 @@ def reload_document(
                         result = result_cache.result(dimension, polarity)
                         result_count += result is not None
                         if result is None and rf_result_path(
-                            data.path, dimension=dimension, rf_type=polarity
+                            data.path, dimension=dimension, rf_type=polarity,
+                            layout_pattern=request.result_layout_pattern,
                         ).exists():
                             result_errors.append(result_cache.error(dimension, polarity))
                 if result_errors:
