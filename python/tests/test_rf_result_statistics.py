@@ -288,3 +288,60 @@ def test_invalid_saved_multiplier_never_uses_a_default(make_data, multiplier):
     text = result_statistics_text(result, data, 42)
     assert "Saved threshold: unavailable" in text
     assert "Computed mean: 25 Hz" in text
+
+
+def recorded_result(data):
+    result = saved_result(data, reference="bottom_row")
+    result.manifest["detector_algorithm"] = "gui-smoothing1-bottom-two-rows-mean-sd-v1"
+    result.manifest["baseline"].update(
+        unit_ids=[99, 42], mean_hz=[100., 25.076493055555538],
+        sd_hz=[9., .4643229358161412], threshold_hz=[999., 999.],
+        response_stage="after_gui_smoothing1",
+    )
+    return result
+
+
+def test_saved_baseline_statistics_use_recorded_unit_ids_without_reading_rf(make_data, monkeypatch):
+    data = make_data()
+    result = recorded_result(data)
+    original = deepcopy(result.manifest)
+    monkeypatch.setattr(data, "rf_map_by_unit_id", lambda _unit_id: pytest.fail("Saved statistics must not read RF"))
+    statistics = result_statistics(result, data, 42)
+    assert statistics.origin == "saved"
+    assert statistics.processing_label == "Smoothing 1"
+    assert statistics.mean_hz == pytest.approx(25.076493055555538)
+    assert statistics.sd_hz == pytest.approx(.4643229358161412)
+    assert statistics.scope == "last two stored rows (all columns)"
+    assert statistics.basis_key
+    text = result_statistics_text(result, None, 42, statistics=statistics)
+    assert "Saved mean: 25.0765 Hz; SD: 0.464323 Hz" in text
+    assert "not recomputed" in text
+    assert "Computed mean" not in text
+    assert "999" not in text
+    assert result.manifest == original
+
+
+@pytest.mark.parametrize("key,value", [
+    ("unit_ids", [42, 42]), ("unit_ids", [True, 42]), ("unit_ids", [99, 100]),
+    ("mean_hz", [1.]), ("mean_hz", [1., float("nan")]), ("mean_hz", [1., True]),
+    ("sd_hz", [1., -1.]), ("sd_hz", [1., float("inf")]), ("sd_hz", None),
+])
+def test_invalid_saved_statistics_are_unavailable_without_computed_substitution(make_data, monkeypatch, key, value):
+    data = make_data()
+    result = recorded_result(data)
+    result.manifest["baseline"][key] = value
+    monkeypatch.setattr(data, "rf_map_by_unit_id", lambda _unit_id: pytest.fail("Invalid saved values must not be replaced"))
+    statistics = result_statistics(result, data, 42)
+    assert statistics.origin == "saved"
+    assert statistics.mean_hz is None and statistics.sd_hz is None
+    assert statistics.error
+    assert "Saved mean / SD unavailable:" in result_statistics_text(result, data, 42, statistics=statistics)
+
+
+def test_saved_statistics_require_hz_and_allow_zero_sd(make_data):
+    data = make_data()
+    result = recorded_result(data)
+    result.manifest["baseline"]["sd_hz"][1] = 0
+    assert result_statistics(result, None, 42).sd_hz == 0
+    result.manifest["response_units"] = "spike_count"
+    assert "Hz units" in result_statistics(result, data, 42).error

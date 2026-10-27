@@ -1,7 +1,9 @@
-## Python 1.11.15: document loading progress
+## Python 1.11.16: shared result statistics and loading progress
 
-Full edition · macOS Apple Silicon build **111015** · Windows x64 build **11116**
+Full edition · macOS Apple Silicon build **111016** · Windows x64 build **11117**
 
+- Group results by dimension and exact analysis window. Share mean/SD only when their origin, baseline provenance, and values match; keep excitatory/inhibitory thresholds and result status separate.
+- Read saved per-unit baseline mean/SD directly. Label saved Smoothing 1 and computed native RF statistics separately; do not substitute one for the other.
 - Show tuning-curve, probe geometry, and waveform loading stages in document progress.
 - During reload, show saved-result loading and the RF unit count without treating RF unit completion as completion of companion work.
 - Retain the concise Inspector and its position above the owning viewer.

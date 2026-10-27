@@ -2,6 +2,7 @@
 
 import sys
 
+from rfmapping_viewer.rf_results_view import group_result_summaries
 from rfmapping_viewer.tk_support import scroll_canvas_precise, tk, ttk
 
 
@@ -56,7 +57,7 @@ class RFInspector(tk.Toplevel):
         self._bind_result_scroll(self._results_canvas)
         self._bind_result_scroll(self.result_cards_frame)
         self.statistics_note = ttk.Label(
-            results, text="Mean/SD: computed current-source rates; not saved detector statistics.",
+            results, text="Saved: file values. Computed: current-source rates.",
             style="Muted.TLabel", wraplength=440, justify="left",
         )
         self.statistics_note.grid(row=2, column=0, sticky="ew", pady=(8, 4))
@@ -99,8 +100,8 @@ class RFInspector(tk.Toplevel):
         for widget in self.result_cards_frame.winfo_children():
             widget.destroy()
         self.summary_cards = []
-        for result in summaries:
-            self._add_result_card(result)
+        for group in group_result_summaries(summaries):
+            self._add_result_card(group)
         if not summaries:
             ttk.Label(self.result_cards_frame, text="No unit selected" if unit_id is None else "No result layers selected",
                       style="Muted.TLabel").grid(sticky="w", pady=10)
@@ -111,40 +112,72 @@ class RFInspector(tk.Toplevel):
         if unit_id != previous_unit:
             self._results_canvas.yview_moveto(0)
 
-    def _add_result_card(self, result):
-        card = ttk.Frame(self.result_cards_frame, style="Panel.TFrame", padding=(0, 4, 4, 4))
+    def _add_result_card(self, group):
+        card = ttk.Frame(self.result_cards_frame, style="Panel.TFrame", padding=(0, 4, 4, 6))
         card.grid(row=len(self.summary_cards), column=0, sticky="ew")
         card.columnconfigure(0, weight=1)
-        card.columnconfigure(1, weight=1)
+        card.result_rows = []
+        card.statistics_rows = []
         self.summary_cards.append(card)
+        heading = ttk.Label(card, text=" · ".join(part for part in (group.dimension.upper(), group.window) if part),
+                            style="Value.TLabel")
+        heading.grid(row=0, column=0, sticky="w", pady=(0, 5))
+        self._bind_result_scroll(heading)
+        row = 1
+        if group.shared_statistics is not None:
+            self._add_statistics(card, card, group.shared_statistics, row)
+            row += 1
+        for result in group.rows:
+            item = ttk.Frame(card, style="Panel.TFrame", padding=(0, 3, 0, 4))
+            item.grid(row=row, column=0, sticky="ew")
+            item.columnconfigure(0, weight=1)
+            item.columnconfigure(1, weight=1)
+            card.result_rows.append(item)
+            status = ttk.Label(item, text=result.status, style="Muted.TLabel")
+            status.grid(row=0, column=1, sticky="e")
+            stats = result.statistics
+            threshold_label = "candidate" if stats is not None and stats.candidate_threshold else "threshold"
+            threshold = ttk.Label(item, text=f"{result.rf_type.capitalize()} {threshold_label}   {(stats.threshold if stats else None) or '—'}",
+                                  style="Panel.TLabel")
+            threshold.grid(row=0, column=0, sticky="w")
+            if group.shared_statistics is None:
+                self._add_statistics(card, item, stats, 1)
+            notes = []
+            if stats is not None and stats.error:
+                notes.append("Mean/SD unavailable")
+            if result.warning:
+                notes.append("Result warning")
+            if notes:
+                note = ttk.Label(item, text=" · ".join(notes) + " — see details", style="Muted.TLabel")
+                note.grid(row=2, column=0, columnspan=2, sticky="w")
+                item.bind("<Configure>", lambda event, label=note: label.configure(wraplength=max(200, event.width - 8)))
+                self._bind_result_scroll(note)
+            for widget in (item, status, threshold):
+                self._bind_result_scroll(widget)
+            row += 1
+        ttk.Separator(card).grid(row=row, column=0, sticky="ew", pady=(4, 0))
+        self._bind_result_scroll(card)
 
-        def label(text, row, column=0, *, span=2, style="Muted.TLabel", sticky="w"):
-            widget = ttk.Label(card, text=text, style=style, justify="left")
-            widget.grid(row=row, column=column, columnspan=span, sticky=sticky)
-            self._bind_result_scroll(widget)
-            return widget
-
-        label(f"{result.dimension.upper()} {result.rf_type.capitalize()}", 0, span=1, style="Value.TLabel")
-        label(result.status, 0, 1, span=1, sticky="e")
-        stats = result.statistics
-        threshold = stats.threshold if stats is not None else None
-        threshold_label = "Candidate" if stats is not None and stats.candidate_threshold else "Threshold"
-        label(f"{threshold_label}   {threshold or '—'}", 1, span=1, style="Panel.TLabel")
-        label(result.window, 1, 1, span=1, sticky="e")
+    def _add_statistics(self, card, parent, stats, row):
+        frame = ttk.Frame(parent, style="Panel.TFrame", padding=(0, 2, 0, 2))
+        frame.grid(row=row, column=0, columnspan=2 if parent is not card else 1, sticky="ew")
+        frame.columnconfigure(0, weight=1)
+        frame.columnconfigure(1, weight=1)
+        card.statistics_rows.append(frame)
         mean = f"{stats.mean_hz:.5g} Hz" if stats is not None and stats.mean_hz is not None else "—"
         sd = f"{stats.sd_hz:.5g} Hz" if stats is not None and stats.sd_hz is not None else "—"
-        label(f"Mean   {mean}", 2, span=1, style="Value.TLabel")
-        label(f"SD   {sd}", 2, 1, span=1, style="Value.TLabel")
-        notes = []
-        if stats is not None and stats.error:
-            notes.append("Mean/SD unavailable")
-        if result.warning:
-            notes.append("Result warning")
-        if notes:
-            note = label(" · ".join(notes) + " — see details", 3)
-            card.bind("<Configure>", lambda event: note.configure(wraplength=max(200, event.width - 8)))
-        ttk.Separator(card).grid(row=4, column=0, columnspan=2, sticky="ew", pady=(4, 0))
-        self._bind_result_scroll(card)
+        for column, text in enumerate((f"Mean   {mean}", f"SD   {sd}")):
+            value = ttk.Label(frame, text=text, style="Value.TLabel")
+            value.grid(row=0, column=column, sticky="w")
+            self._bind_result_scroll(value)
+        if stats is not None and stats.mean_hz is not None:
+            scope = stats.scope.replace("last two stored rows (all columns)", "last 2 source rows").replace("global native RF grid", "full RF grid").replace("global 1D sum onto", "1D sum onto")
+            basis = " · ".join(part for part in (stats.origin.capitalize(), stats.processing_label, scope) if part)
+            source = ttk.Label(frame, text=basis, style="Muted.TLabel", justify="left")
+            source.grid(row=1, column=0, columnspan=2, sticky="ew")
+            frame.bind("<Configure>", lambda event: source.configure(wraplength=max(200, event.width)))
+            self._bind_result_scroll(source)
+        self._bind_result_scroll(frame)
 
     def _toggle_details(self):
         self._details_visible = not self._details_visible

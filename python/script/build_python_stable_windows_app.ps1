@@ -11,9 +11,9 @@ $ProgressPreference = "SilentlyContinue"
 
 $AppName = "RF Map Viewer"
 $ExecutableName = "RF Map Viewer.exe"
-$AppVersion = "1.11.15"
-# Windows VERSIONINFO components are 16-bit; macOS uses build 111015.
-$AppBuild = "11116"
+$AppVersion = "1.11.16"
+# Windows VERSIONINFO components are 16-bit; macOS uses build 111016.
+$AppBuild = "11117"
 $ReleaseEdition = "Full"
 $ReleaseFlavor = "full"
 $Architecture = "x64"

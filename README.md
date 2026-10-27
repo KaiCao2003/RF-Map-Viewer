@@ -17,10 +17,10 @@ through versioned file contracts, principally the RF formats described in
 
 ## Component versions
 
-The stable Python macOS release is `1.11.15` (build `111015`). The Windows
-release is `1.11.15` (build `11116`), Swift is at `1.10.4`, and Web at `1.10.2`.
-Python 1.11.15 reports progress through RF, tuning-curve, and waveform loading
-when opening or reloading a document.
+The stable Python macOS release is `1.11.16` (build `111016`). The Windows
+release is `1.11.16` (build `11117`), Swift is at `1.10.4`, and Web at `1.10.2`.
+Python 1.11.16 groups compatible result statistics with separate excitatory
+and inhibitory thresholds, and reports companion loading progress.
 Component identity belongs in release tags and artifact names, not in a fourth
 version component. See
 [`release/README.md`](release/README.md) for the canonical mapping and tag
@@ -28,16 +28,16 @@ policy.
 
 ## Downloads
 
-Python 1.11.15 includes the concise Inspector on macOS and Windows.
-Computed mean/SD use the saved time window and recorded spatial reference.
-Original detector statistics and temporal aggregation were not saved; missing
-or unsupported window/reference provenance is shown as unavailable.
+Inspector reads per-unit saved mean/SD when provided and labels their
+processing stage. When saved values are absent, supported current-source
+statistics remain labeled Computed. Shared values require matching provenance
+and numerical values; saved and computed statistics remain separate.
 
 GitHub Actions builds the stable packages published on the
 [Releases page](https://github.com/KaiCao2003/RF-Map-Viewer/releases):
 
-- [Python 1.11.15 macOS app](https://github.com/KaiCao2003/RF-Map-Viewer/releases/download/python-v1.11.15/RF_Map_Viewer-python-1.11.15-full-macos-arm64.zip)
-- [Python 1.11.15 Windows installer, build 11116](https://github.com/KaiCao2003/RF-Map-Viewer/releases/download/python-v1.11.15/RF_Map_Viewer-python-1.11.15-full-windows-x64-build11116-setup.exe) · [portable ZIP](https://github.com/KaiCao2003/RF-Map-Viewer/releases/download/python-v1.11.15/RF_Map_Viewer-python-1.11.15-full-windows-x64-build11116-portable.zip)
+- [Python 1.11.16 macOS app](https://github.com/KaiCao2003/RF-Map-Viewer/releases/download/python-v1.11.16/RF_Map_Viewer-python-1.11.16-full-macos-arm64.zip)
+- [Python 1.11.16 Windows installer, build 11117](https://github.com/KaiCao2003/RF-Map-Viewer/releases/download/python-v1.11.16/RF_Map_Viewer-python-1.11.16-full-windows-x64-build11117-setup.exe) · [portable ZIP](https://github.com/KaiCao2003/RF-Map-Viewer/releases/download/python-v1.11.16/RF_Map_Viewer-python-1.11.16-full-windows-x64-build11117-portable.zip)
 - [Swift 1.10.4 macOS app](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/swift-v1.10.4)
 - [Web 1.10.2 package](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/web-v1.10.2)
 

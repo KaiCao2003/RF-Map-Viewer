@@ -25,6 +25,39 @@ class ResultSummary:
     detected_bins: int | None = None
     statistics: ResultStatistics | None = None
     warning: str = ""
+    time_range_s: tuple[float, float] | None = None
+
+
+@dataclass(frozen=True)
+class ResultSummaryGroup:
+    dimension: str
+    window: str
+    rows: tuple[ResultSummary, ...]
+    shared_statistics: ResultStatistics | None
+
+
+def group_result_summaries(summaries) -> list[ResultSummaryGroup]:
+    """Share values only when both provenance and numerical statistics agree."""
+    grouped = {}
+    for summary in summaries:
+        key = (summary.unit_id, summary.dimension, summary.time_range_s)
+        grouped.setdefault(key, []).append(summary)
+    groups = []
+    for rows in grouped.values():
+        first = rows[0]
+        shared = first.statistics
+        if (shared is None or shared.error is not None or not shared.basis_key
+                or shared.mean_hz is None or shared.sd_hz is None):
+            shared = None
+        elif any(
+            row.statistics is None or row.statistics.error is not None
+            or row.statistics.origin != shared.origin or row.statistics.basis_key != shared.basis_key
+            or row.statistics.mean_hz != shared.mean_hz or row.statistics.sd_hz != shared.sd_hz
+            for row in rows[1:]
+        ):
+            shared = None
+        groups.append(ResultSummaryGroup(first.dimension, first.window, tuple(rows), shared))
+    return groups
 
 
 def _result_summary(result: SavedRFResult, unit_id: int, statistics: ResultStatistics | None) -> ResultSummary:
@@ -55,6 +88,7 @@ def _result_summary(result: SavedRFResult, unit_id: int, statistics: ResultStati
         result.dimension, result.rf_type, unit_id, status_kind, status,
         window=f"{first * 1000:g}–{last * 1000:g} ms", centers=center_text,
         detected_bins=detected_bins, statistics=statistics, warning=result.summary_warning or "",
+        time_range_s=(float(first), float(last)),
     )
 
 

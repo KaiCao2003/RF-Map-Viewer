@@ -10,10 +10,13 @@ The Free-Moving alpha application has been retired from the active source and
 release workflow. Its historical Git tags and published artifacts are retained.
 The Python package and generic launcher now identify the stable viewer.
 
-Python 1.11.15 shows tuning-curve, probe, and waveform loading stages; reload
-also identifies saved-result loading alongside the RF unit count. Companion
-loading remains represented after RF unit loading completes. macOS build 111015 and Windows build 11116 share
-the viewer source; Swift and Web releases are unchanged.
+Python 1.11.16 groups result summaries by dimension and exact analysis window,
+sharing mean/SD only when their origin, provenance, and values match. Thresholds
+and result status remain separate. Per-unit saved baseline statistics are read
+directly and distinguished from computed native RF values. Loading progress
+identifies tuning-curve, probe, waveform, and reload saved-result work after RF
+unit loading completes. macOS build 111016 and Windows build 11117 share the
+viewer source; Swift and Web releases are unchanged.
 
 Python 1.11.14 keeps Inspector above its owning viewer and presents concise
 result summaries with saved threshold multipliers, computed mean/SD, and
@@ -61,8 +64,8 @@ component tag and artifact name:
 
 | Component | Release | Tag | Channel |
 | --- | --- | --- | --- |
-| Python stable (macOS) | `1.11.15` | `python-v1.11.15` | stable |
-| Python stable (Windows x64, build 11116) | `1.11.15` | `python-v1.11.15` | stable |
+| Python stable (macOS) | `1.11.16` | `python-v1.11.16` | stable |
+| Python stable (Windows x64, build 11117) | `1.11.16` | `python-v1.11.16` | stable |
 | Swift | `1.10.4` | `swift-v1.10.4` | stable |
 | Web | `1.10.2` | `web-v1.10.2` | stable |
 

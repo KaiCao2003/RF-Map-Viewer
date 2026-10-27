@@ -1,4 +1,6 @@
 from types import SimpleNamespace
+from copy import deepcopy
+from dataclasses import replace
 from unittest import mock
 
 import pytest
@@ -6,6 +8,98 @@ import pytest
 from gui_test_support import tk_test_root
 from rfmapping_viewer.tk_support import TK_AVAILABLE, ttk
 from test_rf_results import source, write_result, write_summary
+from test_rf_result_statistics import make_data, saved_result, recorded_result
+from rfmapping_viewer.rf_result_statistics import result_statistics
+from rfmapping_viewer.rf_results_view import _result_summary, group_result_summaries
+
+
+def statistics_summary(result, data):
+    return _result_summary(result, 42, result_statistics(result, data, 42))
+
+
+@pytest.mark.parametrize("dimension", ["1d", "2d"])
+def test_equivalent_statistics_are_shared_while_thresholds_stay_per_polarity(make_data, dimension):
+    data = make_data()
+    excitatory = saved_result(data, dimension=dimension)
+    inhibitory = replace(excitatory, rf_type="inhibitory", manifest=deepcopy(excitatory.manifest))
+    inhibitory.manifest["parameters"].update(alternative="less", cluster_forming_z=3, drop_bins=5)
+    group, = group_result_summaries([statistics_summary(result, data) for result in (excitatory, inhibitory)])
+    assert group.dimension == dimension
+    assert group.window == "0–200 ms"
+    assert group.shared_statistics is not None
+    assert len(group.rows) == 2
+    assert group.rows[0].statistics.threshold == "mean + 1.8 × SD"
+    assert group.rows[1].statistics.threshold == "mean − 3 × SD"
+
+
+def test_equal_numbers_from_different_baselines_are_not_shared(make_data):
+    data = make_data(((10, 10, 10), (10, 10, 10)))
+    global_result = saved_result(data)
+    bottom_result = saved_result(data, reference="bottom_row")
+    group, = group_result_summaries([statistics_summary(result, data) for result in (global_result, bottom_result)])
+    assert group.rows[0].statistics.mean_hz == group.rows[1].statistics.mean_hz
+    assert group.rows[0].statistics.sd_hz == group.rows[1].statistics.sd_hz
+    assert group.shared_statistics is None
+
+
+def test_equal_1d_statistics_with_different_spatial_sums_are_not_shared(make_data):
+    data = make_data(((10, 10, 10), (10, 10, 10)))
+    first = saved_result(data, dimension="1d")
+    second = replace(first, manifest=deepcopy(first.manifest))
+    first.manifest["spatial_aggregation"][0]["selected_indices"] = [0]
+    second.manifest["spatial_aggregation"][0]["selected_indices"] = [1]
+    group, = group_result_summaries([statistics_summary(result, data) for result in (first, second)])
+    assert group.rows[0].statistics.mean_hz == group.rows[1].statistics.mean_hz
+    assert group.shared_statistics is None
+
+
+def test_saved_and_computed_statistics_remain_distinct_even_if_numbers_match(make_data):
+    data = make_data()
+    computed = saved_result(data, reference="bottom_row")
+    recorded = recorded_result(data)
+    values = result_statistics(computed, data, 42)
+    recorded.manifest["baseline"]["mean_hz"][1] = values.mean_hz
+    recorded.manifest["baseline"]["sd_hz"][1] = values.sd_hz
+    group, = group_result_summaries([statistics_summary(result, data) for result in (computed, recorded)])
+    assert group.shared_statistics is None
+    assert [row.statistics.origin for row in group.rows] == ["computed", "saved"]
+
+
+def test_matching_saved_baseline_statistics_can_be_shared_but_changed_values_cannot(make_data):
+    data = make_data()
+    first = recorded_result(data)
+    second = replace(first, manifest=deepcopy(first.manifest), rf_type="inhibitory")
+    second.manifest["parameters"].update(alternative="less", cluster_forming_z=3)
+    second.manifest["baseline"]["threshold_hz"] = [1., 2.]
+    summaries = [statistics_summary(result, data) for result in (first, second)]
+    assert group_result_summaries(summaries)[0].shared_statistics is not None
+    second.manifest["baseline"]["sd_hz"][1] += .1
+    assert group_result_summaries([statistics_summary(result, data) for result in (first, second)])[0].shared_statistics is None
+
+
+def test_saved_numbers_without_baseline_provenance_remain_separate(make_data):
+    data = make_data()
+    first = saved_result(data)
+    first.manifest["baseline"] = {"unit_ids": [42], "mean_hz": [25.], "sd_hz": [1.]}
+    second = replace(first, manifest=deepcopy(first.manifest), rf_type="inhibitory")
+    group, = group_result_summaries([statistics_summary(result, data) for result in (first, second)])
+    assert all(row.statistics.mean_hz == 25. for row in group.rows)
+    assert group.shared_statistics is None
+
+
+def test_different_time_windows_form_separate_groups_and_unavailable_rows_are_kept(make_data):
+    data = make_data(((0, 0, 0), (0, 0, 0)))
+    first = saved_result(data)
+    second = replace(first, manifest=deepcopy(first.manifest), rf_type="inhibitory")
+    second.manifest["time_range_s"] = [0, .05]
+    summaries = [statistics_summary(result, data) for result in (first, second)]
+    assert len(group_result_summaries(summaries)) == 2
+    second.manifest["time_range_s"] = [0, .2]
+    second.manifest["detector_algorithm"] = "unknown"
+    group, = group_result_summaries([statistics_summary(result, data) for result in (first, second)])
+    assert len(group.rows) == 2
+    assert group.rows[1].statistics.error
+    assert group.shared_statistics is None
 
 
 @pytest.mark.skipif(not TK_AVAILABLE, reason="Tk is unavailable")
