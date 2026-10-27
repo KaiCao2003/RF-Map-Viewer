@@ -75,6 +75,7 @@ class WaveformCanvasTests(unittest.TestCase):
             _selected_unit_id_value=lambda: 17,
         )
         viewer._request_waveform_payload = MethodType(gui.RFMViewer._request_waveform_payload, viewer)
+        viewer._sync_loading_progress = lambda: None
         viewer._sync_sidebar_companions = lambda: None
         viewer._draw_waveform_canvas = MethodType(gui.RFMViewer._draw_waveform_canvas, viewer)
 

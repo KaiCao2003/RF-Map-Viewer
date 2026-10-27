@@ -102,6 +102,7 @@ def test_waveform_loading_keeps_one_worker_and_only_latest_pending_request(inval
     viewer._quitting = False
     viewer._viewer_ready = True
     viewer._schedule_waveform_result_poll = mock.Mock()
+    viewer._sync_loading_progress = mock.Mock()
     viewer._draw_waveform = mock.Mock()
     viewer._request_waveform_payload()
     assert started.wait(5)

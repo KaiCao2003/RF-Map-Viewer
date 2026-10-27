@@ -136,7 +136,10 @@ def test_reload_keeps_rf_positions_and_waveform_with_other_session_tc(sessions, 
         load_probe=True, load_waveform=True,
     ), results)
     ready, complete = results.get_nowait(), results.get_nowait()
+    while complete.stage == "progress":
+        complete = results.get_nowait()
     try:
+        assert complete.stage == "complete"
         assert not complete.errors
         assert {"probe", "waveform", "tuning"} <= complete.loaded
         assert complete.tuning_data.path == sessions[3]["tuning"]
@@ -158,6 +161,8 @@ def test_deferred_gui_autoload_uses_rf_session_with_tc_from_other_session(sessio
             tuning_bins=30, tuning_smoothing=False, tuning_sigma=1.5,
         ))
         result = viewer._optional_result_queue.get_nowait()
+        while "loading" in result:
+            result = viewer._optional_result_queue.get_nowait()
         assert result["worker_error"] is None
         assert result["tuning_data"].path == sessions[3]["tuning"]
         assert result["probe_geometry"].positions_path == rf["positions"]

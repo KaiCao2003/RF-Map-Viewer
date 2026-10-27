@@ -138,6 +138,8 @@ class TuningCurveSessionSettingsTests(unittest.TestCase):
 
             gui.RFMViewer._optional_autoload_worker(worker, snapshot)
             result = result_queue.get_nowait()
+            while "loading" in result:
+                result = result_queue.get_nowait()
 
             self.assertEqual(result["tuning_path"], tuning_paths[1])
             self.assertIsInstance(result["tuning_data"], companions_module.TuningCurveData)

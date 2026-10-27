@@ -454,6 +454,9 @@ class RFMViewer(tk.Toplevel):
         self._reload_companions = None
         self._reload_request = None
         self._reload_previous = None
+        self._reload_loading_stage = None
+        self._optional_loading_stage = None
+        self._loading_progress_mode = None
         self._startup_after: str | None = None
         self._startup_poll_after: str | None = None
         self._startup_generation = 0
@@ -739,6 +742,51 @@ class RFMViewer(tk.Toplevel):
     def _hide_unit_cache(self) -> None:
         self._unit_cache_after = None
         self.unit_cache_frame.grid_remove()
+
+    def _sync_loading_progress(self) -> None:
+        """Show companion work separately from the RF unit cache fraction."""
+        if not self._viewer_ready or self._quitting:
+            return
+        names = {
+            "rf": "RF data", "companions": "companions", "probe": "probe geometry",
+            "tuning": "tuning curve", "waveform": "waveform", "results": "saved results",
+        }
+        archive = None
+        if self._reload_active:
+            candidate = self._reload_candidate
+            archive = candidate.unit_archive if candidate is not None else None
+            parts = []
+            if archive is not None:
+                parts.append(f"RF units {archive.cache_count} / {candidate.n_units}")
+            if self._reload_companions is None:
+                parts.append(names[self._reload_loading_stage or "rf"])
+            text = "Reloading " + " · ".join(parts)
+            busy = self._reload_companions is None
+        else:
+            parts = []
+            if self._optional_loading_stage is not None:
+                parts.append(names[self._optional_loading_stage])
+            if self.show_waveform_var.get() and self._waveform_loading_key is not None:
+                parts.append(f"waveform (unit {self._waveform_loading_key[0]})")
+            if not parts:
+                self.reload_progress.stop()
+                self._loading_progress_mode = None
+                self.reload_frame.grid_remove()
+                return
+            text = "Loading " + " · ".join(parts)
+            busy = True
+        mode = "indeterminate" if busy else "determinate"
+        if mode != self._loading_progress_mode:
+            self.reload_progress.stop()
+            self.reload_progress.configure(mode=mode)
+            if busy:
+                self.reload_progress.configure(maximum=100, value=0)
+                self.reload_progress.start(15)
+            self._loading_progress_mode = mode
+        if not busy and archive is not None:
+            self.reload_progress.configure(maximum=candidate.n_units, value=archive.cache_count)
+        self.reload_label.configure(text=text + ("…" if busy else ""))
+        self.reload_frame.grid()
 
     def _focus_active_canvas(self) -> None:
         self._focus_after = None
@@ -3745,6 +3793,10 @@ class RFMViewer(tk.Toplevel):
             "tuning_smoothing": bool(self.tuning_smoothing_var.get()),
             "tuning_sigma": float(self.tuning_smooth_sigma_var.get()),
         }
+        self._optional_loading_stage = (
+            "companions" if snapshot["load_probe"] or snapshot["load_tuning"] else None
+        )
+        self._sync_loading_progress()
         threading.Thread(
             target=self._optional_autoload_worker,
             args=(snapshot,),
@@ -3779,6 +3831,9 @@ class RFMViewer(tk.Toplevel):
             data_path = data.path
             result["data_path"] = data_path
             if snapshot["load_probe"]:
+                self._optional_result_queue.put({
+                    "generation": snapshot["generation"], "data_path": data_path, "loading": "probe",
+                })
                 geometry = discover_probe_geometry(data_path)
                 if geometry is not None:
                     geometry = data.attach_probe_geometry(
@@ -3788,6 +3843,9 @@ class RFMViewer(tk.Toplevel):
                     )
                 result["probe_geometry"] = geometry
             if snapshot["load_tuning"]:
+                self._optional_result_queue.put({
+                    "generation": snapshot["generation"], "data_path": data_path, "loading": "tuning",
+                })
                 candidate = discover_tuning_curve_path(
                     data_path,
                     int(
@@ -3838,8 +3896,15 @@ class RFMViewer(tk.Toplevel):
                 candidate = self._optional_result_queue.get_nowait()
             except queue.Empty:
                 break
-            if candidate.get("generation") == self._optional_autoload_generation:
+            if (candidate.get("generation") != self._optional_autoload_generation
+                    or candidate.get("data_path") != self.data.path):
+                continue
+            if "loading" in candidate:
+                self._optional_loading_stage = candidate["loading"]
+            else:
+                self._optional_loading_stage = None
                 current_result = candidate
+        self._sync_loading_progress()
         if current_result is None:
             if not self._quitting:
                 self._schedule_optional_result_poll()
@@ -3933,6 +3998,8 @@ class RFMViewer(tk.Toplevel):
             except tk.TclError:
                 pass
         self._optional_autoload_generation += 1
+        self._optional_loading_stage = None
+        self._sync_loading_progress()
         generation = self._optional_autoload_generation
         # Give Tk a chance to map and paint the RF window before starting the
         # mounted-volume discovery worker.
@@ -4165,6 +4232,7 @@ class RFMViewer(tk.Toplevel):
         self._sync_tuning_collapsed_state(schedule_redraw=False)
         self._layout_rf_and_tuning()
         self._sync_optional_menu_states()
+        self._sync_loading_progress()
         if redraw:
             self._draw_probe_canvas()
             self._draw_tuning_curve()
@@ -5709,6 +5777,7 @@ class RFMViewer(tk.Toplevel):
 
     def _request_waveform_payload(self) -> None:
         if not self.show_waveform_var.get():
+            self._sync_loading_progress()
             return
         key = (
             self._selected_unit_id_value(),
@@ -5721,12 +5790,14 @@ class RFMViewer(tk.Toplevel):
                 self._waveform_generation += 1
                 self._waveform_loading_key = None
                 self._waveform_pending_request = None
+                self._sync_loading_progress()
             return
         self._waveform_generation += 1
         self._waveform_loading_key = key
         self._waveform_pending_request = (self._waveform_generation, self.data, key)
         self._start_waveform_load()
         self._schedule_waveform_result_poll()
+        self._sync_loading_progress()
 
     def _start_waveform_load(self) -> None:
         if self._waveform_worker_running or self._waveform_pending_request is None:
@@ -5784,6 +5855,7 @@ class RFMViewer(tk.Toplevel):
         ):
             return
         self._waveform_loading_key = None
+        self._sync_loading_progress()
         if current.payload is not None:
             self.waveform_payload = current.payload
             self._waveform_payload_key = current.key
@@ -8841,9 +8913,12 @@ class RFMViewer(tk.Toplevel):
         self._reload_unit_count = 0
         self._reload_previous = None
         self._reload_active = False
+        self._reload_loading_stage = None
         if was_active:
             self.reload_progress.stop()
+            self._loading_progress_mode = None
             self.reload_frame.grid_remove()
+        self._sync_loading_progress()
 
     def _reload_current_document(self, _event=None) -> str:
         if not self._viewer_ready or self._reload_active:
@@ -8856,6 +8931,7 @@ class RFMViewer(tk.Toplevel):
         # Invalidate outstanding companion reads; keep their displayed data
         # until the replacement files have been fully parsed.
         self._optional_autoload_generation += 1
+        self._optional_loading_stage = None
         for name in ("_optional_autoload_after", "_optional_poll_after"):
             pending = getattr(self, name)
             if pending is not None:
@@ -8879,10 +8955,8 @@ class RFMViewer(tk.Toplevel):
         )
         self._reload_request = request
         self._reload_cancel_event = threading.Event()
-        self.reload_label.configure(text=f"Reloading unit {request.preferred_unit_id}…")
-        self.reload_progress.configure(mode="indeterminate")
-        self.reload_progress.start(15)
-        self.reload_frame.grid()
+        self._reload_loading_stage = "rf"
+        self._sync_loading_progress()
         self.export_toolbar_button.state(["disabled"])
         threading.Thread(
             target=reload_document,
@@ -8987,8 +9061,11 @@ class RFMViewer(tk.Toplevel):
                 self._reload_candidate = event.data
                 if event.data.unit_archive is not None and event.data.retain_previous_units(self.data):
                     self._install_reloaded_document(event.data, progressive=True)
+            elif event.stage == "progress":
+                self._reload_loading_stage = event.loading
             elif event.stage == "complete":
                 self._reload_companions = event
+                self._reload_loading_stage = None
             elif event.stage == "error":
                 error = "; ".join(event.errors.values())
         candidate = self._reload_candidate
@@ -8996,9 +9073,6 @@ class RFMViewer(tk.Toplevel):
         archive = candidate.unit_archive if candidate is not None else None
         ready = candidate is not None and (archive is None or archive.cache_count == candidate.n_units)
         if archive is not None:
-            self.reload_progress.stop()
-            self.reload_progress.configure(mode="determinate", maximum=candidate.n_units, value=archive.cache_count)
-            self.reload_label.configure(text=f"Reloading {archive.cache_count} / {candidate.n_units}")
             if archive.error is not None:
                 error = archive.error[1]
             refreshed = candidate.refresh_reloaded_units() if candidate is self.data else False
@@ -9023,8 +9097,8 @@ class RFMViewer(tk.Toplevel):
             self._reload_candidate = None
             self._reload_companions = None
             self._reload_previous = None
-            self.reload_progress.stop()
-            self.reload_frame.grid_remove()
+            self._reload_loading_stage = None
+            self._sync_loading_progress()
             self.export_toolbar_button.state(["!disabled"])
             self.status_label.configure(text=(
                 "Reloaded; kept previous companion data: " + "; ".join(complete.errors.values())
@@ -9036,6 +9110,7 @@ class RFMViewer(tk.Toplevel):
         if complete is not None and candidate is self.data and not self._reload_companions_installed:
             self._apply_reloaded_companions(complete)
             self._reload_companions_installed = True
+        self._sync_loading_progress()
         if not self._quitting:
             self._reload_after = self.after(60, self._poll_document_reload)
 

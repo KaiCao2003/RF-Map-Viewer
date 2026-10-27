@@ -14,8 +14,10 @@ import pytest
 import rfmapping_gui as gui
 from gui_test_support import tk_test_root
 from rfmapping_viewer.companions import TuningCurveData
+from rfmapping_viewer.companions import load_probe_geometry
 from rfmapping_viewer.document_reload import DocumentReloadEvent
 from rfmapping_viewer.rf_model import RFMappingData
+from rfmapping_viewer.rf_result_overlay import RFResultOverlayCache
 from rfmapping_viewer.settings import ViewerSettings, save_viewer_settings
 from test_indexed_rfmap import write_pair
 
@@ -304,6 +306,10 @@ def test_switching_document_cancels_reload_and_ignores_stale_completion(tmp_path
     assert cancelled()
     assert not app._reload_active
     replacement = app.data
+    status_before_stale_event = app.reload_label.cget("text")
+    app._reload_result_queue.put(DocumentReloadEvent(
+        request.generation, "progress", loading="tuning",
+    ))
     app._reload_result_queue.put(DocumentReloadEvent(request.generation, "complete", data=candidate))
     app._poll_document_reload()
     app.update()
@@ -312,3 +318,69 @@ def test_switching_document_cancels_reload_and_ignores_stale_completion(tmp_path
     assert app._selected_unit_id_value() == 501
     assert app.canvases["rf"].find_all()
     assert not app.reload_frame.winfo_ismapped()
+    assert app.reload_label.cget("text") == status_before_stale_event
+
+
+@pytest.mark.parametrize("companion,fail", [
+    ("tuning", False), ("probe", False), ("waveform", False), ("results", False),
+    ("tuning", True),
+])
+def test_completed_rf_cache_stays_busy_until_actual_companion_read_finishes(
+    tmp_path, make_app, monkeypatch, companion, fail,
+):
+    _json, path, _arrays = write_pair(tmp_path)
+    app = make_app(path)
+    tuning_path = tmp_path / "manual.tc"
+    tuning_path.write_text(json.dumps({"200": [1.] * 180}))
+    app.tuning_curve_data = app.data.attach_hd_tuning(tuning_path)
+    previous_tuning = app.tuning_curve_data
+    positions = tmp_path / "positions.csv"
+    positions.write_text("unit_index,unit_id,x_um,y_um\n0,200,10,20\n")
+    app.probe_geometry = load_probe_geometry("A", positions)
+    app.show_waveform_var.set(True)
+    waveform = {
+        "unit_id": 200, "matrix": [[-1.0, 0.0, 1.0]],
+        "times_ms": [-0.1, 0.0, 0.1], "channel_labels": ["ch 1"],
+        "best_channel_row": 0, "amplitude_limit_uv": 1.0, "max_ptp_uv": 2.0,
+    }
+    app.waveform_payload = waveform
+    app._waveform_payload_key = (200, app.waveform_channel_mode_var.get())
+    monkeypatch.setattr(RFMappingData, "waveform_store", lambda _self: object())
+    monkeypatch.setattr(RFMappingData, "waveform_plot_payload", lambda *_args: waveform)
+    owner, method = {
+        "tuning": (RFMappingData, "attach_hd_tuning"),
+        "probe": (RFMappingData, "attach_probe_geometry"),
+        "waveform": (RFMappingData, "waveform_store"),
+        "results": (RFResultOverlayCache, "result"),
+    }[companion]
+    original = getattr(owner, method)
+    entered, release = threading.Event(), threading.Event()
+
+    def read(*args, **kwargs):
+        if threading.current_thread() is threading.main_thread():
+            return original(*args, **kwargs)
+        entered.set()
+        assert release.wait(10), "Test did not release the companion read"
+        if fail:
+            raise ValueError("companion replacement is incomplete")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(owner, method, read)
+    app._reload_current_document()
+    try:
+        wait_for(app, lambda: entered.is_set() and app._reload_candidate is not None
+                 and app._reload_candidate.unit_archive.cache_count == app._reload_candidate.n_units
+                 and companion in str(app.reload_label.cget("text")).lower())
+        assert app._reload_active
+        assert app.reload_frame.winfo_ismapped()
+        assert str(app.reload_progress.cget("mode")) == "indeterminate"
+        assert f"{app.data.n_units} / {app.data.n_units}" in app.reload_label.cget("text")
+        assert "disabled" in app.export_toolbar_button.state()
+        assert app.canvases["rf"].find_all()
+    finally:
+        release.set()
+    wait_for(app, lambda: not app._reload_active)
+    assert not app.reload_frame.winfo_ismapped()
+    assert "disabled" not in app.export_toolbar_button.state()
+    if fail:
+        assert app.tuning_curve_data is previous_tuning

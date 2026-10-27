@@ -40,7 +40,7 @@ class ReloadRequest:
 @dataclass(frozen=True)
 class DocumentReloadEvent:
     generation: int
-    stage: Literal["rf", "complete", "error"]
+    stage: Literal["rf", "progress", "complete", "error"]
     data: RFMappingData | None = None
     tuning_data: TuningCurveData | None = None
     probe_geometry: ProbeGeometry | None = None
@@ -49,6 +49,7 @@ class DocumentReloadEvent:
     loaded: frozenset[str] = frozenset()
     missing: frozenset[str] = frozenset()
     errors: dict[str, str] = field(default_factory=dict)
+    loading: str | None = None
 
 
 def reload_document(
@@ -100,10 +101,15 @@ def reload_document(
     for companion in ("tuning", "probe", "waveform", "results"):
         if cancelled is not None and cancelled():
             return
+        if companion == "tuning" and request.tuning_path is None and not request.load_tuning:
+            continue
+        if companion == "probe" and request.probe_geometry is None and not request.load_probe:
+            continue
+        if companion == "waveform" and (not request.load_waveform or request.preferred_unit_id is None):
+            continue
+        results.put(DocumentReloadEvent(request.generation, "progress", loading=companion))
         try:
             if companion == "tuning":
-                if request.tuning_path is None and not request.load_tuning:
-                    continue
                 path = request.tuning_path or discover_tuning_curve_path(
                     data.path, request.tuning_session
                 )
@@ -113,8 +119,6 @@ def reload_document(
                 tuning_data = data.attach_hd_tuning(path)
             elif companion == "probe":
                 previous = request.probe_geometry
-                if previous is None and not request.load_probe:
-                    continue
                 if previous is not None:
                     geometry = data.attach_probe_geometry(
                         previous.positions_path, previous.channels_path,
@@ -128,8 +132,6 @@ def reload_document(
                     missing.add(companion)
                     continue
             elif companion == "waveform":
-                if not request.load_waveform or request.preferred_unit_id is None:
-                    continue
                 if data.waveform_store() is None:
                     if data.waveform_error:
                         raise ValueError(data.waveform_error)

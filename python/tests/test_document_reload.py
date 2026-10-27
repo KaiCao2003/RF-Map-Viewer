@@ -1,14 +1,29 @@
 """Reload snapshots publish RF early and preserve independent companions."""
 
 import json
+import threading
 from queue import SimpleQueue
 from unittest import mock
+
+import pytest
 
 from gui_test_support import base_payload
 from rfmapping_viewer.companions import TuningCurveData, load_probe_geometry
 from rfmapping_viewer.document_reload import ReloadRequest, reload_document
 from rfmapping_viewer.rf_model import RFMappingData
+from rfmapping_viewer.rf_result_overlay import RFResultOverlayCache
 from test_indexed_rfmap import wait_for, write_pair
+
+
+def drain_events(results):
+    events = []
+    while not results.empty():
+        events.append(results.get_nowait())
+    return events
+
+
+def data_events(results):
+    return [event for event in drain_events(results) if event.stage != "progress"]
 
 
 def test_rf_is_published_before_whole_tuning_file_is_loaded(tmp_path):
@@ -18,14 +33,18 @@ def test_rf_is_published_before_whole_tuning_file_is_loaded(tmp_path):
     tuning_path.write_text(json.dumps({"42": [1.] * 180}))
     results = SimpleQueue()
     original_load = TuningCurveData.load
+    queued_before_read = []
 
     def load_tuning(candidate):
-        assert results.qsize() == 1
+        queued_before_read.extend(drain_events(results))
+        assert [event.stage for event in queued_before_read] == ["rf", "progress"]
+        assert queued_before_read[-1].loading == "tuning"
         return original_load(candidate)
 
     with mock.patch.object(TuningCurveData, "load", side_effect=load_tuning):
         reload_document(ReloadRequest(4, path, 42, tuning_path=tuning_path), results)
-    ready, complete = results.get_nowait(), results.get_nowait()
+    ready = queued_before_read[0]
+    complete, = data_events(results)
     try:
         assert (ready.stage, complete.stage) == ("rf", "complete")
         assert ready.generation == complete.generation == 4
@@ -44,7 +63,7 @@ def test_indexed_reload_starts_from_selected_unit_and_preloads_remaining(tmp_pat
     _old, path, _arrays = write_pair(tmp_path)
     results = SimpleQueue()
     reload_document(ReloadRequest(3, path, 200), results)
-    ready, complete = results.get_nowait(), results.get_nowait()
+    ready, complete = data_events(results)
     try:
         assert ready.data.unit_archive.initial_unit_index == 2
         wait_for(lambda: ready.data.unit_archive.cache_count == ready.data.n_units)
@@ -73,7 +92,7 @@ def test_bad_tuning_does_not_prevent_probe_and_waveform_reload(tmp_path):
             1, path, 42, tuning_path=tuning_path,
             probe_geometry=old_geometry, load_waveform=True,
         ), results)
-    ready, complete = results.get_nowait(), results.get_nowait()
+    ready, complete = data_events(results)
     try:
         assert set(complete.errors) == {"tuning"}
         assert complete.tuning_data is None
@@ -107,3 +126,57 @@ def test_cancellation_after_rf_handoff_leaves_close_to_caller(tmp_path):
         assert results.empty()
         close.assert_not_called()
     ready.data.close()
+
+
+@pytest.mark.parametrize("companion", ["tuning", "probe", "waveform", "results"])
+def test_progress_is_published_before_each_blocking_companion_read(tmp_path, monkeypatch, companion):
+    path = tmp_path / "mapping.json"
+    path.write_text(json.dumps(base_payload()))
+    tuning_path = tmp_path / "manual.tc"
+    tuning_path.write_text(json.dumps({"42": [1.] * 180}))
+    positions = tmp_path / "positions.csv"
+    positions.write_text("unit_index,unit_id,x_um,y_um\n0,42,10,20\n")
+    geometry = load_probe_geometry("A", positions)
+    monkeypatch.setattr(RFMappingData, "waveform_store", lambda _self: object())
+    monkeypatch.setattr(RFMappingData, "waveform_plot_payload", lambda *_args: {"unit_id": 42})
+    owner, method = {
+        "tuning": (RFMappingData, "attach_hd_tuning"),
+        "probe": (RFMappingData, "attach_probe_geometry"),
+        "waveform": (RFMappingData, "waveform_store"),
+        "results": (RFResultOverlayCache, "result"),
+    }[companion]
+    original = getattr(owner, method)
+    entered, release = threading.Event(), threading.Event()
+
+    def blocked(*args, **kwargs):
+        entered.set()
+        assert release.wait(10), "Test did not release the companion read"
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(owner, method, blocked)
+    results = SimpleQueue()
+    worker = threading.Thread(target=reload_document, args=(ReloadRequest(
+        9, path, 42, tuning_path=tuning_path, probe_geometry=geometry, load_waveform=True,
+    ), results))
+    worker.start()
+    events = []
+    try:
+        assert entered.wait(5), "Reload did not reach the companion read"
+        events.extend(drain_events(results))
+        assert events[0].stage == "rf"
+        assert events[-1].stage == "progress"
+        assert events[-1].loading == companion
+        assert all(event.stage != "complete" for event in events)
+    finally:
+        release.set()
+        worker.join(5)
+        events.extend(drain_events(results))
+        ready = next((event for event in events if event.stage == "rf"), None)
+        if ready is not None:
+            ready.data.close()
+    assert not worker.is_alive()
+    assert [event.loading for event in events if event.stage == "progress"] == [
+        "tuning", "probe", "waveform", "results",
+    ]
+    assert events[-1].stage == "complete"
+    assert not events[-1].errors

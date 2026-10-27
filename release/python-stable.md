@@ -1,3 +1,15 @@
+## Python 1.11.15: document loading progress
+
+Full edition · macOS Apple Silicon build **111015** · Windows x64 build **11116**
+
+- Show tuning-curve, probe geometry, and waveform loading stages in document progress.
+- During reload, show saved-result loading and the RF unit count without treating RF unit completion as completion of companion work.
+- Retain the concise Inspector and its position above the owning viewer.
+
+RF analysis, saved detections, and source data are unchanged. The macOS app,
+Windows installer, and portable ZIP use the same viewer source. Swift and Web
+releases are unchanged.
+
 ## Python 1.11.14: concise Inspector results
 
 Full edition · macOS Apple Silicon build **111014** · Windows x64 build **11115**

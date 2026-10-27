@@ -3292,6 +3292,8 @@ class TkViewerTests(unittest.TestCase):
             self.app._optional_autoload_worker(snapshot)
 
         result = self.app._optional_result_queue.get_nowait()
+        while result.get("loading") is not None:
+            result = self.app._optional_result_queue.get_nowait()
         self.assertEqual(result["generation"], 99)
         self.assertIn("unexpected discovery failure", str(result["worker_error"]))
 
