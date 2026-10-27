@@ -391,8 +391,9 @@ values match. Different baselines remain explicitly labeled.
 
 Per-unit saved baseline mean/SD are read directly using their recorded unit IDs.
 Saved Smoothing 1 values remain separate from computed native RF statistics.
-Invalid saved values remain unavailable; the viewer does not rerun
-detection or derive an absolute Hz threshold.
+The Inspector shows the absolute threshold in Hz as mean ± the saved SD
+multiplier × SD. Invalid saved values remain unavailable; the viewer does not
+rerun detection.
 
 Loading progress identifies tuning curves, probe geometry, and waveform work.
 Reload also identifies saved-result loading while retaining the RF unit count.

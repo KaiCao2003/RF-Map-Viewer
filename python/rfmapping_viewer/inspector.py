@@ -13,7 +13,7 @@ class RFInspector(tk.Toplevel):
         # An owned window stays above its viewer without covering other apps.
         self.transient(owner)
         self.title("Inspector — RF Map Viewer")
-        self.geometry("500x650")
+        self.geometry("500x740")
         self.minsize(440, 400)
         self.protocol("WM_DELETE_WINDOW", self.withdraw)
         self.bind("<Command-w>" if sys.platform == "darwin" else "<Control-w>", self._close)
@@ -137,11 +137,14 @@ class RFInspector(tk.Toplevel):
             status.grid(row=0, column=1, sticky="e")
             stats = result.statistics
             threshold_label = "candidate" if stats is not None and stats.candidate_threshold else "threshold"
-            threshold = ttk.Label(item, text=f"{result.rf_type.capitalize()} {threshold_label}   {(stats.threshold if stats else None) or '—'}",
-                                  style="Panel.TLabel")
-            threshold.grid(row=0, column=0, sticky="w")
+            name = ttk.Label(item, text=f"{result.rf_type.capitalize()} {threshold_label}", style="Panel.TLabel")
+            name.grid(row=0, column=0, sticky="w")
+            threshold = ttk.Label(item, text=(stats.threshold_text if stats else None) or "—",
+                                  style="Panel.TLabel", justify="left")
+            threshold.grid(row=1, column=0, columnspan=2, sticky="ew")
+            item.bind("<Configure>", lambda event, label=threshold: label.configure(wraplength=max(200, event.width - 8)))
             if group.shared_statistics is None:
-                self._add_statistics(card, item, stats, 1)
+                self._add_statistics(card, item, stats, 2)
             notes = []
             if stats is not None and stats.error:
                 notes.append("Mean/SD unavailable")
@@ -149,10 +152,10 @@ class RFInspector(tk.Toplevel):
                 notes.append("Result warning")
             if notes:
                 note = ttk.Label(item, text=" · ".join(notes) + " — see details", style="Muted.TLabel")
-                note.grid(row=2, column=0, columnspan=2, sticky="w")
-                item.bind("<Configure>", lambda event, label=note: label.configure(wraplength=max(200, event.width - 8)))
+                note.grid(row=3, column=0, columnspan=2, sticky="w")
+                item.bind("<Configure>", lambda event, label=note: label.configure(wraplength=max(200, event.width - 8)), add="+")
                 self._bind_result_scroll(note)
-            for widget in (item, status, threshold):
+            for widget in (item, status, name, threshold):
                 self._bind_result_scroll(widget)
             row += 1
         ttk.Separator(card).grid(row=row, column=0, sticky="ew", pady=(4, 0))

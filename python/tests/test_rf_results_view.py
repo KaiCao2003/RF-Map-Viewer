@@ -87,6 +87,16 @@ def test_saved_numbers_without_baseline_provenance_remain_separate(make_data):
     assert group.shared_statistics is None
 
 
+def test_different_smoothing_recipes_do_not_share_equal_saved_statistics(make_data):
+    data = make_data()
+    first = recorded_result(data)
+    first.manifest["spatial_preprocessing"] = {"algorithm": "gui-weighted-spatial-smoothing-v1", "iterations": 1}
+    second = replace(first, manifest=deepcopy(first.manifest), rf_type="inhibitory")
+    second.manifest["spatial_preprocessing"]["iterations"] = 2
+    group, = group_result_summaries([statistics_summary(result, data) for result in (first, second)])
+    assert group.shared_statistics is None
+
+
 def test_different_time_windows_form_separate_groups_and_unavailable_rows_are_kept(make_data):
     data = make_data(((0, 0, 0), (0, 0, 0)))
     first = saved_result(data)

@@ -159,7 +159,10 @@ def _summary(source: RFResultSource, path: Path, ids: tuple[int, ...], manifest,
             or not np.allclose(requested_time, manifest["time_range_s"], rtol=0, atol=1e-12)):
         raise ValueError("Analysis summary time range differs from the saved result")
     saved_parameters = manifest["parameters"]
-    for name in ("drop_bins", "wrap_x", "is_shuffle", "exclude_zero_bins"):
+    drop_bins = parameters.get(f"drop_bins_{dimension}", parameters.get("drop_bins"))
+    if drop_bins != saved_parameters.get("drop_bins"):
+        raise ValueError(f"Analysis summary drop_bins_{dimension} differs from the saved result")
+    for name in ("wrap_x", "is_shuffle", "exclude_zero_bins"):
         if parameters.get(name) != saved_parameters.get(name):
             raise ValueError(f"Analysis summary {name} differs from the saved result")
     if parameters.get(f"cluster_forming_z_{dimension}") != saved_parameters.get("cluster_forming_z"):

@@ -21,12 +21,12 @@
       "artifact_flavor": "full",
       "artifact": "RF_Map_Viewer-python-1.11.16-full-macos-arm64.zip",
       "checksum": "SHA256SUMS-python-1.11.16-full.txt",
-      "windows_portable_artifact": "RF_Map_Viewer-python-1.11.16-full-windows-x64-build11117-portable.zip",
-      "windows_installer_artifact": "RF_Map_Viewer-python-1.11.16-full-windows-x64-build11117-setup.exe",
-      "windows_checksum": "SHA256SUMS-python-1.11.16-full-windows-x64-build11117.txt",
+      "windows_portable_artifact": "RF_Map_Viewer-python-1.11.16-full-windows-x64-build11118-portable.zip",
+      "windows_installer_artifact": "RF_Map_Viewer-python-1.11.16-full-windows-x64-build11118-setup.exe",
+      "windows_checksum": "SHA256SUMS-python-1.11.16-full-windows-x64-build11118.txt",
       "tag": "python-v1.11.16",
       "windows_release_version": "1.11.16",
-      "windows_build": "11117"
+      "windows_build": "11118"
     },
     "swift": {
       "release_version": "1.10.4",

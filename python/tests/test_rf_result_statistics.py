@@ -112,6 +112,8 @@ def test_structured_statistics_share_the_diagnostic_values_without_recalculation
     assert statistics.candidate_threshold is False
     assert statistics.mean_hz == pytest.approx(25)
     assert statistics.sd_hz == pytest.approx(np.std([0, 10, 20, 30, 40, 50]))
+    assert statistics.threshold_hz == pytest.approx(25 + 1.8 * np.std([0, 10, 20, 30, 40, 50]))
+    assert statistics.threshold_text == "mean + 1.8 × SD = 55.7409 Hz"
     assert statistics.scope == "global native RF grid"
     assert statistics.bin_count == 6
     assert statistics.error is None
@@ -130,6 +132,8 @@ def test_structured_unavailable_statistics_keep_saved_parameters(make_data):
     assert statistics.candidate_threshold is True
     assert statistics.surround_decay == .5
     assert statistics.mean_hz is None and statistics.sd_hz is None
+    assert statistics.threshold_hz is None
+    assert statistics.threshold_text == "mean − 1.8 × SD"
     assert "shuffle" in statistics.error
 
 
@@ -345,3 +349,24 @@ def test_saved_statistics_require_hz_and_allow_zero_sd(make_data):
     assert result_statistics(result, None, 42).sd_hz == 0
     result.manifest["response_units"] = "spike_count"
     assert "Hz units" in result_statistics(result, data, 42).error
+
+
+@pytest.mark.parametrize("direction,multiplier,mean,sd,expected", [
+    ("greater", 4.5, 7., 2., 16.),
+    ("less", 3., 7., 2., 1.),
+    ("less", 3., 1., 2., -5.),
+    ("greater", 4.5, 7., 0., 7.),
+])
+def test_saved_smoothed_threshold_uses_aligned_mean_sd_and_signed_multiplier(
+    make_data, monkeypatch, direction, multiplier, mean, sd, expected,
+):
+    data = make_data()
+    result = recorded_result(data)
+    result.manifest["parameters"].update(alternative=direction, cluster_forming_z=multiplier)
+    result.manifest["baseline"]["mean_hz"][1] = mean
+    result.manifest["baseline"]["sd_hz"][1] = sd
+    monkeypatch.setattr(data, "rf_map_by_unit_id", lambda _unit_id: pytest.fail("Must use the saved smoothed baseline"))
+    statistics = result_statistics(result, data, 42)
+    assert statistics.threshold_hz == expected
+    assert statistics.threshold_text.endswith(f"= {expected:g} Hz")
+    assert statistics.threshold_text in result_statistics_text(result, None, 42, statistics=statistics)
