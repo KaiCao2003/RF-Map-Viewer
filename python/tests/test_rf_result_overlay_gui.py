@@ -483,9 +483,10 @@ def test_inspector_is_on_demand_reusable_and_closes_with_document(app):
     assert inspector.state() == "normal"
     assert app.focus_get().winfo_toplevel() is inspector
     notebook = next(widget for widget in inspector.winfo_children() if isinstance(widget, ttk.Notebook))
+    assert notebook.index("current") == 1
     inspector.focus_get().event_generate("<Control-Tab>")
     inspector.update()
-    assert notebook.index("current") == 1
+    assert notebook.index("current") == 0
     assert "7" in inspector.unit_label.cget("text")
     assert "bin" in inspector.response_label.cget("text")
     details = inspector.result_text.get("1.0", "end")
