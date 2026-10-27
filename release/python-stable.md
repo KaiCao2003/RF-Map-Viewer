@@ -1,3 +1,16 @@
+## Python 1.11.14: concise Inspector results
+
+Full edition · macOS Apple Silicon build **111014** · Windows x64 build **11115**
+
+- Keep Inspector above its owning viewer while the RF map is used.
+- Put saved thresholds, computed mean/SD in Hz, detection status, and analysis windows in concise result summaries.
+- Keep full paths, algorithm parameters, and provenance in secondary details.
+
+The mean/SD calculations and saved-result overlays are unchanged. Computed
+statistics describe the current RF source, not the original detector's stored
+statistics. The macOS app, Windows installer, and portable ZIP use the same
+viewer source. Swift and Web releases are unchanged.
+
 ## Python 1.11.13: Inspector result statistics
 
 Full edition · macOS Apple Silicon build **111013** · Windows x64 build **11114**

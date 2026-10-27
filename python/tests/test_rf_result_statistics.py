@@ -10,7 +10,7 @@ import pytest
 from gui_test_support import current_rf_payload
 from rfmapping_viewer.rf_model import RFMappingData
 from rfmapping_viewer.rf_results import RFResultSource, SavedRFResult
-from rfmapping_viewer.rf_result_statistics import result_statistics_text
+from rfmapping_viewer.rf_result_statistics import result_statistics, result_statistics_text
 
 
 @pytest.fixture
@@ -102,6 +102,35 @@ def test_global_uses_saved_halfopen_window_native_hz_and_population_sd(make_data
     assert "Original detector mean/SD and temporal aggregation were not saved." in text
     np.testing.assert_array_equal(data.rf_map_by_unit_id(42).spike_counts, original_counts)
     assert result.manifest == original_manifest
+
+
+def test_structured_statistics_share_the_diagnostic_values_without_recalculation(make_data, monkeypatch):
+    data = make_data()
+    result = saved_result(data)
+    statistics = result_statistics(result, data, 42)
+    assert statistics.threshold == "mean + 1.8 × SD"
+    assert statistics.candidate_threshold is False
+    assert statistics.mean_hz == pytest.approx(25)
+    assert statistics.sd_hz == pytest.approx(np.std([0, 10, 20, 30, 40, 50]))
+    assert statistics.scope == "global native RF grid"
+    assert statistics.bin_count == 6
+    assert statistics.error is None
+    monkeypatch.setattr(data, "rf_map_by_unit_id", lambda _unit_id: pytest.fail("statistics were calculated twice"))
+    assert "Computed mean: 25 Hz; SD: 17.0783 Hz" in result_statistics_text(
+        result, data, 42, statistics=statistics,
+    )
+
+
+def test_structured_unavailable_statistics_keep_saved_parameters(make_data):
+    data = make_data()
+    result = saved_result(data)
+    result.manifest["parameters"].update(is_shuffle=True, alternative="less", surround_decay=.5)
+    statistics = result_statistics(result, data, 42)
+    assert statistics.threshold == "mean − 1.8 × SD"
+    assert statistics.candidate_threshold is True
+    assert statistics.surround_decay == .5
+    assert statistics.mean_hz is None and statistics.sd_hz is None
+    assert "shuffle" in statistics.error
 
 
 def test_bottom_baseline_uses_last_two_stored_rows_not_lowest_y(make_data):

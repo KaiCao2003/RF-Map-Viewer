@@ -10,6 +10,12 @@ The Free-Moving alpha application has been retired from the active source and
 release workflow. Its historical Git tags and published artifacts are retained.
 The Python package and generic launcher now identify the stable viewer.
 
+Python 1.11.14 keeps Inspector above its owning viewer and presents concise
+result summaries with saved threshold multipliers, computed mean/SD, and
+result status. Detailed metadata remains available separately. The scientific
+calculations are unchanged. macOS build 111014 and Windows build 11115 share
+the viewer source; Swift and Web releases are unchanged.
+
 Python 1.11.13 adds saved SD threshold multipliers and computed current-source
 mean-rate mean/SD to **Inspector → Saved results**, separately for 1D and 2D.
 Computed values use the saved time window and recorded spatial reference.
@@ -50,8 +56,8 @@ component tag and artifact name:
 
 | Component | Release | Tag | Channel |
 | --- | --- | --- | --- |
-| Python stable (macOS) | `1.11.13` | `python-v1.11.13` | stable |
-| Python stable (Windows x64, build 11114) | `1.11.13` | `python-v1.11.13` | stable |
+| Python stable (macOS) | `1.11.14` | `python-v1.11.14` | stable |
+| Python stable (Windows x64, build 11115) | `1.11.14` | `python-v1.11.14` | stable |
 | Swift | `1.10.4` | `swift-v1.10.4` | stable |
 | Web | `1.10.2` | `web-v1.10.2` | stable |
 

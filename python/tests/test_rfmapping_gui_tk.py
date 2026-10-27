@@ -2368,6 +2368,7 @@ class TkViewerTests(unittest.TestCase):
         self.app.selected_cell = (0, 1, 0, 1)
         self.app._update_cell_label()
         self.app._show_inspector()
+        self.app.inspector_window.notebook.select(0)
         self.app.update()
         self.assertGreaterEqual(
             self.app.unit_stats_label.winfo_width(),
@@ -3737,6 +3738,9 @@ class TkViewerTests(unittest.TestCase):
         # Deiconifying also queues native map events for the Notebook's children.
         self.app.update()
         self.assertTrue(inspector.winfo_ismapped())
+        self.assertEqual(inspector.notebook.index("current"), 1)
+        inspector.notebook.select(0)
+        self.app.update()
         self.assertTrue(self.app.cell_label.winfo_ismapped())
         self.assertIn("bin", self.app.cell_label.cget("text"))
         self.assertTrue(self.app.unit_stats_label.winfo_ismapped())

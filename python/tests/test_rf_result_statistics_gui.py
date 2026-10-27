@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 import json
+import sys
 from unittest import mock
 
 import numpy as np
@@ -9,7 +10,7 @@ import pytest
 
 import rfmapping_viewer.rf_results_view as results_view
 from rfmapping_viewer.rf_results import RFResultSource
-from rfmapping_viewer.tk_support import TK_AVAILABLE
+from rfmapping_viewer.tk_support import TK_AVAILABLE, ttk
 from test_document_reload_tk import wait_for
 from test_rf_result_overlay_gui import app, draw
 from test_rf_results import write_result
@@ -68,6 +69,19 @@ def show_saved_results(app):
     return inspector_text(app)
 
 
+def card_labels(card):
+    labels = []
+    for child in card.winfo_children():
+        if isinstance(child, ttk.Label):
+            labels.append(child)
+        labels.extend(card_labels(child))
+    return labels
+
+
+def card_text(card):
+    return "\n".join(str(label.cget("text")) for label in card_labels(card))
+
+
 def test_inspector_reads_saved_threshold_and_separate_2d_1d_statistics(stats_app):
     app = stats_app
     paths = [app.data.path, app.data.path.with_suffix(".npz"),
@@ -89,7 +103,7 @@ def test_inspector_reads_saved_threshold_and_separate_2d_1d_statistics(stats_app
 
 def test_hidden_inspector_does_not_calculate_and_reopens_with_overlays_disabled(stats_app):
     app = stats_app
-    with mock.patch.object(results_view, "result_statistics_text", wraps=results_view.result_statistics_text) as compute:
+    with mock.patch.object(results_view, "result_statistics", wraps=results_view.result_statistics) as compute:
         draw(app, "rf")
         draw(app, "results")
         compute.assert_not_called()
@@ -128,6 +142,134 @@ def test_inspector_uses_saved_window_and_refreshes_selected_unit(stats_app):
     assert "Computed mean: 12 Hz; SD: 6.53197 Hz" in text
     assert "Computed mean: 24 Hz; SD: 13.0639 Hz" in text
     assert "Computed mean: 6 Hz;" not in text
+
+
+def test_inspector_defaults_to_readable_results_and_hides_diagnostics(stats_app):
+    app = stats_app
+    draw(app, "results")
+    app._show_inspector()
+    app.update()
+    inspector = app.inspector_window
+
+    assert inspector.notebook.index("current") == 1
+    assert "7" in inspector.results_header.cget("text")
+    assert len(inspector.summary_cards) == 2
+    first, second = map(card_text, inspector.summary_cards)
+    assert "mean + 1.8 × SD" in first
+    assert "mean + 1 × SD" in second
+    assert "Mean" in first and "SD" in first
+    assert "6 Hz" in first and "3.266 Hz" in first
+    assert "12 Hz" in second and "6.532 Hz" in second
+    assert "0–200 ms" in first
+    assert "detected" in first.lower()
+    assert "Parameters:" not in first + second
+    assert str(app.data.path.parent) not in first + second
+    assert not inspector.result_text.winfo_ismapped()
+    assert not inspector.details_frame.winfo_ismapped()
+
+    inspector.details_button.invoke()
+    app.update()
+    assert inspector.result_text.winfo_ismapped()
+    assert "Parameters:" in inspector_text(app)
+    assert "Original detector mean/SD and temporal aggregation were not saved." in inspector_text(app)
+    inspector.details_button.invoke()
+    app.update()
+    assert not inspector.result_text.winfo_ismapped()
+    assert all(card.winfo_ismapped() for card in inspector.summary_cards)
+
+
+def test_inspector_is_owned_by_viewer_without_stealing_viewer_focus(stats_app):
+    app = stats_app
+    app._show_inspector()
+    app.update()
+    inspector = app.inspector_window
+    assert str(inspector.transient()) == str(app)
+    assert not inspector.tk.getboolean(inspector.attributes("-topmost"))
+
+    app.lift()
+    app.focus_force()
+    app.update()
+    assert app.focus_get().winfo_toplevel() is app
+    assert inspector.winfo_ismapped()
+    if sys.platform in {"win32", "darwin"}:
+        assert inspector.tk.getboolean(inspector.tk.call("wm", "stackorder", inspector, "isabove", app))
+
+    inspector.withdraw()
+    app.update()
+    app.lift()
+    app.update()
+    assert not inspector.winfo_ismapped()
+    assert app.winfo_ismapped()
+
+
+def test_four_result_summaries_fit_default_inspector_size(stats_app):
+    app = stats_app
+    source = app.results_pane.source
+    for dimension in ("2d", "1d"):
+        result = app.results_pane.cache.result(dimension, "excitatory")
+        manifest = {**result.manifest, "parameters": {
+            **result.manifest["parameters"], "alternative": "less",
+        }}
+        write_result(source, dimension, "inhibitory", ids=(7, 8), manifest_changes=manifest)
+    app.results_pane.cache.clear()
+    app.settings = replace(app.settings, rf_result_overlay_enabled=True, rf_result_overlay_layers=(
+        "excitatory_2d", "excitatory_1d", "inhibitory_2d", "inhibitory_1d",
+    ))
+    draw(app, "rf")
+    app._show_inspector()
+    app.update()
+    inspector = app.inspector_window
+
+    assert len(inspector.summary_cards) == 4
+    visible_top = inspector._results_canvas.winfo_rooty()
+    visible_bottom = visible_top + inspector._results_canvas.winfo_height()
+    visible_left = inspector.winfo_rootx()
+    visible_right = visible_left + inspector.winfo_width()
+    for card in inspector.summary_cards:
+        for label in card_labels(card):
+            assert label.winfo_ismapped(), label.cget("text")
+            assert visible_top <= label.winfo_rooty()
+            assert label.winfo_rooty() + label.winfo_height() <= visible_bottom, label.cget("text")
+            assert visible_left <= label.winfo_rootx()
+            assert label.winfo_rootx() + label.winfo_width() <= visible_right, label.cget("text")
+    assert "mean − 1.8 × SD" in card_text(inspector.summary_cards[2])
+
+    inspector.geometry("440x400")
+    app.update()
+    inspector._results_canvas.yview_moveto(0)
+    card_labels(inspector.summary_cards[0])[0].event_generate("<MouseWheel>", delta=-120)
+    app.update()
+    assert inspector._results_canvas.yview()[0] > 0
+    inspector._results_canvas.yview_moveto(1)
+    app.update()
+    last_label = card_labels(inspector.summary_cards[-1])[-1]
+    visible_top = inspector._results_canvas.winfo_rooty()
+    visible_bottom = visible_top + inspector._results_canvas.winfo_height()
+    assert visible_top <= last_label.winfo_rooty()
+    assert last_label.winfo_rooty() + last_label.winfo_height() <= visible_bottom
+
+
+def test_summary_refresh_clears_previous_unit_values(stats_app):
+    app = stats_app
+    draw(app, "results")
+    app._show_inspector()
+    app.update()
+    inspector = app.inspector_window
+    assert "6 Hz" in card_text(inspector.summary_cards[0])
+    app._set_selected_unit_id(8)
+    app._update_all()
+    app.update()
+    assert "8" in inspector.results_header.cget("text")
+    assert "12 Hz" in card_text(inspector.summary_cards[0])
+    assert "No RF detected" in card_text(inspector.summary_cards[0])
+    assert "24 Hz" in card_text(inspector.summary_cards[1])
+
+    app.results_pane.unit_id = None
+    app.results_pane.update_details(include_statistics=True)
+    inspector.set_results(app.results_pane.details.get(), summaries=app.results_pane.summaries)
+    app.update()
+    assert not inspector.summary_cards
+    assert "8" not in inspector.results_header.cget("text")
 
 
 def test_unknown_statistics_provenance_keeps_saved_masks_and_threshold(stats_app):

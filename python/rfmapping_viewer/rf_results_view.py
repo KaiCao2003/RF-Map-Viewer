@@ -2,15 +2,60 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 import numpy as np
 
 from rfmapping_viewer.constants import SINGLETON_Y_REFERENCE_COLUMNS, SINGLETON_Y_REFERENCE_ROWS
 from rfmapping_viewer.rf_results import DEFAULT_RF_RESULT_LAYOUT_PATTERN, RFResultSource, SavedRFResult
 from rfmapping_viewer.rf_result_overlay import RFResultOverlayCache
-from rfmapping_viewer.rf_result_statistics import result_statistics_text
+from rfmapping_viewer.rf_result_statistics import ResultStatistics, result_statistics, result_statistics_text
 from rfmapping_viewer.tk_support import tk, ttk
+
+
+@dataclass(frozen=True)
+class ResultSummary:
+    dimension: str
+    rf_type: str
+    unit_id: int
+    status_kind: str
+    status: str
+    window: str = ""
+    centers: str = ""
+    detected_bins: int | None = None
+    statistics: ResultStatistics | None = None
+    warning: str = ""
+
+
+def _result_summary(result: SavedRFResult, unit_id: int, statistics: ResultStatistics | None) -> ResultSummary:
+    saved = result.for_unit(unit_id)
+    qc = result.unit_qc(unit_id)
+    detected_bins = int(saved[0].sum()) if saved is not None else None
+    if qc is not None and not qc["keep"]:
+        status_kind, status = "excluded", "Excluded by QC"
+    elif saved is None:
+        status_kind, status = "missing_unit", "Unit not saved"
+    elif detected_bins == 0:
+        status_kind, status = "empty", "No RF detected"
+    else:
+        status_kind, status = "detected", f"{detected_bins} detected " + ("bin" if detected_bins == 1 else "bins")
+    centers = []
+    if saved is not None:
+        if result.dimension == "2d":
+            centers = [f"({result.source.x_positions[x]:g}, {result.source.y_positions[y]:g})"
+                       for y, x in zip(*saved[1].nonzero())]
+        else:
+            positions = result.source.x_positions if result.axis == "x" else result.source.y_positions
+            centers = [f"{result.axis.upper()} {positions[index]:g}" for index in saved[1].nonzero()[0]]
+    center_text = "; ".join(centers[:3])
+    if len(centers) > 3:
+        center_text += f"; +{len(centers) - 3} more"
+    first, last = result.manifest["time_range_s"]
+    return ResultSummary(
+        result.dimension, result.rf_type, unit_id, status_kind, status,
+        window=f"{first * 1000:g}–{last * 1000:g} ms", centers=center_text,
+        detected_bins=detected_bins, statistics=statistics, warning=result.summary_warning or "",
+    )
 
 
 def _cell_edges(positions) -> np.ndarray:
@@ -121,6 +166,7 @@ class RFResultsPane(ttk.Frame):
         self.unit_id = None
         self.status.set("")
         self.details.set("")
+        self.summaries: list[ResultSummary] = []
 
     def set_layout_pattern(self, pattern: str) -> None:
         if pattern == self.layout_pattern:
@@ -146,6 +192,7 @@ class RFResultsPane(ttk.Frame):
         self._selection_changed()
 
     def update_details(self, *, mode=None, rf_type=None, layers=None, include_statistics=False):
+        self.summaries = []
         if self.cache is None or self.unit_id is None:
             self.status.set("No unit selected")
             self.details.set("")
@@ -162,7 +209,11 @@ class RFResultsPane(ttk.Frame):
             result = self.cache.result(dimension, rf_type)
             if result is None:
                 unavailable.append(f"{rf_type} {dimension.upper()}")
-                details.append(self.cache.error(dimension, rf_type) or "No saved result")
+                error = self.cache.error(dimension, rf_type) or "No saved result"
+                details.append(error)
+                self.summaries.append(ResultSummary(
+                    dimension, rf_type, self.unit_id, "unavailable", "Result unavailable", warning=error,
+                ))
                 continue
             interval = result.manifest["time_range_s"]
             text = f"{interval[0] * 1000:g}–{interval[1] * 1000:g} ms"
@@ -175,9 +226,11 @@ class RFResultsPane(ttk.Frame):
             qc = result.unit_qc(self.unit_id)
             details.append(f"{dimension.upper()} {rf_type} · {text}\n{result.path}")
             details.append(f"Unit {self.unit_id}: " + (f"{int(saved[0].sum())} detected bins" if saved is not None else "not in saved results"))
+            statistics = result_statistics(result, self.data, self.unit_id) if include_statistics else None
+            self.summaries.append(_result_summary(result, self.unit_id, statistics))
             if saved is not None:
                 if include_statistics:
-                    details.append(result_statistics_text(result, self.data, self.unit_id))
+                    details.append(result_statistics_text(result, self.data, self.unit_id, statistics=statistics))
                 if dimension == "2d":
                     centers = [(self.source.x_positions[x], self.source.y_positions[y])
                                for y, x in zip(*saved[1].nonzero())]

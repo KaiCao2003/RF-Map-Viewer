@@ -5375,7 +5375,9 @@ class RFMViewer(tk.Toplevel):
             pane.update_details(layers=self.settings.rf_result_overlay_layers, include_statistics=True)
         else:
             pane.update_details(include_statistics=True)
-        self.inspector_window.set_results(pane.details.get())
+        self.inspector_window.set_results(
+            pane.details.get(), summaries=pane.summaries, unit_id=pane.unit_id,
+        )
 
     def _sync_context_controls(self) -> None:
         if not hasattr(self, "rgb_mode_toggle"):

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 
 from rfmapping_viewer.rf_results import SavedRFResult
@@ -124,30 +126,54 @@ def _baseline_values(result: SavedRFResult, data, unit_id: int) -> tuple[np.ndar
     return values, scope
 
 
-def result_statistics_text(result: SavedRFResult, data, unit_id: int) -> str:
-    """Return Inspector text; unavailable statistics never invalidate saved masks."""
+@dataclass(frozen=True)
+class ResultStatistics:
+    threshold: str | None
+    candidate_threshold: bool
+    surround_decay: float | None
+    mean_hz: float | None = None
+    sd_hz: float | None = None
+    scope: str = ""
+    bin_count: int | None = None
+    error: str | None = None
+
+
+def result_statistics(result: SavedRFResult, data, unit_id: int) -> ResultStatistics:
+    """Keep saved parameters separate from descriptive current-source statistics."""
     parameters = result.manifest["parameters"]
     multiplier = parameters.get("cluster_forming_z")
     direction = parameters.get("alternative")
-    label = "Saved candidate threshold" if parameters.get("is_shuffle") is True else "Saved threshold"
+    threshold = None
     if _positive_number(multiplier) and direction in {"greater", "less"}:
         sign = "+" if direction == "greater" else "−"
-        lines = [f"{label}: mean {sign} {multiplier:g} × SD"]
-    else:
-        lines = [f"{label}: unavailable (no valid saved SD multiplier)"]
+        threshold = f"mean {sign} {multiplier:g} × SD"
     decay = parameters.get("surround_decay")
-    if _positive_number(decay):
-        lines.append(f"Saved surround decay: {decay:g} × SD (one-step seed neighbors)")
+    saved = dict(threshold=threshold, candidate_threshold=parameters.get("is_shuffle") is True,
+                 surround_decay=float(decay) if _positive_number(decay) else None)
     try:
         values, scope = _baseline_values(result, data, unit_id)
-        mean, sd = float(values.mean()), float(values.std(ddof=0))
+        return ResultStatistics(**saved, mean_hz=float(values.mean()), sd_hz=float(values.std(ddof=0)),
+                                scope=scope, bin_count=values.size)
+    except (OSError, ValueError, TypeError, KeyError, IndexError, OverflowError, RuntimeError) as error:
+        return ResultStatistics(**saved, error=str(error))
+
+
+def result_statistics_text(result: SavedRFResult, data, unit_id: int, *,
+                           statistics: ResultStatistics | None = None) -> str:
+    """Full provenance remains available behind the Inspector's compact summary."""
+    statistics = result_statistics(result, data, unit_id) if statistics is None else statistics
+    label = "Saved candidate threshold" if statistics.candidate_threshold else "Saved threshold"
+    lines = [f"{label}: " + (statistics.threshold or "unavailable (no valid saved SD multiplier)")]
+    if statistics.surround_decay is not None:
+        lines.append(f"Saved surround decay: {statistics.surround_decay:g} × SD (one-step seed neighbors)")
+    if statistics.error is None:
         lines.extend((
             "Current-source mean-rate statistics:",
-            f"Computed mean: {mean:.6g} Hz; SD: {sd:.6g} Hz (population, ddof=0)",
-            f"Baseline: {scope}; {values.size} bins; missing bins counted as zero.",
+            f"Computed mean: {statistics.mean_hz:.6g} Hz; SD: {statistics.sd_hz:.6g} Hz (population, ddof=0)",
+            f"Baseline: {statistics.scope}; {statistics.bin_count} bins; missing bins counted as zero.",
             "Time aggregation: mean firing rate over the saved window. "
             "Original detector mean/SD and temporal aggregation were not saved.",
         ))
-    except (OSError, ValueError, TypeError, KeyError, IndexError, OverflowError, RuntimeError) as error:
-        lines.append(f"Computed mean / SD unavailable: {error}.")
+    else:
+        lines.append(f"Computed mean / SD unavailable: {statistics.error}.")
     return "\n".join(lines)
