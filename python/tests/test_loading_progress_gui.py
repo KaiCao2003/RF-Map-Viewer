@@ -30,11 +30,15 @@ def enable_autoload(app, *, probe=False):
     app._schedule_optional_autoload()
 
 
+@pytest.mark.parametrize("requested_width", [1024, 1120])
 def test_startup_phases_and_waveform_remain_visible_after_rf_cache_completes(
-    tmp_path, make_app, monkeypatch,
+    tmp_path, make_app, monkeypatch, requested_width,
 ):
     _json, path, _arrays = write_pair(tmp_path)
     app = make_app(path)
+    app.geometry(f"{requested_width}x720")
+    app.update()
+    mapped_size = (app.winfo_width(), app.winfo_height())
     tuning_path = tmp_path / "manual.tc"
     tuning_path.write_text(json.dumps({"200": [1.] * 180}))
     entered = {kind: threading.Event() for kind in ("probe", "tuning", "waveform")}
@@ -62,7 +66,7 @@ def test_startup_phases_and_waveform_remain_visible_after_rf_cache_completes(
         wait_for(app, lambda: entered["tuning"].is_set() and "tuning" in app.reload_label.cget("text"))
         assert "waveform" in app.reload_label.cget("text")
         assert "200" in app.reload_label.cget("text")
-        assert app.geometry().startswith("1120x720")
+        assert (app.winfo_width(), app.winfo_height()) == mapped_size
         app.update_idletasks()
         for widget in (app.reload_label, app.reload_progress):
             assert widget.winfo_ismapped()
