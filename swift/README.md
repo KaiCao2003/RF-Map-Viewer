@@ -1,4 +1,4 @@
-# SwiftUI Viewer 1.10.4
+# SwiftUI Viewer 1.11.0
 
 This is the native SwiftUI implementation for macOS 15 on Apple silicon. It
 parses RF/HD/probe files itself and has no Python dependency. RF mapping files
@@ -7,16 +7,21 @@ positions use `.probe` (CSV schema). `.json` and `.csv` remain filename aliases,
 but an RF map's extension never enables an older schema. RF maps are primary
 documents; tuning and probe files are attached
 to a loaded RF map in the figure composer so recorded unit IDs can be matched.
-Version `1.10.4` adds ADN annotation and filtering shared with Python’s saved
-selection format; `swift` remains an artifact/tag identity rather than a version suffix.
+Version `1.11.0` aligns the viewer with Python `1.11.18`; the newer Python
+Figure Studio/PDF features and CCG remain outside this update. `swift` remains
+an artifact/tag identity rather than a version suffix.
 
 ## ADN selection
 
-Open **Annotate ADN…** under the Probe panel and draw a freehand circle to add
+Open **Utilities → Annotate ADN…** and draw a freehand circle to add
 neurons. The annotation view uses every unit in the original probe positions,
 including units absent from the loaded RF file. Use **Undo**, **Clear selection**,
 and **Depth zoom** with vertical scrolling to refine the selection. Hover over
 a unit in either probe view to see its ID and physical x/y coordinates in µm.
+**Settings → General → Unit info on hover** turns these labels on or off and
+persists the preference for open and new windows; it is enabled by default.
+Dots use their HD classes (0–3 or Unknown). Class checkboxes limit new lasso
+selections; hiding a class preserves any IDs already selected in it.
 
 **Save ADN** writes `session/data/adn_neuron.npy` under the RF document’s recording
 session. It replaces only the current probe’s IDs and preserves other probes.
@@ -25,12 +30,43 @@ the structured dtype `[("probe", "<U16"), ("unit_id", "<i8")]`, with unique,
 sorted IDs per probe and no pickle. Python and Swift can read and update the
 same file without changing RF inputs or probe-position files.
 
-Enable **Only ADN** to intersect the saved IDs with the current RF-bin filter.
+Enable **View → Only ADN** to intersect the saved IDs with the current RF-bin filter.
 The filter applies to unit navigation, probe points, companion views, and figure
 export choices. Exported figure metadata records the ADN filter and saved IDs.
 Annotation remains available over the full probe geometry while Only ADN is on.
 
 ## Display and input behavior
+
+The current source includes the Python 1.11.18 viewer behavior below.
+
+- RF Hz uses `counts / (stimulusPresentationCounts × response-window seconds)`;
+  files without presentation counts remain viewable in Spike count mode.
+- **RF Results** reads saved 1D/2D excitatory/inhibitory masks and centers, using
+  the same plot geometry as RF. **Reload** (Command+R) rereads the RF document
+  and companions while preserving the selected unit and display controls.
+  Failed replacements retain the previous usable data.
+- Kind directories such as `regular/regular_261019_1.rfmap` use the adjacent
+  `rf_2d_ext.npz`, `rf_1d_ext.npz`, `rf_2d_inh.npz` and `rf_1d_inh.npz` results.
+  Settings provide a configurable directory pattern; a missing current result
+  never silently substitutes an older source-named sidecar. Recorded coordinates
+  must match the open RF grid, including their order.
+- **RF overlap** independently toggles excitatory 1D/2D and inhibitory 1D/2D
+  outlines on their native bins. Each polarity has its own 1D, 2D and intersection
+  colors; inhibitory outlines are dashed. Border width is configurable.
+  **Shift+1 / Shift+2** toggle excitatory 1D / 2D; **Shift+0** hides or restores
+  the overlay without clearing layer choices. Visibility and layers are remembered.
+  Saved results support multiple centers within a nonempty mask.
+- Saved settings control RF display defaults, visible/initial tabs, and HD plot
+  style, bins, smoothing, arrangement and shared scale. **Inspector** provides
+  selected-cell information and saved-result parameters, QC and provenance.
+  Saved baseline mean/SD and numerical Hz thresholds retain their processing
+  labels. Legacy computed values require supported provenance, and shared
+  baselines require matching provenance and numerical values.
+- Missing companion panes start folded; loading data opens them unless manually
+  folded. HD readers accept classes 0–3, columnar and nested tuning documents,
+  and legacy rate-only files without inventing observations.
+
+The existing Swift Figure Composer remains available.
 
 Version 1.10.3 aligns HD tuning with clockwise RF angles in the viewer and
 exported figures: RF −90° matches HD 270°, RF 90° matches HD 90°, and 0° matches
@@ -94,7 +130,7 @@ used for indexed input.
 
 Press `-` or use **View → Subtract RF Windows (A − B)** to subtract two
 independent, half-open response windows. The initial A/B windows are 80–160 ms
-and 0–80 ms. Each window pools counts and occupancy and applies smoothing before
+and 0–80 ms. Each window pools counts and response exposure and applies smoothing before
 subtraction; negative differences are gray/missing, while zero stays zero.
 Sum and difference modes restore their own last-used windows. **Save timing
 defaults** under Display saves both modes and B for new windows and Reset.
@@ -110,11 +146,11 @@ smoothed count histograms, accounts for bin duration, and retains the first
 equal peak. RGB distinguishes black zero response from gray missing occupancy.
 Waveform navigation maintains one active read plus the latest pending unit.
 
-Mean firing rate is the default response display and is computed as pooled raw
-count divided by pooled occupancy seconds. Spatial reduction and smoothing pool
-counts and occupancy independently before division, so unequal occupancy does
-not bias the display or initial strongest-cell selection. Raw spike count
-remains available as the alternate response display.
+Mean firing rate is available when the RF document has presentation counts.
+Spatial reduction and smoothing pool counts and presentation-based exposure
+independently before division. Each response window and Timeline frame uses its
+actual duration, including nonuniform time bins. Occupancy describes stimulus
+display time. Raw spike count remains available when presentation counts are absent.
 
 The main viewer discovers and independently parses the same read-only
 companions as Python: probe positions, an exact positive HD tuning session

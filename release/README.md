@@ -6,6 +6,12 @@ generation behind uses `1.10.x`. Patch numbers identify coordinated or
 target-specific releases within that feature generation; supported input
 contracts are stated explicitly rather than inferred from the patch number.
 
+Python 1.11.18 rejects saved RF results whose coordinates differ from the open
+document even when the grid size matches. Swift 1.11.0 aligns the core viewer
+with this release: presentation-based Hz, saved results and statistics, full
+Reload, persistent overlay visibility, and HD-class-aware ADN annotation.
+CCG and the newer Python Figure Studio/PDF features remain outside this update.
+
 The Free-Moving alpha application has been retired from the active source and
 release workflow. Its historical Git tags and published artifacts are retained.
 The Python package and generic launcher now identify the stable viewer.
@@ -64,9 +70,9 @@ component tag and artifact name:
 
 | Component | Release | Tag | Channel |
 | --- | --- | --- | --- |
-| Python stable (macOS) | `1.11.16` | `python-v1.11.16` | stable |
+| Python stable (macOS) | `1.11.18` | `python-v1.11.18` | stable |
 | Python stable (Windows x64, build 11117) | `1.11.16` | `python-v1.11.16` | stable |
-| Swift | `1.10.4` | `swift-v1.10.4` | stable |
+| Swift | `1.11.0` | `swift-v1.11.0` | stable |
 | Web | `1.10.2` | `web-v1.10.2` | stable |
 
 Published downloads and checksums are available from the repository
@@ -138,9 +144,9 @@ selection, the schema-v4 SpikeInterface waveform viewer/exporter, and matching
 rectangle/polar and palette keyboard shortcuts.
 
 Each active component records a `feature_generation_offset` from the Python
-stable reference. Swift and Web use offset `-1` from Python 1.11,
-retaining their `1.10.x` series. The manifest records their released versions
-independently of unreleased source updates.
+stable reference. Swift 1.11 uses offset `0` for the aligned core viewer;
+Web retains offset `-1` and its `1.10.x` series. The manifest records their
+released versions independently of unreleased source updates.
 
 The Windows 1.11.2 packages were published from commit
 [`2e517d0`](https://github.com/KaiCao2003/RF-Map-Viewer/commit/2e517d05737cf297704c7e3df9ac735d09f42e1c).

@@ -27,6 +27,7 @@ final class WindowRouter {
     private var preparedDocuments: [UUID: RFMappingData] = [:]
     private weak var welcomeWindow: NSWindow?
     private var dismissWelcomeImporter: (() -> Void)?
+    var openWelcomeWindow: (() -> Void)?
 
     func registerWelcomeWindow(_ window: NSWindow, dismissImporter: @escaping () -> Void = {}) {
         welcomeWindow = window
@@ -151,6 +152,15 @@ struct RFMappingCommandActions {
     let toggleSubtract: () -> Void
     let toggleDisplayOptions: () -> Void
     let toggleFilteredUnits: () -> Void
+    let toggleOverlayLayer: (RFOverlayLayer?) -> Void
+    let showInspector: () -> Void
+    let showSettings: () -> Void
+    let reloadDocument: () -> Void
+    let annotateADN: () -> Void
+    let setOnlyADN: (Bool) -> Void
+    let onlyADN: Bool
+    let canAnnotateADN: Bool
+    let visibleTabs: [PlotTab]
 }
 
 struct RFMappingOpenActions {
@@ -248,6 +258,7 @@ private struct RFMappingWelcomeWindow: View {
                 }
             }
             .task {
+                WindowRouter.shared.openWelcomeWindow = { openWindow(id: "welcome") }
                 WindowRouter.shared.install { request in
                     openWindow(id: "rf-map-document", value: request)
                 }
@@ -306,7 +317,8 @@ private struct RFMappingWindow: View {
         let prepared = request.flatMap { WindowRouter.shared.takePreparedDocument(for: $0.id) }
         let store = RFMappingStore(
             initialData: prepared,
-            loadDefault: false
+            loadDefault: false,
+            deferCompanionLoading: true
         )
         _store = State(initialValue: store)
         _pairingCoordinator = State(initialValue: WindowPairingCoordinator.shared)
@@ -322,6 +334,7 @@ private struct RFMappingWindow: View {
             openFigureExporter: openFigureExporter,
             openRFMapInNewWindow: openDocument
         )
+        .modifier(ADNAnnotationPresenter(store: store))
         .frame(minWidth: 1120, minHeight: 720)
         .navigationTitle(store.windowTitle)
         .focusedSceneValue(\.rfMappingCommands, commandActions)
@@ -382,7 +395,16 @@ private struct RFMappingWindow: View {
             cyclePalette: store.cyclePalette,
             toggleSubtract: { store.setRFSubtractEnabled(!store.rfSubtractEnabled) },
             toggleDisplayOptions: { store.showDisplayOptions.toggle() },
-            toggleFilteredUnits: { store.setRFUnitQualityFilterEnabled(!store.rfFilterUnitsWithZeroBins) }
+            toggleFilteredUnits: { store.setRFUnitQualityFilterEnabled(!store.rfFilterUnitsWithZeroBins) },
+            toggleOverlayLayer: store.toggleOverlayLayer,
+            showInspector: { store.inspectorRequest += 1 },
+            showSettings: { store.isShowingSettings = true },
+            reloadDocument: { Task { await store.reloadDocument() } },
+            annotateADN: { store.annotationRequest += 1 },
+            setOnlyADN: store.setOnlyADN,
+            onlyADN: store.onlyADN,
+            canAnnotateADN: store.adnSelectionURL != nil && store.adnProbeName != nil,
+            visibleTabs: store.visibleTabs
         )
     }
 
@@ -510,6 +532,16 @@ private struct RFMappingCommands: Commands {
                 recents.refresh()
                 WindowRouter.shared.showWelcome { openWindow(id: "welcome") }
             }
+            Divider()
+            Button("Reload") { actions?.reloadDocument() }
+                .keyboardShortcut("r", modifiers: .command)
+                .disabled(actions == nil)
+        }
+
+        CommandGroup(after: .windowArrangement) {
+            Button("Close All Windows") {
+                for window in NSApp.windows where window.isVisible { window.performClose(nil) }
+            }.keyboardShortcut("w", modifiers: [.command, .option])
         }
 
         CommandGroup(after: .saveItem) {
@@ -542,10 +574,24 @@ private struct RFMappingCommands: Commands {
 
         CommandMenu("View") {
             Group {
-                ForEach(Array(PlotTab.allCases.enumerated()), id: \.element) { index, tab in
+                ForEach(Array((actions?.visibleTabs ?? PlotTab.allCases).enumerated()), id: \.element) { index, tab in
                     Button("\(tab.rawValue) (\(index + 1))") { actions?.selectTab(index) }
                 }
                 Divider()
+                Button("Inspector…") { actions?.showInspector() }
+                Button("Settings…") { actions?.showSettings() }
+                    .keyboardShortcut(",", modifiers: .command)
+                Toggle("Only ADN", isOn: Binding(
+                    get: { actions?.onlyADN ?? false },
+                    set: { actions?.setOnlyADN($0) }
+                ))
+                .disabled(actions?.canAnnotateADN != true)
+                Menu("RF overlap") {
+                    ForEach(RFOverlayLayer.allCases) { layer in
+                        Button("Toggle " + layer.title) { actions?.toggleOverlayLayer(layer) }
+                    }
+                    Button("Show / Hide RF Overlap") { actions?.toggleOverlayLayer(nil) }
+                }
                 Button("Invert Y (F)") { actions?.toggleFlipY() }
                 Button("Toggle Rectangle / Polar (P)") { actions?.toggleSpatialFormat() }
                 Button("Cycle Palette (Shift-P)") { actions?.cyclePalette() }
@@ -555,6 +601,11 @@ private struct RFMappingCommands: Commands {
                     .keyboardShortcut(".", modifiers: [.command, .shift])
             }
             .disabled(actions == nil)
+        }
+
+        CommandMenu("Utilities") {
+            Button("Annotate ADN…") { actions?.annotateADN() }
+                .disabled(actions?.canAnnotateADN != true)
         }
 
         CommandGroup(after: .help) {
@@ -600,7 +651,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        true
+        false
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag { windowRouter.showWelcome { windowRouter.openWelcomeWindow?() } }
+        return true
     }
 }
 
@@ -698,7 +754,7 @@ private struct WindowShortcutMonitor: NSViewRepresentable {
                 case "-": actions.toggleSubtract(); return true
                 case "d": actions.toggleDisplayOptions(); return true
                 case "?": showKeyboardShortcuts(); return true
-                case "1", "2", "3":
+                case "1", "2", "3", "4":
                     actions.selectTab(Int(character!)! - 1)
                     return true
                 default: return false
@@ -706,6 +762,9 @@ private struct WindowShortcutMonitor: NSViewRepresentable {
             }
 
             if modifiers == [.shift] {
+                if event.keyCode == 18 { actions.toggleOverlayLayer(.excitatory1D); return true }
+                if event.keyCode == 19 { actions.toggleOverlayLayer(.excitatory2D); return true }
+                if event.keyCode == 29 { actions.toggleOverlayLayer(nil); return true }
                 if character == "," || character == "<" { actions.decreaseResolution(); return true }
                 if character == "." || character == ">" { actions.increaseResolution(); return true }
                 if character == "p" { actions.cyclePalette(); return true }
@@ -730,7 +789,9 @@ private func showKeyboardShortcuts() {
     ← / →   Previous / next unit
     ↑ / ↓   Previous / next timeline bin
     Shift+, / Shift+.   Coarser / finer time resolution (one source bin)
-    1–3   Switch plot tab
+    1–4   Switch visible plot tab
+    Shift-1 / Shift-2   Toggle excitatory 1D / 2D overlay
+    Shift-0   Clear all RF overlays
     F   Invert Y
     P   Toggle rectangular / polar layout
     Shift-P   Cycle palette

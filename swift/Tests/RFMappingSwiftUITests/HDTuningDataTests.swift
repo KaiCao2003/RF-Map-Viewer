@@ -167,18 +167,13 @@ final class HDTuningDataTests: XCTestCase {
         }
     }
 
-    func testRejectsObsoleteSchemaVersionAndNonExactTopLevelKeys() throws {
-        var obsolete = strictHDTuningPayload()
-        obsolete["schema_version"] = 2
-        try assertRejected(obsolete, containing: "schema_version is obsolete")
-
-        var missing = strictHDTuningPayload()
-        missing.removeValue(forKey: "occupancy_samples")
-        try assertRejected(missing, containing: "Missing tuning-curve keys")
-
-        var unexpected = strictHDTuningPayload()
-        unexpected["unexpected"] = NSNull()
-        try assertRejected(unexpected, containing: "Unexpected tuning-curve keys")
+    func testAcceptsOptionalSampleCountsAndAdditionalColumnarMetadata() throws {
+        var payload = strictHDTuningPayload()
+        payload.removeValue(forKey: "occupancy_samples")
+        payload["additional_provenance"] = "saved upstream"
+        XCTAssertEqual(try decode(payload).unitIDs, [17])
+        payload.removeValue(forKey: "unit_id")
+        try assertRejected(payload, containing: "Missing tuning-curve keys")
     }
 
     func testRejectsDuplicateTopLevelJSONKeysBeforeFoundationFoldsThem() {
@@ -210,35 +205,12 @@ final class HDTuningDataTests: XCTestCase {
         )
     }
 
-    func testRejectsInvalidOccupancyAndSamplingFrequencyContracts() throws {
-        var fractionalSample = strictHDTuningPayload()
-        var samples = fractionalSample["occupancy_samples"] as! [Any]
-        samples[0] = 1.5
-        fractionalSample["occupancy_samples"] = samples
-        try assertRejected(fractionalSample, containing: "non-negative integer")
-
-        var mismatchedMask = strictHDTuningPayload()
-        samples = mismatchedMask["occupancy_samples"] as! [Any]
-        samples[0] = 0
-        mismatchedMask["occupancy_samples"] = samples
-        try assertRejected(mismatchedMask, containing: "inconsistent samples and time")
-
-        var inconsistentRates = strictHDTuningPayload()
-        samples = inconsistentRates["occupancy_samples"] as! [Any]
-        samples[0] = 200
-        inconsistentRates["occupancy_samples"] = samples
-        try assertRejected(inconsistentRates, containing: "inconsistent sampling rates")
-
-        var featureMismatch = strictHDTuningPayload()
-        var metadata = featureMismatch["metadata"] as! [String: Any]
-        metadata["feature_fs_hz"] = 99.0
-        featureMismatch["metadata"] = metadata
-        try assertRejected(featureMismatch, containing: "does not match occupancy samples/time")
-
-        var allZero = strictHDTuningPayload()
-        allZero["occupancy_samples"] = Array(repeating: 0, count: HDTuningData.rawBinCount)
-        allZero["occupancy_time_s"] = Array(repeating: 0.0, count: HDTuningData.rawBinCount)
-        try assertRejected(allZero, containing: "positive occupancy")
+    func testRejectsInvalidOccupancyWithoutInferringItFromSampleMetadata() throws {
+        var payload = strictHDTuningPayload()
+        payload["occupancy_time_s"] = Array(repeating: 0.0, count: HDTuningData.rawBinCount)
+        try assertRejected(payload, containing: "positive occupancy")
+        payload["occupancy_time_s"] = Array(repeating: -1.0, count: HDTuningData.rawBinCount)
+        try assertRejected(payload, containing: "non-negative")
     }
 
     func testRejectsFractionalCountsAndRateOccupancyMismatches() throws {
@@ -273,42 +245,18 @@ final class HDTuningDataTests: XCTestCase {
         try assertRejected(occupiedNullRate, containing: "must be numeric")
     }
 
-    func testRequiresExactTypedUnitDataColumnsAndValidHDClass() throws {
-        var missing = strictHDTuningPayload()
-        var unitData = missing["unit_data"] as! [String: [Any]]
-        unitData.removeValue(forKey: "rate_mvl")
-        missing["unit_data"] = unitData
-        try assertRejected(missing, containing: "Missing tuning-curve unit_data keys")
-
-        var unexpected = strictHDTuningPayload()
-        unitData = unexpected["unit_data"] as! [String: [Any]]
-        unitData["unexpected"] = [NSNull()]
-        unexpected["unit_data"] = unitData
-        try assertRejected(unexpected, containing: "Unexpected tuning-curve unit_data keys")
-
-        var badMetric = strictHDTuningPayload()
-        unitData = badMetric["unit_data"] as! [String: [Any]]
-        unitData["rate_mvl"] = [1.5]
-        badMetric["unit_data"] = unitData
-        try assertRejected(badMetric, containing: "must not exceed")
-
-        var nonBoolean = strictHDTuningPayload()
-        unitData = nonBoolean["unit_data"] as! [String: [Any]]
-        unitData["rayleigh_significant"] = [1]
-        nonBoolean["unit_data"] = unitData
-        try assertRejected(nonBoolean, containing: "boolean or null")
-
-        var badClass = strictHDTuningPayload()
-        unitData = badClass["unit_data"] as! [String: [Any]]
-        unitData["hd_class"] = [3]
-        badClass["unit_data"] = unitData
-        try assertRejected(badClass, containing: "0, 1, 2, or null")
-
-        var inconsistentClass = strictHDTuningPayload()
-        unitData = inconsistentClass["unit_data"] as! [String: [Any]]
-        unitData["hd_class"] = [2]
-        inconsistentClass["unit_data"] = unitData
-        try assertRejected(inconsistentClass, containing: "significance results")
+    func testPreservesSavedClassThreeAndFlexibleMetricColumns() throws {
+        var payload = strictHDTuningPayload()
+        payload["unit_data"] = ["hd_class": [3], "kappa": [2.7]]
+        let unit = try decode(payload).unit(byID: 17)
+        XCTAssertEqual(unit.hdClass, 3)
+        XCTAssertEqual(unit.metrics["kappa"], .number(2.7))
+        payload["unit_data"] = ["hd_class": [4]]
+        try assertRejected(payload, containing: "0, 1, 2, 3, or null")
+        payload["unit_data"] = ["kappa": [1.0, 2.0]]
+        try assertRejected(payload, containing: "must contain 1 values")
+        payload["unit_data"] = [String: [Any]]()
+        XCTAssertNil(try decode(payload).unit(byID: 17).hdClass)
     }
 
     func testValidatesKnownMetadataTypesAndAllowsForwardCompatibleExtras() throws {
@@ -341,68 +289,35 @@ final class HDTuningDataTests: XCTestCase {
         try assertRejected(invalidTTL, containing: "boolean or null")
     }
 
-    func testNullableMetricsAndRoundoffAtUnitMetricUpperBoundAreAccepted() throws {
+    func testSavedMetricsAndClassAreNotRecalculated() throws {
         var payload = strictHDTuningPayload()
-        var unitData = payload["unit_data"] as! [String: [Any]]
-        for key in [
-            "rate_mvl",
-            "spike_angle_mrl",
-            "rayleigh_score",
-            "rayleigh_p",
-            "rayleigh_significant",
-            "shuffle_p",
-            "shuffle_significant",
-            "hd_class",
-        ] {
-            unitData[key] = [NSNull()]
-        }
-        payload["unit_data"] = unitData
-        XCTAssertNil(try decode(payload).unit(byID: 17).hdClass)
-
-        payload = strictHDTuningPayload()
-        unitData = payload["unit_data"] as! [String: [Any]]
-        unitData["rate_mvl"] = [1.0000000000000002]
-        unitData["spike_angle_mrl"] = [1.0000000000000002]
-        payload["unit_data"] = unitData
-        let rounded = try decode(payload)
-        XCTAssertEqual(rounded.unitIDs, [17])
-        let roundedMetrics = try rounded.unit(byID: 17).metrics
-        XCTAssertEqual(try XCTUnwrap(roundedMetrics["rate_mvl"]), .number(1))
-        XCTAssertEqual(try XCTUnwrap(roundedMetrics["spike_angle_mrl"]), .number(1))
-
-        unitData["rate_mvl"] = [1.0 + 2e-12]
-        payload["unit_data"] = unitData
-        try assertRejected(payload, containing: "rate_mvl must not exceed")
-    }
-
-    func testBoundaryNormalizationDrivesSignificanceAndPersistedMetrics() throws {
-        var payload = strictHDTuningPayload()
-        var metadata = payload["metadata"] as! [String: Any]
-        var classification = metadata["classification"] as! [String: Any]
-        classification["rayleigh_alpha"] = 1.0
-        classification["shuffle_alpha"] = 1.0
-        metadata["classification"] = classification
-        payload["metadata"] = metadata
-
-        var unitData = payload["unit_data"] as! [String: [Any]]
-        let roundoff = 1.0 + 5e-13
-        unitData["rate_mvl"] = [roundoff]
-        unitData["spike_angle_mrl"] = [roundoff]
-        unitData["rayleigh_p"] = [roundoff]
-        unitData["rayleigh_significant"] = [false]
-        unitData["shuffle_p"] = [roundoff]
-        unitData["shuffle_significant"] = [true]
-        unitData["hd_class"] = [1]
-        payload["unit_data"] = unitData
-
+        let saved = 1.0000000000000002
+        payload["unit_data"] = ["hd_class": [2], "rate_mvl": [saved], "rayleigh_p": [0.7]]
         let unit = try decode(payload).unit(byID: 17)
-        XCTAssertEqual(unit.hdClass, 1)
-        for key in ["rate_mvl", "spike_angle_mrl", "rayleigh_p", "shuffle_p"] {
-            XCTAssertEqual(
-                try XCTUnwrap(unit.metrics[key]),
-                .number(1),
-                "Expected normalized \(key)"
-            )
-        }
+        XCTAssertEqual(unit.hdClass, 2)
+        XCTAssertEqual(unit.metrics["rate_mvl"], .number(saved))
+        XCTAssertEqual(unit.metrics["rayleigh_p"], .number(0.7))
     }
+
+    func testNestedV2AndLegacyRatesRetainTheirScientificInputs() throws {
+        let columnar = strictHDTuningPayload()
+        let nested: [String: Any] = [
+            "schema_version": 2,
+            "angle_bin_edges_deg": columnar["angle_bin_edges_deg"]!,
+            "occupancy_time_s": columnar["occupancy_time_s"]!,
+            "metadata": ["classification": ["class_3": "high kappa", "kappa_cutoff": 2.0]],
+            "units": [["unit_id": 17, "spike_counts": (columnar["spike_counts"] as! [[Any]])[0],
+                       "firing_rate_hz": (columnar["firing_rate_hz"] as! [[Any]])[0], "hd_class": 3]],
+        ]
+        let decoded = try decode(nested)
+        XCTAssertEqual(try decoded.unit(byID: 17).hdClass, 3)
+        XCTAssertTrue(try decoded.processedCurve(unitID: 17, displayBins: 180, smoothing: false).ratesHz[179].isNaN)
+        let legacy = try decode(["17": Array(repeating: 4.0, count: 180)])
+        XCTAssertTrue(try legacy.unit(byID: 17).spikeCounts.isEmpty)
+        XCTAssertTrue(legacy.occupancyTimeSeconds.isEmpty)
+        XCTAssertEqual(try legacy.processedCurve(unitID: 17, displayBins: 30, smoothing: false).ratesHz,
+                       Array(repeating: 4.0, count: 30))
+        XCTAssertEqual(try legacy.processedCurve(unitID: 17, displayBins: 30).ratesHz[0], 4.0, accuracy: 1e-12)
+    }
+
 }

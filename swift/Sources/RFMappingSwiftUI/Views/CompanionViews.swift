@@ -8,7 +8,6 @@ struct ProbeSidebarSection: View {
     @State private var dragCurrent: CGPoint?
     @State private var hoveredUnit: ProbeUnitPosition?
     @State private var hoverLocation: CGPoint?
-    @State private var annotation: ADNAnnotationPresentation?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
@@ -32,7 +31,7 @@ struct ProbeSidebarSection: View {
                             geometry: geometry,
                             transform: transform
                         )
-                        if let hoveredUnit, let hoverLocation {
+                        if store.displayDefaults.showProbeUnitInfo, let hoveredUnit, let hoverLocation {
                             drawProbeUnitTooltip(
                                 context: &context,
                                 unit: hoveredUnit,
@@ -73,7 +72,7 @@ struct ProbeSidebarSection: View {
                         switch phase {
                         case .active(let location):
                             hoverLocation = location
-                            hoveredUnit = dragStart == nil ? nearestProbeUnit(
+                            hoveredUnit = store.displayDefaults.showProbeUnitInfo && dragStart == nil ? nearestProbeUnit(
                                 at: location, geometry: geometry, transform: transform, radius: 8
                             ) : nil
                         case .ended:
@@ -99,35 +98,14 @@ struct ProbeSidebarSection: View {
                 Button("Choose Probe Positions…", action: chooseProbePositions)
                     .controlSize(.small)
             }
-            HStack {
-                Button("Annotate ADN…", action: openADNAnnotation)
-                    .disabled(store.probeGeometry == nil
-                        || store.adnSelectionURL == nil || store.adnProbeName == nil)
-                Spacer()
-                Toggle("Only ADN", isOn: Binding(
-                    get: { store.onlyADN },
-                    set: store.setOnlyADN
-                ))
-                .toggleStyle(.checkbox)
-                .disabled(store.adnSelectionURL == nil || store.adnProbeName == nil)
-            }
-            .controlSize(.small)
-        }
-        .sheet(item: $annotation) { presentation in
-            ADNAnnotationView(
-                geometry: presentation.geometry,
-                savedUnitIDs: presentation.unitIDs,
-                selectionURL: presentation.selectionURL,
-                save: store.saveADNSelection
-            )
         }
         .onChange(of: store.data?.url) { _, _ in
-            annotation = nil
             hoveredUnit = nil
             dragStart = nil
             dragCurrent = nil
         }
         .onChange(of: store.localVisibleUnitIDs) { _, _ in hoveredUnit = nil }
+        .onChange(of: store.displayDefaults.showProbeUnitInfo) { _, _ in hoveredUnit = nil }
     }
 
     private func drawProbe(
@@ -243,21 +221,6 @@ struct ProbeSidebarSection: View {
             + " · drag to filter, click to select\(suffix)"
     }
 
-    private func openADNAnnotation() {
-        guard let selectionURL = store.adnSelectionURL, let probeName = store.adnProbeName else {
-            return
-        }
-        do {
-            let geometry = try store.loadADNGeometry()
-            let unitIDs = try ADNSelection.load(from: selectionURL, probeName: probeName)
-            annotation = ADNAnnotationPresentation(
-                geometry: geometry, unitIDs: unitIDs, selectionURL: selectionURL
-            )
-        } catch {
-            store.errorMessage = error.localizedDescription
-        }
-    }
-
     private func chooseProbePositions() {
         let panel = NSOpenPanel()
         panel.title = "Choose probe positions (.probe or CSV)"
@@ -273,11 +236,47 @@ struct ProbeSidebarSection: View {
     }
 }
 
+struct ADNAnnotationPresenter: ViewModifier {
+    @Bindable var store: RFMappingStore
+    @State private var annotation: ADNAnnotationPresentation?
+
+    func body(content: Content) -> some View {
+        content
+            .sheet(item: $annotation) { presentation in
+                ADNAnnotationView(
+                    geometry: presentation.geometry,
+                    savedUnitIDs: presentation.unitIDs,
+                    selectionURL: presentation.selectionURL,
+                    hdClasses: presentation.hdClasses,
+                    showUnitInfo: store.displayDefaults.showProbeUnitInfo,
+                    save: store.saveADNSelection
+                )
+            }
+            .onChange(of: store.annotationRequest) { _, _ in openAnnotation() }
+            .onChange(of: store.data?.url) { _, _ in annotation = nil }
+    }
+
+    private func openAnnotation() {
+        guard let selectionURL = store.adnSelectionURL, let probeName = store.adnProbeName else { return }
+        do {
+            let geometry = try store.loadADNGeometry()
+            let unitIDs = try ADNSelection.load(from: selectionURL, probeName: probeName)
+            annotation = ADNAnnotationPresentation(
+                geometry: geometry, unitIDs: unitIDs, selectionURL: selectionURL,
+                hdClasses: store.annotationHDClasses()
+            )
+        } catch {
+            store.errorMessage = error.localizedDescription
+        }
+    }
+}
+
 private struct ADNAnnotationPresentation: Identifiable {
     let id = UUID()
     let geometry: ProbeGeometry
     let unitIDs: Set<Int>
     let selectionURL: URL
+    let hdClasses: [Int: Int]
 }
 
 struct WaveformSidebarSection: View {
@@ -527,11 +526,16 @@ struct HDTuningCompanionView: View {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("HD tuning").font(.headline)
+                    if let id = store.selectedUnitID, let unit = try? store.hdTuning?.unit(byID: id), let hdClass = unit.hdClass {
+                        Text("Class \(hdClass)").font(.caption.weight(.semibold))
+                    }
                     Text("Exact session \(store.tuningSessionIndex)")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
+                Button { store.tuningExpanded = false } label: { Image(systemName: "sidebar.right") }
+                    .help("Fold HD tuning curve")
                 Button("Choose…", action: chooseHDTuning)
                     .controlSize(.small)
             }
@@ -566,84 +570,67 @@ struct HDTuningCompanionView: View {
         .background(Color(nsColor: .controlBackgroundColor))
     }
 
-    private func drawHDTuning(
-        context: inout GraphicsContext,
-        size: CGSize,
-        curve: ProcessedHDCurve
-    ) {
-        let lineRect = CGRect(x: 42, y: 34, width: max(10, size.width - 64), height: max(10, size.height * 0.42 - 48))
-        let polarCenter = CGPoint(x: size.width / 2, y: size.height * 0.72)
-        let polarRadius = max(10, min(size.width * 0.34, size.height * 0.2))
-        let high = max(curve.ratesHz.max() ?? 0, 1e-12)
-        context.draw(
-            Text("Unit ID \(store.selectedUnitID ?? 0) · max \(String(format: "%.2f", high)) Hz")
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(.black),
-            at: CGPoint(x: 12, y: 14),
-            anchor: .leading
-        )
-        context.stroke(Path(lineRect), with: .color(.gray), lineWidth: 1)
-        let centered = curve.centeredOnZero()
-        var line = Path()
-        for index in centered.ratesHz.indices {
-            let point = CGPoint(
-                x: lineRect.minX + lineRect.width * CGFloat((centered.anglesDegrees[index] + 180) / 360),
-                y: lineRect.maxY - lineRect.height * CGFloat(centered.ratesHz[index] / high)
-            )
-            if index == 0 {
-                line.move(to: point)
-            } else {
-                line.addLine(to: point)
+    private func drawHDTuning(context: inout GraphicsContext, size: CGSize, curve: ProcessedHDCurve) {
+        let settings = store.displayDefaults
+        let polar = settings.tuningStyle == .polar || (settings.tuningStyle == .auto && store.spatialPlotFormat == .polar)
+        let high = store.tuningScaleHigh(current: curve)
+        context.draw(Text("Unit \(store.selectedUnitID ?? 0) · 0–\(String(format: "%.2f", high)) Hz")
+            .font(.system(size: 10, weight: .semibold)).foregroundStyle(.black),
+            at: CGPoint(x: 12, y: 14), anchor: .leading)
+        if polar {
+            drawPolarCurve(context: &context, size: size, curve: curve, high: high)
+        } else {
+            let rect = CGRect(x: 46, y: 38, width: max(10, size.width - 64), height: max(10, size.height - 84))
+            context.stroke(Path(rect), with: .color(.gray), lineWidth: 1)
+            let centered = curve.centeredOnZero()
+            var path = Path()
+            var connected = false
+            for index in centered.ratesHz.indices {
+                let rate = centered.ratesHz[index]
+                guard rate.isFinite else { connected = false; continue }
+                let point = CGPoint(x: rect.minX + rect.width * CGFloat((centered.anglesDegrees[index] + 180) / 360),
+                                    y: rect.maxY - rect.height * CGFloat(rate / high))
+                if connected { path.addLine(to: point) } else { path.move(to: point) }
+                connected = true
+            }
+            context.stroke(path, with: .color(.blue), lineWidth: 2)
+            for (angle, label) in [(-180, "180°"), (-90, "270°"), (0, "0°"), (90, "90°"), (180, "180°")] {
+                context.draw(Text(label).font(.system(size: 9)).foregroundStyle(.black),
+                             at: CGPoint(x: rect.minX + rect.width * CGFloat(angle + 180) / 360, y: rect.maxY + 14))
+            }
+            for fraction in [0.0, 0.5, 1.0] {
+                context.draw(Text(String(format: "%g", high * fraction)).font(.system(size: 9)).foregroundStyle(.black),
+                             at: CGPoint(x: rect.minX - 5, y: rect.maxY - rect.height * fraction), anchor: .trailing)
             }
         }
-        context.stroke(line, with: .color(.blue), lineWidth: 2)
-        for (angle, label) in [(-180, "180°"), (-90, "270°"), (0, "0°"), (90, "90°"), (180, "180°")] {
-            context.draw(
-                Text(label).font(.system(size: 9)).foregroundStyle(.black),
-                at: CGPoint(
-                    x: lineRect.minX + lineRect.width * CGFloat(angle + 180) / 360,
-                    y: lineRect.maxY + 14
-                )
-            )
-        }
+    }
+
+    private func drawPolarCurve(context: inout GraphicsContext, size: CGSize, curve: ProcessedHDCurve, high: Double) {
+        let center = CGPoint(x: size.width / 2, y: size.height / 2 + 8)
+        let radius = max(10, min(size.width - 70, size.height - 90) / 2)
         for fraction in [0.25, 0.5, 0.75, 1.0] {
-            let radius = polarRadius * CGFloat(fraction)
-            context.stroke(
-                Path(ellipseIn: CGRect(
-                    x: polarCenter.x - radius,
-                    y: polarCenter.y - radius,
-                    width: radius * 2,
-                    height: radius * 2
-                )),
-                with: .color(.gray.opacity(0.3)),
-                lineWidth: 1
-            )
+            let r = radius * fraction
+            context.stroke(Path(ellipseIn: CGRect(x: center.x - r, y: center.y - r, width: 2 * r, height: 2 * r)),
+                           with: .color(.gray.opacity(0.4)), lineWidth: 1)
         }
-        var polar = Path()
+        var path = Path()
+        var connected = false
+        guard !curve.ratesHz.isEmpty else { return }
         for index in 0...curve.ratesHz.count {
             let source = index % curve.ratesHz.count
+            let rate = curve.ratesHz[source]
+            guard rate.isFinite else { connected = false; continue }
             let vector = hdScreenVector(angleDegrees: curve.anglesDegrees[source])
-            let radius = polarRadius * CGFloat(curve.ratesHz[source] / high)
-            let point = CGPoint(
-                x: polarCenter.x + radius * CGFloat(vector.x),
-                y: polarCenter.y + radius * CGFloat(vector.y)
-            )
-            if index == 0 {
-                polar.move(to: point)
-            } else {
-                polar.addLine(to: point)
-            }
+            let r = radius * CGFloat(rate / high)
+            let point = CGPoint(x: center.x + r * CGFloat(vector.x), y: center.y + r * CGFloat(vector.y))
+            if connected { path.addLine(to: point) } else { path.move(to: point) }
+            connected = true
         }
-        context.stroke(polar, with: .color(.blue), lineWidth: 2)
+        context.stroke(path, with: .color(.blue), lineWidth: 2)
         for angle in [0, 90, 180, 270] {
             let vector = hdScreenVector(angleDegrees: Double(angle))
-            context.draw(
-                Text("\(angle)°").font(.system(size: 9)).foregroundStyle(.black),
-                at: CGPoint(
-                    x: polarCenter.x + (polarRadius + 14) * CGFloat(vector.x),
-                    y: polarCenter.y + (polarRadius + 14) * CGFloat(vector.y)
-                )
-            )
+            context.draw(Text("\(angle)°").font(.system(size: 9)).foregroundStyle(.black),
+                         at: CGPoint(x: center.x + (radius + 14) * CGFloat(vector.x), y: center.y + (radius + 14) * CGFloat(vector.y)))
         }
     }
 

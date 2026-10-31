@@ -18,7 +18,7 @@ through versioned file contracts, principally the RF formats described in
 ## Component versions
 
 The stable Python macOS release is `1.11.18` (build `111018`). The Windows
-release is `1.11.16` (build `11117`), Swift is at `1.10.4`, and Web at `1.10.2`.
+release is `1.11.16` (build `11117`), Swift is at `1.11.0`, and Web at `1.10.2`.
 Python 1.11.18 rejects saved detections whose recorded coordinates differ from
 the open RF document, including same-size shifted or reversed grids.
 Component identity belongs in release tags and artifact names, not in a fourth
@@ -38,7 +38,7 @@ GitHub Actions builds the stable packages published on the
 
 - [Python 1.11.18 macOS app](https://github.com/KaiCao2003/RF-Map-Viewer/releases/download/python-v1.11.18/RF_Map_Viewer-python-1.11.18-full-macos-arm64.zip)
 - [Python 1.11.16 Windows installer, build 11117](https://github.com/KaiCao2003/RF-Map-Viewer/releases/download/python-v1.11.16/RF_Map_Viewer-python-1.11.16-full-windows-x64-build11117-setup.exe) · [portable ZIP](https://github.com/KaiCao2003/RF-Map-Viewer/releases/download/python-v1.11.16/RF_Map_Viewer-python-1.11.16-full-windows-x64-build11117-portable.zip)
-- [Swift 1.10.4 macOS app](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/swift-v1.10.4)
+- [Swift 1.11.0 macOS app](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/swift-v1.11.0)
 - [Web 1.10.2 package](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/web-v1.10.2)
 
 The Windows 1.11.2 packages use a separate packaging commit identified in the
@@ -91,8 +91,8 @@ payloads without occupancy metadata, including the previously normalized
 vertical-bar format, are intentionally unsupported. Current Python source uses
 `counts / (stimulusPresentationCounts × response-window seconds)` for Hz.
 Files without presentation counts open in Spike count mode; occupancy alone
-does not provide the response exposure. Swift and Web retain their existing
-normalization pending separate updates.
+does not provide the response exposure. Swift 1.11.0 uses the same normalization;
+Web retains its published behavior pending a separate update.
 
 The current payload and companion documents retain these filename aliases:
 

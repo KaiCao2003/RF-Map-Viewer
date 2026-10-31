@@ -52,6 +52,7 @@ private struct RFMappingPayload: Decodable {
     let yPositions: [Double]
     let timeBinEdges: [Double]
     let occupancyTimeSec: OccupancyTimePayload
+    let stimulusPresentationCounts: OccupancyTimePayload?
     let occupancyTimeSecSize: [Int]
     let responseUnits: String
     let responseNormalization: String
@@ -67,6 +68,7 @@ private struct RFMappingPayload: Decodable {
         case yPositions
         case timeBinEdges
         case occupancyTimeSec
+        case stimulusPresentationCounts
         case occupancyTimeSecSize
         case responseUnits
         case responseNormalization
@@ -123,6 +125,9 @@ private struct RFMappingPayload: Decodable {
         )
         timeBinEdges = try container.decode([Double].self, forKey: .timeBinEdges)
         occupancyTimeSec = try Self.decodeOccupancyTime(from: container)
+        stimulusPresentationCounts = container.contains(.stimulusPresentationCounts)
+            ? try Self.decodeOccupancyTime(from: container, key: .stimulusPresentationCounts)
+            : nil
         // MATLAB JSON and indexed exports can omit these descriptive markers.
         // Explicit values (including null) must still satisfy the raw-count
         // contract; the actual occupancy dimensions are validated below.
@@ -153,30 +158,31 @@ private struct RFMappingPayload: Decodable {
     }
 
     private static func decodeOccupancyTime(
-        from container: KeyedDecodingContainer<CodingKeys>
+        from container: KeyedDecodingContainer<CodingKeys>,
+        key: CodingKeys = .occupancyTimeSec
     ) throws -> OccupancyTimePayload {
-        guard container.contains(.occupancyTimeSec) else {
+        guard container.contains(key) else {
             throw RFMappingError.invalidData(
-                "occupancyTimeSec is required by the current RF map schema."
+                "\(key.rawValue) is required by the current RF map schema."
             )
         }
-        let isNull = try container.decodeNil(forKey: .occupancyTimeSec)
+        let isNull = try container.decodeNil(forKey: key)
         guard !isNull else {
             throw RFMappingError.invalidData(
-                "occupancyTimeSec cannot be null in the current RF map schema."
+                "\(key.rawValue) cannot be null in the current RF map schema."
             )
         }
-        if let matrix = try? container.decode([[Double]].self, forKey: .occupancyTimeSec) {
+        if let matrix = try? container.decode([[Double]].self, forKey: key) {
             return .matrix(matrix)
         }
-        if let vector = try? container.decode([Double].self, forKey: .occupancyTimeSec) {
+        if let vector = try? container.decode([Double].self, forKey: key) {
             return .vector(vector)
         }
-        if let scalar = try? container.decode(Double.self, forKey: .occupancyTimeSec) {
+        if let scalar = try? container.decode(Double.self, forKey: key) {
             return .scalar(scalar)
         }
         throw RFMappingError.invalidData(
-            "occupancyTimeSec must be a y-by-x numeric array."
+            "\(key.rawValue) must be a y-by-x numeric array."
         )
     }
 
@@ -227,6 +233,8 @@ struct RFSpatialObservations: Sendable {
     let count: Double
     let occupancyTimeSeconds: Double
     let sourcePixelCount: Int
+    var stimulusPresentationCount: Double? = nil
+    var responseExposureSeconds: Double? = nil
 }
 
 /// Header decoding and individual archive reads run on workers. Loaded RFMap
@@ -262,6 +270,7 @@ final class RFMappingData: @unchecked Sendable {
     private struct SpatialExposure {
         let pixelIndices: [Int]
         let occupancyTimeSeconds: Double
+        let stimulusPresentationCount: Double?
     }
 
     private struct SpatialExposureCache {
@@ -284,6 +293,8 @@ final class RFMappingData: @unchecked Sendable {
     let yPositions: [Double]
     let timeBinEdges: [Double]
     let occupancyTimeSeconds: [[Double]]
+    let stimulusPresentationCounts: [[Double]]?
+    var supportsMeanFiringRate: Bool { stimulusPresentationCounts != nil }
     let responseUnits: String
     let responseNormalization: String
     let spikeCountDefinition: String
@@ -414,6 +425,12 @@ final class RFMappingData: @unchecked Sendable {
             nY: nY,
             nX: nX
         )
+        let presentations: [[Double]]?
+        if let savedPresentations = payload.stimulusPresentationCounts {
+            presentations = try Self.normalizeOccupancyTime(savedPresentations, nY: nY, nX: nX)
+        } else {
+            presentations = nil
+        }
         let sourceMetadata = payload.metadata
         let initialCounts: [[[[Double]]]]
         if let archive {
@@ -431,6 +448,7 @@ final class RFMappingData: @unchecked Sendable {
                 yPositions: payload.yPositions,
                 timeBinEdgesSeconds: payload.timeBinEdges,
                 occupancyTimeSeconds: normalizedOccupancyTime,
+                stimulusPresentationCounts: presentations,
                 metadata: sourceMetadata,
                 sourceURL: url
             )
@@ -442,6 +460,7 @@ final class RFMappingData: @unchecked Sendable {
         yPositions = payload.yPositions
         timeBinEdges = payload.timeBinEdges
         occupancyTimeSeconds = normalizedOccupancyTime
+        stimulusPresentationCounts = presentations
         responseUnits = payload.responseUnits
         responseNormalization = payload.responseNormalization
         spikeCountDefinition = payload.spikeCountDefinition
@@ -495,6 +514,7 @@ final class RFMappingData: @unchecked Sendable {
         let y = yPositions
         let edges = timeBinEdges
         let occupancy = occupancyTimeSeconds
+        let presentations = stimulusPresentationCounts
         let sourceMetadata = metadata
         let sourceURL = url
         let task = Task.detached(priority: .utility) {
@@ -508,6 +528,7 @@ final class RFMappingData: @unchecked Sendable {
                 yPositions: y,
                 timeBinEdgesSeconds: edges,
                 occupancyTimeSeconds: occupancy,
+                stimulusPresentationCounts: presentations,
                 metadata: sourceMetadata,
                 sourceURL: sourceURL
             )
@@ -584,6 +605,7 @@ final class RFMappingData: @unchecked Sendable {
         var totalSpikes = 0.0
         var bestY = 0
         var bestX = 0
+        var strongestValue = -Double.infinity
 
         for yIndex in 0..<nY {
             var totalRow: [Double] = []
@@ -626,9 +648,14 @@ final class RFMappingData: @unchecked Sendable {
                 maxTotal = max(maxTotal, cellTotal)
                 let occupancy = occupancyTimeSeconds[yIndex][xIndex]
                 if occupancy > 0 {
-                    let firingRate = cellTotal / occupancy
-                    if maxFiringRate == nil || firingRate > (maxFiringRate ?? -.infinity) {
-                        maxFiringRate = firingRate
+                    let exposure = stimulusPresentationCounts.map {
+                        $0[yIndex][xIndex] * timeSpanSeconds(start: 0, end: nBins - 1)
+                    }
+                    let rate = exposure.flatMap { $0 > 0 ? cellTotal / $0 : nil }
+                    if let rate { maxFiringRate = max(maxFiringRate ?? rate, rate) }
+                    let value = supportsMeanFiringRate ? rate : cellTotal
+                    if let value, value > strongestValue {
+                        strongestValue = value
                         bestY = yIndex
                         bestX = xIndex
                     }
@@ -755,7 +782,7 @@ final class RFMappingData: @unchecked Sendable {
         guard !timeGroups.isEmpty, !yGroups.isEmpty, !xGroups.isEmpty else { return [] }
         let frames = countWindows(unitIndex: unitIndex, timeGroups: timeGroups)
         let exposures = spatialExposures(yGroups: yGroups, xGroups: xGroups)
-        return frames.map { frame in
+        return frames.enumerated().map { index, frame in
             exposures.map { row in
                 row.map { exposure in
                     RFSpatialObservations(
@@ -763,7 +790,11 @@ final class RFMappingData: @unchecked Sendable {
                             frame[$0 / self.nX][$0 % self.nX]
                         }),
                         occupancyTimeSeconds: exposure.occupancyTimeSeconds,
-                        sourcePixelCount: exposure.pixelIndices.count
+                        sourcePixelCount: exposure.pixelIndices.count,
+                        stimulusPresentationCount: exposure.stimulusPresentationCount,
+                        responseExposureSeconds: exposure.stimulusPresentationCount.map {
+                            $0 * self.timeSpanSeconds(start: timeGroups[index].start, end: timeGroups[index].end)
+                        }
                     )
                 }
             }
@@ -799,7 +830,10 @@ final class RFMappingData: @unchecked Sendable {
                 }
                 return SpatialExposure(
                     pixelIndices: indices,
-                    occupancyTimeSeconds: compensatedSum(occupancy)
+                    occupancyTimeSeconds: compensatedSum(occupancy),
+                    stimulusPresentationCount: stimulusPresentationCounts.map { presentations in
+                        compensatedSum(indices.map { presentations[$0 / nX][$0 % nX] })
+                    }
                 )
             }
         }
@@ -861,6 +895,7 @@ final class RFMappingData: @unchecked Sendable {
         end: Int,
         valueMode: ResponseValueMode
     ) throws -> Double? {
+        try requireValueMode(valueMode)
         let low = max(0, min(nBins - 1, min(start, end)))
         let high = max(0, min(nBins - 1, max(start, end)))
         let count = rangeCount(
@@ -876,7 +911,8 @@ final class RFMappingData: @unchecked Sendable {
         case .spikeCount:
             return count
         case .meanFiringRate:
-            return count / occupancy
+            let exposure = stimulusPresentationCounts![yIndex][xIndex] * timeSpanSeconds(start: low, end: high)
+            return exposure > 0 ? count / exposure : nil
         }
     }
 
@@ -886,6 +922,7 @@ final class RFMappingData: @unchecked Sendable {
         end: Int,
         valueMode: ResponseValueMode
     ) throws -> OptionalMatrix {
+        try requireValueMode(valueMode)
         let low = max(0, min(nBins - 1, min(start, end)))
         let high = max(0, min(nBins - 1, max(start, end)))
         let prefix = prefixValues(for: unitIndex)
@@ -907,7 +944,8 @@ final class RFMappingData: @unchecked Sendable {
                 case .spikeCount:
                     return count
                 case .meanFiringRate:
-                    return count / occupancy
+                    let exposure = stimulusPresentationCounts![yIndex][xIndex] * timeSpanSeconds(start: low, end: high)
+                    return exposure > 0 ? count / exposure : nil
                 }
             }
         }
@@ -926,6 +964,7 @@ final class RFMappingData: @unchecked Sendable {
         let xEnd = max(0, min(nX - 1, max(xGroup.start, xGroup.end)))
         var counts: [Double] = []
         var occupancies: [Double] = []
+        var presentations: [Double] = []
         counts.reserveCapacity((yEnd - yStart + 1) * (xEnd - xStart + 1))
         occupancies.reserveCapacity(counts.capacity)
         for yIndex in yStart...yEnd {
@@ -940,13 +979,26 @@ final class RFMappingData: @unchecked Sendable {
                     end: end
                 ))
                 occupancies.append(occupancy)
+                if let counts = stimulusPresentationCounts {
+                    presentations.append(counts[yIndex][xIndex])
+                }
             }
         }
         return RFSpatialObservations(
             count: compensatedSum(counts),
             occupancyTimeSeconds: compensatedSum(occupancies),
-            sourcePixelCount: counts.count
+            sourcePixelCount: counts.count,
+            stimulusPresentationCount: stimulusPresentationCounts.map { _ in compensatedSum(presentations) },
+            responseExposureSeconds: stimulusPresentationCounts.map { _ in
+                compensatedSum(presentations) * timeSpanSeconds(start: start, end: end)
+            }
         )
+    }
+
+    private func requireValueMode(_ mode: ResponseValueMode) throws {
+        if mode == .meanFiringRate && !supportsMeanFiringRate {
+            throw RFMappingError.invalidData("Mean firing rate requires saved stimulusPresentationCounts.")
+        }
     }
 
     private func prefixRangeCount(

@@ -1,11 +1,55 @@
 import SwiftUI
 
+enum ADNHDClass: Int, CaseIterable, Identifiable {
+    case zero, one, two, three
+    case unknown = -1
+
+    var id: Int { rawValue }
+    var title: String { self == .unknown ? "Unknown" : "Class \(rawValue)" }
+
+    init(_ value: Int?) {
+        self = value.flatMap(Self.init(rawValue:)) ?? .unknown
+    }
+
+    var color: Color {
+        let rgb: (Double, Double, Double)
+        switch self {
+        case .zero: rgb = (71, 84, 103)
+        case .one: rgb = (128, 91, 0)
+        case .two: rgb = (8, 120, 63)
+        case .three: rgb = (24, 93, 168)
+        case .unknown: rgb = (128, 100, 162)
+        }
+        return Color(red: rgb.0 / 255, green: rgb.1 / 255, blue: rgb.2 / 255)
+    }
+}
+
+struct ADNAnnotationFilter {
+    let hdClasses: [Int: Int]
+    var visibleClasses = Set(ADNHDClass.allCases)
+
+    func visibleUnitIDs(in geometry: ProbeGeometry) -> Set<Int> {
+        Set(geometry.positionedUnits.compactMap { unit in
+            visibleClasses.contains(ADNHDClass(hdClasses[unit.unitID])) ? unit.unitID : nil
+        })
+    }
+
+    func addingUnits(in polygon: [CGPoint], geometry: ProbeGeometry, to selected: Set<Int>) -> Set<Int> {
+        let enclosed = ADNSelection.unitIDs(in: polygon, geometry: geometry)
+            .intersection(visibleUnitIDs(in: geometry))
+        // Hiding a class changes new lasso membership, never saved selections.
+        return selected.union(enclosed)
+    }
+}
+
 struct ADNAnnotationView: View {
     let geometry: ProbeGeometry
     let selectionURL: URL
+    let showUnitInfo: Bool
     let save: (Set<Int>) throws -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var selectedUnitIDs: Set<Int>
+    @State private var classFilter: ADNAnnotationFilter
     @State private var undoSelections: [Set<Int>] = []
     @State private var lasso: [CGPoint] = []
     @State private var depthZoom = 1
@@ -19,12 +63,16 @@ struct ADNAnnotationView: View {
         geometry: ProbeGeometry,
         savedUnitIDs: Set<Int>,
         selectionURL: URL,
+        hdClasses: [Int: Int],
+        showUnitInfo: Bool = true,
         save: @escaping (Set<Int>) throws -> Void
     ) {
         self.geometry = geometry
         self.selectionURL = selectionURL
+        self.showUnitInfo = showUnitInfo
         self.save = save
         _selectedUnitIDs = State(initialValue: savedUnitIDs)
+        _classFilter = State(initialValue: ADNAnnotationFilter(hdClasses: hdClasses))
     }
 
     var body: some View {
@@ -68,7 +116,7 @@ struct ADNAnnotationView: View {
                     ScrollView(.vertical) {
                         Canvas { context, _ in
                             drawGeometry(context: &context, transform: transform)
-                            if let hoveredUnit, let hoverLocation {
+                            if showUnitInfo, let hoveredUnit, let hoverLocation {
                                 drawProbeUnitTooltip(
                                     context: &context,
                                     unit: hoveredUnit,
@@ -93,8 +141,9 @@ struct ADNAnnotationView: View {
                                 .onEnded { value in
                                     lasso.append(value.location)
                                     let polygon = lasso.map { transform.position(at: $0) }
-                                    let enclosed = ADNSelection.unitIDs(in: polygon, geometry: geometry)
-                                    replaceSelection(selectedUnitIDs.union(enclosed))
+                                    replaceSelection(classFilter.addingUnits(
+                                        in: polygon, geometry: geometry, to: selectedUnitIDs
+                                    ))
                                     lasso = []
                                 }
                         )
@@ -102,7 +151,7 @@ struct ADNAnnotationView: View {
                             switch phase {
                             case .active(let location):
                                 hoverLocation = location
-                                hoveredUnit = lasso.isEmpty
+                                hoveredUnit = showUnitInfo && lasso.isEmpty
                                     ? nearestUnit(at: location, transform: transform) : nil
                             case .ended:
                                 hoveredUnit = nil
@@ -118,7 +167,29 @@ struct ADNAnnotationView: View {
                 .background(.white)
                 .overlay(Rectangle().stroke(.gray.opacity(0.4)))
                 VStack(alignment: .leading, spacing: 8) {
+                    Text("HD cell class").font(.headline)
+                    ForEach(ADNHDClass.allCases) { hdClass in
+                        HStack(spacing: 6) {
+                            Circle().fill(hdClass.color).frame(width: 8, height: 8)
+                            Toggle(hdClass.title, isOn: Binding(
+                                get: { classFilter.visibleClasses.contains(hdClass) },
+                                set: { visible in
+                                    if visible {
+                                        classFilter.visibleClasses.insert(hdClass)
+                                    } else {
+                                        classFilter.visibleClasses.remove(hdClass)
+                                    }
+                                    hoveredUnit = nil
+                                    lasso = []
+                                }
+                            ))
+                            .toggleStyle(.checkbox)
+                        }
+                    }
+                    Divider()
                     Text("\(selectedUnitIDs.count) selected").font(.headline)
+                    Text("\(classFilter.visibleUnitIDs(in: geometry).count) visible")
+                        .font(.caption).foregroundStyle(.secondary)
                     Text("\(geometry.positionedUnits.count)/\(geometry.units.count) units positioned")
                         .font(.caption).foregroundStyle(.secondary)
                     ScrollView {
@@ -127,8 +198,10 @@ struct ADNAnnotationView: View {
                             .textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
+                    Text("Orange ring = selected ADN")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
-                .frame(width: 140)
+                .frame(width: 170)
             }
             HStack {
                 VStack(alignment: .leading, spacing: 3) {
@@ -186,8 +259,9 @@ struct ADNAnnotationView: View {
     }
 
     private func nearestUnit(at location: CGPoint, transform: ProbeDisplayTransform) -> ProbeUnitPosition? {
+        let visibleUnitIDs = classFilter.visibleUnitIDs(in: geometry)
         let candidates = geometry.positionedUnits.compactMap { unit -> (ProbeUnitPosition, CGFloat)? in
-            guard let position = unit.position else { return nil }
+            guard visibleUnitIDs.contains(unit.unitID), let position = unit.position else { return nil }
             let point = transform.point(x: position.x, y: position.y)
             return (unit, hypot(point.x - location.x, point.y - location.y))
         }
@@ -220,12 +294,19 @@ struct ADNAnnotationView: View {
             context.fill(Path(ellipseIn: CGRect(x: point.x - 1.5, y: point.y - 1.5, width: 3, height: 3)),
                          with: .color(.gray.opacity(0.22)))
         }
-        for unit in geometry.positionedUnits {
+        let visibleUnitIDs = classFilter.visibleUnitIDs(in: geometry)
+        for unit in geometry.positionedUnits where visibleUnitIDs.contains(unit.unitID) {
             guard let position = unit.position else { continue }
             let point = transform.point(x: position.x, y: position.y)
             let selected = selectedUnitIDs.contains(unit.unitID)
+            if selected {
+                context.stroke(
+                    Path(ellipseIn: CGRect(x: point.x - 7, y: point.y - 7, width: 14, height: 14)),
+                    with: .color(.orange), lineWidth: 2
+                )
+            }
             context.fill(Path(ellipseIn: CGRect(x: point.x - 3.5, y: point.y - 3.5, width: 7, height: 7)),
-                         with: .color(selected ? .orange : .blue))
+                         with: .color(ADNHDClass(classFilter.hdClasses[unit.unitID]).color))
             context.draw(Text(String(unit.unitID)).font(.system(size: 8)).foregroundColor(.black),
                          at: CGPoint(x: point.x + 5, y: point.y - 4), anchor: .leading)
         }
@@ -247,7 +328,7 @@ func drawProbeUnitTooltip(
     bounds: CGRect
 ) {
     guard let position = unit.position else { return }
-    let label = Text("ID: \(unit.unitID)\nx: \(String(format: "%.1f", position.x)) µm\ny: \(String(format: "%.1f", position.y)) µm")
+    let label = Text("Unit ID: \(unit.unitID)\nx: \(String(format: "%.1f", position.x)) µm\ny: \(String(format: "%.1f", position.y)) µm")
         .font(.system(size: 11)).foregroundColor(.black)
     let resolved = context.resolve(label)
     let textSize = resolved.measure(in: CGSize(width: 200, height: 100))

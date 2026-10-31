@@ -406,7 +406,7 @@ struct FigureExportSeed: Sendable {
 extension FigureExportPlotKind {
     static func currentViewerDefault(from state: ViewerSyncState) -> FigureExportPlotKind {
         switch state.selectedTab {
-        case .rf:
+        case .rf, .results:
             return state.spatialPlotFormat == .polar ? .rfPolar : .rfCartesian
         case .delayRGB:
             if state.delayRGBMode == .rgb {

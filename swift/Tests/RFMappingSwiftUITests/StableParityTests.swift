@@ -4,8 +4,8 @@ import XCTest
 
 @MainActor
 final class StableParityTests: XCTestCase {
-    private func data(_ cells: [[Double]], edges: [Double], occupancy: [Double]? = nil) throws -> RFMappingData {
-        let payload = currentRFSchemaPayload([
+    private func data(_ cells: [[Double]], edges: [Double], occupancy: [Double]? = nil, presentations: [Double]? = nil) throws -> RFMappingData {
+        var payload = currentRFSchemaPayload([
             "unitsSpikeCounts": [[cells]],
             "unitsSpikeCountsSize": [1, 1, cells.count, edges.count - 1],
             "unitPool": [17],
@@ -14,6 +14,7 @@ final class StableParityTests: XCTestCase {
             "timeBinEdges": edges,
         ], occupancyTimeSec: [occupancy ?? Array(repeating: 1.0, count: cells.count)],
            occupancyTimeSecSize: [1, cells.count])
+        if let presentations { payload["stimulusPresentationCounts"] = [presentations] }
         return try RFMappingData(data: JSONSerialization.data(withJSONObject: payload),
                                  url: URL(fileURLWithPath: "/tmp/stable-parity.rfmap"))
     }
@@ -26,15 +27,15 @@ final class StableParityTests: XCTestCase {
     }
 
     func testDifferencePoolsBothWindowsBeforeClippingAndKeepsTimelineIndependent() throws {
-        let source = try data([[6, 2, 0], [2, 10, 0]], edges: [0, 0.08, 0.16, 0.24], occupancy: [1, 3])
+        let source = try data([[6, 2, 0], [2, 10, 0]], edges: [0, 0.08, 0.16, 0.24], occupancy: [1, 3], presentations: [1, 3])
         let viewer = store(source)
         let originalTimeline = viewer.timelineSnapshot().matrices
         let originalDelay = viewer.delayHeatmapPlot(floor: 0).matrix
         viewer.setRFSubtractEnabled(true)
         XCTAssertNil(viewer.currentHeatmapPlot().matrix[0][0])
-        XCTAssertEqual(try XCTUnwrap(viewer.currentHeatmapPlot().matrix[0][1]), 8.0 / 3.0, accuracy: 1e-12)
+        XCTAssertEqual(try XCTUnwrap(viewer.currentHeatmapPlot().matrix[0][1]), 8.0 / 0.24, accuracy: 1e-12)
         viewer.xBins = 1
-        XCTAssertEqual(viewer.currentHeatmapPlot().matrix, [[1]])
+        XCTAssertEqual(try XCTUnwrap(viewer.currentHeatmapPlot().matrix[0][0]), 12.5, accuracy: 1e-12)
         viewer.xBins = 2
         XCTAssertEqual(viewer.timelineSnapshot().matrices, originalTimeline)
         XCTAssertEqual(viewer.delayHeatmapPlot(floor: 0).matrix, originalDelay)
@@ -152,7 +153,7 @@ final class StableParityTests: XCTestCase {
     }
 
     func testRepeatedResponseSmoothingDoesNotCrossMissingOccupancy() throws {
-        let viewer = store(try data([[4], [0], [16]], edges: [0, 0.01], occupancy: [1, 0, 1]))
+        let viewer = store(try data([[4], [0], [16]], edges: [0, 0.01], occupancy: [1, 0, 1], presentations: [100, 0, 100]))
         for mode in ResponseValueMode.allCases {
             viewer.valueMode = mode
             for radius in 1...3 {
@@ -240,7 +241,7 @@ final class StableParityTests: XCTestCase {
     }
 
     func testInspectorUsesCountRatePeakAndNativeEntropyInBothValueModes() throws {
-        let viewer = store(try data([[5, 5, 8]], edges: [0, 0.01, 0.02, 0.03], occupancy: [2]))
+        let viewer = store(try data([[5, 5, 8]], edges: [0, 0.01, 0.02, 0.03], occupancy: [2], presentations: [200]))
         let cell = CellRef(yStart: 0, yEnd: 0, xStart: 0, xEnd: 0)
         for mode in ResponseValueMode.allCases {
             viewer.setValueMode(mode)
