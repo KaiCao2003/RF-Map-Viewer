@@ -341,7 +341,21 @@ def test_different_saved_windows_have_separate_statistic_groups(stats_app):
     assert all(len(card.statistics_rows) == 1 for card in two_d)
     assert any("0–200 ms" in card_text(card) and "6 Hz" in card_text(card) for card in two_d)
     assert any("100–200 ms" in card_text(card) and "9 Hz" in card_text(card) for card in two_d)
-    assert_cards_fit(inspector)
+    # Different windows can create more cards than fit on a small screen.
+    # Every label must remain reachable through the existing scroll canvas.
+    inspector.geometry("500x400")
+    app.update()
+    canvas = inspector._results_canvas
+    for card in inspector.summary_cards:
+        for label in card_labels(card):
+            offset = canvas.canvasy(0) + label.winfo_rooty() - canvas.winfo_rooty()
+            canvas.yview_moveto(offset / inspector.result_cards_frame.winfo_height())
+            app.update()
+            assert label.winfo_ismapped(), label.cget("text")
+            assert canvas.winfo_rooty() <= label.winfo_rooty()
+            assert label.winfo_rooty() + label.winfo_height() <= canvas.winfo_rooty() + canvas.winfo_height()
+            assert canvas.winfo_rootx() <= label.winfo_rootx()
+            assert label.winfo_rootx() + label.winfo_width() <= canvas.winfo_rootx() + canvas.winfo_width()
 
 
 def test_identical_numbers_from_different_references_are_not_shared(stats_app):
