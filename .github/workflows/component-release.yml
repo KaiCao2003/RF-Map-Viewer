@@ -157,10 +157,19 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Test Swift viewer
+        timeout-minutes: 10
         working-directory: swift
         env:
           RFMAPPING_NATIVE_RENDER_DIR: ${{ runner.temp }}/swift-native-rendering
-        run: swift test -c release
+          RFMAPPING_SWIFT_TEST_EVIDENCE_DIR: ${{ runner.temp }}/swift-test-evidence
+        run: script/test_swift_candidate.sh
+      - name: Upload Swift test logs and process samples
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: swift-test-evidence
+          path: ${{ runner.temp }}/swift-test-evidence/
+          if-no-files-found: error
       - name: Upload Swift native rendering evidence
         if: always()
         uses: actions/upload-artifact@v6

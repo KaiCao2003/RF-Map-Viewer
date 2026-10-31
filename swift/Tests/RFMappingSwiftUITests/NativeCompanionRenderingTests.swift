@@ -130,8 +130,9 @@ extension IndexedRFArchiveTests {
         try await withNativeHost(view, size: CGSize(width: 460, height: 240)) { host in
             let bitmap = try nativeBitmap(host, name: "saved-result-inspector-top")
             try checkWhiteCanvas(bitmap, region: CGRect(x: 0.03, y: 0.03, width: 0.9, height: 0.94))
-            func scrollViews(in view: NSView) -> [NSScrollView] {
-                (view as? NSScrollView).map { [$0] } ?? view.subviews.flatMap { scrollViews(in: $0) }
+            @MainActor func scrollViews(in view: NSView) -> [NSScrollView] {
+                if let scroll = view as? NSScrollView { return [scroll] }
+                return view.subviews.flatMap { scrollViews(in: $0) }
             }
             let scroll = try XCTUnwrap(scrollViews(in: host).first)
             let document = try XCTUnwrap(scroll.documentView)
