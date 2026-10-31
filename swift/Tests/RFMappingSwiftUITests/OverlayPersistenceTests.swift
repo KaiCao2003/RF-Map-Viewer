@@ -67,6 +67,27 @@ final class OverlayPersistenceTests: XCTestCase {
         XCTAssertEqual(second.overlayLayers, [.excitatory1D])
     }
 
+    func testApplyingRendererSnapshotDoesNotPersistOrBroadcastPreferences() throws {
+        let suite = UUID().uuidString
+        let preferences = UserDefaults(suiteName: suite)!
+        defer { preferences.removePersistentDomain(forName: suite) }
+        let viewer = try store(preferences: preferences)
+        viewer.setOverlayLayer(.excitatory2D, enabled: true)
+        let saved = preferences.data(forKey: "rfmapping.displayDefaults")
+        var snapshot = viewer.viewerSyncState
+        snapshot.overlayLayers = [.inhibitory1D]
+        snapshot.overlayEnabled = false
+        let renderer = try store(preferences: preferences)
+
+        renderer.applyViewerSyncState(snapshot)
+
+        XCTAssertEqual(renderer.overlayLayers, [.inhibitory1D])
+        XCTAssertFalse(renderer.overlayEnabled)
+        XCTAssertEqual(viewer.overlayLayers, [.excitatory2D])
+        XCTAssertTrue(viewer.overlayEnabled)
+        XCTAssertEqual(preferences.data(forKey: "rfmapping.displayDefaults"), saved)
+    }
+
     func testOldSettingsDecodeWithVisibleMasterAndDefaultLayout() throws {
         let old = Data(#"{"overlayLayers":["excitatory_2d"]}"#.utf8)
         let decoded = try JSONDecoder().decode(ViewerDisplayDefaults.self, from: old)

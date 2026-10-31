@@ -1186,7 +1186,6 @@ final class RFMappingStore {
         displayDefaults.showProbe = state.showProbe
         overlayLayers = state.overlayLayers
         overlayEnabled = state.overlayEnabled
-        if fields.contains(.overlay) { persistOverlaySelection() }
 
         rangeStartMS = finiteOr(state.rangeStartMS, fallback: timeAxisStartMS())
         rangeEndMS = finiteOr(state.rangeEndMS, fallback: timeAxisEndMS())
