@@ -791,7 +791,7 @@ private func showKeyboardShortcuts() {
     Shift+, / Shift+.   Coarser / finer time resolution (one source bin)
     1–4   Switch visible plot tab
     Shift-1 / Shift-2   Toggle excitatory 1D / 2D overlay
-    Shift-0   Clear all RF overlays
+    Shift-0   Show / hide RF overlays
     F   Invert Y
     P   Toggle rectangular / polar layout
     Shift-P   Cycle palette

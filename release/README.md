@@ -71,7 +71,7 @@ component tag and artifact name:
 | Component | Release | Tag | Channel |
 | --- | --- | --- | --- |
 | Python stable (macOS) | `1.11.18` | `python-v1.11.18` | stable |
-| Python stable (Windows x64, build 11117) | `1.11.16` | `python-v1.11.16` | stable |
+| Python stable (Windows x64, build 11115) | `1.11.14` | `python-v1.11.14` | stable |
 | Swift | `1.11.0` | `swift-v1.11.0` | stable |
 | Web | `1.10.2` | `web-v1.10.2` | stable |
 

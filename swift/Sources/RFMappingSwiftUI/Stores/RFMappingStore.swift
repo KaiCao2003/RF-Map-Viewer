@@ -237,7 +237,6 @@ final class RFMappingStore {
         let loadTuning: Bool
         let loadProbe: Bool
         let loadWaveform: Bool
-        let layoutPattern: String
     }
 
     var data: RFMappingData?
@@ -956,8 +955,7 @@ final class RFMappingStore {
             probeRevision: probeSourceRevision,
             loadTuning: hdTuningURL != nil || discoversCompanionsAutomatically && displayDefaults.autoLoadTuning,
             loadProbe: probeGeometry != nil || discoversCompanionsAutomatically && displayDefaults.autoLoadProbe,
-            loadWaveform: discoversCompanionsAutomatically && showWaveform,
-            layoutPattern: displayDefaults.rfResultLayoutPattern
+            loadWaveform: discoversCompanionsAutomatically && showWaveform
         )
     }
 
@@ -1055,6 +1053,7 @@ final class RFMappingStore {
             }
         }
         loadingStage = "Saved RF results"
+        let layoutPattern = displayDefaults.rfResultLayoutPattern
         let replacement = await Task.detached(priority: .userInitiated) {
             var results: [String: SavedRFResult] = [:]
             var errors: [String: String] = [:]
@@ -1063,14 +1062,14 @@ final class RFMappingStore {
                     let key = dimension + ":" + polarity.rawValue
                     do {
                         results[key] = try SavedRFResult.load(source: loaded, dimension: dimension,
-                            polarity: polarity.rawValue, layoutPattern: request.layoutPattern)
+                            polarity: polarity.rawValue, layoutPattern: layoutPattern)
                     } catch { errors[key] = error.localizedDescription }
                 }
             }
             return (results, errors)
         }.value
         guard isCurrent() else { return }
-        if displayDefaults.rfResultLayoutPattern == request.layoutPattern {
+        if displayDefaults.rfResultLayoutPattern == layoutPattern {
             savedResults = replacement.0
             savedResultErrors = replacement.1
         }

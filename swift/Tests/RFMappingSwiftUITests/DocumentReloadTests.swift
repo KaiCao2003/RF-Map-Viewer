@@ -1,4 +1,5 @@
 import Foundation
+import Observation
 import XCTest
 @testable import RFMappingSwiftUI
 
@@ -156,5 +157,25 @@ final class DocumentReloadTests: XCTestCase {
         XCTAssertEqual(viewer.selectedUnitID, 90)
         XCTAssertFalse(viewer.isLoadingData)
         XCTAssertNil(viewer.loadingStage)
+    }
+
+    func testResultPathSavedDuringRFReloadAppliesToReplacementDocument() async throws {
+        let url = try directory().appendingPathComponent("new.rfmap")
+        try writeRF(url)
+        let viewer = try store(url)
+        withObservationTracking {
+            _ = viewer.isLoadingData
+        } onChange: {
+            MainActor.assumeIsolated {
+                viewer.displayDefaults.rfResultLayoutPattern = "[^/]+/new"
+                viewer.saveDisplayDefaults()
+            }
+        }
+
+        await viewer.reloadDocument()
+
+        XCTAssertEqual(viewer.displayDefaults.rfResultLayoutPattern, "[^/]+/new")
+        XCTAssertTrue(viewer.savedResultErrors["2d:excitatory"]?.contains("rf_2d_ext.npz") == true)
+        XCTAssertNil(viewer.errorMessage)
     }
 }
