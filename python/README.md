@@ -1,6 +1,6 @@
 # Python RF Map Viewers
 
-This directory contains the Python/Tk RF Map Viewer `1.11.16`, launched by
+This directory contains the Python/Tk RF Map Viewer `1.11.18`, launched by
 `rfmapping_gui.py` or the installed `rfmapping-viewer` command. The separate
 Free-Moving alpha and its HDF5 Square/Bar, 3D-sphere, and exposure-QA paths have
 been retired. The offline session/EBC HTML report script remains available.
@@ -162,6 +162,16 @@ triangles at the axis edge. Unit matching uses recorded IDs. This tab does not
 run detection. Legacy 1D projections require their saved analysis provenance.
 Use **Reload** after the analysis producer updates the files.
 
+New analysis outputs keep each source in a kind directory, for example
+`ProbeA/regular/regular_261019_1.rfmap`. Beside it, the viewer reads
+`rf_2d_ext.npz`, `rf_1d_ext.npz`, `rf_2d_inh.npz`, and `rf_1d_inh.npz`, with
+optional `analysis_ext.json` and `analysis_inh.json` for QC and provenance.
+The same layout applies to bar, rotation, egocentric, allocentric-pixel-bin,
+and free-moving sources. Source-named sidecars remain supported for older
+layouts. The layout determines the names; a missing new result does not
+cause an older file to be substituted. Independent `unitList_*.npy` files
+are not required by the viewer: saved result archives contain the unit IDs.
+
 **Settings → RF Map → Saved RF overlay** adds saved detections to RF as colored
 bin borders. Check **Excitatory 2D**, **Excitatory 1D**, **Inhibitory 2D** and
 **Inhibitory 1D** independently; all four can be shown together. Excitatory
@@ -187,6 +197,15 @@ and count-rate peak delay. If display bins combine multiple source cells, the
 reported index ranges describe that group. **Saved results** contains detection
 parameters, QC, source paths and compatibility diagnostics. Closing Inspector
 keeps the document open.
+
+**Saved results** shows the mean, SD, and numerical threshold in Hz for each
+selected result layer. Excitatory and inhibitory results with the same saved
+baseline share one mean/SD row, followed by their separate thresholds. The
+baseline describes the saved analysis window and processing, such as
+**Smoothing 1**; changing the current display controls does not change it.
+For older files without saved detector statistics, computed current-source
+mean/SD do not reconstruct the original detector statistics. Missing or
+unsupported window/reference provenance is shown as unavailable.
 
 **Delay / RGB** summarizes response timing over the full recorded time axis.
 The Delay map colors each spatial location by the center of its peak
@@ -244,6 +263,12 @@ unavailable gray.
 The RF map is the primary document. Head-direction tuning curves, Probe
 positions, and local average waveforms are optional companion data and are
 never required to open the RF map.
+
+Automatic waveform and unit-position discovery follows the **RF session**,
+independently of the selected Tuning Curve Session. Missing RF companions
+remain unavailable even if the HD session has matching unit IDs. A legacy
+global positions directory cannot override a known recording's session;
+explicitly attaching a position file remains available.
 
 - **HD tuning curve:** the viewer can discover a matching tuning_curves.tc
   or tuning_curves.json, or you can choose **File → Attach Tuning Curves…**.
@@ -382,6 +407,22 @@ of **⌘** on Windows. NumLock and ScrollLock do not disable viewer shortcuts.
 
 ---
 
+## Stable viewer 1.11.18: saved-result coordinate matching
+
+Saved RF detections now check their recorded coordinates against the open RF
+document. A shifted or reversed grid with the same dimensions is reported as
+incompatible instead of placing masks and centers on incorrect locations.
+Legacy results without coordinate metadata remain supported. macOS build: 111018.
+
+## Stable viewer 1.11.17: macOS source synchronization
+
+The macOS app includes the current Linux-validated viewer source: kind-directory
+RF results, configurable result paths, shared Inspector baseline statistics,
+numerical thresholds in Hz, and companion loading progress. Analysis summaries
+can use distinct 1D/2D drop-bin settings. The update preserves the existing
+macOS shortcuts, waveform zoom, ADN utility, and document reload behavior.
+macOS Apple Silicon build: 111017.
+
 ## Stable viewer 1.11.16: shared result statistics and loading progress
 
 **Inspector → Saved results** groups results by dimension and exact analysis
@@ -391,8 +432,9 @@ values match. Different baselines remain explicitly labeled.
 
 Per-unit saved baseline mean/SD are read directly using their recorded unit IDs.
 Saved Smoothing 1 values remain separate from computed native RF statistics.
-Invalid saved values remain unavailable; the viewer does not rerun
-detection or derive an absolute Hz threshold.
+Each threshold shows its signed SD formula and the corresponding Hz cutoff
+from that baseline. Invalid saved values remain unavailable; the viewer does
+not rerun detection or substitute unsmoothed values for a saved baseline.
 
 Loading progress identifies tuning curves, probe geometry, and waveform work.
 Reload also identifies saved-result loading while retaining the RF unit count.
@@ -696,14 +738,14 @@ Opening the app without a path shows the native file chooser. Release packages
 do not contain or auto-load sample RF data.
 
 Its macOS identity is `RF Map Viewer.app`, bundle ID
-`org.local.rfmapping.viewer`, and version/build `1.11.16` / `111016`. Build it with:
+`org.local.rfmapping.viewer`, and version/build `1.11.18` / `111018`. Build it with:
 
 ```sh
 script/build_python_stable_macos_app.sh
 ```
 
-Stable 1.11.16 targets Windows x64 as a portable ZIP and an Inno Setup installer
-(Windows build 11117). On a Windows build host with Python 3.14, PyInstaller,
+Stable 1.11.1 targets Windows x64 as a portable ZIP and an Inno Setup installer
+(Windows build 11101). On a Windows build host with Python 3.14, PyInstaller,
 and Inno Setup 6 installed, build and smoke-test both artifacts with:
 
 ```powershell
@@ -712,9 +754,9 @@ script/build_python_stable_windows_app.ps1
 
 The Windows artifacts are:
 
-- `RF_Map_Viewer-python-1.11.16-full-windows-x64-build11117-portable.zip`
-- `RF_Map_Viewer-python-1.11.16-full-windows-x64-build11117-setup.exe`
-- `SHA256SUMS-python-1.11.16-full-windows-x64-build11117.txt`
+- `RF_Map_Viewer-python-1.11.1-full-windows-x64-portable.zip`
+- `RF_Map_Viewer-python-1.11.1-full-windows-x64-setup.exe`
+- `SHA256SUMS-python-1.11.1-full-windows-x64.txt`
 
 The versioned outputs are written under `dist/windows/`; the builder verifies
 the portable executable and a silent temporary installation with the RF
@@ -724,7 +766,7 @@ document loader inside the packaged executable.
 
 The release workflow also accepts `python-stable-windows` to build only a
 Windows candidate without publishing. See [release instructions](../release/README.md)
-for Windows candidate validation and publishing.
+for the Windows follow-up to the existing `python-v1.11.1` release.
 
 Windows and macOS use the same Python viewer source, including cancellable
 large-file loading, compact count storage, cached time-window calculations,

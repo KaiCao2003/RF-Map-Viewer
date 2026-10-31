@@ -149,6 +149,30 @@ def test_qc_lookup_uses_its_own_unit_ids(source):
     assert result.unit_qc(99)["keep"] is False
 
 
+@pytest.mark.parametrize("dimension", ["1d", "2d"])
+@pytest.mark.parametrize("rf_type", ["excitatory", "inhibitory"])
+@pytest.mark.parametrize("dimension_drop_bins", [2, 3])
+def test_summary_uses_dimension_specific_component_filter(source, dimension, rf_type, dimension_drop_bins):
+    path, manifest = write_result(source, dimension, rf_type)
+    summary_path, summary = write_summary(source, path, manifest, dimension=dimension, rf_type=rf_type)
+    summary["parameters"].update(
+        drop_bins=4 if dimension_drop_bins == 2 else 2,
+        drop_bins_1d=3, drop_bins_2d=3,
+    )
+    summary["parameters"][f"drop_bins_{dimension}"] = dimension_drop_bins
+    summary_path.write_text(json.dumps(summary))
+
+    result = load_saved_rf_result(source, dimension=dimension, rf_type=rf_type)
+
+    if dimension_drop_bins == 2:
+        assert result.summary_warning is None
+        assert result.unit_qc(99)["keep"] is False
+    else:
+        assert result.summary is None
+        assert f"drop_bins_{dimension}" in result.summary_warning
+    assert result.for_unit(42)[0].sum() == 1
+
+
 def test_recording_can_move_with_its_sidecars_and_preserve_original_provenance(source):
     path, manifest = write_result(source)
     summary_path, summary = write_summary(source, path, manifest)

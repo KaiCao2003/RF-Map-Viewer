@@ -290,6 +290,45 @@ def test_shared_statistics_keep_each_polarity_threshold_and_detection_status(sta
     assert "2D inhibitory" in inspector_text(app)
 
 
+def test_smoothed_polarities_share_one_baseline_and_show_two_numeric_thresholds(stats_app):
+    app = stats_app
+    original = app.results_pane.cache.result("2d", "excitatory")
+    baseline = {
+        "row_indices": [0, 1], "y_positions": list(app.results_pane.source.y_positions),
+        "bin_count": 6, "mean_scope": "bottom_two_rows", "sd_scope": "bottom_two_rows", "sd_ddof": 0,
+        "response_stage": "after_gui_smoothing1", "unit_ids": [7, 8],
+        "mean_hz": [6., 12.], "sd_hz": [.5, 1.],
+    }
+    for polarity, alternative, multiplier in (("excitatory", "greater", 4.5), ("inhibitory", "less", 3.)):
+        write_result(app.results_pane.source, "2d", polarity, ids=(7, 8), manifest_changes={
+            **original.manifest, "detector_algorithm": "gui-smoothing1-bottom-two-rows-mean-sd-v1",
+            "parameters": {**original.manifest["parameters"], "reference": "bottom_row",
+                           "alternative": alternative, "cluster_forming_z": multiplier},
+            "baseline": baseline,
+            "spatial_preprocessing": {"algorithm": "gui-weighted-spatial-smoothing-v1", "iterations": 1},
+        })
+    write_inhibitory_result(app, "1d")
+    inspector = show_all_results(app)
+    two_d = inspector.summary_cards[0]
+    assert len(two_d.statistics_rows) == 1
+    assert sum(label.cget("text").startswith("Mean") for label in card_labels(two_d)) == 1
+    assert "Smoothing 1" in card_text(two_d.statistics_rows[0])
+    excitatory, inhibitory = map(card_text, two_d.result_rows)
+    assert "mean + 4.5 × SD = 8.25 Hz" in excitatory
+    assert "mean − 3 × SD = 4.5 Hz" in inhibitory
+    assert_cards_fit(inspector)
+
+    app._set_selected_unit_id(8)
+    app._update_all()
+    app.update()
+    two_d = inspector.summary_cards[0]
+    assert len(two_d.statistics_rows) == 1
+    excitatory, inhibitory = map(card_text, two_d.result_rows)
+    assert "mean + 4.5 × SD = 16.5 Hz" in excitatory
+    assert "mean − 3 × SD = 9 Hz" in inhibitory
+    assert "8.25 Hz" not in excitatory
+
+
 def test_different_saved_windows_have_separate_statistic_groups(stats_app):
     app = stats_app
     write_inhibitory_result(app, "2d", manifest_changes={"time_range_s": [0.1, 0.2]})

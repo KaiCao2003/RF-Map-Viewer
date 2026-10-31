@@ -140,6 +140,13 @@ class ResultStatistics:
     origin: str = "computed"
     processing_label: str = "Native RF"
     basis_key: str = ""
+    threshold_hz: float | None = None
+
+    @property
+    def threshold_text(self) -> str | None:
+        if self.threshold_hz is None:
+            return self.threshold
+        return f"{self.threshold} = {self.threshold_hz:.6g} Hz"
 
 
 def _statistics_basis(result: SavedRFResult, unit_id: int, origin: str) -> str:
@@ -174,7 +181,7 @@ def _statistics_basis(result: SavedRFResult, unit_id: int, origin: str) -> str:
         "axis": result.axis,
         **{key: manifest.get(key) for key in (
             "time_range_s", "response_units", "response_normalization", "response_stage",
-            "x_positions", "y_positions",
+            "x_positions", "y_positions", "spatial_preprocessing",
         )},
     }
     return json.dumps(basis, sort_keys=True, separators=(",", ":"), allow_nan=False)
@@ -222,6 +229,12 @@ def result_statistics(result: SavedRFResult, data, unit_id: int) -> ResultStatis
     decay = parameters.get("surround_decay")
     saved = dict(threshold=threshold, candidate_threshold=parameters.get("is_shuffle") is True,
                  surround_decay=float(decay) if _positive_number(decay) else None)
+
+    def threshold_hz(mean, sd):
+        if threshold is None:
+            return None
+        return float(mean + (1 if direction == "greater" else -1) * multiplier * sd)
+
     baseline = result.manifest.get("baseline")
     has_saved_statistics = isinstance(baseline, dict) and bool({"mean_hz", "sd_hz"}.intersection(baseline))
     origin = "saved" if has_saved_statistics else "computed"
@@ -229,9 +242,11 @@ def result_statistics(result: SavedRFResult, data, unit_id: int) -> ResultStatis
         recorded = _saved_baseline_statistics(result, unit_id)
         if recorded is not None:
             return ResultStatistics(**saved, **recorded, origin="saved",
+                                    threshold_hz=threshold_hz(recorded["mean_hz"], recorded["sd_hz"]),
                                     basis_key=_statistics_basis(result, unit_id, "saved"))
         values, scope = _baseline_values(result, data, unit_id)
-        return ResultStatistics(**saved, mean_hz=float(values.mean()), sd_hz=float(values.std(ddof=0)),
+        mean, sd = float(values.mean()), float(values.std(ddof=0))
+        return ResultStatistics(**saved, mean_hz=mean, sd_hz=sd, threshold_hz=threshold_hz(mean, sd),
                                 scope=scope, bin_count=values.size,
                                 basis_key=_statistics_basis(result, unit_id, "computed"))
     except (OSError, ValueError, TypeError, KeyError, IndexError, OverflowError, RuntimeError) as error:
@@ -244,7 +259,7 @@ def result_statistics_text(result: SavedRFResult, data, unit_id: int, *,
     """Full provenance remains available behind the Inspector's compact summary."""
     statistics = result_statistics(result, data, unit_id) if statistics is None else statistics
     label = "Saved candidate threshold" if statistics.candidate_threshold else "Saved threshold"
-    lines = [f"{label}: " + (statistics.threshold or "unavailable (no valid saved SD multiplier)")]
+    lines = [f"{label}: " + (statistics.threshold_text or "unavailable (no valid saved SD multiplier)")]
     if statistics.surround_decay is not None:
         lines.append(f"Saved surround decay: {statistics.surround_decay:g} × SD (one-step seed neighbors)")
     if statistics.error is None and statistics.origin == "saved":

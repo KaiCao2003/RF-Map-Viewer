@@ -17,10 +17,10 @@ through versioned file contracts, principally the RF formats described in
 
 ## Component versions
 
-The stable Python macOS release is `1.11.16` (build `111016`). The Windows
+The stable Python macOS release is `1.11.18` (build `111018`). The Windows
 release is `1.11.16` (build `11117`), Swift is at `1.10.4`, and Web at `1.10.2`.
-Python 1.11.16 groups compatible result statistics with separate excitatory
-and inhibitory thresholds, and reports companion loading progress.
+Python 1.11.18 rejects saved detections whose recorded coordinates differ from
+the open RF document, including same-size shifted or reversed grids.
 Component identity belongs in release tags and artifact names, not in a fourth
 version component. See
 [`release/README.md`](release/README.md) for the canonical mapping and tag
@@ -36,7 +36,7 @@ and numerical values; saved and computed statistics remain separate.
 GitHub Actions builds the stable packages published on the
 [Releases page](https://github.com/KaiCao2003/RF-Map-Viewer/releases):
 
-- [Python 1.11.16 macOS app](https://github.com/KaiCao2003/RF-Map-Viewer/releases/download/python-v1.11.16/RF_Map_Viewer-python-1.11.16-full-macos-arm64.zip)
+- [Python 1.11.18 macOS app](https://github.com/KaiCao2003/RF-Map-Viewer/releases/download/python-v1.11.18/RF_Map_Viewer-python-1.11.18-full-macos-arm64.zip)
 - [Python 1.11.16 Windows installer, build 11117](https://github.com/KaiCao2003/RF-Map-Viewer/releases/download/python-v1.11.16/RF_Map_Viewer-python-1.11.16-full-windows-x64-build11117-setup.exe) · [portable ZIP](https://github.com/KaiCao2003/RF-Map-Viewer/releases/download/python-v1.11.16/RF_Map_Viewer-python-1.11.16-full-windows-x64-build11117-portable.zip)
 - [Swift 1.10.4 macOS app](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/swift-v1.10.4)
 - [Web 1.10.2 package](https://github.com/KaiCao2003/RF-Map-Viewer/releases/tag/web-v1.10.2)
