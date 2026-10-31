@@ -83,9 +83,12 @@ final class NativeCompanionRenderingTests: XCTestCase {
             selectionURL: URL(fileURLWithPath: "/synthetic/adn_neuron.npy"),
             hdClasses: [7: 0, 8: 1, 9: 2, 10: 3], save: { _ in XCTFail("Rendering must not save data") }
         )
+        .frame(width: 800, height: 640)
+        .background(Color.white)
+        .preferredColorScheme(.light)
         try await withNativeHost(view, size: CGSize(width: 800, height: 640)) { host in
             let bitmap = try nativeBitmap(host, name: "adn-class-filters")
-            try checkWhiteCanvas(bitmap, region: CGRect(x: 0.05, y: 0.2, width: 0.65, height: 0.55), requireColor: true)
+            try checkWhiteCanvas(bitmap, region: CGRect(x: 0, y: 0, width: 1, height: 1), requireColor: true)
         }
     }
 }

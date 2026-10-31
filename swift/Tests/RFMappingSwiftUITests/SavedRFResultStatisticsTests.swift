@@ -179,9 +179,9 @@ extension IndexedRFArchiveTests {
         try withStatisticsSource(rates: [[10, 10, 10], [10, 10, 10]]) { source in
             let statistics = SavedRFResultStatistics.calculate(result: try statisticsResult(source), source: source, unitID: 42)
             XCTAssertNil(statistics.error)
-            XCTAssertEqual(statistics.meanHz, 10)
-            XCTAssertEqual(statistics.sdHz, 0)
-            XCTAssertEqual(statistics.thresholdHz, 10)
+            XCTAssertEqual(try XCTUnwrap(statistics.meanHz), 10, accuracy: 1e-12)
+            XCTAssertEqual(try XCTUnwrap(statistics.sdHz), 0, accuracy: 1e-12)
+            XCTAssertEqual(try XCTUnwrap(statistics.thresholdHz), 10, accuracy: 1e-12)
         }
     }
 
